@@ -69,8 +69,8 @@ jobs:
           key: cargo-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ matrix.os }}-
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
 
   swift:
     runs-on: ubuntu-latest
