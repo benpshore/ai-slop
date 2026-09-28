@@ -469,6 +469,35 @@ pub fn order_page(page: &mut PageText) {
     page.text = text;
 }
 
+/// Fill `page.lines` and `page.text` for a backend that already emits spans
+/// in reading order (`Extractor::provides_reading_order`): one line per
+/// non-blank span in `seq` order (ties keep their stored order), column 0,
+/// the span's box, text trimmed of surrounding whitespace; `page.text` is the
+/// line texts joined by `\n`. No geometry is consulted. Idempotent.
+pub fn lines_in_backend_order(page: &mut PageText) {
+    let mut order: Vec<(u32, usize)> = page
+        .spans
+        .iter()
+        .enumerate()
+        .filter(|(_, span)| !span.text.trim().is_empty())
+        .map(|(i, span)| (span.seq, i))
+        .collect();
+    order.sort_unstable();
+    let mut lines: Vec<Line> = Vec::with_capacity(order.len());
+    for (_, i) in order {
+        let span = &page.spans[i];
+        lines.push(Line {
+            text: span.text.trim().to_string(),
+            bbox: span.bbox,
+            column: 0,
+            spans: vec![u32::try_from(i).unwrap_or(u32::MAX)],
+        });
+    }
+    let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+    page.text = texts.join("\n");
+    page.lines = lines;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,5 +716,30 @@ mod tests {
         assert!(page.text.is_empty());
         assert!(page.warnings.is_empty());
         assert!(order_lines(Vec::new(), 612.0).is_empty());
+    }
+
+    #[test]
+    fn backend_order_follows_seq_not_geometry() {
+        // Geometry says "bottom" comes last, `seq` says it comes first.
+        let mut page = page_with(vec![
+            span("top", 50.0, 700.0, 100.0, 710.0, 2),
+            span("  ", 50.0, 650.0, 100.0, 660.0, 1),
+            span(" bottom ", 50.0, 100.0, 100.0, 110.0, 0),
+            loose_span("loose", 3),
+        ]);
+        lines_in_backend_order(&mut page);
+        assert_eq!(texts(&page), vec!["bottom", "top", "loose"]);
+        assert_eq!(page.text, "bottom\ntop\nloose");
+        assert!(page.lines.iter().all(|line| line.column == 0));
+        assert_eq!(page.lines[0].spans, vec![2]);
+        assert_eq!(page.lines[1].spans, vec![0]);
+        assert_eq!(page.lines[2].spans, vec![3]);
+        assert_eq!(page.lines[0].bbox, page.spans[2].bbox);
+        assert_eq!(page.lines[2].bbox, None);
+        assert!(page.warnings.is_empty());
+
+        let first = page.clone();
+        lines_in_backend_order(&mut page);
+        assert_eq!(page, first);
     }
 }

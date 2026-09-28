@@ -1,0 +1,108 @@
+name: Native
+
+# Builds and tests the engine with the native backends (`docling`, `pdfium`)
+# against the artifacts pinned in native/manifest.json, then runs the docling
+# evaluation on the dev split (docs/NATIVE.md, docs/EVAL.md). Not part of the
+# required `ci` check: it needs the network for PDFium, the docling models, ONNX
+# Runtime and the corpus, and the metrics are diagnostic.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - native/**
+      - src/**
+      - tests/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/native.yml
+  push:
+    branches: [main]
+    paths:
+      - native/**
+      - src/**
+      - tests/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/native.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    # A release build plus a test build of docling-pdf/ONNX Runtime are two
+    # full dependency builds on a cold cache.
+    timeout-minutes: 90
+    env:
+      # docling-pdf binds PDFium from here (a directory or a file); the models
+      # resolve from `.models/` under the CWD, then this directory (which is the
+      # `.models` directory itself, not its parent).
+      PDFIUM_DYNAMIC_LIB_PATH: ${{ github.workspace }}/.pdfium/lib
+      DOCLING_RS_MODELS_DIR: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup component add clippy rustfmt
+      - run: rustc --version --verbose && uname -m
+      # ONNX Runtime is not provisioned by native/fetch.sh: the `ort` crate
+      # (enabled by docling-pdf with `download-binaries`) downloads a prebuilt
+      # ONNX Runtime in its build script, so it lands under target/ and is
+      # reused through this cache. The ~/.cache and ~/Library/Caches paths are
+      # where ort-sys is expected to keep its download cache (not verified;
+      # missing paths only produce a cache warning).
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            target
+          key: cargo-native-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-native-${{ matrix.os }}-
+      # PDFium differs per platform, so the key includes the OS; any change to
+      # the manifest (a new URL or a pinned hash) invalidates it.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            .models
+            .pdfium
+          key: native-assets-${{ matrix.os }}-${{ hashFiles('native/manifest.json') }}
+      - name: Provision PDFium and the docling models (prints file, bytes, sha256)
+        run: sh native/fetch.sh
+      - run: cargo build --release --features docling,pdfium
+      # --nocapture so the "skipped: ..." lines of the native smoke tests show
+      # in the log: with the artifacts present, none of them should appear.
+      - run: cargo test --features docling,pdfium -- --nocapture
+      - run: cargo clippy --all-targets --features docling,pdfium -- -D warnings
+      # `tpe backends` (lists compiled-in backends and whether their native
+      # dependencies load) is added in the same batch by another change;
+      - name: List backends
+        run: ./target/release/tpe backends
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .corpus-cache
+          key: corpus-${{ hashFiles('corpus/manifest.json') }}
+          restore-keys: corpus-
+      - name: Fetch the corpus (cached items are reused)
+        run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
+      - name: Evaluate the docling backend
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native --dump-dir eval-native/dumps
+      - name: Publish the report in the job summary
+        run: cat eval-native/report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-eval-${{ matrix.os }}
+          path: eval-native

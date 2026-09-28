@@ -56,7 +56,7 @@ jobs:
       - name: Fetch the corpus (cached items are reused)
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split "$SPLIT"
       - name: Evaluate
-        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --out eval-out --split "$SPLIT"
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --out eval-out --dump-dir eval-out/dumps --split "$SPLIT"
       - name: Publish the report in the job summary
         run: cat eval-out/report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

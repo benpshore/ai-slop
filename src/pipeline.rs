@@ -2,15 +2,22 @@
 //! open a backend session, extract every requested page, order the spans,
 //! summarise chunks, then derive metadata and citations. The ledger write is
 //! left to the caller so that one thread can own the database.
+//!
+//! Figures: after each page is extracted, the bytes behind every
+//! `PageText::figures` entry are taken from the session once. Their SHA-256
+//! is recorded on the figure and, when the job names a `figures_dir`, they
+//! are written to `<figures_dir>/<document hash>/p<page>-f<index>.<ext>`.
+//! Bytes never reach the page text.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 use thiserror::Error;
 
 use crate::acquire::{self, AcquireError};
-use crate::backend::{self, BackendError};
+use crate::backend::{self, BackendError, DocumentSession, Extractor};
 use crate::citations;
 use crate::metadata;
 use crate::reading_order;
@@ -67,6 +74,62 @@ fn sub_range_digest(backend_digest: &str, first: u32, last: u32) -> String {
     config_digest(&config)
 }
 
+/// File extension for exported figure bytes of MIME type `mime`.
+fn figure_extension(mime: Option<&str>) -> &'static str {
+    match mime {
+        Some("image/png") => "png",
+        Some("image/jpeg") => "jpg",
+        Some("image/jp2") => "jp2",
+        _ => "bin",
+    }
+}
+
+/// Write `bytes` to `target`, creating its parent directory.
+fn write_figure(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(target, bytes)
+}
+
+/// Take the bytes of every figure on `page` from `session`, record their
+/// SHA-256 and, with a `figures_dir`, export them to
+/// `<figures_dir>/<hash>/p<page>-f<index>.<ext>` and set `file` to that path
+/// relative to `figures_dir` (always `/`-separated). A failed write leaves
+/// `file` unset and returns a warning (never prefixed `failed:`, which is
+/// reserved for pages whose text could not be extracted).
+fn collect_figures(
+    session: &mut dyn DocumentSession,
+    page: &mut PageText,
+    hash: &str,
+    figures_dir: Option<&Path>,
+) -> Vec<String> {
+    let page_no = page.page;
+    let mut warnings: Vec<String> = Vec::new();
+    for figure in &mut page.figures {
+        let index = figure.index;
+        let Some(bytes) = session.take_figure_bytes(page_no, index) else {
+            continue;
+        };
+        figure.sha256 = Some(sha256_hex(&bytes));
+        let Some(dir) = figures_dir else {
+            continue;
+        };
+        let ext = figure_extension(figure.mime.as_deref());
+        let relative = format!("{hash}/p{page_no}-f{index}.{ext}");
+        let target = dir.join(&relative);
+        match write_figure(&target, &bytes) {
+            Ok(()) => figure.file = Some(relative),
+            Err(err) => warnings.push(format!(
+                "figure export: page {page_no} figure {index}: {}: {err}",
+                target.display()
+            )),
+        }
+    }
+    page.warnings.extend(warnings.iter().cloned());
+    warnings
+}
+
 /// Run every stage for one document and return the complete result.
 ///
 /// A `BackendError::Page` for one page is recorded as a warning prefixed with
@@ -82,9 +145,22 @@ fn sub_range_digest(backend_digest: &str, first: u32, last: u32) -> String {
 /// keys runs by backend identity, so this keeps a sub-range run from being
 /// published over, or in place of, the full-document run. A full run keeps
 /// the backend's identity unchanged.
+///
+/// Spans are ordered geometrically ([`reading_order::order_page`]) unless the
+/// backend declares `provides_reading_order`, in which case its `seq` order
+/// is kept ([`reading_order::lines_in_backend_order`]). Figure bytes are
+/// handled as described in the module docs.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
+    run_job_with(extractor.as_ref(), job)
+}
+
+/// [`run_job`] with an already resolved backend; `job.backend` is ignored.
+pub fn run_job_with(
+    extractor: &dyn Extractor,
+    job: &Job,
+) -> Result<ExtractionResult, PipelineError> {
     let mut identity = extractor.identity();
 
     let mut timings = StageTimings::default();
@@ -109,9 +185,15 @@ pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
         status = Status::Partial;
         identity.config_digest = sub_range_digest(&identity.config_digest, first, last);
     }
+    let figures_dir: Option<&Path> = job.figures_dir.as_deref().map(Path::new);
     for page in first..=last {
         match session.page_text(page) {
-            Ok(text) => pages.push(text),
+            Ok(mut text) => {
+                let figure_warnings =
+                    collect_figures(session.as_mut(), &mut text, &snapshot.hash.0, figures_dir);
+                warnings.extend(figure_warnings);
+                pages.push(text);
+            }
             Err(BackendError::Page { message, .. }) => {
                 let warning = format!("failed: page {page}: {message}");
                 let mut placeholder = PageText::new(page, 0.0, 0.0, 0);
@@ -127,8 +209,13 @@ pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     timings.parse_ms = elapsed_ms(parse_start);
 
     let order_start = Instant::now();
+    let backend_order = extractor.provides_reading_order();
     for page in &mut pages {
-        reading_order::order_page(page);
+        if backend_order {
+            reading_order::lines_in_backend_order(page);
+        } else {
+            reading_order::order_page(page);
+        }
     }
     timings.order_ms = elapsed_ms(order_start);
 
@@ -221,9 +308,120 @@ mod tests {
     use lopdf::{Document, Object, Stream, dictionary};
     use tempfile::TempDir;
 
-    use super::{PipelineError, chunk_results, resolve_page_range, run_job, sub_range_digest};
-    use crate::backend::{BackendError, Extractor, lopdf_backend::LopdfBackend};
-    use crate::schema::{Job, PageText, Status, config_digest, sha256_hex};
+    use super::{
+        PipelineError, chunk_results, figure_extension, resolve_page_range, run_job, run_job_with,
+        sub_range_digest,
+    };
+    use crate::backend::{BackendError, DocumentSession, Extractor, lopdf_backend::LopdfBackend};
+    use crate::schema::{
+        BBox, BackendIdentity, Figure, Job, PageText, Span, Status, config_digest, sha256_hex,
+    };
+
+    /// Bytes the fake backend hands out for figure 0 on page 1.
+    const FIGURE_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake pixels";
+
+    /// A backend whose single page has two spans (`first` at the bottom with
+    /// `seq` 0, `second` at the top with `seq` 1) and one PNG figure.
+    struct FakeExtractor {
+        reading_order: bool,
+    }
+
+    struct FakeSession {
+        figure: Option<Vec<u8>>,
+    }
+
+    fn fake_span(text: &str, y0: f32, seq: u32) -> Span {
+        Span {
+            text: text.to_string(),
+            bbox: Some(BBox {
+                x0: 72.0,
+                y0,
+                x1: 120.0,
+                y1: y0 + 10.0,
+            }),
+            font: None,
+            size: Some(10.0),
+            seq,
+        }
+    }
+
+    impl DocumentSession for FakeSession {
+        fn page_count(&self) -> u32 {
+            1
+        }
+
+        fn page_text(&mut self, page: u32) -> Result<PageText, BackendError> {
+            let mut text = PageText::new(page, 612.0, 792.0, 0);
+            text.spans.push(fake_span("second", 700.0, 1));
+            text.spans.push(fake_span("first", 100.0, 0));
+            text.figures.push(Figure {
+                index: 0,
+                bbox: None,
+                kind: "raster".to_string(),
+                mime: Some("image/png".to_string()),
+                width_px: Some(1),
+                height_px: Some(1),
+                sha256: None,
+                file: None,
+                caption: None,
+            });
+            Ok(text)
+        }
+
+        fn info(&self) -> BTreeMap<String, String> {
+            BTreeMap::new()
+        }
+
+        fn take_figure_bytes(&mut self, page: u32, index: u32) -> Option<Vec<u8>> {
+            if page == 1 && index == 0 {
+                self.figure.take()
+            } else {
+                None
+            }
+        }
+    }
+
+    impl Extractor for FakeExtractor {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                name: "fake".to_string(),
+                version: "0".to_string(),
+                config_digest: config_digest(&BTreeMap::new()),
+            }
+        }
+
+        fn open(
+            &self,
+            _bytes: &[u8],
+            _password: Option<&str>,
+        ) -> Result<Box<dyn DocumentSession>, BackendError> {
+            Ok(Box::new(FakeSession {
+                figure: Some(FIGURE_BYTES.to_vec()),
+            }))
+        }
+
+        fn provides_reading_order(&self) -> bool {
+            self.reading_order
+        }
+    }
+
+    /// A non-empty input file for the fake backend (its bytes are ignored).
+    fn fake_input(dir: &Path) -> PathBuf {
+        let path = dir.join("fake.pdf");
+        std::fs::write(&path, b"%PDF-1.5 fake").unwrap();
+        path
+    }
+
+    fn fake_job(path: &Path, figures_dir: Option<&Path>) -> Job {
+        Job {
+            path: path.to_string_lossy().into_owned(),
+            backend: "fake".to_string(),
+            pages: None,
+            password: None,
+            max_bytes: None,
+            figures_dir: figures_dir.map(|dir| dir.to_string_lossy().into_owned()),
+        }
+    }
 
     /// Build a three-page PDF with Helvetica as `/F1`; page `n` shows `Page n`.
     fn three_page_pdf() -> Vec<u8> {
@@ -289,6 +487,7 @@ mod tests {
             pages,
             password: None,
             max_bytes: None,
+            figures_dir: None,
         }
     }
 
@@ -365,6 +564,7 @@ mod tests {
             pages: None,
             password: None,
             max_bytes: None,
+            figures_dir: None,
         };
         match run_job(&job) {
             Err(PipelineError::UnknownBackend(name)) => assert_eq!(name, "no-such-backend"),
@@ -450,5 +650,84 @@ mod tests {
         let want_last = "partial extraction: pages 2-3 of 3".to_string();
         assert!(first_two.warnings.contains(&want_first));
         assert!(last_two.warnings.contains(&want_last));
+    }
+
+    #[test]
+    fn figure_bytes_are_hashed_and_exported() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let figures = dir.path().join("figures");
+        let backend = FakeExtractor {
+            reading_order: false,
+        };
+        let result = run_job_with(&backend, &fake_job(&input, Some(&figures))).unwrap();
+
+        assert_eq!(result.status, Status::Complete);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let hash = result.document.hash.0.clone();
+        let figure = &result.pages[0].figures[0];
+        assert_eq!(figure.sha256, Some(sha256_hex(FIGURE_BYTES)));
+        let expected = format!("{hash}/p1-f0.png");
+        assert_eq!(figure.file.as_deref(), Some(expected.as_str()));
+        let written = std::fs::read(figures.join(&expected)).unwrap();
+        assert_eq!(written, FIGURE_BYTES);
+        assert!(
+            !result.pages[0].text.contains("PNG"),
+            "{}",
+            result.pages[0].text
+        );
+        assert!(result.pages[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn figure_bytes_without_dir_only_set_the_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let backend = FakeExtractor {
+            reading_order: false,
+        };
+        let result = run_job_with(&backend, &fake_job(&input, None)).unwrap();
+        let figure = &result.pages[0].figures[0];
+        assert_eq!(figure.sha256, Some(sha256_hex(FIGURE_BYTES)));
+        assert_eq!(figure.file, None);
+        assert!(!dir.path().join("figures").exists());
+    }
+
+    #[test]
+    fn backend_reading_order_is_kept_when_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let job = fake_job(&input, None);
+
+        let ordered = run_job_with(
+            &FakeExtractor {
+                reading_order: true,
+            },
+            &job,
+        )
+        .unwrap();
+        assert_eq!(ordered.pages[0].text, "first\nsecond");
+
+        let geometric = run_job_with(
+            &FakeExtractor {
+                reading_order: false,
+            },
+            &job,
+        )
+        .unwrap();
+        assert!(
+            geometric.pages[0].text.starts_with("second"),
+            "{}",
+            geometric.pages[0].text
+        );
+    }
+
+    #[test]
+    fn figure_extensions_follow_mime() {
+        assert_eq!(figure_extension(Some("image/png")), "png");
+        assert_eq!(figure_extension(Some("image/jpeg")), "jpg");
+        assert_eq!(figure_extension(Some("image/jp2")), "jp2");
+        assert_eq!(figure_extension(Some("image/x-jp2-codestream")), "bin");
+        assert_eq!(figure_extension(None), "bin");
     }
 }

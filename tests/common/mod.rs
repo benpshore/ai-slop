@@ -7,6 +7,8 @@
 
 #![allow(dead_code, clippy::missing_panics_doc)]
 
+pub mod raster;
+
 use std::path::PathBuf;
 
 use lopdf::content::{Content, Operation};

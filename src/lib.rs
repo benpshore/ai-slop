@@ -15,6 +15,11 @@
 //! - `corpus`: manifest of CC-BY papers, cached download and source unpacking.
 //! - `latex_refs`: `.bbl`/`.bib`/`\cite` parsing into reference ground truth.
 //! - `eval`: reference matching, field accuracy, marker resolution, report.
+//!
+//! Native backends (batch 3), each behind a Cargo feature so the default
+//! build stays pure Rust: `backend::pdfium_backend` (feature `pdfium`) and
+//! `backend::docling_backend` (feature `docling`, implies `pdfium`). Figure
+//! bytes are exported by `pipeline`, never inlined into text.
 
 #![allow(
     clippy::missing_errors_doc,

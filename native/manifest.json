@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "note": "Pinned native artifacts for the docling and pdfium backends; fetched by native/fetch.sh (see docs/NATIVE.md). Keep one entry object per line: fetch.sh falls back to a line-oriented reader when python3 is absent. sha256 is the digest of the file at dest; archive_sha256 is the digest of the downloaded tgz. null means not pinned yet: fetch.sh prints the digest and the Native workflow logs it for committing.",
+  "pdfium_release": "chromium/8066",
+  "models_release": "models-v1",
+  "entries": [
+    {"kind": "pdfium", "platform": "linux-arm64", "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8066/pdfium-linux-arm64.tgz", "member": "lib/libpdfium.so", "dest": ".pdfium/lib/libpdfium.so", "archive_sha256": null, "sha256": null},
+    {"kind": "pdfium", "platform": "mac-arm64", "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8066/pdfium-mac-arm64.tgz", "member": "lib/libpdfium.dylib", "dest": ".pdfium/lib/libpdfium.dylib", "archive_sha256": null, "sha256": null},
+    {"kind": "pdfium", "platform": "linux-x64", "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8066/pdfium-linux-x64.tgz", "member": "lib/libpdfium.so", "dest": ".pdfium/lib/libpdfium.so", "archive_sha256": null, "sha256": null},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/layout_heron_int8.onnx", "member": null, "dest": ".models/layout_heron_int8.onnx", "archive_sha256": null, "sha256": null},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/ocr_det.onnx", "member": null, "dest": ".models/ocr_det.onnx", "archive_sha256": null, "sha256": null},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/ocr_rec_en.onnx", "member": null, "dest": ".models/ocr_rec_en.onnx", "archive_sha256": null, "sha256": null},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/en_dict.txt", "member": null, "dest": ".models/en_dict.txt", "archive_sha256": null, "sha256": null}
+  ]
+}

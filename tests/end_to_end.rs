@@ -19,6 +19,7 @@ fn job_for(path: &Path, pages: Option<(u32, u32)>) -> Job {
         pages,
         password: None,
         max_bytes: None,
+        figures_dir: None,
     }
 }
 
