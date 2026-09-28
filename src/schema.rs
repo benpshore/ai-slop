@@ -260,6 +260,11 @@ pub struct Job {
     pub pages: Option<(u32, u32)>,
     pub password: Option<String>,
     pub max_bytes: Option<u64>,
+    /// Directory that receives exported figure bytes as
+    /// `<dir>/<document hash>/p<page>-f<index>.<ext>`; `None` exports nothing
+    /// (figure hashes are still recorded when the backend supplies bytes).
+    #[serde(default)]
+    pub figures_dir: Option<String>,
 }
 
 /// Lower-case hex SHA-256 of `bytes`.
@@ -322,5 +327,14 @@ mod tests {
         let s = serde_json::to_string(&r).unwrap();
         let back: ExtractionResult = serde_json::from_str(&s).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn job_without_figures_dir_parses() {
+        let json =
+            r#"{"path":"a.pdf","backend":"lopdf","pages":null,"password":null,"max_bytes":null}"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.figures_dir, None);
+        assert_eq!(job.backend, "lopdf");
     }
 }

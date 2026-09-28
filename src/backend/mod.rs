@@ -1,13 +1,23 @@
 //! Extraction backends. A backend opens complete immutable bytes and yields
 //! per-page positioned spans; it never orders, repairs or interprets text.
+//!
+//! `lopdf` is always compiled in. `pdfium` (feature `pdfium`) and
+//! `docling-text` / `docling` (feature `docling`, which implies `pdfium`)
+//! need native artifacts at run time; see `docs/NATIVE.md`.
 
 use std::collections::BTreeMap;
 
+use lopdf::content::{Content, Operation};
+use lopdf::{Document, Object, Stream, dictionary};
 use thiserror::Error;
 
 use crate::schema::{BackendIdentity, PageText};
 
+#[cfg(feature = "docling")]
+pub mod docling_backend;
 pub mod lopdf_backend;
+#[cfg(feature = "pdfium")]
+pub mod pdfium_backend;
 
 #[derive(Debug, Error)]
 pub enum BackendError {
@@ -49,6 +59,12 @@ pub trait DocumentSession {
     fn page_text(&mut self, page: u32) -> Result<PageText, BackendError>;
     /// String-valued `/Info` entries, keys without the leading `/`.
     fn info(&self) -> BTreeMap<String, String>;
+    /// Bytes of a figure recorded in `PageText::figures` (same page/index),
+    /// taken once; `None` when the backend has no pixels for it.
+    fn take_figure_bytes(&mut self, page: u32, index: u32) -> Option<Vec<u8>> {
+        let _ = (page, index);
+        None
+    }
 }
 
 pub trait Extractor: Send + Sync {
@@ -58,15 +74,151 @@ pub trait Extractor: Send + Sync {
         bytes: &[u8],
         password: Option<&str>,
     ) -> Result<Box<dyn DocumentSession>, BackendError>;
+    /// `true` when the spans of a page already come in reading order (by
+    /// `seq`), so the engine must not re-order them geometrically.
+    fn provides_reading_order(&self) -> bool {
+        false
+    }
 }
 
-/// Look up a backend by CLI name.
+/// Look up a compiled-in backend by CLI name.
 pub fn by_name(name: &str) -> Option<Box<dyn Extractor>> {
     match name {
         "lopdf" => Some(Box::new(lopdf_backend::LopdfBackend::default())),
+        #[cfg(feature = "pdfium")]
+        "pdfium" => Some(Box::new(pdfium_backend::PdfiumBackend::default())),
+        #[cfg(feature = "docling")]
+        "docling-text" => Some(Box::new(docling_backend::DoclingBackend::text_layer())),
+        #[cfg(feature = "docling")]
+        "docling" => Some(Box::new(docling_backend::DoclingBackend::full())),
         _ => None,
     }
 }
 
-/// Names accepted by [`by_name`].
+/// Names accepted by [`by_name`] in this build (`docling` implies `pdfium`).
+#[cfg(feature = "docling")]
+pub const NAMES: &[&str] = &["lopdf", "pdfium", "docling-text", "docling"];
+
+/// Names accepted by [`by_name`] in this build (`docling` implies `pdfium`).
+#[cfg(all(feature = "pdfium", not(feature = "docling")))]
+pub const NAMES: &[&str] = &["lopdf", "pdfium"];
+
+/// Names accepted by [`by_name`] in this build (`docling` implies `pdfium`).
+#[cfg(not(feature = "pdfium"))]
 pub const NAMES: &[&str] = &["lopdf"];
+
+/// Every backend name the engine knows, compiled in or not.
+pub const ALL_KNOWN: &[&str] = &["lopdf", "pdfium", "docling-text", "docling"];
+
+/// Backend names compiled into this build (same as [`NAMES`]).
+pub fn available() -> Vec<&'static str> {
+    NAMES.to_vec()
+}
+
+/// Every backend name the engine knows (same as [`ALL_KNOWN`]).
+pub fn all_known() -> &'static [&'static str] {
+    ALL_KNOWN
+}
+
+/// Cargo feature that compiles `name` in; `None` for `lopdf` and unknown names.
+pub fn feature_for(name: &str) -> Option<&'static str> {
+    match name {
+        "pdfium" => Some("pdfium"),
+        "docling-text" | "docling" => Some("docling"),
+        _ => None,
+    }
+}
+
+/// A one-page PDF (Helvetica, the word `probe`) for checking that a backend
+/// opens documents, e.g. `tpe backends`.
+pub fn probe_pdf() -> Result<Vec<u8>, BackendError> {
+    let mut doc = Document::with_version("1.5");
+    let tree_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let operations = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12_i32.into()]),
+        Operation::new("Td", vec![72_i32.into(), 720_i32.into()]),
+        Operation::new("Tj", vec![Object::string_literal("probe")]),
+        Operation::new("ET", vec![]),
+    ];
+    let content = Content { operations }
+        .encode()
+        .map_err(|err| BackendError::Malformed(format!("probe content: {err}")))?;
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => tree_id,
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    let tree = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![Object::Reference(page_id)],
+        "Count" => Object::Integer(1),
+        "MediaBox" => vec![0_i32.into(), 0_i32.into(), 612_i32.into(), 792_i32.into()],
+    };
+    doc.objects.insert(tree_id, Object::Dictionary(tree));
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => tree_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    let mut bytes: Vec<u8> = Vec::new();
+    doc.save_to(&mut bytes)
+        .map_err(|err| BackendError::Malformed(format!("probe save: {err}")))?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ALL_KNOWN, NAMES, all_known, available, by_name, feature_for, probe_pdf};
+
+    #[test]
+    fn every_available_name_resolves_and_is_known() {
+        assert_eq!(available(), NAMES.to_vec());
+        assert_eq!(all_known(), ALL_KNOWN);
+        assert!(available().contains(&"lopdf"));
+        for name in available() {
+            assert!(ALL_KNOWN.contains(&name), "{name}");
+            let backend = by_name(name).expect("available backend resolves");
+            assert_eq!(backend.identity().name, name);
+        }
+        for name in ALL_KNOWN {
+            assert_eq!(
+                by_name(name).is_some(),
+                available().contains(name),
+                "{name}"
+            );
+        }
+        assert!(by_name("nope").is_none());
+    }
+
+    #[test]
+    fn features_are_named_for_native_backends() {
+        assert_eq!(feature_for("lopdf"), None);
+        assert_eq!(feature_for("pdfium"), Some("pdfium"));
+        assert_eq!(feature_for("docling-text"), Some("docling"));
+        assert_eq!(feature_for("docling"), Some("docling"));
+        assert_eq!(feature_for("nope"), None);
+    }
+
+    #[test]
+    fn lopdf_does_not_provide_reading_order_and_opens_the_probe() {
+        let backend = by_name("lopdf").expect("lopdf is always compiled in");
+        assert!(!backend.provides_reading_order());
+        let bytes = probe_pdf().expect("probe builds");
+        let mut session = backend.open(&bytes, None).expect("probe opens");
+        assert_eq!(session.page_count(), 1);
+        let page = session.page_text(1).expect("page 1");
+        assert!(page.spans.iter().any(|span| span.text.contains("probe")));
+        assert_eq!(session.take_figure_bytes(1, 0), None);
+    }
+}

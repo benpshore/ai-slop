@@ -63,6 +63,9 @@ enum Cmd {
     },
     /// Evaluate extraction against `arXiv` `LaTeX` ground truth and write a report.
     Eval(EvalArgs),
+    /// List every known backend, whether it is compiled in, and whether it
+    /// opens a one-page probe PDF (native libraries found).
+    Backends,
 }
 
 #[derive(Subcommand)]
@@ -122,6 +125,9 @@ struct ExtractArgs {
     /// Reject inputs larger than this many bytes.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
+    #[arg(long, value_name = "DIR")]
+    figures_dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -198,6 +204,13 @@ struct EvalArgs {
     /// Optional `SQLite` ledger that also receives every extraction result.
     #[arg(long, value_name = "FILE")]
     db: Option<PathBuf>,
+    /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
+    #[arg(long, value_name = "DIR")]
+    figures_dir: Option<PathBuf>,
+    /// Directory that receives one JSON diagnostics dump per evaluated paper
+    /// (truth vs extracted references, matches, markers, warnings, timings).
+    #[arg(long, value_name = "DIR")]
+    dump_dir: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<ExitCode> {
@@ -221,6 +234,10 @@ fn main() -> anyhow::Result<ExitCode> {
         },
         Cmd::Eval(args) => {
             run_eval(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Backends => {
+            run_backends()?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -257,13 +274,25 @@ fn open_ledger(db: &Path) -> anyhow::Result<Ledger> {
     Ledger::open(db).with_context(|| format!("opening ledger {}", db.display()))
 }
 
-/// Fail early when the backend name is unknown.
+/// Fail early when the backend name is unknown or not compiled into this build.
 fn check_backend(name: &str) -> anyhow::Result<()> {
-    if backend::by_name(name).is_none() {
-        let known = backend::NAMES.join(", ");
-        bail!("unknown backend `{name}`; known backends: {known}");
+    let available = backend::available();
+    if available.contains(&name) {
+        return Ok(());
     }
-    Ok(())
+    let compiled = available.join(", ");
+    if let Some(feature) = backend::feature_for(name) {
+        bail!(
+            "backend `{name}` is not compiled into this build; rebuild with \
+             `--features {feature}` (compiled in: {compiled})"
+        );
+    }
+    bail!("unknown backend `{name}`; known backends: {compiled}");
+}
+
+/// `--figures-dir` as the job field.
+fn figures_dir_field(dir: Option<&Path>) -> Option<String> {
+    dir.map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Process exit code for a batch: failure when any item failed.
@@ -325,6 +354,7 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         pages: args.pages,
         password: args.password.clone(),
         max_bytes: args.max_bytes,
+        figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let start = Instant::now();
     // A panic inside a backend must fail this file only, not the whole batch.
@@ -463,7 +493,47 @@ fn run_stats(db: &Path) -> anyhow::Result<()> {
     println!("pages: {}", stats.pages);
     println!("references: {}", stats.references);
     println!("citations: {}", stats.citations);
+    println!("figures: {}", stats.figures);
     Ok(())
+}
+
+/// Print one line per known backend: `<name>\tavailable\t<probe outcome>`
+/// or `<name>\tnot compiled\t<feature hint>`. Always succeeds when the probe
+/// PDF can be built; a backend whose native library is missing is reported,
+/// not treated as an error.
+fn run_backends() -> anyhow::Result<()> {
+    let probe = backend::probe_pdf().context("building the probe PDF")?;
+    let available = backend::available();
+    for name in backend::ALL_KNOWN {
+        if available.contains(name) {
+            println!("{name}\tavailable\t{}", probe_backend(name, &probe));
+        } else {
+            let feature = backend::feature_for(name).unwrap_or("?");
+            println!("{name}\tnot compiled\trebuild with --features {feature}");
+        }
+    }
+    Ok(())
+}
+
+/// Open `probe` with backend `name` and describe the outcome. Only `open` is
+/// called (no page is converted, so no models load), and the session is
+/// dropped before this returns: a live `pdfium` session blocks every other
+/// `pdfium` use in the process.
+fn probe_backend(name: &str, probe: &[u8]) -> String {
+    let Some(extractor) = backend::by_name(name) else {
+        return "not resolvable".to_string();
+    };
+    let outcome = panic::catch_unwind(panic::AssertUnwindSafe(
+        || -> Result<u32, backend::BackendError> {
+            let session = extractor.open(probe, None)?;
+            Ok(session.page_count())
+        },
+    ));
+    match outcome {
+        Ok(Ok(pages)) => format!("opens ({pages} page probe)"),
+        Ok(Err(err)) => format!("open failed: {err}"),
+        Err(payload) => format!("open panicked: {}", panic_message(&*payload)),
+    }
 }
 
 /// Find the most recently finished run whose document hash starts with
@@ -597,6 +667,7 @@ fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
             pages: None,
             password: None,
             max_bytes: None,
+            figures_dir: None,
         };
         match bench_file(&job, iterations) {
             Ok(mut bench) => {
@@ -734,13 +805,21 @@ fn eval_item(args: &EvalArgs, item: &ManifestItem) -> Evaluated {
         pages: None,
         password: None,
         max_bytes: None,
+        figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let result = match pipeline::run_job(&job) {
         Ok(result) => result,
         Err(err) => return failed(format!("extract: {err}")),
     };
+    let paper = eval::evaluate(id, &result, &truth);
+    if let Some(dir) = &args.dump_dir {
+        match eval::write_dump(dir, &eval::dump_paper(id, &result, &truth, &paper)) {
+            Ok(path) => eprintln!("dump written: {}", path.display()),
+            Err(err) => eprintln!("{id}: dump not written: {err}"),
+        }
+    }
     Evaluated {
-        paper: eval::evaluate(id, &result, &truth),
+        paper,
         result: Some(result),
     }
 }
@@ -803,9 +882,19 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
         .iter()
         .filter(|item| args.split.includes(item))
     {
-        let evaluated = eval_item(args, item);
-        if let (Some(ledger), Some(result)) = (ledger.as_mut(), evaluated.result.as_ref()) {
-            store_result(ledger, result, &item.id)?;
+        let mut evaluated = eval_item(args, item);
+        if let (Some(ledger), Some(result)) = (ledger.as_mut(), evaluated.result.as_mut()) {
+            let write_start = Instant::now();
+            let run = store_result(ledger, result, &item.id)?;
+            let write_ms = elapsed_ms(write_start);
+            result.timings.write_ms = write_ms;
+            ledger
+                .update_timings(run, &result.timings)
+                .with_context(|| format!("recording write time for {}", item.id))?;
+            let paper = &mut evaluated.paper;
+            paper.timings.write_ms = write_ms;
+            paper.ms_total += write_ms;
+            paper.ms_per_chunk = paper.ms_total / f64::from(paper.chunks.max(1));
         }
         println!("{}", paper_line(&evaluated.paper));
         papers.push(evaluated.paper);
@@ -818,7 +907,10 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestItem, Split, parse_pages, percentile, short_hash};
+    use super::{
+        ManifestItem, Split, check_backend, parse_pages, percentile, probe_backend, short_hash,
+    };
+    use tpe::backend;
 
     /// A manifest item in the given split; the other fields do not matter here.
     fn item(split: &str) -> ManifestItem {
@@ -875,5 +967,28 @@ mod tests {
         assert!((percentile(&samples, 0.95) - 5.0).abs() < f64::EPSILON);
         assert!((percentile(&samples, 0.0) - 1.0).abs() < f64::EPSILON);
         assert!(percentile(&[], 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn backend_names_are_checked_against_this_build() {
+        assert!(check_backend("lopdf").is_ok());
+        let unknown = check_backend("nope").unwrap_err().to_string();
+        assert!(unknown.contains("unknown backend"), "{unknown}");
+        for name in backend::ALL_KNOWN {
+            let outcome = check_backend(name);
+            if backend::available().contains(name) {
+                assert!(outcome.is_ok(), "{name}");
+            } else {
+                let message = outcome.unwrap_err().to_string();
+                assert!(message.contains("not compiled"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn lopdf_opens_the_probe() {
+        let probe = backend::probe_pdf().unwrap();
+        assert_eq!(probe_backend("lopdf", &probe), "opens (1 page probe)");
+        assert_eq!(probe_backend("nope", &probe), "not resolvable");
     }
 }

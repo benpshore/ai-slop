@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "note": "Pinned native artifacts for the docling and pdfium backends; fetched by native/fetch.sh (see docs/NATIVE.md). Keep one entry object per line: fetch.sh falls back to a line-oriented reader when python3 is absent. sha256 is the digest of the file at dest; archive_sha256 is the digest of the downloaded tgz. null means not pinned yet: fetch.sh prints the digest and the Native workflow logs it for committing.",
+  "pdfium_release": "chromium/8066",
+  "models_release": "models-v1",
+  "entries": [
+    {"kind": "pdfium", "platform": "linux-arm64", "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8066/pdfium-linux-arm64.tgz", "member": "lib/libpdfium.so", "dest": ".pdfium/lib/libpdfium.so", "archive_sha256": "0e6f90dccbc6b81fd5d7106abaf164c4222178f024c204d00d526b60fd2ad535", "sha256": "9d00f11a0b27d6860aadd6301c4d18c03d455a2d149f0fbef9dccdb9fb2f19f5"},
+    {"kind": "pdfium", "platform": "mac-arm64", "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8066/pdfium-mac-arm64.tgz", "member": "lib/libpdfium.dylib", "dest": ".pdfium/lib/libpdfium.dylib", "archive_sha256": "336219e80580b93c6523f44db7dc1de59cc497b13a7390ddac84223f68ca162b", "sha256": "1c5326c2ebf250026715c696ca7a391955028cf34312170ed9cf4d904382e59b"},
+    {"kind": "pdfium", "platform": "linux-x64", "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8066/pdfium-linux-x64.tgz", "member": "lib/libpdfium.so", "dest": ".pdfium/lib/libpdfium.so", "archive_sha256": "0b43f405477cf2cfc4dbff06905093c3309756c6bca1fb9da99234a2ca97fed2", "sha256": "7670b3c597b02dfa3f98b23b49c3bb52536312f1ea686b739321731b6011f5a9"},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/layout_heron_int8.onnx", "member": null, "dest": ".models/layout_heron_int8.onnx", "archive_sha256": null, "sha256": "d0eb9da0515a2121a20c3262f49ec4761109da45423b37c14b8b98b9759499b5"},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/ocr_det.onnx", "member": null, "dest": ".models/ocr_det.onnx", "archive_sha256": null, "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/ocr_rec_en.onnx", "member": null, "dest": ".models/ocr_rec_en.onnx", "archive_sha256": null, "sha256": "ef7abd8bd3629ae57ea2c28b425c1bd258a871b93fd2fe7c433946ade9b5d9ea"},
+    {"kind": "model", "platform": "any", "url": "https://github.com/docling-project/docling.rs/releases/download/models-v1/en_dict.txt", "member": null, "dest": ".models/en_dict.txt", "archive_sha256": null, "sha256": "5662df9d2d03f0e8ca0d3b0649d6acbab904b6a14b3d3521463c71c37c668ce3"}
+  ]
+}

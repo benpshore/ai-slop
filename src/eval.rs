@@ -12,13 +12,17 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::citations::find_reference_section;
 use crate::latex_refs::{GroundTruth, TruthReference};
-use crate::schema::{ExtractionResult, ReferenceEntry};
+use crate::schema::{CitationMarker, ExtractionResult, PageText, ReferenceEntry, StageTimings};
 
 /// Product target: warm service time per 20-page chunk, in milliseconds.
 pub const TARGET_MS_PER_CHUNK: f64 = 30.0;
@@ -32,6 +36,12 @@ const TITLE_JACCARD_MIN: f32 = 0.8;
 
 /// Unmatched truth keys listed per paper in the markdown report.
 const UNMATCHED_KEYS_SHOWN: usize = 10;
+
+/// Byte cap on [`PaperDump::reference_section_text`] (60 kB).
+pub const REFERENCE_TEXT_CAP: usize = 60_000;
+
+/// Separator between pages in [`PaperDump::reference_section_text`].
+pub const DUMP_PAGE_SEPARATOR: &str = "\n\u{c}\n";
 
 /// How one truth reference was (or was not) paired with an extracted entry.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -83,6 +93,20 @@ pub struct PaperEval {
     /// All truth references that carry a title, matched or not.
     #[serde(default)]
     pub title_truth_total: u32,
+    /// Matched truth references with a DOI that is printed in the PDF: the
+    /// normalised DOI occurs in the concatenated page text (case-insensitive,
+    /// whitespace ignored on both sides so line-wrapped DOIs count), or the
+    /// extracted DOI is already correct (covers DOIs hyphenated across lines),
+    /// so `doi_correct <= doi_printed` always holds.
+    #[serde(default)]
+    pub doi_printed: u32,
+    /// `extracted_refs / truth_refs`; 0.0 when the truth has no references.
+    /// Above 1 means over-segmentation, below 1 merged or missed entries.
+    #[serde(default)]
+    pub over_segmentation: f32,
+    /// Per-stage timings copied from `ExtractionResult::timings`.
+    #[serde(default)]
+    pub timings: StageTimings,
     /// `\cite`-family commands counted in the `LaTeX` source.
     pub truth_cite_commands: u32,
     pub extracted_markers: u32,
@@ -115,6 +139,10 @@ pub struct Summary {
     pub ref_recall: f32,
     pub ref_precision: f32,
     pub doi_accuracy: f32,
+    /// `doi_correct / doi_printed` summed over papers: DOI accuracy counting
+    /// only DOIs that the PDF actually prints. 0.0 when none are printed.
+    #[serde(default)]
+    pub doi_accuracy_printed: f32,
     pub year_accuracy: f32,
     pub title_accuracy: f32,
     /// Precision-like: resolved markers over extracted markers.
@@ -127,6 +155,24 @@ pub struct Summary {
     pub p50_ms_per_chunk: f64,
     pub p95_ms_per_chunk: f64,
     pub target_ms_per_chunk: f64,
+    /// Mean `StageTimings::acquire_ms` per non-failed document.
+    #[serde(default)]
+    pub mean_acquire_ms: f64,
+    /// Mean `StageTimings::parse_ms` per non-failed document.
+    #[serde(default)]
+    pub mean_parse_ms: f64,
+    /// Mean `StageTimings::order_ms` per non-failed document.
+    #[serde(default)]
+    pub mean_order_ms: f64,
+    /// Mean `StageTimings::metadata_ms` per non-failed document.
+    #[serde(default)]
+    pub mean_metadata_ms: f64,
+    /// Mean `StageTimings::citations_ms` per non-failed document.
+    #[serde(default)]
+    pub mean_citations_ms: f64,
+    /// Mean `StageTimings::write_ms` per non-failed document.
+    #[serde(default)]
+    pub mean_write_ms: f64,
 }
 
 /// One evaluation run over the corpus.
@@ -573,6 +619,26 @@ fn title_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
     }
 }
 
+/// Concatenated page text, lower-cased, with all whitespace removed.
+fn squashed_page_text(pages: &[PageText]) -> String {
+    pages
+        .iter()
+        .flat_map(|page| page.text.chars())
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Whether the normalised DOI, whitespace removed, occurs in `squashed`
+/// (the output of [`squashed_page_text`]).
+fn doi_is_printed(doi: &str, squashed: &str) -> bool {
+    let needle: String = normalize_doi(doi)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    !needle.is_empty() && squashed.contains(&needle)
+}
+
 /// Scores one extraction result against its ground truth.
 pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> PaperEval {
     let matches = match_references(&truth.references, &result.references);
@@ -589,6 +655,8 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
     let mut doi_truth_total = 0_u32;
     let mut year_truth_total = 0_u32;
     let mut title_truth_total = 0_u32;
+    let mut doi_printed = 0_u32;
+    let printed_text = squashed_page_text(&result.pages);
 
     for (truth_ref, m) in truth.references.iter().zip(&matches) {
         let has_doi = u32::from(truth_ref.doi.is_some());
@@ -606,8 +674,13 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         doi_truth += has_doi;
         year_truth += has_year;
         title_truth += has_title;
-        if let Some(ext) = result.references.iter().find(|entry| entry.index == idx) {
-            doi_correct += u32::from(doi_equal(truth_ref.doi.as_ref(), ext.doi.as_ref()));
+        let ext = result.references.iter().find(|entry| entry.index == idx);
+        let correct = ext.is_some_and(|e| doi_equal(truth_ref.doi.as_ref(), e.doi.as_ref()));
+        if let Some(doi) = &truth_ref.doi {
+            doi_printed += u32::from(correct || doi_is_printed(doi, &printed_text));
+        }
+        if let Some(ext) = ext {
+            doi_correct += u32::from(correct);
             year_correct += u32::from(truth_ref.year.is_some() && truth_ref.year == ext.year);
             title_correct += u32::from(title_equal(truth_ref.title.as_ref(), ext.title.as_ref()));
         }
@@ -682,6 +755,9 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         doi_truth_total,
         year_truth_total,
         title_truth_total,
+        doi_printed,
+        over_segmentation: ratio(u64::from(extracted_refs), u64::from(truth_refs)),
+        timings: result.timings,
         truth_cite_commands,
         extracted_markers,
         resolved_markers,
@@ -718,6 +794,9 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         doi_truth_total: 0,
         year_truth_total: 0,
         title_truth_total: 0,
+        doi_printed: 0,
+        over_segmentation: 0.0,
+        timings: StageTimings::default(),
         truth_cite_commands: 0,
         extracted_markers: 0,
         resolved_markers: 0,
@@ -787,6 +866,13 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
 
     let mut ms: Vec<f64> = ok.iter().map(|p| p.ms_per_chunk).collect();
     ms.sort_unstable_by(f64::total_cmp);
+    let mean_stage = |f: fn(&StageTimings) -> f64| -> f64 {
+        if ok.is_empty() {
+            0.0
+        } else {
+            ok.iter().map(|p| f(&p.timings)).sum::<f64>() / ok.len() as f64
+        }
+    };
 
     Summary {
         papers: papers.len() as u32,
@@ -795,6 +881,7 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         ref_recall: ratio(matched, sum(|p| p.truth_refs)),
         ref_precision: ratio(matched, sum(|p| p.extracted_refs)),
         doi_accuracy: ratio(sum(|p| p.doi_correct), sum(|p| p.doi_truth)),
+        doi_accuracy_printed: ratio(sum(|p| p.doi_correct), sum(|p| p.doi_printed)),
         year_accuracy: ratio(sum(|p| p.year_correct), sum(|p| p.year_truth)),
         title_accuracy: ratio(sum(|p| p.title_correct), sum(|p| p.title_truth)),
         marker_resolution_rate: ratio(sum(|p| p.resolved_markers), sum(|p| p.extracted_markers)),
@@ -803,6 +890,12 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         p50_ms_per_chunk: percentile(&ms, 50.0),
         p95_ms_per_chunk: percentile(&ms, 95.0),
         target_ms_per_chunk: TARGET_MS_PER_CHUNK,
+        mean_acquire_ms: mean_stage(|t| t.acquire_ms),
+        mean_parse_ms: mean_stage(|t| t.parse_ms),
+        mean_order_ms: mean_stage(|t| t.order_ms),
+        mean_metadata_ms: mean_stage(|t| t.metadata_ms),
+        mean_citations_ms: mean_stage(|t| t.citations_ms),
+        mean_write_ms: mean_stage(|t| t.write_ms),
     }
 }
 
@@ -865,6 +958,11 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     let _ = writeln!(out, "| Reference recall | {} |", pct(s.ref_recall));
     let _ = writeln!(out, "| Reference precision | {} |", pct(s.ref_precision));
     let _ = writeln!(out, "| DOI accuracy | {} |", pct(s.doi_accuracy));
+    let _ = writeln!(
+        out,
+        "| DOI accuracy (of printed DOIs) | {} |",
+        pct(s.doi_accuracy_printed)
+    );
     let _ = writeln!(out, "| Year accuracy | {} |", pct(s.year_accuracy));
     let _ = writeln!(out, "| Title accuracy | {} |", pct(s.title_accuracy));
     let _ = writeln!(
@@ -890,20 +988,39 @@ pub fn render_markdown(report: &CorpusReport) -> String {
         s.target_ms_per_chunk
     );
 
+    out.push_str("## Stage timings (mean ms per document)\n\n");
+    out.push_str("| Stage | Mean ms |\n");
+    out.push_str("| --- | --- |\n");
+    let stages = [
+        ("acquire", s.mean_acquire_ms),
+        ("parse", s.mean_parse_ms),
+        ("order", s.mean_order_ms),
+        ("metadata", s.mean_metadata_ms),
+        ("citations", s.mean_citations_ms),
+        ("write", s.mean_write_ms),
+    ];
+    let mut stage_total = 0.0_f64;
+    for (name, mean) in stages {
+        stage_total += mean;
+        let _ = writeln!(out, "| {name} | {mean:.1} |");
+    }
+    let _ = write!(out, "| total | {stage_total:.1} |\n\n");
+
     out.push_str("## Papers\n\n");
     out.push_str(
-        "| id | status | pages | refs truth/extracted/matched | count exact | doi c/t | \
-         year c/t | markers resolved/extracted | truth cites | marker recall | align | \
-         ms/chunk | warnings |\n",
+        "| id | status | pages | refs truth/extracted/matched | count exact | ext/truth | \
+         doi c/t/printed | year c/t | markers resolved/extracted | truth cites | \
+         marker recall | align | ms/chunk | warnings |\n",
     );
     out.push_str(
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {}/{}/{} | {} | {}/{} | {}/{} | {}/{} | {} | {} | {} | {:.1} | {} |",
+            "| {} | {} | {} | {}/{}/{} | {} | {:.2} | {}/{}/{} | {}/{} | {}/{} | {} | {} | {} | \
+             {:.1} | {} |",
             cell(&p.id),
             cell(&p.status),
             p.pages,
@@ -911,8 +1028,10 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             p.extracted_refs,
             p.matched_refs,
             exact,
+            p.over_segmentation,
             p.doi_correct,
             p.doi_truth,
+            p.doi_printed,
             p.year_correct,
             p.year_truth,
             p.resolved_markers,
@@ -954,13 +1073,193 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     out
 }
 
+/// Everything needed to diagnose one paper's reference parsing offline.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PaperDump {
+    pub id: String,
+    /// `GroundTruth::method`: `bbl`, `bib-cited` or `bib-all`.
+    pub truth_method: String,
+    pub truth: Vec<TruthReference>,
+    pub extracted: Vec<ReferenceEntry>,
+    pub matches: Vec<RefMatch>,
+    pub unmatched_truth_keys: Vec<String>,
+    /// `ReferenceEntry::index` values that matched no truth reference.
+    pub spurious_extracted: Vec<u32>,
+    pub markers: Vec<CitationMarker>,
+    /// Document-level warnings.
+    pub warnings: Vec<String>,
+    /// `(page, warning)` for every page warning.
+    pub page_warnings: Vec<(u32, String)>,
+    pub timings: StageTimings,
+    /// Pages actually extracted.
+    pub pages: u32,
+    /// Page text from the detected reference heading line to the end of the
+    /// document, pages joined by [`DUMP_PAGE_SEPARATOR`], capped at
+    /// [`REFERENCE_TEXT_CAP`] bytes; empty when no heading was found.
+    pub reference_section_text: String,
+}
+
+/// Reference heading on a single text line, for pages without `lines`.
+fn text_heading_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(\d+\.?\s*)?(References|Bibliography|Works Cited|REFERENCES)\s*$")
+            .expect("valid regex")
+    })
+}
+
+/// Byte offset of line `line_index` of `page.lines` inside `page.text`,
+/// found by walking the line texts in order; `None` when it cannot be found.
+fn line_byte_offset(page: &PageText, line_index: usize) -> Option<usize> {
+    let mut cursor = 0_usize;
+    for (i, line) in page.lines.iter().enumerate().take(line_index + 1) {
+        let needle = line.text.trim();
+        if needle.is_empty() {
+            continue;
+        }
+        let rel = page.text.get(cursor..).and_then(|rest| rest.find(needle));
+        match rel {
+            Some(rel) => {
+                let start = cursor + rel;
+                if i == line_index {
+                    return Some(start);
+                }
+                cursor = start + needle.len();
+            }
+            None if i == line_index => return None,
+            None => {}
+        }
+    }
+    None
+}
+
+/// `(position in pages, byte offset in its text)` of the last reference
+/// heading: via `citations::find_reference_section` over `page.lines`, else
+/// the last matching line of `page.text`.
+fn reference_start(pages: &[PageText]) -> Option<(usize, usize)> {
+    if let Some(section) = find_reference_section(pages) {
+        let pos = pages.iter().position(|p| p.page == section.first_page)?;
+        let offset = line_byte_offset(&pages[pos], section.first_line)
+            .or_else(|| pages[pos].text.find(section.heading.as_str()))
+            .unwrap_or(0);
+        return Some((pos, offset));
+    }
+    let mut found: Option<(usize, usize)> = None;
+    for (pos, page) in pages.iter().enumerate() {
+        let mut offset = 0_usize;
+        for line in page.text.split('\n') {
+            if text_heading_re().is_match(line) {
+                found = Some((pos, offset));
+            }
+            offset += line.len() + 1;
+        }
+    }
+    found
+}
+
+/// Truncates `s` to at most `cap` bytes on a char boundary.
+fn truncate_on_char_boundary(s: &mut String, cap: usize) {
+    if s.len() <= cap {
+        return;
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
+/// Page text from the last reference heading to the end of the document,
+/// capped at [`REFERENCE_TEXT_CAP`] bytes; empty when there is no heading.
+pub fn reference_section_text(pages: &[PageText]) -> String {
+    let Some((pos, offset)) = reference_start(pages) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (i, page) in pages.iter().enumerate().skip(pos) {
+        if i == pos {
+            out.push_str(page.text.get(offset..).unwrap_or(""));
+        } else {
+            out.push_str(DUMP_PAGE_SEPARATOR);
+            out.push_str(&page.text);
+        }
+        if out.len() > REFERENCE_TEXT_CAP {
+            break;
+        }
+    }
+    truncate_on_char_boundary(&mut out, REFERENCE_TEXT_CAP);
+    out
+}
+
+/// Collects the truth, the extracted entries, the pairing from `eval`, the
+/// markers, warnings, timings and reference-section text for one paper.
+pub fn dump_paper(
+    id: &str,
+    result: &ExtractionResult,
+    truth: &GroundTruth,
+    eval: &PaperEval,
+) -> PaperDump {
+    let page_warnings: Vec<(u32, String)> = result
+        .pages
+        .iter()
+        .flat_map(|page| page.warnings.iter().map(|w| (page.page, w.clone())))
+        .collect();
+    PaperDump {
+        id: id.to_string(),
+        truth_method: truth.method.clone(),
+        truth: truth.references.clone(),
+        extracted: result.references.clone(),
+        matches: eval.matches.clone(),
+        unmatched_truth_keys: eval.unmatched_truth_keys.clone(),
+        spurious_extracted: eval.spurious_extracted.clone(),
+        markers: result.citations.clone(),
+        warnings: result.warnings.clone(),
+        page_warnings,
+        timings: result.timings,
+        pages: result.pages.len() as u32,
+        reference_section_text: reference_section_text(&result.pages),
+    }
+}
+
+/// File-name-safe form of a paper id: every character other than ASCII
+/// letters, digits, `-`, `_` and `.` becomes `_` (`arxiv:2108.04588` ->
+/// `arxiv_2108.04588`); an empty result becomes `paper`.
+pub fn safe_file_stem(id: &str) -> String {
+    let stem: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if stem.is_empty() || stem.chars().all(|c| c == '.') {
+        "paper".to_string()
+    } else {
+        stem
+    }
+}
+
+/// Writes `dump` as pretty JSON to `<dir>/<safe id>.json`, creating `dir`
+/// when missing, and returns the path written.
+pub fn write_dump(dir: &Path, dump: &PaperDump) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}.json", safe_file_stem(&dump.id)));
+    let mut json = serde_json::to_string_pretty(dump).map_err(std::io::Error::other)?;
+    json.push('\n');
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::latex_refs::{TruthCitations, TruthSource};
     use crate::schema::{
-        BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document, Metadata, PageText,
-        SCHEMA_VERSION, StageTimings, Status,
+        BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document, Line, Metadata,
+        PageText, SCHEMA_VERSION, StageTimings, Status,
     };
 
     fn close(a: f32, b: f32) -> bool {
@@ -1489,9 +1788,12 @@ mod tests {
         );
         assert!(md.contains("| truth cites | marker recall | align |"));
         assert!(md.contains(
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
         ));
-        assert!(md.contains("| arxiv:2108.04588 | complete | 0 | 31/31/30 | ✓ |"));
+        assert!(md.contains("| arxiv:2108.04588 | complete | 0 | 31/31/30 | ✓ | 0.00 | 0/0/0 |"));
+        assert!(md.contains("| ext/truth | doi c/t/printed | year c/t |"));
+        assert!(md.contains("| DOI accuracy (of printed DOIs) | 0.0% |"));
+        assert!(md.contains("## Stage timings (mean ms per document)\n"));
         assert!(md.contains("| 4/6 | 8 | 50.0% | 0.912 | 12.5 | 0 |"));
         assert!(md.contains("| 0/0 | 0 | n/a | n/a | 0.0 | 0 |"));
         assert!(md.contains("| Marker resolution (precision-like, resolved/extracted) | 66.7% |"));
@@ -1524,5 +1826,248 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let back: CorpusReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, report);
+    }
+
+    fn lined_page(number: u32, lines: &[&str]) -> PageText {
+        let mut p = PageText::new(number, 612.0, 792.0, 0);
+        p.lines = lines
+            .iter()
+            .map(|text| Line {
+                text: (*text).to_string(),
+                bbox: None,
+                column: 0,
+                spans: Vec::new(),
+            })
+            .collect();
+        p.text = lines.join("\n");
+        p
+    }
+
+    #[test]
+    fn dump_paper_collects_truth_extraction_and_reference_text() {
+        let mut ref_a = truth_ref("a");
+        ref_a.title = Some("Alpha Title".to_string());
+        let ref_b = truth_ref("b");
+        let mut e1 = extracted(1);
+        e1.title = Some("Alpha title".to_string());
+        let e2 = extracted(2);
+        let markers = vec![CitationMarker {
+            page: 1,
+            offset: 0,
+            text: "[1]".to_string(),
+            targets: vec![1],
+        }];
+        let mut result = sample_result(vec![e1, e2], markers.clone());
+        let mut page2 = lined_page(
+            2,
+            &[
+                "Body text",
+                "1 References",
+                "[1] A. Smith. Alpha title. 2020.",
+            ],
+        );
+        page2.warnings.push("odd glyph".to_string());
+        result.pages = vec![
+            lined_page(1, &["Intro", "References", "not the real section"]),
+            page2,
+            lined_page(3, &["[2] B. Jones. Other. 2021."]),
+        ];
+        let truth = truth_with(vec![ref_a, ref_b], "");
+        let eval = evaluate("arxiv:1234.5678", &result, &truth);
+        let dump = dump_paper("arxiv:1234.5678", &result, &truth, &eval);
+
+        assert_eq!(dump.id, "arxiv:1234.5678");
+        assert_eq!(dump.truth_method, "bbl");
+        assert_eq!(dump.truth.len(), 2);
+        assert_eq!(dump.extracted.len(), 2);
+        assert_eq!(dump.matches, eval.matches);
+        assert_eq!(dump.matches[0].extracted_index, Some(1));
+        assert_eq!(dump.unmatched_truth_keys, vec!["b".to_string()]);
+        assert_eq!(dump.spurious_extracted, vec![2]);
+        assert_eq!(dump.markers, markers);
+        assert_eq!(dump.warnings, vec!["one warning".to_string()]);
+        assert_eq!(dump.page_warnings, vec![(2, "odd glyph".to_string())]);
+        assert!((dump.timings.parse_ms - 10.0).abs() < 1e-9);
+        assert_eq!(dump.pages, 3);
+        // The last heading wins, the heading line is included and later
+        // pages follow after the separator.
+        assert_eq!(
+            dump.reference_section_text,
+            "1 References\n[1] A. Smith. Alpha title. 2020.\n\u{c}\n[2] B. Jones. Other. 2021."
+        );
+    }
+
+    #[test]
+    fn reference_section_text_falls_back_to_text_lines() {
+        let pages = [
+            page(1, "Body\nREFERENCES\n[1] X. Y. Title."),
+            page(2, "[2] Z."),
+        ];
+        assert_eq!(
+            reference_section_text(&pages),
+            "REFERENCES\n[1] X. Y. Title.\n\u{c}\n[2] Z."
+        );
+        assert_eq!(reference_section_text(&[page(1, "No heading here")]), "");
+        assert_eq!(reference_section_text(&[]), "");
+    }
+
+    #[test]
+    fn reference_section_text_is_capped_on_char_boundary() {
+        let long = "é".repeat(40_000);
+        let pages = [lined_page(1, &["References", long.as_str()])];
+        let text = reference_section_text(&pages);
+        assert!(text.len() <= REFERENCE_TEXT_CAP, "{}", text.len());
+        assert!(text.len() >= REFERENCE_TEXT_CAP - 3, "{}", text.len());
+        assert!(text.starts_with("References\né"));
+    }
+
+    #[test]
+    fn safe_file_stem_replaces_unsafe_characters() {
+        assert_eq!(safe_file_stem("arxiv:2108.04588"), "arxiv_2108.04588");
+        assert_eq!(safe_file_stem("a/b\\c d"), "a_b_c_d");
+        assert_eq!(safe_file_stem(""), "paper");
+        assert_eq!(safe_file_stem(".."), "paper");
+    }
+
+    #[test]
+    fn write_dump_writes_pretty_json_that_round_trips() {
+        let result = sample_result(vec![extracted(1)], Vec::new());
+        let truth = truth_with(vec![truth_ref("a")], "");
+        let eval = evaluate("arxiv:2108.04588", &result, &truth);
+        let dump = dump_paper("arxiv:2108.04588", &result, &truth, &eval);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dumps").join("nested");
+        let path = write_dump(&dir, &dump).unwrap();
+        assert_eq!(path, dir.join("arxiv_2108.04588.json"));
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains("\n  \"id\": \"arxiv:2108.04588\""));
+        let back: PaperDump = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dump);
+    }
+
+    #[test]
+    fn evaluate_counts_printed_dois() {
+        let mut ref_a = truth_ref("a");
+        ref_a.doi = Some("10.1000/ABC.123".to_string());
+        ref_a.title = Some("Title A".to_string());
+        let mut ref_b = truth_ref("b");
+        ref_b.doi = Some("10.2000/xyz".to_string());
+        ref_b.title = Some("Title B".to_string());
+        let mut ref_c = truth_ref("c");
+        ref_c.doi = Some("10.3000/q".to_string());
+        let mut ref_d = truth_ref("d");
+        ref_d.doi = Some("10.4000/d".to_string());
+
+        let mut e1 = extracted(1);
+        e1.title = Some("Title A".to_string());
+        let mut e2 = extracted(2);
+        e2.title = Some("Title B".to_string());
+        let mut e4 = extracted(4);
+        e4.doi = Some("10.4000/D".to_string());
+        let mut result = sample_result(vec![e1, e2, e4], Vec::new());
+        // a is printed but wrapped across a line; c is printed but unmatched;
+        // b is not printed; d is not printed but was extracted correctly.
+        result.pages[0].text = "see DOI: 10.1000/abc.\n123 and 10.3000/q".to_string();
+        let truth = truth_with(vec![ref_a, ref_b, ref_c, ref_d], "");
+
+        let eval = evaluate("p", &result, &truth);
+        assert_eq!(eval.matched_refs, 3);
+        assert_eq!(eval.doi_truth, 3);
+        assert_eq!(eval.doi_correct, 1);
+        assert_eq!(eval.doi_printed, 2);
+
+        let s = summarize(&[eval]);
+        assert!(close(s.doi_accuracy, 1.0 / 3.0), "{}", s.doi_accuracy);
+        assert!(
+            close(s.doi_accuracy_printed, 0.5),
+            "{}",
+            s.doi_accuracy_printed
+        );
+        let md = render_markdown(&build_report("lopdf", "h", vec![paper_with("q", 1.0)]));
+        assert!(md.contains("| DOI accuracy (of printed DOIs) | 0.0% |"));
+    }
+
+    #[test]
+    fn summarize_means_stage_timings_over_non_failed_papers() {
+        let mut p1 = paper_with("p1", 10.0);
+        p1.timings = StageTimings {
+            acquire_ms: 1.0,
+            parse_ms: 10.0,
+            order_ms: 2.0,
+            metadata_ms: 4.0,
+            citations_ms: 6.0,
+            write_ms: 0.0,
+        };
+        let mut p2 = paper_with("p2", 20.0);
+        p2.timings = StageTimings {
+            acquire_ms: 3.0,
+            parse_ms: 30.0,
+            order_ms: 4.0,
+            metadata_ms: 0.0,
+            citations_ms: 2.0,
+            write_ms: 1.0,
+        };
+        let mut failed = failed_paper("p3", "boom");
+        failed.timings.parse_ms = 1000.0;
+
+        let s = summarize(&[p1, p2, failed]);
+        assert!((s.mean_acquire_ms - 2.0).abs() < 1e-9);
+        assert!((s.mean_parse_ms - 20.0).abs() < 1e-9);
+        assert!((s.mean_order_ms - 3.0).abs() < 1e-9);
+        assert!((s.mean_metadata_ms - 2.0).abs() < 1e-9);
+        assert!((s.mean_citations_ms - 4.0).abs() < 1e-9);
+        assert!((s.mean_write_ms - 0.5).abs() < 1e-9);
+        assert!(summarize(&[]).mean_parse_ms.abs() < 1e-9);
+
+        let result = sample_result(Vec::new(), Vec::new());
+        let eval = evaluate("x", &result, &truth_with(Vec::new(), ""));
+        assert!((eval.timings.order_ms - 4.0).abs() < 1e-9);
+
+        let report = build_report("lopdf", "h", vec![eval]);
+        let md = render_markdown(&report);
+        assert!(md.contains(
+            "## Stage timings (mean ms per document)\n\n| Stage | Mean ms |\n| --- | --- |\n\
+             | acquire | 1.0 |\n| parse | 10.0 |\n| order | 4.0 |\n| metadata | 2.0 |\n\
+             | citations | 3.0 |\n| write | 0.0 |\n| total | 20.0 |\n\n## Papers\n"
+        ));
+    }
+
+    #[test]
+    fn evaluate_reports_over_segmentation() {
+        let result = sample_result(vec![extracted(1), extracted(2), extracted(3)], Vec::new());
+        let truth = truth_with(vec![truth_ref("a"), truth_ref("b")], "");
+        let eval = evaluate("over", &result, &truth);
+        assert!(
+            close(eval.over_segmentation, 1.5),
+            "{}",
+            eval.over_segmentation
+        );
+
+        let none = evaluate("none", &result, &truth_with(Vec::new(), ""));
+        assert!(close(none.over_segmentation, 0.0));
+
+        let md = render_markdown(&build_report("lopdf", "h", vec![eval]));
+        assert!(md.contains("| over | complete | 2 | 2/3/0 | ✗ | 1.50 | 0/0/0 |"));
+    }
+
+    #[test]
+    fn render_markdown_paper_rows_match_header_columns() {
+        let mut p1 = paper_with("p1", 3.0);
+        p1.marker_recall = Some(0.5);
+        p1.body_alignment = Some(0.5);
+        let p2 = failed_paper("p2", "offline");
+        let md = render_markdown(&build_report("lopdf", "h", vec![p1, p2]));
+        let papers = md.split("## Papers\n").nth(1).expect("papers section");
+        let table: Vec<&str> = papers
+            .lines()
+            .skip_while(|l| !l.starts_with('|'))
+            .take_while(|l| l.starts_with('|'))
+            .collect();
+        assert_eq!(table.len(), 4, "{table:?}");
+        let columns = table[0].matches('|').count();
+        assert_eq!(columns, 15);
+        for row in &table {
+            assert_eq!(row.matches('|').count(), columns, "{row}");
+        }
     }
 }

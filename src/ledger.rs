@@ -7,7 +7,9 @@
 //! exists replaces the earlier run inside a single transaction. Positioned
 //! evidence (spans, lines), warnings, keywords and the raw `/Info` map are
 //! kept as JSON text columns; everything a query would filter on is a plain
-//! column.
+//! column. Figures (image and drawing regions) get their own `figures` table,
+//! created on open when missing, so ledgers written before it existed gain
+//! it without a [`SCHEMA_VERSION`] change.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,8 +19,9 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 use thiserror::Error;
 
 use crate::schema::{
-    Author, BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document, ExtractionResult,
-    Metadata, PageText, ReferenceEntry, SCHEMA_VERSION, SourceObservation, StageTimings, Status,
+    Author, BBox, BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document,
+    ExtractionResult, Figure, Metadata, PageText, ReferenceEntry, SCHEMA_VERSION,
+    SourceObservation, StageTimings, Status,
 };
 
 /// Row id of a run in the `runs` table.
@@ -59,6 +62,7 @@ pub struct LedgerStats {
     pub pages: u64,
     pub references: u64,
     pub citations: u64,
+    pub figures: u64,
 }
 
 /// Handle on one ledger database.
@@ -201,6 +205,31 @@ CREATE TABLE IF NOT EXISTS citation_targets (
 );
 "#;
 
+/// The `figures` table, kept apart from [`SCHEMA_SQL`] because it was added
+/// after version 1 shipped. It is created `IF NOT EXISTS` on every open, so an
+/// existing ledger gains the (empty) table the first time this build opens it
+/// and [`SCHEMA_VERSION`] stays unchanged. The bounding box is four nullable
+/// columns: all set or all `NULL`.
+const FIGURES_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS figures (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    page INTEGER NOT NULL,
+    idx INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    mime TEXT,
+    width_px INTEGER,
+    height_px INTEGER,
+    sha256 TEXT,
+    file TEXT,
+    caption TEXT,
+    x0 REAL,
+    y0 REAL,
+    x1 REAL,
+    y1 REAL,
+    PRIMARY KEY (run_id, page, idx)
+);
+";
+
 // Statement text. `references` and `offset` are SQL keywords and stay quoted.
 
 const SELECT_VERSION: &str = "SELECT version FROM schema_meta";
@@ -222,6 +251,9 @@ const INSERT_RUN: &str = "INSERT INTO runs (hash, backend_name, backend_version,
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 const INSERT_PAGE: &str = "INSERT INTO pages (run_id, page, width, height, rotation, text, \
     spans_json, lines_json, warnings_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+const INSERT_FIGURE: &str = "INSERT INTO figures (run_id, page, idx, kind, mime, width_px, \
+    height_px, sha256, file, caption, x0, y0, x1, y1) \
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 const INSERT_CHUNK: &str = "INSERT INTO chunks (run_id, chunk_index, first_page, last_page, \
     status, text_sha256, ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const INSERT_METADATA: &str = "INSERT INTO metadata (run_id, title, doi, arxiv_id, year, \
@@ -251,6 +283,8 @@ const SELECT_SOURCES: &str = "SELECT path, inode, device, mtime_unix, size FROM 
     WHERE hash = ?1 ORDER BY id";
 const SELECT_PAGES: &str = "SELECT page, width, height, rotation, text, spans_json, lines_json, \
     warnings_json FROM pages WHERE run_id = ?1 ORDER BY page";
+const SELECT_FIGURES: &str = "SELECT page, idx, kind, mime, width_px, height_px, sha256, file, \
+    caption, x0, y0, x1, y1 FROM figures WHERE run_id = ?1 ORDER BY page, idx";
 const SELECT_CHUNKS: &str = "SELECT chunk_index, first_page, last_page, status, text_sha256, ms \
     FROM chunks WHERE run_id = ?1 ORDER BY chunk_index";
 const SELECT_METADATA: &str = "SELECT title, doi, arxiv_id, year, venue, abstract_text, \
@@ -274,7 +308,8 @@ const SELECT_STATS: &str = "SELECT \
     (SELECT COUNT(*) FROM runs WHERE status = 'failed'), \
     (SELECT COUNT(*) FROM pages), \
     (SELECT COUNT(*) FROM \"references\"), \
-    (SELECT COUNT(*) FROM citations)";
+    (SELECT COUNT(*) FROM citations), \
+    (SELECT COUNT(*) FROM figures)";
 
 impl Ledger {
     /// Opens or creates the ledger file at `path` and verifies its schema
@@ -293,9 +328,11 @@ impl Ledger {
         Self::init(conn)
     }
 
-    /// Creates the schema if missing and checks `schema_meta.version`.
+    /// Creates the schema if missing (including the later `figures` table)
+    /// and checks `schema_meta.version`.
     fn init(conn: Connection) -> Result<Self, LedgerError> {
         conn.execute_batch(SCHEMA_SQL)?;
+        conn.execute_batch(FIGURES_SQL)?;
         let found = optional_row(&conn, SELECT_VERSION, [], |row| row.get::<_, u32>(0))?;
         match found {
             None => {
@@ -379,6 +416,7 @@ impl Ledger {
         )?;
         let run_id = tx.last_insert_rowid();
         insert_pages(&tx, run_id, &result.pages)?;
+        insert_figures(&tx, run_id, &result.pages)?;
         insert_chunks(&tx, run_id, &result.chunks)?;
         insert_metadata(&tx, run_id, &result.metadata)?;
         insert_references(&tx, run_id, &result.references)?;
@@ -483,6 +521,7 @@ impl Ledger {
                 pages: to_u64(row.get(5)?),
                 references: to_u64(row.get(6)?),
                 citations: to_u64(row.get(7)?),
+                figures: to_u64(row.get(8)?),
             })
         })?;
         Ok(stats)
@@ -601,6 +640,34 @@ fn insert_pages(conn: &Connection, run_id: RunId, pages: &[PageText]) -> Result<
             lines_json,
             warnings_json,
         ])?;
+    }
+    Ok(())
+}
+
+/// Stores every page's figures; the bounding box goes into four nullable
+/// coordinate columns.
+fn insert_figures(conn: &Connection, run_id: RunId, pages: &[PageText]) -> Result<(), LedgerError> {
+    let mut stmt = conn.prepare(INSERT_FIGURE)?;
+    for page in pages {
+        for figure in &page.figures {
+            let bbox = figure.bbox;
+            stmt.execute(params![
+                run_id,
+                page.page,
+                figure.index,
+                figure.kind,
+                figure.mime,
+                figure.width_px,
+                figure.height_px,
+                figure.sha256,
+                figure.file,
+                figure.caption,
+                bbox.map(|b| b.x0),
+                bbox.map(|b| b.y0),
+                bbox.map(|b| b.x1),
+                bbox.map(|b| b.y1),
+            ])?;
+        }
     }
     Ok(())
 }
@@ -761,6 +828,7 @@ fn load_document(conn: &Connection, hash: ContentHash) -> Result<Document, Ledge
 }
 
 fn load_pages(conn: &Connection, run: RunId) -> Result<Vec<PageText>, LedgerError> {
+    let mut figures_by_page = load_figures(conn, run)?;
     let mut stmt = conn.prepare(SELECT_PAGES)?;
     let rows = stmt.query_map(params![run], |row| {
         Ok(PageRow {
@@ -783,13 +851,48 @@ fn load_pages(conn: &Connection, run: RunId) -> Result<Vec<PageText>, LedgerErro
             height: row.height,
             rotation: row.rotation,
             spans: serde_json::from_str(&row.spans_json)?,
-            figures: Vec::new(),
+            figures: figures_by_page.remove(&row.page).unwrap_or_default(),
             lines: serde_json::from_str(&row.lines_json)?,
             text: row.text,
             warnings: serde_json::from_str(&row.warnings_json)?,
         });
     }
     Ok(pages)
+}
+
+/// Loads the figures of `run` grouped by page number, each page's figures
+/// in ascending index order.
+fn load_figures(conn: &Connection, run: RunId) -> Result<BTreeMap<u32, Vec<Figure>>, LedgerError> {
+    let mut stmt = conn.prepare(SELECT_FIGURES)?;
+    let rows = stmt.query_map(params![run], |row| {
+        let page: u32 = row.get(0)?;
+        let x0: Option<f32> = row.get(9)?;
+        let y0: Option<f32> = row.get(10)?;
+        let x1: Option<f32> = row.get(11)?;
+        let y1: Option<f32> = row.get(12)?;
+        let bbox = match (x0, y0, x1, y1) {
+            (Some(x0), Some(y0), Some(x1), Some(y1)) => Some(BBox { x0, y0, x1, y1 }),
+            _ => None,
+        };
+        let figure = Figure {
+            index: row.get(1)?,
+            bbox,
+            kind: row.get(2)?,
+            mime: row.get(3)?,
+            width_px: row.get(4)?,
+            height_px: row.get(5)?,
+            sha256: row.get(6)?,
+            file: row.get(7)?,
+            caption: row.get(8)?,
+        };
+        Ok((page, figure))
+    })?;
+    let mut by_page: BTreeMap<u32, Vec<Figure>> = BTreeMap::new();
+    for row in rows {
+        let (page, figure) = row?;
+        by_page.entry(page).or_default().push(figure);
+    }
+    Ok(by_page)
 }
 
 fn load_chunks(conn: &Connection, run: RunId) -> Result<Vec<ChunkResult>, LedgerError> {
@@ -978,7 +1081,7 @@ fn to_u64(value: i64) -> u64 {
 mod tests {
     use super::*;
 
-    use crate::schema::{BBox, Line, Span, config_digest, sha256_hex};
+    use crate::schema::{Line, Span, config_digest, sha256_hex};
 
     fn at(x0: f32, y0: f32, x1: f32, y1: f32) -> BBox {
         BBox { x0, y0, x1, y1 }
@@ -1044,6 +1147,30 @@ mod tests {
         ];
         first.text = "Deep Ledgers\nAda Bob".to_string();
         first.warnings = vec!["span 3: undecodable bytes".to_string()];
+        first.figures = vec![
+            Figure {
+                index: 0,
+                bbox: Some(at(72.0, 300.0, 540.0, 660.5)),
+                kind: "raster".to_string(),
+                mime: Some("image/png".to_string()),
+                width_px: Some(1200),
+                height_px: Some(800),
+                sha256: Some(sha256_hex(b"figure bytes")),
+                file: Some("figures/p1-0.png".to_string()),
+                caption: Some("Figure 1: A ledger.".to_string()),
+            },
+            Figure {
+                index: 1,
+                bbox: None,
+                kind: "vector".to_string(),
+                mime: None,
+                width_px: None,
+                height_px: None,
+                sha256: None,
+                file: None,
+                caption: None,
+            },
+        ];
 
         let mut second = PageText::new(2, 612.0, 792.0, 90);
         let body = at(72.0, 60.0, 400.0, 72.0);
@@ -1169,6 +1296,14 @@ mod tests {
         conn.query_row(sql, [], |row| row.get(0)).unwrap()
     }
 
+    fn has_table(conn: &Connection, name: &str) -> bool {
+        let sql = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1";
+        let count: i64 = conn
+            .query_row(sql, params![name], |row| row.get(0))
+            .unwrap();
+        count == 1
+    }
+
     #[test]
     fn in_memory_ledger_starts_empty() {
         let ledger = Ledger::open_in_memory().unwrap();
@@ -1181,7 +1316,31 @@ mod tests {
         let result = sample_result();
         let run = ledger.write_result(&result).unwrap();
         let loaded = ledger.load_result(run).unwrap();
+        assert_eq!(loaded.pages[0].figures.len(), 2);
+        assert!(loaded.pages[0].figures[1].bbox.is_none());
+        assert!(loaded.pages[1].figures.is_empty());
         assert_eq!(loaded, result);
+        assert_eq!(ledger.stats().unwrap().figures, 2);
+    }
+
+    #[test]
+    fn ledger_without_figures_table_gains_it_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute(INSERT_VERSION, params![SCHEMA_VERSION])
+                .unwrap();
+            assert!(!has_table(&conn, "figures"));
+        }
+        let mut ledger = Ledger::open(&path).unwrap();
+        assert!(has_table(&ledger.conn, "figures"));
+        assert_eq!(ledger.stats().unwrap().figures, 0);
+        let result = sample_result();
+        let run = ledger.write_result(&result).unwrap();
+        assert_eq!(ledger.load_result(run).unwrap(), result);
+        assert_eq!(ledger.stats().unwrap().figures, 2);
     }
 
     #[test]
@@ -1199,6 +1358,7 @@ mod tests {
         assert_eq!(stats.pages, 2);
         assert_eq!(stats.references, 3);
         assert_eq!(stats.citations, 2);
+        assert_eq!(stats.figures, 2);
         assert_eq!(count_sources(&ledger), 1);
         assert_eq!(ledger.load_result(second_run).unwrap(), result);
 
@@ -1210,6 +1370,7 @@ mod tests {
         assert_eq!(stats.documents, 1);
         assert_eq!(stats.runs, 2);
         assert_eq!(stats.references, 6);
+        assert_eq!(stats.figures, 4);
         assert_eq!(ledger.load_result(third_run).unwrap(), upgraded);
         assert_eq!(ledger.load_result(second_run).unwrap(), result);
     }
