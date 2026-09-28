@@ -198,15 +198,15 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
     // DOI: any Info value first, then page 1. arXiv's own DOI for the
     // preprint (`10.48550/arXiv.<id>`) in `/Info` ranks like the same DOI
     // printed on page 1: a page-1 publisher DOI with positive evidence
-    // (header/footer furniture or a `DOI` label) replaces it.
+    // (header/footer furniture or a `DOI` label) replaces it. The `/Info`
+    // scan stops at the first DOI of either kind, so an unrelated DOI in a
+    // later key (a `Subject` citing other work) never overrides it.
     let mut info_arxiv_doi: Option<(String, String)> = None;
     for (key, value) in info {
         if let Some(doi) = find_doi(value) {
             if is_arxiv_doi(&doi) {
-                if info_arxiv_doi.is_none() {
-                    info_arxiv_doi = Some((doi, key.clone()));
-                }
-                continue;
+                info_arxiv_doi = Some((doi, key.clone()));
+                break;
             }
             meta.doi = Some(doi);
             meta.provenance
@@ -2214,6 +2214,38 @@ mod tests {
             Some("10.48550/arXiv.2410.19245")
         );
         assert_eq!(without_page.provenance["doi"], "info:DOI");
+    }
+
+    /// An unrelated DOI in a later `/Info` key (`Subject` citing other work)
+    /// never replaces the `/Info` arXiv DOI; only a page-1 publisher DOI
+    /// with evidence (the ACM footer) does.
+    #[test]
+    fn later_info_doi_does_not_override_info_arxiv_doi() {
+        let info = info_from(&[
+            ("DOI", "10.48550/arXiv.2410.19245"),
+            ("Subject", "see also 10.1000/unrelated"),
+        ]);
+        let plain = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+        ]);
+        let meta = extract_metadata(&info, &[plain]);
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arXiv.2410.19245"));
+        assert_eq!(meta.provenance["doi"], "info:DOI");
+
+        let with_footer = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+            ("ACM ISBN 979-8-4007-2025-3/26/04", 7.0, 50.0),
+            ("https://doi.org/10.1145/3744916.3773221", 7.0, 40.0),
+        ]);
+        let meta = extract_metadata(&info, &[with_footer]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1145/3744916.3773221"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi-header-footer");
     }
 
     /// A non-arXiv `/Info` DOI keeps its priority over page 1's arXiv DOI.

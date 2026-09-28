@@ -846,10 +846,8 @@ fn flow(prev: &str, next: &str) -> i32 {
         // A trailing hyphen is not terminal, so a hyphen before a
         // lowercase letter scores +2 here.
         2
-    } else if first.is_uppercase() {
-        1
     } else {
-        0
+        i32::from(first.is_uppercase())
     }
 }
 
