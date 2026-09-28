@@ -4227,13 +4227,16 @@ Body text \cite{k}.
         assert_eq!(person_name("van Gogh"), None);
     }
 
+    use std::fmt::Write as _;
+
     /// A `thebibliography` list with one minimal entry per key.
     fn bbl_with(keys: &[&str]) -> String {
         let mut out = String::from("\\begin{thebibliography}{9}\n");
         for key in keys {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "\\bibitem{{{key}}} Some Author.\n\\newblock Title {key}.\n\\newblock Venue, 2001.\n"
-            ));
+            );
         }
         out.push_str("\\end{thebibliography}\n");
         out
