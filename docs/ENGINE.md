@@ -32,6 +32,21 @@ backend that is not compiled in fails with a hint naming the feature.
 A backend that declares its own reading order (`docling-text`, `docling`) gets one line per
 span in `seq` order; the others are ordered by the XY-cut.
 
+## Measured status (2026-09-28)
+
+The `lopdf` backend's reference/metadata/marker/timing numbers from Eval run 36470860921
+(`dev`, 60 papers) and run 36472085645 (`holdout`, 10 papers), both after PR #32 on
+`ubuntu-24.04-arm`, are in [README.md](../README.md) and GitHub issue #15; per-loop
+taxonomies are in [docs/analysis/](analysis/). Body-text alignment (0.751 `dev` / 0.787
+`holdout`, body only) is far from the 99% error-free-chunk goal, and the loop-7 region tagger
+over-tags prose on some papers (loop 8 is fixing this); marker recall does not yet verify that
+a marker resolved to the *correct* entry.
+
+The full `docling` pipeline is a routed exception at about 7.7 s/document, and `pdfium` is
+about 5x slower than `lopdf` on the reference-metrics path. Accuracy reports for `pdfium`,
+`docling-text` and `docling` come from the Native workflow (first docling comparison on issue
+#15) but are not summarised here.
+
 ## Figures
 
 Images never enter page text. Each page records `figures` (index, bbox, kind, MIME, pixel
