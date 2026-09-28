@@ -91,7 +91,10 @@ const REFERENCE_LINES: &[(&str, &str)] = &[
         "[2] G. Hopper, \"Compilers,\" Journal of Programming, vol. 3, no. 2, pp. 45–67, 1952,",
         "doi:10.1000/abc456.",
     ),
-    ("[3] A. Turing, \"On computable numbers,\"", "arXiv:1936.00001, 1936."),
+    (
+        "[3] A. Turing, \"On computable numbers,\"",
+        "arXiv:1936.00001, 1936.",
+    ),
 ];
 
 /// Font, size and starting baseline for a block of consecutive lines.
@@ -126,7 +129,10 @@ fn text_line(ops: &mut Vec<Operation>, font: &str, size: f32, x: f32, y: f32, te
     ops.push(Operation::new("BT", vec![]));
     ops.push(Operation::new("Tf", vec![font_name, Object::Real(size)]));
     ops.push(Operation::new("Td", vec![Object::Real(x), Object::Real(y)]));
-    ops.push(Operation::new("Tj", vec![Object::string_literal(win_ansi(text))]));
+    ops.push(Operation::new(
+        "Tj",
+        vec![Object::string_literal(win_ansi(text))],
+    ));
     ops.push(Operation::new("ET", vec![]));
 }
 

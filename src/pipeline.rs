@@ -141,7 +141,7 @@ pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
 /// Pages are grouped by page number, so page 21 always lands in chunk 1 even
 /// when only a sub-range was extracted. `parse_plus_order_ms` is apportioned
 /// to chunks by page count. The chunk text hash covers the page texts joined
-/// by `"\n\f\n"`. A chunk is `Partial` when any of its pages carries a
+/// by `"\n\x0C\n"`. A chunk is `Partial` when any of its pages carries a
 /// warning starting with `failed:`.
 pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkResult> {
     if pages.is_empty() {
@@ -176,7 +176,7 @@ pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkR
             first_page,
             last_page,
             status,
-            text_sha256: sha256_hex(texts.join("\n\f\n").as_bytes()),
+            text_sha256: sha256_hex(texts.join("\n\x0C\n").as_bytes()),
             ms: per_page_ms * count,
         });
     }
@@ -219,7 +219,7 @@ mod tests {
         let pages = synthetic_pages(2);
         let chunks = chunk_results(&pages, 0.0);
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text_sha256, sha256_hex(b"page 1\n\f\npage 2"));
+        assert_eq!(chunks[0].text_sha256, sha256_hex(b"page 1\n\x0C\npage 2"));
     }
 
     #[test]

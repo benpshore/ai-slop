@@ -1,7 +1,11 @@
 //! `tpe` command-line interface: extract PDFs into a ledger, query the ledger
 //! and benchmark the extraction stages.
 
-#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 
 use std::collections::VecDeque;
 use std::fs;
