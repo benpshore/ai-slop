@@ -3417,6 +3417,53 @@ Body text \cite{k}.
         assert_eq!(paper.arxiv_id, None);
     }
 
+    /// The `\title` forms of the three papers whose `/Info` title differs
+    /// from the printed one (arXiv:2505.16990, 2305.13843, 2608.28714): the
+    /// truth is the printed title.
+    #[test]
+    fn paper_truth_titles_with_line_breaks_and_optional_arguments() {
+        let acl = r"\documentclass[11pt]{article}
+\title{Dimple: Discrete Diffusion Parallel Generation for \\Large Multimodal Modal}
+\author{Runpeng Yu \and Xinyin Ma}
+\begin{document}
+\maketitle
+\end{document}
+";
+        assert_eq!(
+            paper_truth(acl).title.as_deref(),
+            Some("Dimple: Discrete Diffusion Parallel Generation for Large Multimodal Modal")
+        );
+        let cas = r"\documentclass[a4paper,fleqn]{cas-dc}
+\shorttitle{Advances and Challenges of Multi-task Learning Method in Recommender Systems: A Survey}
+\title[mode = title]{Advances and Challenges of Multi-task Learning Method in Recommender Systems: A Survey}
+\begin{document}
+\maketitle
+\end{document}
+";
+        assert_eq!(
+            paper_truth(cas).title.as_deref(),
+            Some(
+                "Advances and Challenges of Multi-task Learning Method in Recommender Systems: A Survey"
+            )
+        );
+        let ieee = r"\documentclass[journal]{IEEEtran}
+\begin{document}
+\title{Evaluating the Safety of Deep Learning-Based Brain MRI Reconstruction:\\ A Systematic Review of Current Evaluation Practices}
+\author{Dat~Tat~Mai,
+        and~James~Jin~Kang%
+\thanks{Dat Tat Mai is with RMIT University Vietnam.}}
+\maketitle
+\end{document}
+";
+        assert_eq!(
+            paper_truth(ieee).title.as_deref(),
+            Some(
+                "Evaluating the Safety of Deep Learning-Based Brain MRI Reconstruction: \
+                 A Systematic Review of Current Evaluation Practices"
+            )
+        );
+    }
+
     #[test]
     fn person_name_heuristic() {
         assert_eq!(person_name("Jane Q. Doe").as_deref(), Some("Jane Q. Doe"));
