@@ -5,8 +5,21 @@
 //! Per-document work is cached inside the session: a font dictionary is
 //! resolved (encoding, widths, flags) once per `ObjectId` and shared by
 //! every page and Form `XObject` that references it, and a Form `XObject`'s
-//! content stream is decompressed and parsed once. The caches hold only
+//! content stream is decompressed and lexed once. The caches hold only
 //! owned data, so they never borrow the [`Document`] they were built from.
+//!
+//! Content streams are not parsed with `Content::decode`, which allocates
+//! an `Operation` (and every operand) for each of the many path and colour
+//! operators a vector figure is made of. A streaming lexer reads the same
+//! grammar as `lopdf` (its quirks included: it stops quietly at the first
+//! token it cannot read and rejects the stream only where `lopdf` does,
+//! except that it accepts an inline image whose `EI` ends the stream) and
+//! materialises operands only for the operators the interpreter acts on
+//! (see [`OpKind`]); everything else is tokenised and dropped without
+//! allocating. A Form runs on a graphics-state stack of its own and its
+//! graphics state is restored afterwards, so only the text it shows and the
+//! text matrix outlive it; a Form stream in which no operator that shows
+//! text or moves the text matrix can occur is therefore not lexed or run.
 //!
 //! Text is normalised, never repaired: every non-ASCII string is put in NFC,
 //! and the Latin presentation-form ligatures U+FB00 to U+FB06 (`ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ
@@ -23,9 +36,9 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use lopdf::content::{Content, Operation};
 use lopdf::{
-    Dictionary, Document, Encoding, Error as LopdfError, LoadOptions, Object, ObjectId, Stream,
+    Dictionary, Document, Encoding, Error as LopdfError, LoadOptions, Object, ObjectId, ParseError,
+    Stream, StringFormat,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -137,10 +150,11 @@ struct SessionCache {
     /// Fonts written directly into a resources dictionary have no id and are
     /// resolved on every use.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
-    /// Decoded content of Form `XObject` streams, keyed by stream id.
-    /// Streams that fail to decode are not cached, so their warning recurs
-    /// exactly as it would without the cache.
-    forms: HashMap<ObjectId, Rc<Vec<Operation>>>,
+    /// The text-relevant operators of Form `XObject` streams (empty for a
+    /// stream that cannot show text), keyed by stream id. Streams that fail
+    /// to lex are not cached, so their warning recurs exactly as it would
+    /// without the cache.
+    forms: HashMap<ObjectId, Rc<TextProgram>>,
 }
 
 struct LopdfSession {
@@ -391,17 +405,61 @@ impl SimpleWidths {
 
 /// Glyph widths of a composite (Type0) font, keyed by CID.
 struct CompositeWidths {
-    /// `(first, last, width)` runs from the `/W` array.
+    /// `(first, last, width)` runs from the `/W` array: sorted by `first`
+    /// when `disjoint`, otherwise in `/W` order.
     ranges: Vec<(u32, u32, f32)>,
+    /// No two runs overlap, so at most one contains a CID and a binary
+    /// search finds it. Otherwise the first run in `/W` order that contains
+    /// the CID wins, found by a linear scan.
+    disjoint: bool,
     default_width: f32,
 }
 
 impl CompositeWidths {
+    /// Index the `/W` runs for lookup. Empty runs (`first > last`) contain
+    /// no CID and are dropped from the sorted index.
+    fn new(ranges: Vec<(u32, u32, f32)>, default_width: f32) -> Self {
+        let mut sorted: Vec<(u32, u32, f32)> = ranges
+            .iter()
+            .copied()
+            .filter(|&(first, last, _)| first <= last)
+            .collect();
+        sorted.sort_by_key(|&(first, _, _)| first);
+        let disjoint = sorted.windows(2).all(|pair| match pair {
+            [left, right] => left.1 < right.0,
+            _ => true,
+        });
+        if disjoint {
+            Self {
+                ranges: sorted,
+                disjoint,
+                default_width,
+            }
+        } else {
+            Self {
+                ranges,
+                disjoint,
+                default_width,
+            }
+        }
+    }
+
     /// Advance of `cid` in text space (1.0 = the font size).
     fn width(&self, cid: u32) -> f32 {
-        for &(first, last, glyph_width) in &self.ranges {
-            if (first..=last).contains(&cid) {
+        if self.disjoint {
+            let after = self.ranges.partition_point(|&(first, _, _)| first <= cid);
+            if let Some(&(_, last, glyph_width)) = after
+                .checked_sub(1)
+                .and_then(|index| self.ranges.get(index))
+                && cid <= last
+            {
                 return glyph_width * THOUSANDTH;
+            }
+        } else {
+            for &(first, last, glyph_width) in &self.ranges {
+                if (first..=last).contains(&cid) {
+                    return glyph_width * THOUSANDTH;
+                }
             }
         }
         self.default_width * THOUSANDTH
@@ -648,10 +706,7 @@ fn composite_widths(doc: &Document, dict: &Dictionary) -> CompositeWidths {
             ranges = parse_w_array(doc, array);
         }
     }
-    CompositeWidths {
-        ranges,
-        default_width,
-    }
+    CompositeWidths::new(ranges, default_width)
 }
 
 /// Parse a CID font `/W` array, which mixes `c [w1 w2 ...]` and
@@ -851,6 +906,658 @@ fn replacement_text(composite: bool, bytes: &[u8]) -> String {
     std::iter::repeat_n('\u{FFFD}', codes).collect()
 }
 
+/// How deep `lopdf` lets arrays and dictionaries nest in a content stream
+/// (`reader::MAX_NESTING_DEPTH`).
+const MAX_NESTING: usize = 100;
+/// How deep `lopdf` lets parentheses nest inside a literal string
+/// (`reader::MAX_BRACKET`).
+const MAX_PAREN_NESTING: usize = 100;
+
+/// The content-stream operators the interpreter acts on. Every other
+/// operator (path construction and painting, clipping, colour, line style,
+/// `gs`, marked content, shading, Type3 `d0`/`d1`, `ET`, inline images) is
+/// lexed and dropped without materialising its operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpKind {
+    /// `q`
+    Save,
+    /// `Q`
+    Restore,
+    /// `cm`
+    Concat,
+    /// `BT`
+    BeginText,
+    /// `Tf`
+    Font,
+    /// `Td`
+    Move,
+    /// `TD`
+    MoveSetLeading,
+    /// `Tm`
+    TextMatrix,
+    /// `T*`
+    NextLine,
+    /// `TL`
+    Leading,
+    /// `Tc`
+    CharSpacing,
+    /// `Tw`
+    WordSpacing,
+    /// `Tz`
+    HorizontalScale,
+    /// `Ts`
+    Rise,
+    /// `Tj`
+    Show,
+    /// `'`
+    NextLineShow,
+    /// `"`
+    SpacingShow,
+    /// `TJ`
+    ShowArray,
+    /// `Do`
+    Invoke,
+}
+
+impl OpKind {
+    fn from_operator(operator: &[u8]) -> Option<Self> {
+        let kind = match operator {
+            b"q" => Self::Save,
+            b"Q" => Self::Restore,
+            b"cm" => Self::Concat,
+            b"BT" => Self::BeginText,
+            b"Tf" => Self::Font,
+            b"Td" => Self::Move,
+            b"TD" => Self::MoveSetLeading,
+            b"Tm" => Self::TextMatrix,
+            b"T*" => Self::NextLine,
+            b"TL" => Self::Leading,
+            b"Tc" => Self::CharSpacing,
+            b"Tw" => Self::WordSpacing,
+            b"Tz" => Self::HorizontalScale,
+            b"Ts" => Self::Rise,
+            b"Tj" => Self::Show,
+            b"'" => Self::NextLineShow,
+            b"\"" => Self::SpacingShow,
+            b"TJ" => Self::ShowArray,
+            b"Do" => Self::Invoke,
+            _ => return None,
+        };
+        Some(kind)
+    }
+}
+
+/// One kept operator and the range of its operands in
+/// [`TextProgram::operands`].
+#[derive(Clone, Copy, Debug)]
+struct TextOp {
+    kind: OpKind,
+    first: usize,
+    end: usize,
+}
+
+/// The operators of one content stream that the interpreter acts on, in
+/// stream order, with their operands exactly as `Content::decode` yields them.
+#[derive(Default)]
+struct TextProgram {
+    ops: Vec<TextOp>,
+    operands: Vec<Object>,
+}
+
+impl TextProgram {
+    fn operands(&self, op: TextOp) -> &[Object] {
+        self.operands.get(op.first..op.end).unwrap_or_default()
+    }
+}
+
+/// Why no object or operation could be read at some position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Halt {
+    /// Nothing valid here (a `nom` error): `lopdf` backtracks, and at the
+    /// top level it stops and keeps the operations read so far.
+    Stop,
+    /// `lopdf` rejects the whole content stream (a `nom` failure).
+    Fatal,
+}
+
+/// The end of a lexed object (before any white space after it) and, in
+/// build mode, the object.
+type Lexed = Result<(usize, Option<Object>), Halt>;
+
+/// White space `lopdf` skips between content-stream tokens.
+fn is_content_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// PDF white space, skipped inside arrays, dictionaries and hex strings.
+fn is_pdf_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\0' | 0x0C)
+}
+
+fn is_delimiter(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+fn is_regular(byte: u8) -> bool {
+    !is_pdf_space(byte) && !is_delimiter(byte)
+}
+
+fn is_digit(byte: u8) -> bool {
+    byte.is_ascii_digit()
+}
+
+fn is_operator_char(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'*' | b'\'' | b'"')
+}
+
+/// White space around the `EI` that ends an inline image of unknown length.
+fn is_ei_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\n' | b'\r')
+}
+
+/// The position after the run of bytes from `pos` for which `keep` holds.
+fn skip_while(bytes: &[u8], pos: usize, keep: fn(u8) -> bool) -> usize {
+    let rest = bytes.get(pos..).unwrap_or_default();
+    pos + rest.iter().take_while(|&&byte| keep(byte)).count()
+}
+
+fn skip_content_space(bytes: &[u8], pos: usize) -> usize {
+    skip_while(bytes, pos, is_content_space)
+}
+
+/// The end of the end-of-line marker (`\r\n`, `\n` or `\r`) at `pos`.
+fn eol_end(bytes: &[u8], pos: usize) -> Option<usize> {
+    match bytes.get(pos..)? {
+        [b'\r', b'\n', ..] => Some(pos + 2),
+        [b'\r' | b'\n', ..] => Some(pos + 1),
+        _ => None,
+    }
+}
+
+/// The end of the `%` comment at `pos`, after its end-of-line marker;
+/// `None` when there is no comment there or nothing terminates it.
+fn comment_end(bytes: &[u8], pos: usize) -> Option<usize> {
+    if bytes.get(pos) != Some(&b'%') {
+        return None;
+    }
+    let eol = skip_while(bytes, pos + 1, |byte| byte != b'\r' && byte != b'\n');
+    eol_end(bytes, eol)
+}
+
+/// White space and comments, as `lopdf` skips them inside arrays and
+/// dictionaries.
+fn skip_space(bytes: &[u8], mut pos: usize) -> usize {
+    loop {
+        let next = skip_while(bytes, pos, is_pdf_space);
+        match comment_end(bytes, next) {
+            Some(end) => pos = end,
+            None => return next,
+        }
+    }
+}
+
+fn hex_value(digit: u8) -> u8 {
+    match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'a'..=b'f' => digit - b'a' + 10,
+        b'A'..=b'F' => digit - b'A' + 10,
+        _ => 0,
+    }
+}
+
+fn parse_ascii<T: std::str::FromStr>(bytes: &[u8], start: usize, end: usize) -> Result<T, Halt> {
+    let text = bytes
+        .get(start..end)
+        .and_then(|slice| std::str::from_utf8(slice).ok());
+    text.and_then(|text| text.parse::<T>().ok())
+        .ok_or(Halt::Stop)
+}
+
+/// The name whose `/` is at `pos`: its end and, in build mode, its bytes
+/// with `#xx` escapes decoded. A `#` without two hex digits ends it.
+fn lex_name(bytes: &[u8], pos: usize, build: bool) -> (usize, Vec<u8>) {
+    let mut name = Vec::new();
+    let mut at = pos + 1;
+    loop {
+        match bytes.get(at..).unwrap_or_default() {
+            [b'#', high, low, ..] if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() => {
+                if build {
+                    name.push((hex_value(*high) << 4) | hex_value(*low));
+                }
+                at += 3;
+            }
+            [byte, ..] if *byte != b'#' && is_regular(*byte) => {
+                if build {
+                    name.push(*byte);
+                }
+                at += 1;
+            }
+            _ => return (at, name),
+        }
+    }
+}
+
+/// The escape sequence whose backslash ends at `pos`: its end and the byte
+/// it stands for (`None` for a line continuation).
+fn lex_escape(bytes: &[u8], pos: usize) -> Result<(usize, Option<u8>), Halt> {
+    let Some(&first) = bytes.get(pos) else {
+        return Err(Halt::Stop);
+    };
+    if (b'0'..=b'7').contains(&first) {
+        let mut value: u16 = 0;
+        let mut end = pos;
+        for &digit in bytes.iter().skip(pos).take(3) {
+            if !(b'0'..=b'7').contains(&digit) {
+                break;
+            }
+            value = value * 8 + u16::from(digit - b'0');
+            end += 1;
+        }
+        // Overflow past 0o377 is ignored, as the spec (and `lopdf`) say.
+        return Ok((end, Some(value as u8)));
+    }
+    if let Some(end) = eol_end(bytes, pos) {
+        return Ok((end, None));
+    }
+    let value = match first {
+        b'n' => b'\n',
+        b'r' => b'\r',
+        b't' => b'\t',
+        b'b' => 0x08,
+        b'f' => 0x0C,
+        other => other,
+    };
+    Ok((pos + 1, Some(value)))
+}
+
+/// The literal string whose `(` is at `pos`: its end and, in build mode,
+/// its bytes. Balanced inner parentheses are kept, raw end-of-line markers
+/// are kept as written, and more than [`MAX_PAREN_NESTING`] open inner
+/// parentheses make the string unreadable, as in `lopdf`.
+fn lex_literal(bytes: &[u8], pos: usize, build: bool) -> Result<(usize, Vec<u8>), Halt> {
+    let mut out = Vec::new();
+    let mut open: usize = 0;
+    let mut at = pos + 1;
+    loop {
+        let Some(&byte) = bytes.get(at) else {
+            return Err(Halt::Stop);
+        };
+        match byte {
+            b')' => {
+                at += 1;
+                if open == 0 {
+                    return Ok((at, out));
+                }
+                open -= 1;
+                if build {
+                    out.push(byte);
+                }
+            }
+            b'(' => {
+                if open >= MAX_PAREN_NESTING {
+                    return Err(Halt::Stop);
+                }
+                open += 1;
+                at += 1;
+                if build {
+                    out.push(byte);
+                }
+            }
+            b'\\' => {
+                let (end, escaped) = lex_escape(bytes, at + 1)?;
+                if build && let Some(value) = escaped {
+                    out.push(value);
+                }
+                at = end;
+            }
+            _ => {
+                if build {
+                    out.push(byte);
+                }
+                at += 1;
+            }
+        }
+    }
+}
+
+/// The hex string whose `<` is at `pos`: its end and, in build mode, its
+/// bytes. White space between digits is ignored and an odd final digit is
+/// padded with 0.
+fn lex_hex(bytes: &[u8], pos: usize, build: bool) -> Result<(usize, Vec<u8>), Halt> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut low_next = false;
+    let mut at = pos + 1;
+    loop {
+        let next = skip_while(bytes, at, is_pdf_space);
+        match bytes.get(next) {
+            Some(&digit) if digit.is_ascii_hexdigit() => {
+                if build {
+                    let value = hex_value(digit);
+                    if low_next {
+                        if let Some(last) = out.last_mut() {
+                            *last |= value;
+                        }
+                    } else {
+                        out.push(value << 4);
+                    }
+                }
+                low_next = !low_next;
+                at = next + 1;
+            }
+            _ => break,
+        }
+    }
+    let close = skip_while(bytes, at, is_pdf_space);
+    if bytes.get(close) == Some(&b'>') {
+        Ok((close + 1, out))
+    } else {
+        Err(Halt::Stop)
+    }
+}
+
+/// A number at `pos` (`-.5`, `6.`, `+3`): `Ok(None)` when there is none,
+/// `Err(Stop)` for an integer outside `i64`, which `lopdf` cannot read.
+fn lex_number(
+    bytes: &[u8],
+    pos: usize,
+    build: bool,
+) -> Result<Option<(usize, Option<Object>)>, Halt> {
+    let mut digits_start = pos;
+    if matches!(bytes.get(pos), Some(b'+' | b'-')) {
+        digits_start += 1;
+    }
+    let digits_end = skip_while(bytes, digits_start, is_digit);
+    let has_digits = digits_end > digits_start;
+    let fraction_start = digits_end + 1;
+    let is_real = bytes.get(digits_end) == Some(&b'.')
+        && (has_digits || bytes.get(fraction_start).is_some_and(u8::is_ascii_digit));
+    if is_real {
+        let end = skip_while(bytes, fraction_start, is_digit);
+        let value = if build {
+            Some(Object::Real(parse_ascii::<f32>(bytes, pos, end)?))
+        } else {
+            None
+        };
+        return Ok(Some((end, value)));
+    }
+    if !has_digits {
+        return Ok(None);
+    }
+    let value: i64 = parse_ascii(bytes, pos, digits_end)?;
+    Ok(Some((digits_end, build.then_some(Object::Integer(value)))))
+}
+
+/// An indirect reference `n g R` at `pos` (allowed only inside arrays and
+/// dictionaries): its end and id.
+fn lex_reference(bytes: &[u8], pos: usize) -> Option<(usize, ObjectId)> {
+    let id_end = skip_while(bytes, pos, is_digit);
+    let id: u32 = parse_ascii(bytes, pos, id_end).ok()?;
+    let generation_start = skip_space(bytes, id_end);
+    let generation_end = skip_while(bytes, generation_start, is_digit);
+    let generation: u16 = parse_ascii(bytes, generation_start, generation_end).ok()?;
+    let marker = skip_space(bytes, generation_end);
+    (bytes.get(marker) == Some(&b'R')).then_some((marker + 1, (id, generation)))
+}
+
+/// One object at `pos`, read as `lopdf` reads a content-stream operand
+/// (`direct == false`) or an array element or dictionary value
+/// (`direct == true`, where `n g R` references are allowed too). Nested
+/// arrays and dictionaries get `depth` as their budget. Nothing is
+/// allocated unless `build`.
+fn lex_object(bytes: &[u8], pos: usize, depth: usize, direct: bool, build: bool) -> Lexed {
+    let rest = bytes.get(pos..).unwrap_or_default();
+    if rest.starts_with(b"null") {
+        return Ok((pos + 4, build.then_some(Object::Null)));
+    }
+    if rest.starts_with(b"true") {
+        return Ok((pos + 4, build.then_some(Object::Boolean(true))));
+    }
+    if rest.starts_with(b"false") {
+        return Ok((pos + 5, build.then_some(Object::Boolean(false))));
+    }
+    if direct && let Some((end, id)) = lex_reference(bytes, pos) {
+        return Ok((end, build.then_some(Object::Reference(id))));
+    }
+    if let Some(number) = lex_number(bytes, pos, build)? {
+        return Ok(number);
+    }
+    match rest {
+        [b'/', ..] => {
+            let (end, name) = lex_name(bytes, pos, build);
+            Ok((end, build.then_some(Object::Name(name))))
+        }
+        [b'(', ..] => {
+            let (end, text) = lex_literal(bytes, pos, build)?;
+            Ok((
+                end,
+                build.then_some(Object::String(text, StringFormat::Literal)),
+            ))
+        }
+        [b'<', b'<', ..] => lex_dictionary(bytes, pos, depth, build),
+        [b'<', ..] => {
+            let (end, text) = lex_hex(bytes, pos, build)?;
+            let format = StringFormat::Hexadecimal;
+            Ok((end, build.then_some(Object::String(text, format))))
+        }
+        [b'[', ..] => lex_array(bytes, pos, depth, build),
+        _ => Err(Halt::Stop),
+    }
+}
+
+/// An array element or dictionary value and the white space after it. A
+/// container with no budget left is fatal, as in `lopdf`.
+fn lex_direct(bytes: &[u8], pos: usize, depth: usize, build: bool) -> Lexed {
+    if depth == 0 {
+        return Err(Halt::Fatal);
+    }
+    let (end, value) = lex_object(bytes, pos, depth - 1, true, build)?;
+    Ok((skip_space(bytes, end), value))
+}
+
+/// The array whose `[` is at `pos`.
+fn lex_array(bytes: &[u8], pos: usize, depth: usize, build: bool) -> Lexed {
+    let mut items: Vec<Object> = Vec::new();
+    let mut at = skip_space(bytes, pos + 1);
+    loop {
+        match lex_direct(bytes, at, depth, build) {
+            Ok((end, item)) => {
+                items.extend(item);
+                at = end;
+            }
+            Err(Halt::Stop) => break,
+            Err(Halt::Fatal) => return Err(Halt::Fatal),
+        }
+    }
+    if bytes.get(at) == Some(&b']') {
+        Ok((at + 1, build.then_some(Object::Array(items))))
+    } else {
+        Err(Halt::Stop)
+    }
+}
+
+/// `/Key value` pairs from `pos` up to the first position that does not
+/// start one: that position and, in build mode, the entries.
+fn lex_entries(
+    bytes: &[u8],
+    pos: usize,
+    depth: usize,
+    build: bool,
+) -> Result<(usize, Dictionary), Halt> {
+    let mut dict = Dictionary::new();
+    let mut at = pos;
+    while bytes.get(at) == Some(&b'/') {
+        let (name_end, key) = lex_name(bytes, at, build);
+        match lex_direct(bytes, skip_space(bytes, name_end), depth, build) {
+            Ok((end, value)) => {
+                if let Some(value) = value {
+                    dict.set(key, value);
+                }
+                at = end;
+            }
+            Err(Halt::Stop) => break,
+            Err(Halt::Fatal) => return Err(Halt::Fatal),
+        }
+    }
+    Ok((at, dict))
+}
+
+/// The dictionary whose `<<` is at `pos`.
+fn lex_dictionary(bytes: &[u8], pos: usize, depth: usize, build: bool) -> Lexed {
+    let (at, dict) = lex_entries(bytes, skip_space(bytes, pos + 2), depth, build)?;
+    if bytes.get(at..).is_some_and(|rest| rest.starts_with(b">>")) {
+        Ok((at + 2, build.then_some(Object::Dictionary(dict))))
+    } else {
+        Err(Halt::Stop)
+    }
+}
+
+fn inline_entry<'d>(dict: &'d Dictionary, short: &[u8], long: &[u8]) -> Option<&'d Object> {
+    dict.get(short).or_else(|_| dict.get(long)).ok()
+}
+
+/// The data length `lopdf` computes for an unfiltered inline image, `None`
+/// where it cannot (and scans for `EI` instead).
+fn inline_image_length(dict: &Dictionary) -> Option<usize> {
+    let width = inline_entry(dict, b"W", b"Width")?.as_i64().ok()? as usize;
+    let height = inline_entry(dict, b"H", b"Height")?.as_i64().ok()? as usize;
+    let bits = inline_entry(dict, b"BPC", b"BitsPerComponent")?
+        .as_i64()
+        .ok()? as usize;
+    let mask = inline_entry(dict, b"IM", b"ImageMask")
+        .is_some_and(|value| matches!(value.as_bool(), Ok(true)));
+    let colours: usize = if mask {
+        1
+    } else {
+        match inline_entry(dict, b"CS", b"ColorSpace")?.as_name().ok()? {
+            b"DeviceGray" | b"Gray" => 1,
+            b"DeviceRGB" | b"RGB" => 3,
+            b"DeviceRGBA" | b"RGBA" | b"DeviceCMYK" | b"CMYK" => 4,
+            _ => return None,
+        }
+    };
+    if inline_entry(dict, b"F", b"Filter").is_some() {
+        return None;
+    }
+    let stride = width.checked_mul(colours.checked_mul(bits)?)?.div_ceil(8);
+    height.checked_mul(stride)
+}
+
+/// Skip the inline image whose `BI` ends at `pos`, as `lopdf` reads it:
+/// the data length comes from the image dictionary when `lopdf` can compute
+/// it (so data bytes that spell `EI` are skipped), otherwise the data runs
+/// to the first `EI` with white space on both sides. `None` where `lopdf`
+/// rejects the whole content stream, with one exception: an `EI` that ends
+/// the stream right after white space is accepted (`lopdf` wants white
+/// space after it too), so a stream cut off after its last inline image
+/// keeps its text.
+fn skip_inline_image(bytes: &[u8], pos: usize) -> Option<usize> {
+    let start = skip_content_space(bytes, pos);
+    let (at, dict) = lex_entries(bytes, start, MAX_NESTING, true).ok()?;
+    if !bytes.get(at..)?.starts_with(b"ID") {
+        return None;
+    }
+    let data = skip_content_space(bytes, at + 2);
+    if let Some(length) = inline_image_length(&dict)
+        && let Some(data_end) = data.checked_add(length)
+        && data_end <= bytes.len()
+    {
+        let marker = skip_content_space(bytes, data_end);
+        if !bytes.get(marker..)?.starts_with(b"EI") {
+            return None;
+        }
+        return Some(skip_content_space(bytes, marker + 2));
+    }
+    let rest = bytes.get(data..)?;
+    let found = rest.windows(4).position(|window| {
+        matches!(window, [before, b'E', b'I', after] if is_ei_space(*before) && is_ei_space(*after))
+    });
+    if let Some(found) = found {
+        return Some(skip_content_space(bytes, data + found + 3));
+    }
+    match rest {
+        [.., before, b'E', b'I'] if is_ei_space(*before) => Some(bytes.len()),
+        _ => None,
+    }
+}
+
+fn invalid_content() -> LopdfError {
+    LopdfError::Parse(ParseError::InvalidContentStream)
+}
+
+/// Read a content stream as `Content::decode` does and keep only the
+/// operators [`OpKind`] names, with their operands. Everything else is
+/// tokenised and dropped without allocating. Like `lopdf`, lexing stops
+/// quietly at the first token it cannot read, keeping what came before,
+/// and fails only where `lopdf` rejects the whole stream (an inline image
+/// without `ID` or `EI`, arrays or dictionaries nested too deep). The one
+/// place it is more lenient is an inline image whose `EI` ends the stream
+/// (see [`skip_inline_image`]).
+fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
+    let mut program = TextProgram::default();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut pos = skip_content_space(bytes, 0);
+    loop {
+        let mut at = pos;
+        while let Some(end) = comment_end(bytes, at) {
+            at = skip_content_space(bytes, end);
+        }
+        if bytes.get(at..).is_some_and(|rest| rest.starts_with(b"BI")) {
+            pos = skip_inline_image(bytes, at + 2).ok_or_else(invalid_content)?;
+            continue;
+        }
+        starts.clear();
+        loop {
+            match lex_object(bytes, at, MAX_NESTING, false, false) {
+                Ok((end, _)) => {
+                    starts.push(at);
+                    at = skip_content_space(bytes, end);
+                }
+                Err(Halt::Stop) => break,
+                Err(Halt::Fatal) => return Err(invalid_content()),
+            }
+        }
+        let end = skip_while(bytes, at, is_operator_char);
+        if end == at {
+            return Ok(program);
+        }
+        if let Some(kind) = bytes.get(at..end).and_then(OpKind::from_operator) {
+            let first = program.operands.len();
+            for &start in &starts {
+                if let Ok((_, Some(operand))) = lex_object(bytes, start, MAX_NESTING, false, true) {
+                    program.operands.push(operand);
+                }
+            }
+            let last = program.operands.len();
+            program.ops.push(TextOp {
+                kind,
+                first,
+                end: last,
+            });
+        }
+        pos = skip_content_space(bytes, end);
+    }
+}
+
+/// Whether a Form stream can show text or move the text position. It is
+/// false only when no `BT`, `Tj`, `TJ`, `Td`, `TD`, `Tm`, `T*`, `Do` or
+/// `BI` byte pair and no `'` or `"` byte occurs anywhere in it (a pure
+/// vector figure). Such a stream runs as a no-op, as a Form cannot pop the
+/// caller's graphics states, so it is not lexed at all.
+fn may_affect_text(bytes: &[u8]) -> bool {
+    bytes.iter().any(|&byte| matches!(byte, b'\'' | b'"'))
+        || bytes.windows(2).any(|pair| {
+            matches!(
+                pair,
+                [b'B', b'T' | b'I']
+                    | [b'T', b'j' | b'J' | b'd' | b'D' | b'm' | b'*']
+                    | [b'D', b'o']
+            )
+        })
+}
+
 struct Interpreter<'a> {
     doc: &'a Document,
     cache: &'a mut SessionCache,
@@ -885,34 +1592,34 @@ impl<'a> Interpreter<'a> {
         self.page
     }
 
-    fn run(&mut self, operations: &[Operation], contexts: &mut Vec<Context<'a>>, depth: u32) {
-        for op in operations {
-            let operands = op.operands.as_slice();
-            match op.operator.as_str() {
-                "q" => self.stack.push(self.state.clone()),
-                "Q" => {
+    fn run(&mut self, program: &TextProgram, contexts: &mut Vec<Context<'a>>, depth: u32) {
+        for &op in &program.ops {
+            let operands = program.operands(op);
+            match op.kind {
+                OpKind::Save => self.stack.push(self.state.clone()),
+                OpKind::Restore => {
                     if let Some(state) = self.stack.pop() {
                         self.state = state;
                     }
                 }
-                "cm" => {
+                OpKind::Concat => {
                     if let Some(matrix) = matrix_from_operands(operands) {
                         self.state.ctm = matrix.then(self.state.ctm);
                     }
                 }
-                "BT" => {
+                OpKind::BeginText => {
                     self.tm = Matrix::IDENTITY;
                     self.tlm = Matrix::IDENTITY;
                 }
-                "Tf" => self.set_font(operands),
-                "Td" => {
+                OpKind::Font => self.set_font(operands),
+                OpKind::Move => {
                     if let Some(tx) = float_at(operands, 0)
                         && let Some(ty) = float_at(operands, 1)
                     {
                         self.text_move(tx, ty);
                     }
                 }
-                "TD" => {
+                OpKind::MoveSetLeading => {
                     if let Some(tx) = float_at(operands, 0)
                         && let Some(ty) = float_at(operands, 1)
                     {
@@ -920,50 +1627,50 @@ impl<'a> Interpreter<'a> {
                         self.text_move(tx, ty);
                     }
                 }
-                "Tm" => {
+                OpKind::TextMatrix => {
                     if let Some(matrix) = matrix_from_operands(operands) {
                         self.tm = matrix;
                         self.tlm = matrix;
                     }
                 }
-                "T*" => self.next_line(),
-                "TL" => {
+                OpKind::NextLine => self.next_line(),
+                OpKind::Leading => {
                     if let Some(value) = float_at(operands, 0) {
                         self.state.leading = value;
                     }
                 }
-                "Tc" => {
+                OpKind::CharSpacing => {
                     if let Some(value) = float_at(operands, 0) {
                         self.state.char_spacing = value;
                     }
                 }
-                "Tw" => {
+                OpKind::WordSpacing => {
                     if let Some(value) = float_at(operands, 0) {
                         self.state.word_spacing = value;
                     }
                 }
-                "Tz" => {
+                OpKind::HorizontalScale => {
                     if let Some(value) = float_at(operands, 0) {
                         self.state.hscale = value / 100.0;
                     }
                 }
-                "Ts" => {
+                OpKind::Rise => {
                     if let Some(value) = float_at(operands, 0) {
                         self.state.rise = value;
                     }
                 }
-                "Tj" => {
+                OpKind::Show => {
                     if let Some(bytes) = string_at(operands, 0) {
                         self.show(bytes, contexts);
                     }
                 }
-                "'" => {
+                OpKind::NextLineShow => {
                     self.next_line();
                     if let Some(bytes) = string_at(operands, 0) {
                         self.show(bytes, contexts);
                     }
                 }
-                "\"" => {
+                OpKind::SpacingShow => {
                     if let Some(value) = float_at(operands, 0) {
                         self.state.word_spacing = value;
                     }
@@ -975,9 +1682,8 @@ impl<'a> Interpreter<'a> {
                         self.show(bytes, contexts);
                     }
                 }
-                "TJ" => self.show_array(operands, contexts),
-                "Do" => self.do_xobject(operands, contexts, depth),
-                _ => {}
+                OpKind::ShowArray => self.show_array(operands, contexts),
+                OpKind::Invoke => self.do_xobject(operands, contexts, depth),
             }
         }
     }
@@ -1199,23 +1905,33 @@ impl<'a> Interpreter<'a> {
             return;
         }
         let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
-        let operations = if let Some(operations) = cached {
-            operations
+        let program = if let Some(program) = cached {
+            program
         } else {
             let content_bytes = match stream.get_plain_content() {
                 Ok(bytes) => bytes,
                 Err(_) => stream.content.clone(),
             };
-            let Ok(content) = Content::decode(&content_bytes) else {
-                self.warn(format!("XObject {label}: undecodable content stream"));
-                return;
+            let program = if may_affect_text(&content_bytes) {
+                let Ok(program) = lex_content(&content_bytes) else {
+                    self.warn(format!("XObject {label}: undecodable content stream"));
+                    return;
+                };
+                program
+            } else {
+                TextProgram::default()
             };
-            let operations = Rc::new(content.operations);
+            let program = Rc::new(program);
             if let Some(id) = stream_id {
-                self.cache.forms.insert(id, Rc::clone(&operations));
+                self.cache.forms.insert(id, Rc::clone(&program));
             }
-            operations
+            program
         };
+        // Nothing in it can show text, move the text position or reach the
+        // caller's state, so running it would change nothing.
+        if program.ops.is_empty() {
+            return;
+        }
         let matrix = match stream.dict.get(b"Matrix").and_then(Object::as_array) {
             Ok(array) => matrix_from_operands(array).unwrap_or(Matrix::IDENTITY),
             Err(_) => Matrix::IDENTITY,
@@ -1231,13 +1947,15 @@ impl<'a> Interpreter<'a> {
             load_fonts_from_resources(doc, self.cache, resources, &mut form_context.fonts);
         }
 
+        // The Form runs on a stack of its own: an unbalanced `Q` inside it
+        // cannot pop graphics states the caller saved (PDF 32000-1, 8.10.1).
         let saved_state = self.state.clone();
-        let saved_depth = self.stack.len();
+        let saved_stack = std::mem::take(&mut self.stack);
         self.state.ctm = matrix.then(self.state.ctm);
         contexts.push(form_context);
-        self.run(operations.as_slice(), contexts, depth + 1);
+        self.run(&program, contexts, depth + 1);
         contexts.pop();
-        self.stack.truncate(saved_depth);
+        self.stack = saved_stack;
         self.state = saved_state;
     }
 }
@@ -1265,8 +1983,8 @@ fn extract_page(
     }
 
     let content_bytes = doc.get_page_content(page_id);
-    let content = match Content::decode(&content_bytes) {
-        Ok(content) => content,
+    let program = match lex_content(&content_bytes) {
+        Ok(program) => program,
         Err(err) => return Err(page_error(page, format!("content stream: {err}"))),
     };
 
@@ -1307,13 +2025,14 @@ fn extract_page(
         ligatures: 0,
     };
     let mut contexts = vec![page_context];
-    interpreter.run(&content.operations, &mut contexts, 0);
+    interpreter.run(&program, &mut contexts, 0);
     Ok(interpreter.finish())
 }
 
 #[cfg(test)]
 mod tests {
-    use lopdf::{StringFormat, dictionary};
+    use lopdf::content::{Content, Operation};
+    use lopdf::dictionary;
 
     use super::*;
 
@@ -1953,5 +2672,366 @@ mod tests {
         assert!(close(second_box.x0, 70.0), "x0 {}", second_box.x0);
         assert!(close(second_box.y0, 78.0), "y0 {}", second_box.y0);
         assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    }
+
+    /// The operator a kept [`OpKind`] stands for.
+    fn operator_name(kind: OpKind) -> &'static str {
+        match kind {
+            OpKind::Save => "q",
+            OpKind::Restore => "Q",
+            OpKind::Concat => "cm",
+            OpKind::BeginText => "BT",
+            OpKind::Font => "Tf",
+            OpKind::Move => "Td",
+            OpKind::MoveSetLeading => "TD",
+            OpKind::TextMatrix => "Tm",
+            OpKind::NextLine => "T*",
+            OpKind::Leading => "TL",
+            OpKind::CharSpacing => "Tc",
+            OpKind::WordSpacing => "Tw",
+            OpKind::HorizontalScale => "Tz",
+            OpKind::Rise => "Ts",
+            OpKind::Show => "Tj",
+            OpKind::NextLineShow => "'",
+            OpKind::SpacingShow => "\"",
+            OpKind::ShowArray => "TJ",
+            OpKind::Invoke => "Do",
+        }
+    }
+
+    type OpList = Result<Vec<(String, Vec<Object>)>, String>;
+
+    /// The kept operators and their operands, from the streaming lexer.
+    fn lexed(bytes: &[u8]) -> OpList {
+        let program = lex_content(bytes).map_err(|err| format!("{err}"))?;
+        let ops = program
+            .ops
+            .iter()
+            .map(|&op| {
+                let name = operator_name(op.kind).to_string();
+                (name, program.operands(op).to_vec())
+            })
+            .collect();
+        Ok(ops)
+    }
+
+    /// The same, from `lopdf`'s full `Content::decode`.
+    fn decoded(bytes: &[u8]) -> OpList {
+        let content = Content::decode(bytes).map_err(|err| format!("{err}"))?;
+        let ops = content
+            .operations
+            .into_iter()
+            .filter(|op| OpKind::from_operator(op.operator.as_bytes()).is_some())
+            .map(|op| (op.operator, op.operands))
+            .collect();
+        Ok(ops)
+    }
+
+    fn assert_same_as_lopdf(bytes: &[u8]) {
+        let expected = decoded(bytes);
+        let actual = lexed(bytes);
+        assert_eq!(
+            actual,
+            expected,
+            "stream: {}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+
+    /// `(operator, operands)` for a test expectation.
+    fn op(name: &str, operands: Vec<Object>) -> (String, Vec<Object>) {
+        (name.to_string(), operands)
+    }
+
+    /// Path construction, painting, clipping and colour operators only:
+    /// `rounds` × 10 operators.
+    fn vector_ops(rounds: i32) -> Vec<Operation> {
+        let mut ops = Vec::new();
+        for index in 0..rounds {
+            let x = index % 500;
+            ops.push(Operation::new("m", vec![x.into(), 10.into()]));
+            ops.push(Operation::new("l", vec![(x + 5).into(), 20.into()]));
+            let curve = vec![
+                1.into(),
+                2.into(),
+                Object::Real(3.5),
+                4.into(),
+                5.into(),
+                6.into(),
+            ];
+            ops.push(Operation::new("c", curve));
+            ops.push(Operation::new("h", vec![]));
+            ops.push(Operation::new("S", vec![]));
+            let rect = vec![x.into(), 0.into(), 10.into(), 10.into()];
+            ops.push(Operation::new("re", rect));
+            ops.push(Operation::new("W", vec![]));
+            ops.push(Operation::new("n", vec![]));
+            ops.push(Operation::new(
+                "rg",
+                vec![Object::Real(0.5), 0.into(), 1.into()],
+            ));
+            ops.push(Operation::new("f*", vec![]));
+        }
+        ops
+    }
+
+    #[test]
+    fn lexer_matches_content_decode() {
+        let deep_ok = format!("BT {}{} TJ ET", "[".repeat(100), "]".repeat(100));
+        let deep_bad = format!("BT {}{} TJ ET", "[".repeat(101), "]".repeat(101));
+        let parens_ok = format!("BT ({}{}) Tj ET", "(".repeat(100), ")".repeat(100));
+        let parens_bad = format!("BT ({}{}) Tj (x) Tj ET", "(".repeat(101), ")".repeat(101));
+        let cases: Vec<&[u8]> = vec![
+            &b""[..],
+            b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET",
+            b"% leading\nq 1 0 0 1 5 5 cm % after cm\n BT /F1 9 Tf (a) Tj ET\n%end\n",
+            b"BT 1 0 % mid-operands comment\n 0 1 0 0 Tm (x) Tj ET",
+            b"BT (a) Tj ET % no end of line",
+            br"BT (a\(b\)c) Tj (nest (inner (deep)) x) Tj (oct \053\5\1234\777) Tj ET",
+            br"BT (esc \n\r\t\b\f\\\q\)) Tj ET",
+            b"BT (a\\\r\nb) Tj (c\\\nd) Tj (e\r\nf) Tj (g\rh) Tj ET",
+            b"BT (trailing backslash\\",
+            b"BT <48 65 6c6C 6f> Tj <414> Tj <> Tj < 4\x001 > Tj <4G> Tj (after) Tj ET",
+            b"BT -.5 6. Td +3 .5 TD 1.2.3 Tc 12Tz -0 Ts 0 0 d0 BT ET",
+            b"BT null true false Tj nullTf falseTw ET",
+            b"BT /A#20B 12 Tf /#46#31 1 Tf ET /C#2 3 Tf (lost) Tj",
+            b"BT [(a) -120 (b) 1 0 R (c) 2.5 [(n)] << /K 1 >> % c\n (d)] TJ ET",
+            b"BT [(a)1 0R(b)-7.25<41>] TJ [ ] TJ [(x) 99999999999 0 R] TJ ET",
+            b"/Span << /ActualText (a\\)b) /MCID 3 /Sub <</X [1 2]>> >> BDC BT (x) Tj ET EMC",
+            b"/P <</A /B /C>> BDC BT (lost) Tj ET",
+            b"q 1 0 0 1 10 10 cm BT (x) Tj (corrupted Q",
+            b"BT (a) Tj 99999999999999999999 Tc (b) Tj ET",
+            b"BT (a) Tj 1 2",
+            b"BT (a) Tj\x0C(b) Tj ET",
+            b"\0BT (a) Tj ET",
+            b"BT 14 TL (a) ' 1 2 (b) \" 3 T* ET",
+            b"0.5 g 1 0 0 RG [3 2] 0 d /GS1 gs 2 w 1 J 0 j 4 M BT /F1 1 Tf (x) Tj ET",
+            b"q 100 0 0 50 0 0 cm /Im1 Do Q BT 1 0 R Tf ET",
+            b"BT(a)Tj[(b)]TJ/F1 9 Tf<<>>BDC(c)Tj ET",
+            b"q BI /W 2 /H 1 /BPC 8 /CS /RGB ID a EI ) EI Q BT (after) Tj ET",
+            b"q BI /Width 2 /Height 1 /BitsPerComponent 8 /ImageMask true ID ab EI Q",
+            b"BI /W 2 /H 1 /BPC 8 /CS /G /F /AHx ID 0a0b EI BT (after) Tj ET",
+            b"BI /W 1 /H 1 /BPC 8 /CS /Indexed ID x EI BT (after) Tj ET",
+            b"BT (a) Tj ET BI /W 1 /H 1 EI",
+            b"BI /W 1 /H 1 /BPC 8 /CS /G /F /DCT ID xyz",
+            b"BI /W 1 /H 1 /BPC 8 /CS /G ID x Q",
+            deep_ok.as_bytes(),
+            deep_bad.as_bytes(),
+            parens_ok.as_bytes(),
+            parens_bad.as_bytes(),
+        ];
+        for bytes in cases {
+            assert_same_as_lopdf(bytes);
+        }
+        // Operators `lopdf` writes itself round-trip too.
+        let mut ops = vector_ops(1_000);
+        ops.extend(text_ops(12, 100, 600, "Middle"));
+        ops.extend(vector_ops(1_000));
+        let encoded = Content { operations: ops }.encode().unwrap();
+        assert_same_as_lopdf(&encoded);
+    }
+
+    #[test]
+    fn lexer_reads_strings_numbers_and_arrays_exactly() {
+        let bytes = br"BT -.5 6. Td (a (b) \(c\) \101\n) Tj [(x) -250 (y) 12.5] TJ ET";
+        let expected = vec![
+            op("BT", vec![]),
+            op("Td", vec![Object::Real(-0.5), Object::Real(6.0)]),
+            op(
+                "Tj",
+                vec![Object::string_literal(b"a (b) (c) A\n".to_vec())],
+            ),
+            op(
+                "TJ",
+                vec![Object::Array(vec![
+                    Object::string_literal("x"),
+                    Object::Integer(-250),
+                    Object::string_literal("y"),
+                    Object::Real(12.5),
+                ])],
+            ),
+        ];
+        assert_eq!(lexed(bytes), Ok(expected));
+        let hex = lexed(b"<48 65 6>Tj").unwrap();
+        let hex_string = Object::String(b"He`".to_vec(), StringFormat::Hexadecimal);
+        assert_eq!(hex, vec![op("Tj", vec![hex_string])]);
+    }
+
+    #[test]
+    fn inline_image_data_containing_ei_is_skipped() {
+        // 2 × 1 RGB pixels: exactly 6 data bytes, `a EI )`. Scanning for the
+        // first ` EI ` would resume inside the data and stop at `)`.
+        let bytes = b"q BI /W 2 /H 1 /BPC 8 /CS /RGB ID a EI ) EI Q BT (after) Tj ET";
+        let expected = vec![
+            op("q", vec![]),
+            op("Q", vec![]),
+            op("BT", vec![]),
+            op("Tj", vec![Object::string_literal("after")]),
+        ];
+        assert_eq!(lexed(bytes), Ok(expected));
+        // Filtered data has no computable length: it ends at ` EI `.
+        let filtered = b"BI /W 9 /H 9 /BPC 8 /CS /G /F /Fl ID \x01EI\x02 EI BT (b) Tj ET";
+        let expected = vec![
+            op("BT", vec![]),
+            op("Tj", vec![Object::string_literal("b")]),
+        ];
+        assert_eq!(lexed(filtered), Ok(expected));
+        // No `ID` at all: `lopdf` rejects the whole stream.
+        assert!(lexed(b"BT (a) Tj ET BI /W 1 EI").is_err());
+        // An `EI` that ends the stream: `lopdf` rejects it, the lexer keeps
+        // the text before the image.
+        let cut = b"BT (a) Tj ET BI /W 9 /H 9 /BPC 8 /CS /G /F /Fl ID \x01\x02 EI";
+        assert!(decoded(cut).is_err());
+        let expected = vec![
+            op("BT", vec![]),
+            op("Tj", vec![Object::string_literal("a")]),
+        ];
+        assert_eq!(lexed(cut), Ok(expected));
+        // Without white space before that `EI` it is still data.
+        assert!(lexed(b"BT (a) Tj ET BI /W 9 /H 9 /BPC 8 /CS /G /F /Fl ID \x01EI").is_err());
+    }
+
+    #[test]
+    fn path_operators_are_skipped_without_changing_spans() {
+        let text = text_ops(12, 100, 600, "Only text");
+        let mut busy = vec![Operation::new("q", vec![])];
+        busy.extend(vector_ops(500));
+        busy.push(Operation::new("Q", vec![]));
+        busy.extend(text.clone());
+        busy.extend(vector_ops(500));
+        let bytes = build_pdf(vec![text, busy], None);
+        let mut session = open_session(&bytes);
+        let plain = session.page_text(1).unwrap();
+        let busy_page = session.page_text(2).unwrap();
+        assert_eq!(plain.spans.len(), 1);
+        assert_eq!(busy_page.spans, plain.spans);
+        assert_eq!(busy_page.warnings, plain.warnings);
+
+        let content = session.doc.get_page_content(session.pages[&2]);
+        let program = lex_content(&content).unwrap();
+        let kinds: Vec<OpKind> = program.ops.iter().map(|op| op.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                OpKind::Save,
+                OpKind::Restore,
+                OpKind::BeginText,
+                OpKind::Font,
+                OpKind::Move,
+                OpKind::Show,
+            ]
+        );
+    }
+
+    #[test]
+    fn pure_vector_form_is_cached_empty_and_mixed_form_still_recurses() {
+        let page = vec![
+            Operation::new("q", vec![]),
+            cm_translate(200, 300),
+            Operation::new("Do", vec!["X1".into()]),
+            Operation::new("Q", vec![]),
+        ];
+        let figure = build_pdf(vec![page.clone()], Some(vector_ops(200)));
+        let mut session = open_session(&figure);
+        let result = session.page_text(1).unwrap();
+        assert!(result.spans.is_empty());
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(session.cache.forms.len(), 1);
+        let cached = session.cache.forms.values().next().unwrap();
+        assert!(cached.ops.is_empty());
+
+        let mut mixed = vector_ops(200);
+        mixed.extend(text_ops(10, 50, 50, "Form"));
+        mixed.extend(vector_ops(200));
+        let bytes = build_pdf(vec![page], Some(mixed));
+        let mut session = open_session(&bytes);
+        let result = session.page_text(1).unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(result.spans.len(), 1);
+        assert_eq!(result.spans[0].text, "Form");
+        let form_box = result.spans[0].bbox.unwrap();
+        assert!(close(form_box.x0, 250.0), "x0 {}", form_box.x0);
+        assert!(close(form_box.y0, 348.0), "y0 {}", form_box.y0);
+    }
+
+    #[test]
+    fn form_cannot_pop_the_callers_graphics_state() {
+        let page = vec![
+            Operation::new("q", vec![]),
+            cm_translate(200, 300),
+            Operation::new("Do", vec!["X1".into()]),
+            Operation::new("Q", vec![]),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 10.into()]),
+            Operation::new("Td", vec![50.into(), 50.into()]),
+            Operation::new("Tj", vec![Object::string_literal("After")]),
+            Operation::new("ET", vec![]),
+        ];
+        let form = vec![
+            Operation::new("Q", vec![]),
+            Operation::new("Q", vec![]),
+            Operation::new("BT", vec![]),
+            Operation::new("ET", vec![]),
+        ];
+        let bytes = build_pdf(vec![page], Some(form));
+        let mut session = LopdfBackend::default().open(&bytes, None).unwrap();
+        let result = session.page_text(1).unwrap();
+        assert_eq!(result.spans.len(), 1);
+        // The page's own `Q` still restores the identity CTM.
+        let after_box = result.spans[0].bbox.unwrap();
+        assert!(close(after_box.x0, 50.0), "x0 {}", after_box.x0);
+    }
+
+    #[test]
+    fn text_free_streams_are_recognised() {
+        assert!(!may_affect_text(
+            b"q 1 0 0 1 5 5 cm 0 0 m 10 10 l S 0.5 g f Q"
+        ));
+        assert!(!may_affect_text(b"/GS1 gs [3 2] 0 d 0 0 10 10 re W n"));
+        for trigger in [
+            &b"BT"[..],
+            b"Tj",
+            b"TJ",
+            b"Td",
+            b"TD",
+            b"Tm",
+            b"T*",
+            b"'",
+            b"\"",
+            b"Do",
+            b"BI",
+        ] {
+            let mut bytes = b"0 0 m 1 1 l S ".to_vec();
+            bytes.extend_from_slice(trigger);
+            assert!(
+                may_affect_text(&bytes),
+                "{}",
+                String::from_utf8_lossy(trigger)
+            );
+        }
+    }
+
+    #[test]
+    fn composite_widths_lookup_matches_first_match_scan() {
+        let ranges = vec![
+            (10, 10, 300.0),
+            (1, 3, 100.0),
+            (20, 25, 700.0),
+            (5, 4, 999.0),
+        ];
+        let widths = CompositeWidths::new(ranges, 1000.0);
+        assert!(widths.disjoint);
+        assert!(close(widths.width(2), 0.1));
+        assert!(close(widths.width(10), 0.3));
+        assert!(close(widths.width(25), 0.7));
+        assert!(close(widths.width(0), 1.0));
+        assert!(close(widths.width(4), 1.0));
+        assert!(close(widths.width(11), 1.0));
+        assert!(close(widths.width(26), 1.0));
+
+        let overlapping = CompositeWidths::new(vec![(1, 10, 100.0), (5, 5, 900.0)], 500.0);
+        assert!(!overlapping.disjoint);
+        assert!(close(overlapping.width(5), 0.1));
+        assert!(close(overlapping.width(11), 0.5));
     }
 }
