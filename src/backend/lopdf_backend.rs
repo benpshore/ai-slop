@@ -62,6 +62,12 @@ const MAX_PARENT_DEPTH: u32 = 64;
 /// Recorded in the identity's config map: see the module documentation.
 const LIGATURE_POLICY: &str = "expand";
 
+/// Revision of the content-stream extraction policy, part of the backend
+/// identity so ledger runs from different policies are never confused:
+/// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
+/// stack per Form.
+const CONTENT_POLICY: &str = "2";
+
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LopdfBackend {
@@ -87,6 +93,7 @@ impl Extractor for LopdfBackend {
             self.max_xobject_depth.to_string(),
         );
         config.insert("ligatures".to_string(), LIGATURE_POLICY.to_string());
+        config.insert("content".to_string(), CONTENT_POLICY.to_string());
         BackendIdentity {
             name: "lopdf".to_string(),
             version: LOPDF_VERSION.to_string(),
@@ -2169,8 +2176,13 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
+        config.insert("content".to_string(), "2".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
-        // The digest before ligature expansion must not be reused.
+        // The digests before ligature expansion and before the streaming
+        // lexer must not be reused.
+        config.insert("content".to_string(), "1".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.remove("content");
         config.remove("ligatures");
         assert_ne!(identity.config_digest, config_digest(&config));
     }
