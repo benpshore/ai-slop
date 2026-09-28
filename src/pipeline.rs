@@ -22,8 +22,8 @@ use crate::citations;
 use crate::metadata;
 use crate::reading_order;
 use crate::schema::{
-    CHUNK_PAGES, ChunkResult, Document, ExtractionResult, Job, PageText, SCHEMA_VERSION,
-    StageTimings, Status, config_digest, sha256_hex,
+    BackendIdentity, CHUNK_PAGES, ChunkResult, Document, ExtractionResult, Job, PageText,
+    SCHEMA_VERSION, StageTimings, Status, config_digest, sha256_hex,
 };
 
 /// Failure of a whole job. Per-page backend failures are not errors: they
@@ -102,8 +102,16 @@ fn collect_figures(
     session: &mut dyn DocumentSession,
     page: &mut PageText,
     hash: &str,
+    identity: &BackendIdentity,
     figures_dir: Option<&Path>,
 ) -> Vec<String> {
+    // Runs of different backends/configurations on one document must not
+    // overwrite each other's exports: the path carries the backend identity.
+    let run_dir = format!(
+        "{hash}/{}-{}",
+        identity.name,
+        &identity.config_digest[..identity.config_digest.len().min(8)]
+    );
     let page_no = page.page;
     let mut warnings: Vec<String> = Vec::new();
     for figure in &mut page.figures {
@@ -116,7 +124,7 @@ fn collect_figures(
             continue;
         };
         let ext = figure_extension(figure.mime.as_deref());
-        let relative = format!("{hash}/p{page_no}-f{index}.{ext}");
+        let relative = format!("{run_dir}/p{page_no}-f{index}.{ext}");
         let target = dir.join(&relative);
         match write_figure(&target, &bytes) {
             Ok(()) => figure.file = Some(relative),
@@ -189,8 +197,13 @@ pub fn run_job_with(
     for page in first..=last {
         match session.page_text(page) {
             Ok(mut text) => {
-                let figure_warnings =
-                    collect_figures(session.as_mut(), &mut text, &snapshot.hash.0, figures_dir);
+                let figure_warnings = collect_figures(
+                    session.as_mut(),
+                    &mut text,
+                    &snapshot.hash.0,
+                    &identity,
+                    figures_dir,
+                );
                 warnings.extend(figure_warnings);
                 pages.push(text);
             }

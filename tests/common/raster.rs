@@ -198,7 +198,7 @@ pub fn scanned_page_pdf(text_lines: &[&str], scale: u32) -> Vec<u8> {
     let height_pt = image.height * 6 / 25;
 
     let mut doc = Document::with_version("1.5");
-    let pages_id = doc.new_object_id();
+    let pages_root_id = doc.new_object_id();
     let image_dict = dictionary! {
         "Type" => "XObject",
         "Subtype" => "Image",
@@ -232,7 +232,7 @@ pub fn scanned_page_pdf(text_lines: &[&str], scale: u32) -> Vec<u8> {
 
     let page_id = doc.add_object(dictionary! {
         "Type" => "Page",
-        "Parent" => pages_id,
+        "Parent" => pages_root_id,
         "MediaBox" => vec![
             Object::Integer(0),
             Object::Integer(0),
@@ -245,7 +245,7 @@ pub fn scanned_page_pdf(text_lines: &[&str], scale: u32) -> Vec<u8> {
         "Contents" => content_id,
     });
     doc.objects.insert(
-        pages_id,
+        pages_root_id,
         Object::Dictionary(dictionary! {
             "Type" => "Pages",
             "Kids" => vec![Object::Reference(page_id)],
@@ -254,7 +254,7 @@ pub fn scanned_page_pdf(text_lines: &[&str], scale: u32) -> Vec<u8> {
     );
     let catalog_id = doc.add_object(dictionary! {
         "Type" => "Catalog",
-        "Pages" => pages_id,
+        "Pages" => pages_root_id,
     });
     doc.trailer.set("Root", catalog_id);
 

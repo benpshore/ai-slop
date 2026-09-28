@@ -125,13 +125,9 @@ struct ExtractArgs {
     /// Reject inputs larger than this many bytes.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
-    /// Directory that receives figure bytes as `<hash>/p<page>-f<index>.<ext>`.
+    /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
-    /// Directory that receives one JSON diagnostics dump per evaluated paper
-    /// (truth vs extracted references, matches, markers, warnings, timings).
-    #[arg(long, value_name = "DIR")]
-    dump_dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -208,9 +204,13 @@ struct EvalArgs {
     /// Optional `SQLite` ledger that also receives every extraction result.
     #[arg(long, value_name = "FILE")]
     db: Option<PathBuf>,
-    /// Directory that receives figure bytes as `<hash>/p<page>-f<index>.<ext>`.
+    /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
+    /// Directory that receives one JSON diagnostics dump per evaluated paper
+    /// (truth vs extracted references, matches, markers, warnings, timings).
+    #[arg(long, value_name = "DIR")]
+    dump_dir: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<ExitCode> {
@@ -882,9 +882,19 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
         .iter()
         .filter(|item| args.split.includes(item))
     {
-        let evaluated = eval_item(args, item);
-        if let (Some(ledger), Some(result)) = (ledger.as_mut(), evaluated.result.as_ref()) {
-            store_result(ledger, result, &item.id)?;
+        let mut evaluated = eval_item(args, item);
+        if let (Some(ledger), Some(result)) = (ledger.as_mut(), evaluated.result.as_mut()) {
+            let write_start = Instant::now();
+            let run = store_result(ledger, result, &item.id)?;
+            let write_ms = elapsed_ms(write_start);
+            result.timings.write_ms = write_ms;
+            ledger
+                .update_timings(run, &result.timings)
+                .with_context(|| format!("recording write time for {}", item.id))?;
+            let paper = &mut evaluated.paper;
+            paper.timings.write_ms = write_ms;
+            paper.ms_total += write_ms;
+            paper.ms_per_chunk = paper.ms_total / f64::from(paper.chunks.max(1));
         }
         println!("{}", paper_line(&evaluated.paper));
         papers.push(evaluated.paper);

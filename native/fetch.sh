@@ -217,6 +217,10 @@ if [ "$UNPINNED" = 1 ]; then
   echo
   echo "note: some entries have sha256 null in $MANIFEST; copy the digests above"
   echo "      into the manifest to pin them (archive_sha256 is shown only on download)."
+  if [ "${TPE_ALLOW_UNPINNED:-0}" != 1 ]; then
+    echo "error: unpinned native artifacts are refused (set TPE_ALLOW_UNPINNED=1 to bootstrap)" >&2
+    FAILED=1
+  fi
 fi
 if [ "$FAILED" != 0 ]; then
   echo "error: native provisioning failed" >&2
