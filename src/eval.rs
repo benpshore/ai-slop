@@ -783,37 +783,37 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     let s = &report.summary;
     let mut out = String::new();
     out.push_str("# Evaluation report\n\n");
-    let _ = write!(out, "- Backend: `{}`\n", cell(&report.backend));
-    let _ = write!(out, "- Host: `{}`\n", cell(&report.host));
+    let _ = writeln!(out, "- Backend: `{}`", cell(&report.backend));
+    let _ = writeln!(out, "- Host: `{}`", cell(&report.host));
     let _ = write!(out, "- Generated (unix): {}\n\n", report.generated_unix);
 
     out.push_str("## Summary\n\n");
     out.push_str("| Metric | Value |\n");
     out.push_str("| --- | --- |\n");
-    let _ = write!(out, "| Papers | {} |\n", s.papers);
-    let _ = write!(out, "| Failed | {} |\n", s.failed);
-    let _ = write!(
+    let _ = writeln!(out, "| Papers | {} |", s.papers);
+    let _ = writeln!(out, "| Failed | {} |", s.failed);
+    let _ = writeln!(
         out,
-        "| Reference count exact | {} |\n",
+        "| Reference count exact | {} |",
         pct(s.ref_count_exact_rate)
     );
-    let _ = write!(out, "| Reference recall | {} |\n", pct(s.ref_recall));
-    let _ = write!(out, "| Reference precision | {} |\n", pct(s.ref_precision));
-    let _ = write!(out, "| DOI accuracy | {} |\n", pct(s.doi_accuracy));
-    let _ = write!(out, "| Year accuracy | {} |\n", pct(s.year_accuracy));
-    let _ = write!(out, "| Title accuracy | {} |\n", pct(s.title_accuracy));
-    let _ = write!(
+    let _ = writeln!(out, "| Reference recall | {} |", pct(s.ref_recall));
+    let _ = writeln!(out, "| Reference precision | {} |", pct(s.ref_precision));
+    let _ = writeln!(out, "| DOI accuracy | {} |", pct(s.doi_accuracy));
+    let _ = writeln!(out, "| Year accuracy | {} |", pct(s.year_accuracy));
+    let _ = writeln!(out, "| Title accuracy | {} |", pct(s.title_accuracy));
+    let _ = writeln!(
         out,
-        "| Marker resolution | {} |\n",
+        "| Marker resolution | {} |",
         pct(s.marker_resolution_rate)
     );
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "| Mean body alignment | {} |\n",
+        "| Mean body alignment | {} |",
         align_cell(s.mean_body_alignment)
     );
-    let _ = write!(out, "| p50 ms per chunk | {:.1} |\n", s.p50_ms_per_chunk);
-    let _ = write!(out, "| p95 ms per chunk | {:.1} |\n", s.p95_ms_per_chunk);
+    let _ = writeln!(out, "| p50 ms per chunk | {:.1} |", s.p50_ms_per_chunk);
+    let _ = writeln!(out, "| p95 ms per chunk | {:.1} |", s.p95_ms_per_chunk);
     let _ = write!(
         out,
         "| Target ms per chunk | {:.1} |\n\n",
@@ -828,9 +828,9 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
-        let _ = write!(
+        let _ = writeln!(
             out,
-            "| {} | {} | {} | {}/{}/{} | {} | {}/{} | {}/{} | {}/{} | {} | {:.1} | {} |\n",
+            "| {} | {} | {} | {}/{}/{} | {} | {}/{} | {}/{} | {}/{} | {} | {:.1} | {} |",
             cell(&p.id),
             cell(&p.status),
             p.pages,
