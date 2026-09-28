@@ -2929,7 +2929,8 @@ fn subtract_range(windows: &[Range<usize>], cut_start: usize, cut_end: usize) ->
 /// when no list touches it, the part above the heading, the part after the
 /// line that ends a list (an appendix after the bibliography is scanned).
 fn page_scan_windows(page: &PageText, extents: &[ListExtent]) -> Vec<Range<usize>> {
-    let mut windows: Vec<Range<usize>> = vec![0..page.text.len()];
+    let mut windows: Vec<Range<usize>> = Vec::with_capacity(2);
+    windows.push(0..page.text.len());
     for extent in extents {
         let (start_page, start_line) = extent.start;
         if page.page < start_page {
