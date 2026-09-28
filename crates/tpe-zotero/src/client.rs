@@ -36,6 +36,8 @@ pub const DEFAULT_BASE: &str = "https://api.zotero.org";
 pub const API_VERSION: &str = "3";
 /// Largest `limit` the Web API accepts for multi-object reads.
 pub const MAX_LIMIT: u32 = 100;
+/// Longest pause honoured for a `Backoff` header between pages, in seconds.
+const MAX_BACKOFF_SECS: u64 = 60;
 /// Most objects one write request may carry.
 pub const MAX_WRITE_ITEMS: usize = 50;
 /// `User-Agent` sent by this client.
