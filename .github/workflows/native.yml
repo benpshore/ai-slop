@@ -101,12 +101,25 @@ jobs:
       - name: Fetch the corpus (cached items are reused)
         if: ${{ !cancelled() }}
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
-      - name: Evaluate the docling backend
+      - name: Evaluate the pdfium backend
         if: ${{ !cancelled() }}
-        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native --dump-dir eval-native/dumps
-      - name: Publish the report in the job summary
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend pdfium --split dev --out eval-native/pdfium --dump-dir eval-native/pdfium/dumps
+      - name: Evaluate the docling-text backend
         if: ${{ !cancelled() }}
-        run: cat eval-native/report.md >> "$GITHUB_STEP_SUMMARY"
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling-text --split dev --out eval-native/docling-text --dump-dir eval-native/docling-text/dumps
+      - name: Evaluate the docling backend (full layout + OCR)
+        if: ${{ !cancelled() }}
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native/docling --dump-dir eval-native/docling/dumps
+      - name: Publish the reports in the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          for b in pdfium docling-text docling; do
+            if [ -f "eval-native/$b/report.md" ]; then
+              { echo "# $b"; cat "eval-native/$b/report.md"; echo; } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "# $b: no report" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}
         with:
