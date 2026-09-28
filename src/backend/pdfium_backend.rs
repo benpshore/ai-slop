@@ -358,15 +358,14 @@ impl Collector {
                             "form XObject nesting deeper than {MAX_FORM_DEPTH}; skipped"
                         ));
                     } else {
-                        let local = match form.matrix() {
-                            Ok(matrix) => Some(matrix),
-                            Err(_) => {
-                                self.warn(
-                                    "form XObject: matrix unavailable; children left in form space"
-                                        .to_string(),
-                                );
-                                None
-                            }
+                        let local = if let Ok(matrix) = form.matrix() {
+                            Some(matrix)
+                        } else {
+                            self.warn(
+                                "form XObject: matrix unavailable; children left in form space"
+                                    .to_string(),
+                            );
+                            None
                         };
                         self.visit(form.iter(), text_page, compose(local, placement), depth + 1);
                     }

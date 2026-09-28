@@ -98,8 +98,15 @@ jobs:
           restore-keys: corpus-
       - name: Fetch the corpus (cached items are reused)
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
-      - name: Evaluate the docling backend
-        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native --dump-dir eval-native/dumps
+      - name: Evaluate the pdfium backend
+        if: ${{ !cancelled() }}
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend pdfium --split dev --out eval-native/pdfium --dump-dir eval-native/pdfium/dumps
+      - name: Evaluate the docling-text backend
+        if: ${{ !cancelled() }}
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling-text --split dev --out eval-native/docling-text --dump-dir eval-native/docling-text/dumps
+      - name: Evaluate the docling backend (full layout + OCR)
+        if: ${{ !cancelled() }}
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native/docling --dump-dir eval-native/docling/dumps
       - name: Publish the report in the job summary
         run: cat eval-native/report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
