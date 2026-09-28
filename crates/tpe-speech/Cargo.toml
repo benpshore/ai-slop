@@ -1,0 +1,52 @@
+[package]
+name = "tpe-speech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neural text-to-speech (AVSpeechSynthesizer on macOS, optional Kokoro) validated by a Whisper round trip"
+
+[features]
+default = []
+# Kokoro-82M ONNX engine on every OS (needs model files, see `kokoro.rs`).
+kokoro = ["dep:kokoro-tts", "dep:tokio"]
+# docling Whisper ASR for the synthesis -> transcription round trip.
+asr = ["dep:docling-asr"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+thiserror = "2"
+kokoro-tts = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+docling-asr = { version = "1.69", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Same ranges as objc2-avf-audio 0.3.2 so Cargo resolves ONE objc2/block2
+# (the block type in `writeUtterance:toBufferCallback:` must be the same crate).
+objc2 = ">=0.6.2, <0.8.0"
+block2 = ">=0.6.1, <0.8.0"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDate",
+    "NSError",
+    "NSObject",
+    "NSRunLoop",
+    "NSString",
+    "NSURL",
+] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "AVAudioBuffer",
+    "AVAudioFormat",
+    "AVAudioPlayer",
+    "AVAudioTypes",
+    "AVSpeechSynthesis",
+] }
+
+[[bin]]
+name = "tpe-speak"
+path = "src/bin/tpe-speak.rs"
+
+[lints]
+workspace = true
