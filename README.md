@@ -4,7 +4,44 @@ A native Rust engine for high-throughput, faithful text mining of academic PDFs,
 
 The eventual application is a compact, accessible, Zed-inspired Rust document workbench: corpus browser, PDF viewer, selectable extracted text, source highlighting, and job controls. The headless engine comes first and remains independently usable.
 
-**Status: strategy and implementation plan.** This repository currently contains a generated multi-language scaffold and smoke tests. Extraction, upstream synchronization, MLX acceleration, and the GUI are not implemented. No project performance or accuracy results exist yet. Implementation starts with the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md); technical sources and update policy are in [Upstreams](docs/UPSTREAMS.md).
+**Status: early engine, measured baseline, nothing production-ready.** A pure-Rust extraction engine (`tpe`), an evaluation harness and a first measured baseline exist. The baseline is far from the targets below: 70.0% of papers get an exact reference count and p95 is 89 ms per 20-page chunk against a 30 ms target. The PDFium and docling backends build and pass their unit tests in the Native workflow, but they have no measured accuracy yet. The workbench crates are libraries with offline tests. The GUI is a skeleton, the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
+
+## What exists today
+
+The engine is the root crate `tpe` ([Engine](docs/ENGINE.md)):
+
+- `tpe extract` writes page text with span geometry, reading order, metadata, references, citation markers, chunks and figures to one SQLite ledger. Runs are keyed by input hash and backend identity.
+- Backends: `lopdf` (pure Rust, the default and only backend in the default build), `pdfium` behind feature `pdfium`, and `docling-text` / `docling` behind feature `docling`. Provisioning of the native libraries and models is in [Native](docs/NATIVE.md).
+- Figures: images never enter page text. Each page lists its figures, and `--figures-dir` writes their bytes.
+- Scanned-page fixture (`tests/scanned_fixture.rs`): a synthetic image-only page. `lopdf` must find no text, `pdfium` must report one raster figure, and docling OCR must read the text back.
+- Evaluation ([Eval](docs/EVAL.md)): `tpe eval` scores the engine against arXiv LaTeX sources. `corpus/manifest.json` pins 30 CC-BY 4.0 arXiv papers by version and SHA-256, 20 in `dev` and 10 in `holdout`.
+
+Measured baseline (GitHub issue #15, Eval run of 2026-09-28, backend `lopdf`, `dev` split of 20 papers, hosted arm64 runners, not an M1):
+
+| metric | value |
+| --- | --- |
+| reference count exact | 70.0% |
+| reference recall / precision | 69.3% / 67.1% |
+| DOI / year / title correct | 48.9% / 98.2% / 47.6% |
+| citation-marker recall | 99.6% |
+| time per 20-page chunk, p50 / p95 | 39 ms / 89 ms (target 30 ms) |
+
+These are diagnostics from one run on shared CI hardware. They are not the acceptance measurement described below.
+
+Native workflow: with pinned PDFium and model assets, the `docling` and `pdfium` features build and their unit tests pass on `ubuntu-24.04-arm`. The docling OCR fixture result is not yet known.
+
+Workbench crates under `crates/` (each is a library with offline tests; see [Tracks](docs/TRACKS.md)):
+
+| crate | what it is |
+| --- | --- |
+| `tpe-common` | shared paper record types |
+| `tpe-credentials` | secret storage: macOS keychain, encrypted file, memory |
+| `tpe-biblio` | OpenAlex, Crossref, Semantic Scholar, PMC, Europe PMC, Unpaywall, OpenURL clients; dedupe. Google Scholar has no API, so only a search URL builder exists |
+| `tpe-zotero` | Zotero Web API client, local database reader, plugin import body ([Zotero](docs/ZOTERO.md)) |
+| `tpe-search` | lexical (FTS5) and semantic search over ledger text |
+| `tpe-speech` | text-to-speech with a speech-recognition round trip |
+| `tpe-app` | GPUI workbench skeleton (macOS only), gated on extraction quality |
+| `tpe-browser` | research-browser model (DOI/PDF detection, host policy, cookies). CEF embedding is design-only ([Browser](docs/BROWSER.md)) |
 
 ## Performance and fidelity targets
 
