@@ -23,8 +23,11 @@
 //! The pass also sets `Line::role` (it only tags; `text` keeps every line
 //! that is not furniture): removed lines become `furniture`, table-of-contents
 //! lines with dot leaders `toc`, lines opening with `Figure N:`-style labels
-//! `caption`, and on page 1 the lines before the abstract `front` (the
-//! standalone `Abstract` line itself `heading`). Only lines still tagged
+//! (or `Fig. 3 Overview`-style ones, a number and a capitalised word, when
+//! they do not continue the paragraph above) `caption`, and on page 1 the
+//! lines before the abstract `front` (the standalone `Abstract` line itself
+//! `heading`), stopping at the first run of long prose lines and skipping
+//! long lines that are neither affiliations nor lists of names. Only lines still tagged
 //! `body` are retagged, except that `furniture` wins over any tag.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -53,6 +56,30 @@ const SHARE_DENOMINATOR: usize = 5;
 const FRONT_MAX_LINES: usize = 60;
 /// Dot-leader runs a table-of-contents line has at least.
 const TOC_MIN_LEADERS: usize = 4;
+/// Fewest words in each line of the prose run that ends page-1 front
+/// matter even without an `Abstract` line.
+const FRONT_RUN_WORDS: usize = 10;
+/// Consecutive prose lines of at least `FRONT_RUN_WORDS` words that end the
+/// front matter.
+const FRONT_RUN_LINES: usize = 2;
+/// A page-1 line with at least this many words is never front matter unless
+/// it carries an affiliation signal or reads like a list of names.
+const FRONT_LONG_WORDS: usize = 14;
+/// Substrings that mark an affiliation or contact line in the front matter.
+const AFFILIATION_SIGNALS: [&str; 6] = [
+    "@",
+    "University",
+    "Institute",
+    "Department",
+    "Laboratory",
+    "Corresponding",
+];
+/// Fewest words in a line directly above a bare caption start (`Figure 3
+/// The ...`) for that line to read as a paragraph the start continues.
+const CAPTION_PARAGRAPH_WORDS: usize = 6;
+/// Largest gap, in heights of the lower line, between a line and the bare
+/// caption start below it for the two to belong to one paragraph.
+const CAPTION_PARAGRAPH_GAP: f32 = 0.6;
 const ROLE_BODY: &str = "body";
 const ROLE_FURNITURE: &str = "furniture";
 const ROLE_TOC: &str = "toc";
@@ -286,6 +313,18 @@ fn caption_re() -> &'static Regex {
     RE.get_or_init(|| {
         Regex::new(
             r"^(?:Figure|FIGURE|Fig\.|FIG\.|Table|TABLE|Algorithm|ALGORITHM|Listing|LISTING)\s*(?:[A-Z]?\d+(?:\.\d+)*|[IVXL]+)\s*[.:|]",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A caption start without punctuation after the number, followed by a
+/// capitalised word: `Fig. 3 Overview of`, `Table 2 Results on`.
+fn caption_bare_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:Figure|FIGURE|Fig\.|FIG\.|Table|TABLE)\s*(?:[A-Z]?\d+(?:\.\d+)*|[IVXL]+)\s+\p{Lu}\p{Ll}",
         )
         .expect("valid regex")
     })
@@ -1491,9 +1530,87 @@ fn is_caption(text: &str) -> bool {
     caption_re().is_match(text.trim())
 }
 
+/// A bare caption start: `Figure`, `Fig.` or `Table`, a number and then a
+/// capitalised word with no punctuation between (`Fig. 3 Overview of the`,
+/// `Table 2 Results`). `Figure 3 shows` stays body.
+fn is_bare_caption(text: &str) -> bool {
+    caption_bare_re().is_match(text.trim())
+}
+
+/// Words in `text` and how many of them start with a lowercase letter.
+fn lowercase_words(text: &str) -> (usize, usize) {
+    let mut total: usize = 0;
+    let mut lower: usize = 0;
+    for token in text.split_whitespace() {
+        total += 1;
+        let starts_lower = token
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .is_some_and(char::is_lowercase);
+        if starts_lower {
+            lower += 1;
+        }
+    }
+    (total, lower)
+}
+
+/// The line at `index` directly continues the paragraph of the nearest
+/// earlier non-furniture line: that line has at least
+/// `CAPTION_PARAGRAPH_WORDS` words, does not end a sentence or a label, and
+/// sits just above it with overlapping x ranges.
+fn continues_paragraph(page: &PageText, index: usize) -> bool {
+    let Some(line) = page.lines.get(index) else {
+        return false;
+    };
+    let Some(prev) = page.lines[..index]
+        .iter()
+        .rev()
+        .find(|l| l.role != ROLE_FURNITURE)
+    else {
+        return false;
+    };
+    let (words, _) = lowercase_words(&prev.text);
+    if words < CAPTION_PARAGRAPH_WORDS || prev.text.trim_end().ends_with(['.', ':', '!', '?']) {
+        return false;
+    }
+    let (Some(upper), Some(lower)) = (prev.bbox.map(norm), line.bbox.map(norm)) else {
+        return false;
+    };
+    let height = lower.y1 - lower.y0;
+    let gap = upper.y0 - lower.y1;
+    let overlap = upper.x0 < lower.x1 && lower.x0 < upper.x1;
+    overlap && height > 0.0 && gap >= -0.5 * height && gap <= CAPTION_PARAGRAPH_GAP * height
+}
+
+/// The line carries an affiliation or contact signal (see
+/// `AFFILIATION_SIGNALS`).
+fn has_affiliation_signal(text: &str) -> bool {
+    AFFILIATION_SIGNALS.iter().any(|s| text.contains(s))
+}
+
+/// A line of the prose run that ends the front matter: at least
+/// `FRONT_RUN_WORDS` words, at least half of them starting lowercase, and
+/// no affiliation signal.
+fn is_front_prose(text: &str) -> bool {
+    let (total, lower) = lowercase_words(text);
+    total >= FRONT_RUN_WORDS && lower * 2 >= total && !has_affiliation_signal(text)
+}
+
+/// A long page-1 line that is not front matter: at least
+/// `FRONT_LONG_WORDS` words, no affiliation signal, and not a list of
+/// names (at least 30 % of its words start lowercase).
+fn is_long_body_line(text: &str) -> bool {
+    let (total, lower) = lowercase_words(text);
+    total >= FRONT_LONG_WORDS && !has_affiliation_signal(text) && lower * 10 >= total * 3
+}
+
 /// Page-1 front matter: the non-furniture lines before the abstract when it
 /// starts within `FRONT_MAX_LINES` lines (a standalone `Abstract` line is
-/// tagged `heading`), else those before an `Introduction` heading.
+/// tagged `heading`), else those before an `Introduction` heading. Either
+/// way the front matter also stops at the first run of `FRONT_RUN_LINES`
+/// consecutive prose lines (see [`is_front_prose`]), an unlabelled abstract
+/// or first paragraph, and a long line that is neither an affiliation nor
+/// a list of names (see [`is_long_body_line`]) is never tagged.
 fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
     let order: Vec<usize> = page
         .lines
@@ -1521,7 +1638,18 @@ fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
     } else {
         return;
     };
-    for k in order.iter().take(end) {
+    let run_at = order
+        .windows(FRONT_RUN_LINES)
+        .position(|w| w.iter().all(|k| is_front_prose(text_of(*k))));
+    let end = run_at.map_or(end, |run| end.min(run));
+    let long: Vec<bool> = order
+        .iter()
+        .map(|k| is_long_body_line(text_of(*k)))
+        .collect();
+    for (pos, k) in order.iter().enumerate().take(end) {
+        if long[pos] {
+            continue;
+        }
         if let Some(line) = page.lines.get_mut(*k)
             && tag(line, ROLE_FRONT)
         {
@@ -1537,17 +1665,30 @@ fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
 }
 
 /// Text-based roles on the final lines: `toc`, `caption`, and page-1
-/// `front`/`heading`. Never changes `text`.
+/// `front`/`heading`. A bare caption start (see [`is_bare_caption`]) is a
+/// caption only when it does not continue the paragraph above it (see
+/// [`continues_paragraph`]). Never changes `text`.
 fn tag_roles(page: &mut PageText, report: &mut CleanupReport) {
-    for line in &mut page.lines {
+    let kinds: Vec<(bool, bool)> = page
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(k, line)| {
+            let text = line.text.as_str();
+            let toc = is_toc(text);
+            let bare = is_bare_caption(text) && !continues_paragraph(page, k);
+            (toc, !toc && (is_caption(text) || bare))
+        })
+        .collect();
+    for (line, (toc, caption)) in page.lines.iter_mut().zip(kinds) {
         if line.role == ROLE_FURNITURE {
             continue;
         }
-        if is_toc(&line.text) {
+        if toc {
             if tag(line, ROLE_TOC) {
                 report.role_toc += 1;
             }
-        } else if is_caption(&line.text) && tag(line, ROLE_CAPTION) {
+        } else if caption && tag(line, ROLE_CAPTION) {
             report.role_caption += 1;
         }
     }
@@ -1618,6 +1759,7 @@ pub fn warm_up() {
         abstract_heading_re,
         introduction_re,
         caption_re,
+        caption_bare_re,
     ];
     for accessor in accessors {
         accessor();
@@ -2393,6 +2535,130 @@ mod tests {
             ]
         );
         assert_eq!(pages[1].text, before);
+    }
+
+    #[test]
+    fn bare_caption_starts_are_tagged_unless_they_continue_a_paragraph() {
+        let mut pages = vec![
+            page_of(1, &[("Body text on page one", 60.0, 600.0, 0)]),
+            page_of(
+                2,
+                &[
+                    (
+                        "Fig. 3 Overview of the judge and extractor choice",
+                        60.0,
+                        700.0,
+                        0,
+                    ),
+                    ("Table 2 Results on the benchmark", 60.0, 660.0, 0),
+                    (
+                        "Figure 1 The overall framework of the model",
+                        60.0,
+                        620.0,
+                        0,
+                    ),
+                    ("Figure 3 shows the results.", 60.0, 580.0, 0),
+                    ("TABLE IV Error Rates", 60.0, 540.0, 0),
+                    (
+                        "the accuracy of the two systems is compared in",
+                        60.0,
+                        500.0,
+                        0,
+                    ),
+                    ("Table 5 The numbers there are averages.", 60.0, 488.0, 0),
+                ],
+            ),
+        ];
+        let before = pages[1].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_caption, 4);
+        assert_eq!(
+            roles(&pages[1]),
+            [
+                "caption", "caption", "caption", "body", "caption", "body", "body"
+            ]
+        );
+        assert_eq!(pages[1].text, before);
+        assert!(is_bare_caption("Fig. 3 Overview of the judge"));
+        assert!(is_bare_caption("Table S1 Data sources"));
+        assert!(!is_bare_caption("Table 2 shows the gains"));
+        assert!(!is_bare_caption("Figure 3 GPT results"));
+        assert!(!is_bare_caption("Algorithm 1 Greedy Search"));
+    }
+
+    #[test]
+    fn a_prose_run_ends_front_matter_without_an_abstract_line() {
+        let affiliation = "Department of Physics, University of Somewhere, 1 Main Street, \
+                           Some City, Some Country, Earth";
+        let names = "Carl Coauthor, Dana Doe, Eve Example, Finn Fourth, Gail Fifth, \
+                     Hal Sixth, Ida Seventh";
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("A Study of Things", 60.0, 700.0, 0),
+                ("Ann Author, Bob Writer", 60.0, 688.0, 0),
+                (affiliation, 60.0, 676.0, 0),
+                (names, 60.0, 664.0, 0),
+                (
+                    "we study the dynamics of chemical reaction networks with the goal of",
+                    60.0,
+                    640.0,
+                    0,
+                ),
+                (
+                    "deriving an upper bound on their rates, which is hard because",
+                    60.0,
+                    628.0,
+                    0,
+                ),
+                ("1 Introduction", 60.0, 600.0, 0),
+                ("Things matter.", 60.0, 588.0, 0),
+            ],
+        )];
+        let before = pages[0].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_front, 4);
+        assert_eq!(
+            roles(&pages[0]),
+            [
+                "front", "front", "front", "front", "body", "body", "body", "body"
+            ]
+        );
+        assert_eq!(pages[0].text, before);
+    }
+
+    #[test]
+    fn a_long_line_without_an_affiliation_signal_is_not_front_matter() {
+        let notice = "This work has been submitted to the IEEE for possible publication \
+                      and may change without notice";
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("A Study of Things", 60.0, 700.0, 0),
+                (notice, 60.0, 688.0, 0),
+                ("Ann Author", 60.0, 676.0, 0),
+                ("Abstract", 60.0, 640.0, 0),
+                ("We study things.", 60.0, 628.0, 0),
+            ],
+        )];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_front, 2);
+        assert_eq!(
+            roles(&pages[0]),
+            ["front", "body", "front", "heading", "body"]
+        );
+        assert!(is_front_prose(
+            "we study the dynamics of chemical reaction networks with the goal of"
+        ));
+        assert!(!is_front_prose(
+            "Carl Coauthor, Dana Doe, Eve Example, Finn Fourth, Gail Fifth, Hal Sixth"
+        ));
+        assert!(!is_front_prose(
+            "we thank the department of physics at the University of Somewhere for"
+        ));
+        assert!(!is_long_body_line(
+            "Carl Coauthor, Dana Doe, Eve Example, Finn Fourth, Gail Fifth, Hal Sixth, Ida Seventh"
+        ));
     }
 
     #[test]
