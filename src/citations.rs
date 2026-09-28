@@ -5133,7 +5133,7 @@ mod tests {
         assert_marker_offsets(&body, &markers);
 
         // Two bare labels are not a run; the list stays author-year.
-        let two = vec![
+        let two = [
             bare_line("[4]"),
             bare_line("[5]"),
             bare_line("A. Author, “First title,” Journal One, vol. 1, pp. 1–2, 2020."),
