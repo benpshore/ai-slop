@@ -5260,7 +5260,7 @@ dependencies = [
  "image",
  "itertools 0.15.0",
  "js-sys",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "maybe-owned",
  "once_cell",
