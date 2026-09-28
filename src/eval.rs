@@ -174,9 +174,10 @@ pub struct PaperEval {
     pub marker_targets: u32,
     /// [`word_alignment`] of the extracted body text against the detexed
     /// body, both prepared by `alignment_texts`: the extracted side is the
-    /// page text before the reference section with citation markers, caption
-    /// paragraphs and math-heavy lines removed, the truth side has math-heavy
-    /// lines removed. `None` when the truth has no body text.
+    /// page text before the reference section with lines tagged with a
+    /// non-body role, citation markers, caption paragraphs and math-heavy
+    /// lines removed, the truth side has math-heavy lines removed. `None`
+    /// when the truth has no body text.
     pub body_alignment: Option<f32>,
     /// [`word_alignment`] of all extracted page text (pages joined by `\n`)
     /// against the unfiltered detexed body; the pre-loop-5 metric. `None`
@@ -562,16 +563,106 @@ fn marker_char_ranges(page: &PageText, markers: &[CitationMarker]) -> Vec<(usize
     ranges
 }
 
-/// `page.text` up to byte `cut` (the whole text when `None`), with each
+/// Line roles whose text stays in the body-only text: `body`, `heading`,
+/// and an empty role (treated as untagged).
+fn is_body_role(role: &str) -> bool {
+    matches!(role, "" | "body" | "heading")
+}
+
+/// A byte range `[start, end)` of `page.text` left out of the body-only
+/// text: a line tagged with a non-body role plus the whitespace after it.
+/// `paragraph` puts one `\n` in its place, so a paragraph break after the
+/// dropped line survives when the separator before it was a single `\n`.
+struct DroppedLine {
+    start: usize,
+    end: usize,
+    paragraph: bool,
+}
+
+/// Byte offset of the first occurrence of `needle` at or after `from` in
+/// `text` that is a whole line: only spaces or tabs between it and the
+/// previous `\n` (or the text start) and between it and the next `\n` (or
+/// the text end). `needle` must not be empty.
+fn find_whole_line(text: &str, needle: &str, from: usize) -> Option<usize> {
+    let step = needle.chars().next().map_or(1, char::len_utf8);
+    let mut search = from;
+    while let Some(rel) = text.get(search..).and_then(|rest| rest.find(needle)) {
+        let start = search + rel;
+        let end = start + needle.len();
+        let line_start = text[..start].rfind('\n').map_or(0, |pos| pos + 1);
+        let line_end = text[end..].find('\n').map_or(text.len(), |pos| end + pos);
+        if text[line_start..start].trim().is_empty() && text[end..line_end].trim().is_empty() {
+            return Some(start);
+        }
+        search = start + step;
+    }
+    None
+}
+
+/// The lines of `page.lines` with a non-body role (see [`is_body_role`]),
+/// as byte ranges of `page.text` sorted by start. The line texts are found
+/// in `page.text` in order, each as a whole line after the previous one
+/// found; a line that is not found (furniture removed from the text, or
+/// text that is not built from the lines) is skipped without moving the
+/// search on. Empty when no line has a non-body role, so untagged pages and
+/// pages without lines keep their whole text.
+fn dropped_lines(page: &PageText) -> Vec<DroppedLine> {
+    let mut dropped: Vec<DroppedLine> = Vec::new();
+    if page.lines.iter().all(|line| is_body_role(&line.role)) {
+        return dropped;
+    }
+    let text = page.text.as_str();
+    let mut cursor = 0_usize;
+    for line in &page.lines {
+        let needle = line.text.trim();
+        if needle.is_empty() {
+            continue;
+        }
+        let Some(start) = find_whole_line(text, needle, cursor) else {
+            continue;
+        };
+        let end = start + needle.len();
+        cursor = end;
+        if is_body_role(&line.role) {
+            continue;
+        }
+        let next = text.len() - text[end..].trim_start().len();
+        let before_len = text[..start].trim_end().len();
+        let paragraph = before_len > 0
+            && next < text.len()
+            && text[end..next].matches('\n').count() >= 2
+            && text[before_len..start].matches('\n').count() < 2;
+        dropped.push(DroppedLine {
+            start,
+            end: next,
+            paragraph,
+        });
+    }
+    dropped
+}
+
+/// `page.text` up to byte `cut` (the whole text when `None`), without the
+/// lines tagged with a non-body role (see [`dropped_lines`]) and with each
 /// verified citation marker replaced by one space.
 fn page_body_text(page: &PageText, markers: &[CitationMarker], cut: Option<usize>) -> String {
     let ranges = marker_char_ranges(page, markers);
+    let dropped = dropped_lines(page);
     let limit = cut.unwrap_or(page.text.len());
     let mut out = String::with_capacity(page.text.len());
     let mut next = 0_usize;
+    let mut next_drop = 0_usize;
     for (char_index, (byte_index, c)) in page.text.char_indices().enumerate() {
         if byte_index >= limit {
             break;
+        }
+        while next_drop < dropped.len() && dropped[next_drop].end <= byte_index {
+            next_drop += 1;
+        }
+        if let Some(drop) = dropped.get(next_drop).filter(|d| d.start <= byte_index) {
+            if drop.start == byte_index && drop.paragraph {
+                out.push('\n');
+            }
+            continue;
         }
         while next < ranges.len() && ranges[next].1 <= char_index {
             next += 1;
@@ -592,17 +683,32 @@ fn page_body_text(page: &PageText, markers: &[CitationMarker], cut: Option<usize
 
 /// The two sides of the body-only alignment, `(extracted, truth)`.
 ///
-/// Extracted: page texts up to the start of the reference section (the
-/// last reference heading, as in [`reference_section_text`]; every page when
-/// there is none), joined by blank lines, with the `markers` found at their
-/// char offsets and any remaining [`citation_marker_re`] match removed, then
-/// caption paragraphs and math-heavy lines dropped. Truth: `truth_body` with
-/// math-heavy lines dropped.
+/// Extracted: [`body_only_text`] with pages joined by blank lines. Truth:
+/// `truth_body` with math-heavy lines dropped.
 fn alignment_texts(
     pages: &[PageText],
     markers: &[CitationMarker],
     truth_body: &str,
 ) -> (String, String) {
+    (
+        body_only_text(pages, markers, "\n\n"),
+        drop_math_lines(truth_body),
+    )
+}
+
+/// The extracted body-only text.
+///
+/// First pass, per page: lines tagged with a role other than `body` or
+/// `heading` (figure and table text, captions, algorithms, table of
+/// contents, front matter, furniture) are left out, found in `page.text` by
+/// [`dropped_lines`]; untagged pages keep their whole text. Second pass,
+/// the heuristics for untagged backends: page texts up to the start of the
+/// reference section (the last reference heading, as in
+/// [`reference_section_text`]; every page when there is none), joined by
+/// `separator`, with the `markers` found at their char offsets and any
+/// remaining [`citation_marker_re`] match removed, then caption paragraphs
+/// and math-heavy lines dropped.
+fn body_only_text(pages: &[PageText], markers: &[CitationMarker], separator: &str) -> String {
     let start = reference_start(pages);
     let mut parts: Vec<String> = Vec::new();
     for (pos, page) in pages.iter().enumerate() {
@@ -613,10 +719,9 @@ fn alignment_texts(
         };
         parts.push(page_body_text(page, markers, cut));
     }
-    let joined = parts.join("\n\n");
+    let joined = parts.join(separator);
     let unmarked = citation_marker_re().replace_all(&joined, " ");
-    let extracted = drop_caption_and_math_lines(&unmarked);
-    (extracted, drop_math_lines(truth_body))
+    drop_caption_and_math_lines(&unmarked)
 }
 
 /// `10.NNNN/`: where a DOI starts inside a longer string.
@@ -2221,8 +2326,10 @@ pub struct PaperDump {
     /// (`GroundTruth::paper`).
     #[serde(default)]
     pub paper_truth: TruthPaper,
-    /// Every extracted page text in page order, joined by
-    /// [`DUMP_PAGE_SEPARATOR`], capped at [`BODY_TEXT_CAP`] bytes.
+    /// The extracted side of `body_alignment` (lines with a non-body role,
+    /// the reference section, citation markers, captions and math-heavy
+    /// lines removed), pages joined by [`DUMP_PAGE_SEPARATOR`], capped at
+    /// [`BODY_TEXT_CAP`] bytes.
     #[serde(default)]
     pub body_text_extracted: String,
     /// The `LaTeX` body text (`GroundTruth::body_text`), capped at
@@ -2323,19 +2430,19 @@ pub fn reference_section_text(pages: &[PageText]) -> String {
     out
 }
 
-/// All page texts joined by [`DUMP_PAGE_SEPARATOR`], capped at
-/// [`BODY_TEXT_CAP`] bytes on a char boundary.
+/// The body-only text of [`body_only_text`] without recorded markers
+/// (citation groups are still removed by pattern), pages joined by
+/// [`DUMP_PAGE_SEPARATOR`], capped at [`BODY_TEXT_CAP`] bytes on a char
+/// boundary.
 pub fn body_text_extracted(pages: &[PageText]) -> String {
-    let mut out = String::new();
-    for (i, page) in pages.iter().enumerate() {
-        if i > 0 {
-            out.push_str(DUMP_PAGE_SEPARATOR);
-        }
-        out.push_str(&page.text);
-        if out.len() > BODY_TEXT_CAP {
-            break;
-        }
-    }
+    body_text_with_markers(pages, &[])
+}
+
+/// [`body_text_extracted`] with the recorded `markers` also removed at
+/// their char offsets: the extracted side of `body_alignment`, with the
+/// dump's page separator.
+fn body_text_with_markers(pages: &[PageText], markers: &[CitationMarker]) -> String {
+    let mut out = body_only_text(pages, markers, DUMP_PAGE_SEPARATOR);
     truncate_on_char_boundary(&mut out, BODY_TEXT_CAP);
     out
 }
@@ -2373,7 +2480,7 @@ pub fn dump_paper(
         reference_section_text: reference_section_text(&result.pages),
         metadata: result.metadata.clone(),
         paper_truth: truth.paper.clone(),
-        body_text_extracted: body_text_extracted(&result.pages),
+        body_text_extracted: body_text_with_markers(&result.pages, &result.citations),
         body_text_truth,
     }
 }
@@ -3507,6 +3614,7 @@ mod tests {
                 bbox: None,
                 column: 0,
                 spans: Vec::new(),
+                role: "body".to_string(),
             })
             .collect();
         p.text = lines.join("\n");
@@ -3569,9 +3677,7 @@ mod tests {
         assert_eq!(dump.paper_truth, truth.paper);
         assert_eq!(
             dump.body_text_extracted,
-            "Intro\nReferences\nnot the real section\n\u{c}\n\
-             Body text\n1 References\n[1] A. Smith. Alpha title. 2020.\n\u{c}\n\
-             [2] B. Jones. Other. 2021."
+            "Intro\nReferences\nnot the real section\n\u{c}\nBody text\n"
         );
         assert_eq!(dump.body_text_truth, "Intro text.");
     }
@@ -3932,6 +4038,121 @@ mod tests {
         assert!(is_math_heavy("12"));
         assert!(!is_math_heavy("In 2019, 45 of the 1234 runs failed"));
         assert!(!is_math_heavy(""));
+    }
+
+    /// A page whose `text` is given and whose lines are `(text, role)`.
+    fn roled_page(number: u32, text: &str, lines: &[(&str, &str)]) -> PageText {
+        let mut p = page(number, text);
+        p.lines = lines
+            .iter()
+            .map(|(line, role)| Line {
+                text: (*line).to_string(),
+                role: (*role).to_string(),
+                ..Line::default()
+            })
+            .collect();
+        p
+    }
+
+    const ROLED_TEXT: &str = "1 Introduction\nWe study text.\nEpoch 0 Epoch 50\n\n\
+                              Method Score\nThe prose resumes.\nContents . . . 3\nA Title Line";
+
+    const ROLED_LINES: [&str; 7] = [
+        "1 Introduction",
+        "We study text.",
+        "Epoch 0 Epoch 50",
+        "Method Score",
+        "The prose resumes.",
+        "Contents . . . 3",
+        "A Title Line",
+    ];
+
+    #[test]
+    fn body_text_skips_non_body_roles_and_keeps_body_and_headings() {
+        let roles = ["heading", "body", "figure", "table", "body", "toc", "front"];
+        let lines: Vec<(&str, &str)> = ROLED_LINES.iter().copied().zip(roles).collect();
+        let mut tagged = roled_page(1, ROLED_TEXT, &lines);
+        tagged.lines.push(Line {
+            text: "3".to_string(),
+            role: "furniture".to_string(),
+            ..Line::default()
+        });
+        assert_eq!(
+            body_text_extracted(&[tagged]),
+            "1 Introduction\nWe study text.\n\nThe prose resumes.\n"
+        );
+    }
+
+    #[test]
+    fn body_text_without_roles_or_lines_keeps_the_old_text() {
+        let untagged: Vec<(&str, &str)> = ROLED_LINES.iter().map(|l| (*l, "body")).collect();
+        assert_eq!(
+            body_text_extracted(&[roled_page(1, ROLED_TEXT, &untagged)]),
+            ROLED_TEXT
+        );
+        let empty_role: Vec<(&str, &str)> = ROLED_LINES.iter().map(|l| (*l, "")).collect();
+        assert_eq!(
+            body_text_extracted(&[roled_page(1, ROLED_TEXT, &empty_role)]),
+            ROLED_TEXT
+        );
+        assert_eq!(body_text_extracted(&[page(1, ROLED_TEXT)]), ROLED_TEXT);
+    }
+
+    #[test]
+    fn dropped_line_keeps_paragraph_separators() {
+        let lines = [("A line", "body"), ("FIG", "figure"), ("B line", "body")];
+        let para_after = roled_page(1, "A line\nFIG\n\nB line", &lines);
+        assert_eq!(body_text_extracted(&[para_after]), "A line\n\nB line");
+        let para_before = roled_page(1, "A line\n\nFIG\nB line", &lines);
+        assert_eq!(body_text_extracted(&[para_before]), "A line\n\nB line");
+        let no_para = roled_page(1, "A line\nFIG\nB line", &lines);
+        assert_eq!(body_text_extracted(&[no_para]), "A line\nB line");
+        let caption = [("Body.", "body"), ("A plain caption", "caption")];
+        let captioned = roled_page(1, "Body.\nA plain caption", &caption);
+        assert_eq!(body_text_extracted(&[captioned]), "Body.\n");
+    }
+
+    #[test]
+    fn short_tagged_line_only_matches_a_whole_line() {
+        // The figure label "7" is not in the text as a line of its own; it
+        // must not match the "7" inside the prose that follows.
+        let lines = [("7", "figure"), ("Ran 7 epochs.", "body")];
+        let p = roled_page(1, "Ran 7 epochs.", &lines);
+        assert_eq!(body_text_extracted(&[p]), "Ran 7 epochs.");
+        let lines = [("Ran 50 epochs.", "body"), ("50", "figure")];
+        let p = roled_page(1, "Ran 50 epochs.\n50", &lines);
+        assert_eq!(body_text_extracted(&[p]), "Ran 50 epochs.\n");
+    }
+
+    #[test]
+    fn recorded_marker_after_a_dropped_line_is_still_removed() {
+        let lines = [
+            ("Epoch 0 Epoch 50", "figure"),
+            ("See Smith (2020) here.", "body"),
+        ];
+        let p = roled_page(1, "Epoch 0 Epoch 50\nSee Smith (2020) here.", &lines);
+        let marker = CitationMarker {
+            page: 1,
+            offset: 21,
+            text: "Smith (2020)".to_string(),
+            targets: vec![1],
+        };
+        let (extracted, _) = alignment_texts(&[p], &[marker], "");
+        assert_eq!(words(&extracted), vec!["see", "here"]);
+    }
+
+    #[test]
+    fn body_alignment_excludes_figure_lines_but_raw_keeps_them() {
+        let lines = [("Real prose words.", "body"), ("Plot label axis", "figure")];
+        let p = roled_page(1, "Real prose words.\nPlot label axis", &lines);
+        let result = body_result(vec![p], Vec::new());
+        let truth = truth_with(Vec::new(), "Real prose words.");
+        let eval = evaluate("roles", &result, &truth);
+        let alignment = eval.body_alignment.expect("body text present");
+        assert!(close(alignment, 1.0), "got {alignment}");
+        assert_eq!(eval.body_words_extracted, 3);
+        let raw = eval.body_alignment_raw.expect("body text present");
+        assert!(close(raw, 6.0 / 9.0), "got {raw}");
     }
 
     #[test]

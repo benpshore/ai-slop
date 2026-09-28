@@ -1406,6 +1406,7 @@ mod tests {
                 bbox: Some(bbox),
                 column: 0,
                 spans: vec![i as u32],
+                role: crate::schema::default_line_role(),
             });
             parts.push(*text);
             y -= size * 1.4;
@@ -1689,6 +1690,7 @@ mod tests {
                 bbox: Some(bbox),
                 column: 0,
                 spans: vec![index],
+                role: crate::schema::default_line_role(),
             },
         );
         page.text = format!("{stamp}\n{}", page.text);
@@ -1984,6 +1986,7 @@ mod tests {
                 bbox: Some(bbox),
                 column: 0,
                 spans: vec![i as u32],
+                role: crate::schema::default_line_role(),
             });
             parts.push(*text);
         }

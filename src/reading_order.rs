@@ -542,6 +542,7 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
             .iter()
             .map(|i| u32::try_from(*i).unwrap_or(u32::MAX))
             .collect(),
+        role: crate::schema::default_line_role(),
     }
 }
 
@@ -1018,6 +1019,7 @@ pub fn order_page(page: &mut PageText) {
                 bbox: None,
                 column: next_column,
                 spans: vec![u32::try_from(*i).unwrap_or(u32::MAX)],
+                role: crate::schema::default_line_role(),
             });
         }
         let n = loose.len();
@@ -1050,6 +1052,7 @@ pub fn lines_in_backend_order(page: &mut PageText) {
             bbox: span.bbox,
             column: 0,
             spans: vec![u32::try_from(i).unwrap_or(u32::MAX)],
+            role: crate::schema::default_line_role(),
         });
     }
     let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();

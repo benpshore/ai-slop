@@ -3564,6 +3564,7 @@ mod tests {
             }),
             column,
             spans: Vec::new(),
+            role: crate::schema::default_line_role(),
         }
     }
 
@@ -3574,6 +3575,7 @@ mod tests {
             bbox: None,
             column: 0,
             spans: Vec::new(),
+            role: crate::schema::default_line_role(),
         }
     }
 
