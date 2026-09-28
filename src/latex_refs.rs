@@ -182,7 +182,8 @@ pub struct TruthPaper {
 pub struct GroundTruth {
     pub references: Vec<TruthReference>,
     pub citations: TruthCitations,
-    /// `bbl`, `bbl+bib`, `bib-cited` or `bib-all`.
+    /// `bbl`, `bbl+bib`, `bib-cited` or `bib-all`; with several toplevel
+    /// documents, their distinct methods joined by `,`.
     pub method: String,
     /// Detexed body for alignment diagnostics; may be empty.
     pub body_text: String,
@@ -1782,13 +1783,14 @@ fn scan_cites(clean: &str) -> Vec<CiteCommand> {
 /// named `cite...` (`multibib`'s `\citeapp`, `\citeA`, ...) whose keys look
 /// like keys, with `*` and up to two `[...]` arguments before `{keys}`;
 /// `\nocite{keys}` and `\nocite{*}`, and `multibib`'s `\nocite<name>{keys}`
-/// and `\nocite<name>{*}` (`\nociteapp{*}`). Commented text is ignored, and so are
+/// and `\nocite<name>{*}` (`\nociteapp{*}`). Commented text (`%`, `comment`
+/// environments, `\iffalse ... \fi`) is ignored, and so are
 /// commands with no key (macro definitions such as `\cite{#1}`). Keys are
 /// trimmed and split on `,`. Only the first key group of multi-group
 /// commands (`\cites{a}{b}`) is read. Author- or year-only commands are
 /// counted in `cite_commands` and also in `cite_only_author_year`.
 pub fn parse_cites(tex: &str) -> TruthCitations {
-    let clean = strip_comments(tex);
+    let clean = remove_disabled(&strip_comments(tex));
     let mut cites = TruthCitations::default();
     for cmd in scan_cites(&clean) {
         if cmd.nocite {
@@ -1934,6 +1936,163 @@ fn environment_end(body: &str, name: &str, from: usize) -> usize {
         }
     }
     i
+}
+
+/// Conditional-looking commands (`etoolbox`, `ifthen`) that take brace
+/// arguments and are never closed by `\fi`.
+const ARGUMENT_CONDITIONALS: &[&str] = &[
+    "ifthenelse",
+    "ifdef",
+    "ifndef",
+    "ifcsdef",
+    "ifundef",
+    "ifcsundef",
+    "ifdefmacro",
+    "ifcsmacro",
+    "ifdefparam",
+    "ifcsparam",
+    "ifdefprefix",
+    "ifcsprefix",
+    "ifdefprotected",
+    "ifcsprotected",
+    "ifdefltxprotect",
+    "ifcsltxprotect",
+    "ifdefempty",
+    "ifcsempty",
+    "ifdefvoid",
+    "ifcsvoid",
+    "ifdefequal",
+    "ifcsequal",
+    "ifdefstring",
+    "ifcsstring",
+    "ifdefstrequal",
+    "ifcsstrequal",
+    "ifdefcounter",
+    "ifcscounter",
+    "ifltxcounter",
+    "ifdeflength",
+    "ifcslength",
+    "ifdefdimen",
+    "ifcsdimen",
+    "ifstrequal",
+    "ifstrempty",
+    "ifblank",
+    "ifnumcomp",
+    "ifnumequal",
+    "ifnumgreater",
+    "ifnumless",
+    "ifnumodd",
+    "ifdimcomp",
+    "ifdimequal",
+    "ifdimgreater",
+    "ifdimless",
+    "ifbool",
+    "ifboolexpr",
+    "ifboolexpe",
+    "iftoggle",
+    "ifinlist",
+    "ifinlistcs",
+    "ifrmnum",
+    "ifstrcmp",
+];
+
+/// The control word starting at the backslash at `at`: its name (letters
+/// and `@`; empty for a control symbol such as `\\` or `\%`) and the index
+/// just past it.
+fn control_word(s: &str, at: usize) -> (&str, usize) {
+    let start = at + 1;
+    let mut end = start;
+    while let Some(c) = char_at(s, end) {
+        if c.is_ascii_alphabetic() || c == '@' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if end == start {
+        let past = char_at(s, start).map_or(start, |c| start + c.len_utf8());
+        return ("", past);
+    }
+    (&s[start..end], end)
+}
+
+/// Whether the control word `name` opens a `TeX` conditional closed by `\fi`.
+fn opens_conditional(name: &str) -> bool {
+    name.starts_with("if") && !ARGUMENT_CONDITIONALS.contains(&name)
+}
+
+/// Index just past the `\fi` (or a depth-one `\else`, whose branch is live)
+/// that ends the false branch of an `\iffalse` ending at `from`. Nested
+/// conditionals are counted; `\newif\ifname` declares rather than opens one.
+/// `None` when the branch is never closed.
+fn false_branch_end(s: &str, from: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = from;
+    let mut after_newif = false;
+    while let Some(off) = s[i..].find('\\') {
+        let (name, end) = control_word(s, i + off);
+        i = end;
+        if name == "fi" {
+            depth -= 1;
+            if depth == 0 {
+                return Some(end);
+            }
+        } else if name == "else" && depth == 1 {
+            return Some(end);
+        } else if !after_newif && opens_conditional(name) {
+            depth += 1;
+        }
+        after_newif = name == "newif";
+    }
+    None
+}
+
+/// Remove `\iffalse ... \fi` blocks (up to a depth-one `\else`, whose
+/// branch is kept). An `\iffalse` that is never closed is left alone.
+fn remove_iffalse(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut i = 0;
+    let mut after_newif = false;
+    while let Some(off) = s[i..].find('\\') {
+        let at = i + off;
+        let (name, end) = control_word(s, at);
+        i = end;
+        if name == "iffalse"
+            && !after_newif
+            && let Some(resume) = false_branch_end(s, end)
+        {
+            out.push_str(&s[copied..at]);
+            copied = resume;
+            i = resume;
+        }
+        after_newif = name == "newif";
+    }
+    out.push_str(&s[copied..]);
+    out
+}
+
+/// Remove `\begin{comment} ... \end{comment}` environments (the `comment`
+/// and `verbatim` packages); an unclosed one runs to the end of the text.
+fn remove_comment_environments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for caps in begin_re().captures_iter(s) {
+        let Some(whole) = caps.get(0) else { continue };
+        if whole.start() < last || &caps[1] != "comment" {
+            continue;
+        }
+        out.push_str(&s[last..whole.start()]);
+        last = environment_end(s, "comment", whole.end());
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+/// Remove text `TeX` never typesets from comment-free source: `comment`
+/// environments, then `\iffalse ... \fi` blocks.
+fn remove_disabled(clean: &str) -> String {
+    remove_iffalse(&remove_comment_environments(clean))
 }
 
 /// Position of `\` + `symbol` at or after `from` whose backslash is not itself escaped.
@@ -2526,9 +2685,11 @@ pub fn paper_truth(main_tex_merged: &str) -> TruthPaper {
 
 /// Inline `\input{f}`, `\include{f}` and `\subfile{f}` relative to `root`
 /// (`.tex` is added when the name has no extension), recursively while
-/// `depth <= 5`. Missing files are left as they are. Comments are removed.
+/// `depth <= 5`. Missing files are left as they are. Comments, `comment`
+/// environments and `\iffalse ... \fi` blocks are removed from every file
+/// before its own inputs are expanded, so nothing inside them is inlined.
 pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
-    let clean = strip_comments(main_tex);
+    let clean = remove_disabled(&strip_comments(main_tex));
     if depth > MAX_INPUT_DEPTH {
         return clean;
     }
@@ -2671,48 +2832,131 @@ fn bib_extras(
     Ok(extra)
 }
 
-/// Ground truth for one paper's source tree.
-///
-/// The main file is the first `.tex` containing `\begin{document}`
-/// ([`TruthError::NoMainTex`] otherwise); `\input`s are resolved relative to
-/// its directory. Citations and body text come from the merged source. The
-/// bibliography is, in order of preference: all `.bbl` files (method `bbl`),
-/// a `thebibliography` environment inline in the source (also `bbl`), or the
-/// `.bib` files filtered to cited and `\nocite`d keys (`bib-cited`), or every
-/// `.bib` entry when `\nocite{*}` is present (`bib-all`). When `.bbl` files
-/// exist but miss a whole bibliography (`multibib` shipping only `app.bbl`,
-/// see `bbl_is_partial`), the `.bib` entries of cited keys that no `.bbl`
-/// has are appended after the `.bbl` entries (method `bbl+bib`); with
-/// `\nocite{*}` that is every `.bib` entry no `.bbl` has (see
-/// `bbl_is_partial_for_all`).
-/// [`TruthError::NoBibliography`] when none of these yields an entry.
-pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
-    let mut main: Option<(PathBuf, String)> = None;
-    for path in &files.tex {
-        let text = read_lossy(path)?;
-        if strip_comments(&text).contains("\\begin{document}") {
-            main = Some((path.clone(), text));
-            break;
+/// `arXiv`'s processing manifest at the root of a source tree.
+const README_JSON: &str = "00README.json";
+
+const BEGIN_DOCUMENT: &str = "\\begin{document}";
+
+/// The `toplevel` sources that `00README.json` at `root` declares, in file
+/// order, as paths under `root`. Empty when the manifest is absent or
+/// unreadable; absolute names and names containing `..` are skipped.
+fn readme_toplevels(root: &Path) -> Vec<PathBuf> {
+    let Ok(bytes) = fs::read(root.join(README_JSON)) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    let Some(sources) = value.get("sources").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    sources
+        .iter()
+        .filter(|source| {
+            source.get("usage").and_then(serde_json::Value::as_str) == Some("toplevel")
+        })
+        .filter_map(|source| source.get("filename").and_then(serde_json::Value::as_str))
+        .filter(|name| !name.is_empty() && !Path::new(name).is_absolute() && !name.contains(".."))
+        .map(|name| root.join(name))
+        .collect()
+}
+
+/// The documents the PDF is built from, each as (path, source text): every
+/// `00README.json` `toplevel` file that contains `\begin{document}` (`arXiv`
+/// typesets them one after another into one PDF), else the first `.tex`
+/// that contains `\begin{document}`.
+fn main_documents(files: &LatexFiles) -> Result<Vec<(PathBuf, String)>, TruthError> {
+    let mut docs: Vec<(PathBuf, String)> = Vec::new();
+    for path in readme_toplevels(&files.root) {
+        let Ok(text) = read_lossy(&path) else {
+            continue;
+        };
+        if strip_comments(&text).contains(BEGIN_DOCUMENT) {
+            docs.push((path, text));
         }
     }
-    let Some((main_path, main_text)) = main else {
-        return Err(TruthError::NoMainTex);
-    };
+    if !docs.is_empty() {
+        return Ok(docs);
+    }
+    for path in &files.tex {
+        let text = read_lossy(path)?;
+        if strip_comments(&text).contains(BEGIN_DOCUMENT) {
+            return Ok(vec![(path.clone(), text)]);
+        }
+    }
+    Err(TruthError::NoMainTex)
+}
+
+/// `bibunits` `.bbl` files (`bu1.bbl`, `bu2.bbl`, ..., `bu10.bbl`) in unit
+/// number order.
+fn bibunit_bbls(bbl: &[PathBuf]) -> Vec<PathBuf> {
+    let mut units: Vec<(u32, PathBuf)> = bbl
+        .iter()
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_str()?;
+            let digits = stem.strip_prefix("bu")?;
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let number = digits.parse::<u32>().ok()?;
+            Some((number, path.clone()))
+        })
+        .collect();
+    units.sort();
+    units.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The `.bbl` files one document typesets. With `bibunits` (`\putbib` in
+/// the merged source) and unit files present, the unit files `bu<n>.bbl` in
+/// unit order: any other `.bbl` is a stale whole-document one that is never
+/// printed. When several toplevel documents share the tree, only the `.bbl`
+/// named after the document. Otherwise every `.bbl`.
+fn document_bbls(
+    files: &LatexFiles,
+    merged: &str,
+    main_path: &Path,
+    several: bool,
+) -> Vec<PathBuf> {
+    if merged.contains("\\putbib") {
+        let units = bibunit_bbls(&files.bbl);
+        if !units.is_empty() {
+            return units;
+        }
+    }
+    if several {
+        let stem = main_path.file_stem();
+        return files
+            .bbl
+            .iter()
+            .filter(|path| path.file_stem() == stem)
+            .cloned()
+            .collect();
+    }
+    files.bbl.clone()
+}
+
+/// Ground truth for one toplevel document (see [`ground_truth`]); `several`
+/// says whether other toplevel documents share the source tree.
+fn document_truth(
+    files: &LatexFiles,
+    main_path: &Path,
+    main_text: &str,
+    several: bool,
+) -> Result<GroundTruth, TruthError> {
     let root: &Path = main_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(files.root.as_path());
-    let merged = resolve_inputs(root, &main_text, 0);
+    let merged = resolve_inputs(root, main_text, 0);
     let citations = parse_cites(&merged);
     let body = body_text(&merged);
     let paper = paper_truth(&merged);
     let wanted = wanted_keys(&citations);
 
     let mut references = Vec::new();
-    for path in &files.bbl {
-        references.extend(parse_bbl(&read_lossy(path)?));
+    for path in document_bbls(files, &merged, main_path, several) {
+        references.extend(parse_bbl(&read_lossy(&path)?));
     }
-    let from_bbl_files = !references.is_empty();
     let inline = if references.is_empty() {
         merged.find("\\begin{thebibliography}")
     } else {
@@ -2737,7 +2981,9 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
             references = dedupe_keys(cited_entries);
             "bib-cited"
         }
-    } else if from_bbl_files && !files.bib.is_empty() {
+    } else if files.bib.is_empty() {
+        "bbl"
+    } else {
         let extra = bib_extras(files, &merged, &citations, &wanted, &references)?;
         if extra.is_empty() {
             "bbl"
@@ -2745,8 +2991,6 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
             references.extend(extra);
             "bbl+bib"
         }
-    } else {
-        "bbl"
     };
     Ok(GroundTruth {
         references,
@@ -2755,6 +2999,74 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
         body_text: body,
         paper,
     })
+}
+
+/// Append a later toplevel document's truth to `first`. References and
+/// citations are concatenated (each document prints its own list, so a work
+/// cited by both appears twice), body texts are joined by a blank line, the
+/// paper metadata stays the first document's, and a method that differs
+/// from those so far is appended after a `,`.
+fn append_document(mut first: GroundTruth, next: GroundTruth) -> GroundTruth {
+    first.references.extend(next.references);
+    let cites = &mut first.citations;
+    cites.cite_commands += next.citations.cite_commands;
+    cites.cite_only_author_year += next.citations.cite_only_author_year;
+    cites.cited_keys.extend(next.citations.cited_keys);
+    cites.nocite_keys.extend(next.citations.nocite_keys);
+    cites.nocite_all |= next.citations.nocite_all;
+    if !next.body_text.is_empty() {
+        if !first.body_text.is_empty() {
+            first.body_text.push_str("\n\n");
+        }
+        first.body_text.push_str(&next.body_text);
+    }
+    if !first.method.split(',').any(|method| method == next.method) {
+        first.method.push(',');
+        first.method.push_str(&next.method);
+    }
+    first
+}
+
+/// Ground truth for one paper's source tree.
+///
+/// The main files are the `toplevel` sources of `00README.json` that contain
+/// `\begin{document}` (`arXiv` typesets several of them, such as a paper and
+/// its supporting information, into one PDF), else the first `.tex`
+/// containing `\begin{document}` ([`TruthError::NoMainTex`] otherwise).
+/// Each main file is handled on its own and the results are concatenated
+/// in manifest order (see `append_document`); the paper metadata comes
+/// from the first. `\input`s are resolved relative to the main file's
+/// directory, after `%` comments, `comment` environments and
+/// `\iffalse ... \fi` blocks are removed from each file. Citations and body
+/// text come from the merged source. The bibliography is, in order of
+/// preference: the `.bbl` files (method `bbl`; see `document_bbls` for
+/// `bibunits` and several main files), a `thebibliography` environment
+/// inline in the source (also `bbl`), or the `.bib` files filtered to cited
+/// and `\nocite`d keys (`bib-cited`), or every `.bib` entry when
+/// `\nocite{*}` is present (`bib-all`). When the `.bbl` files or the inline
+/// list miss a whole bibliography (`multibib` shipping only `app.bbl`, or an
+/// appendix `thebibliography` next to a `\bibliography{..}` with no `.bbl`;
+/// see `bbl_is_partial`), the `.bib` entries of cited keys they lack are
+/// appended after them (method `bbl+bib`); with `\nocite{*}` that is every
+/// `.bib` entry they lack (see `bbl_is_partial_for_all`).
+/// [`TruthError::NoBibliography`] when none of these yields an entry (with
+/// several main files, when none of them does).
+pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
+    let docs = main_documents(files)?;
+    let several = docs.len() > 1;
+    let mut combined: Option<GroundTruth> = None;
+    for (path, text) in &docs {
+        let truth = match document_truth(files, path, text, several) {
+            Ok(truth) => truth,
+            Err(TruthError::NoBibliography) if several => continue,
+            Err(err) => return Err(err),
+        };
+        combined = Some(match combined {
+            None => truth,
+            Some(so_far) => append_document(so_far, truth),
+        });
+    }
+    combined.ok_or(TruthError::NoBibliography)
 }
 
 #[cfg(test)]
@@ -3913,5 +4225,244 @@ Body text \cite{k}.
         assert_eq!(person_name("Firstname1 Lastname1"), None);
         assert_eq!(person_name("MIT CSAIL"), None);
         assert_eq!(person_name("van Gogh"), None);
+    }
+
+    use std::fmt::Write as _;
+
+    /// A `thebibliography` list with one minimal entry per key.
+    fn bbl_with(keys: &[&str]) -> String {
+        let mut out = String::from("\\begin{thebibliography}{9}\n");
+        for key in keys {
+            let _ = write!(
+                out,
+                "\\bibitem{{{key}}} Some Author.\n\\newblock Title {key}.\n\\newblock Venue, 2001.\n"
+            );
+        }
+        out.push_str("\\end{thebibliography}\n");
+        out
+    }
+
+    fn truth_keys(truth: &GroundTruth) -> Vec<&str> {
+        truth.references.iter().map(|r| r.key.as_str()).collect()
+    }
+
+    #[test]
+    fn remove_disabled_drops_comment_environments_and_iffalse_blocks() {
+        let tex = r"A \begin{comment} \cite{c1} \end{comment} B
+\iffalse \newif\ifdraft \ifx\a\b \cite{c2} \fi \fill \cite{c3} \fi C
+\iffalse \cite{c4} \else D \cite{k1} \fi E
+\iftrue F \fi \ifthenelse{\boolean{x}}{G}{H} \figurename{} I
+\iffalse never closed \cite{k2}";
+        let out = remove_disabled(tex);
+        for gone in ["c1", "c2", "c3", "c4"] {
+            assert!(!out.contains(gone), "{gone}: {out}");
+        }
+        for kept in [
+            "A ",
+            " B",
+            " C",
+            "D \\cite{k1}",
+            "E",
+            "\\iftrue F",
+            "\\ifthenelse",
+            "I",
+        ] {
+            assert!(out.contains(kept), "{kept}: {out}");
+        }
+        assert!(out.contains("never closed \\cite{k2}"), "{out}");
+        assert_eq!(parse_cites(tex).cited_keys, ["k1", "k2"]);
+    }
+
+    #[test]
+    fn ground_truth_ignores_cites_in_comment_environments_of_input_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sections = dir.path().join("sections");
+        fs::create_dir_all(&sections).unwrap();
+        fs::write(
+            dir.path().join("main.tex"),
+            r"\documentclass{acmart}
+\begin{document}
+See \cite{alpha}.
+\input{sections/related_work}
+\iffalse
+Old text \cite{beta}.
+\fi
+\bibliography{refs}
+\end{document}
+",
+        )
+        .unwrap();
+        fs::write(
+            sections.join("related_work.tex"),
+            r"Addressing these gaps is essential \citep{gamma}.
+
+\begin{comment}
+    \subsection{Extra related work}
+Task automation is not a new field \citep{beta, NEURIPS2024_0b82662b}.
+\input{sections/hidden}
+\end{comment}
+",
+        )
+        .unwrap();
+        fs::write(sections.join("hidden.tex"), r"\cite{beta}").unwrap();
+        fs::write(dir.path().join("refs.bib"), REFS_BIB).unwrap();
+        let tex = [
+            "main.tex",
+            "sections/hidden.tex",
+            "sections/related_work.tex",
+        ];
+        let truth = ground_truth(&files(dir.path(), &tex, &[], &["refs.bib"])).unwrap();
+        assert_eq!(truth.citations.cited_keys, ["alpha", "gamma"]);
+        assert_eq!(truth.citations.cite_commands, 2);
+        assert_eq!(truth.method, "bib-cited");
+        assert_eq!(truth_keys(&truth), ["alpha", "gamma"]);
+        assert!(
+            !truth.body_text.contains("Task automation"),
+            "{}",
+            truth.body_text
+        );
+    }
+
+    #[test]
+    fn ground_truth_bibunits_uses_unit_bbls_in_order_and_ignores_stale_bbl() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.tex"),
+            r"\documentclass{sn-jnl}
+\usepackage{bibunits}
+\defaultbibliography{references}
+\begin{document}
+\begin{bibunit}
+Intro \citep{u1a,shared}.
+\putbib
+\end{bibunit}
+\begin{bibunit}
+Methods \citep{u2a,shared} and \citep{u10a}.
+\putbib
+\end{bibunit}
+\end{document}
+",
+        )
+        .unwrap();
+        fs::write(dir.path().join("bu1.bbl"), bbl_with(&["u1a", "shared"])).unwrap();
+        fs::write(dir.path().join("bu2.bbl"), bbl_with(&["u2a", "shared"])).unwrap();
+        fs::write(dir.path().join("bu10.bbl"), bbl_with(&["u10a"])).unwrap();
+        fs::write(dir.path().join("main.bbl"), bbl_with(&["stale1", "stale2"])).unwrap();
+        let bbl = ["bu1.bbl", "bu10.bbl", "bu2.bbl", "main.bbl"];
+        let truth = ground_truth(&files(dir.path(), &["main.tex"], &bbl, &[])).unwrap();
+        assert_eq!(truth.method, "bbl");
+        assert_eq!(
+            truth_keys(&truth),
+            ["u1a", "shared", "u2a", "shared", "u10a"]
+        );
+
+        // Without `\putbib` every `.bbl` is still read.
+        fs::write(dir.path().join("plain.tex"), MAIN_TEX).unwrap();
+        let plain = ground_truth(&files(dir.path(), &["plain.tex"], &bbl, &[])).unwrap();
+        assert_eq!(plain.references.len(), 7);
+    }
+
+    #[test]
+    fn ground_truth_merges_bib_when_inline_list_covers_under_half() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.tex"),
+            r"\documentclass{informs4}
+\begin{document}
+Advice \citep{alpha,beta} and \citep{gamma}.
+\bibliographystyle{informs2014}
+\bibliography{refs}
+
+\include{appendix}
+
+\end{document}
+",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("appendix.tex"),
+            r"Hardness follows from \citet{johnson1979computers}.
+
+\begin{thebibliography}{9}
+\bibitem[{Johnson \protect\BIBand{} Garey(1979)}]{johnson1979computers}
+Johnson DS, Garey MR (1979) \emph{Computers and {I}ntractability: A {G}uide to
+  the {T}heory of {N}P-{C}ompleteness} (WH Freeman).
+\end{thebibliography}
+",
+        )
+        .unwrap();
+        fs::write(dir.path().join("refs.bib"), REFS_BIB).unwrap();
+        let tex = ["appendix.tex", "main.tex"];
+        let truth = ground_truth(&files(dir.path(), &tex, &[], &["refs.bib"])).unwrap();
+        assert_eq!(truth.method, "bbl+bib");
+        assert_eq!(
+            truth_keys(&truth),
+            ["johnson1979computers", "alpha", "beta", "gamma"]
+        );
+        assert_eq!(truth.references[0].source, TruthSource::Bbl);
+        assert_eq!(truth.references[0].year, Some(1979));
+        assert_eq!(truth.references[1].source, TruthSource::Bib);
+    }
+
+    #[test]
+    fn ground_truth_concatenates_readme_toplevel_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("00README.json"),
+            r#"{
+   "sources" : [
+      { "usage" : "toplevel", "filename" : "paper.tex" },
+      { "usage" : "ignore", "filename" : "refs.bib" },
+      { "usage" : "toplevel", "filename" : "a_si.tex" }
+   ],
+   "spec_version" : 1
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("paper.tex"),
+            r"\documentclass{article}
+\title{Main Paper Title}
+\begin{document}
+\maketitle
+See \cite{alpha} and \cite{gamma}.
+\bibliography{refs}
+\end{document}
+",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("a_si.tex"),
+            r"\documentclass{article}
+\title{Supporting Information}
+\begin{document}
+\maketitle
+Data from \cite{gamma} and \cite{beta, gamma}.
+\bibliography{refs}
+\end{document}
+",
+        )
+        .unwrap();
+        fs::write(dir.path().join("refs.bib"), REFS_BIB).unwrap();
+        let tree = files(dir.path(), &["a_si.tex", "paper.tex"], &[], &["refs.bib"]);
+        let truth = ground_truth(&tree).unwrap();
+        assert_eq!(truth.method, "bib-cited");
+        assert_eq!(truth_keys(&truth), ["alpha", "gamma", "beta", "gamma"]);
+        assert_eq!(
+            truth.citations.cited_keys,
+            ["alpha", "gamma", "gamma", "beta", "gamma"]
+        );
+        assert_eq!(truth.citations.cite_commands, 4);
+        assert_eq!(truth.paper.title.as_deref(), Some("Main Paper Title"));
+        assert!(truth.body_text.contains("Data from"), "{}", truth.body_text);
+
+        // Without the manifest the first `.tex` with `\begin{document}` wins.
+        fs::remove_file(dir.path().join("00README.json")).unwrap();
+        let single = ground_truth(&tree).unwrap();
+        assert_eq!(truth_keys(&single), ["beta", "gamma"]);
+        assert_eq!(
+            single.paper.title.as_deref(),
+            Some("Supporting Information")
+        );
     }
 }

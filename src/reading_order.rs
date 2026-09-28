@@ -3,8 +3,9 @@
 //! The backend emits one [`Span`] per string operator in content-stream
 //! order, which on multi-column pages is rarely the reading order. This
 //! module groups spans into lines by baseline, orders the lines with a
-//! recursive XY-cut over their boxes (rows first, then columns) and joins
-//! them into `PageText::text`. Coordinates are PDF user space (origin
+//! recursive XY-cut over their boxes (columns before rows, except that
+//! full-width lines at the top or bottom of a region are split off first)
+//! and joins them into `PageText::text`. Coordinates are PDF user space (origin
 //! bottom-left, `y` grows upwards) and are used unrotated. No text repair
 //! of any kind is performed.
 //!
@@ -60,6 +61,23 @@ const ACCENT_DIP_BELOW: f32 = 0.6;
 /// Horizontal slack when matching an accent's centre to the glyph span under
 /// it (multiple of the size); bridges kerning between two spans of one word.
 const ACCENT_SLACK: f32 = 0.1;
+/// Fraction of a region's width above which a line counts as spanning it
+/// (a title, running header or footer) for the XY-cut.
+const SPANNING_WIDTH: f32 = 0.6;
+/// Fraction of a region's width below which a line centred on the region
+/// (a page number or short running footer in the gutter) counts as a
+/// margin line for the XY-cut.
+const GUTTER_WIDTH: f32 = 0.15;
+/// Largest distance, as a fraction of the region's width, between a narrow
+/// margin line's centre and the region's horizontal midpoint.
+const GUTTER_OFFSET: f32 = 0.1;
+/// Smallest vertical overlap of the two sides of a column cut, as a
+/// fraction of the shorter side's vertical extent, for them to count as
+/// columns standing side by side.
+const COEXIST_OVERLAP: f32 = 0.5;
+/// Fewest lines each side of a column cut needs inside the vertically
+/// overlapping band for the sides to count as columns.
+const COEXIST_LINES: usize = 2;
 
 /// Thresholds of one XY-cut run, in points.
 struct CutParams {
@@ -653,20 +671,132 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
     (lines, unattached)
 }
 
-/// Position in `idx` (sorted top-to-bottom here) at which the widest
-/// horizontal whitespace band wider than `min_gap` starts, if any.
-fn row_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> {
-    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
+/// Position in `idx` (already sorted top-to-bottom) at which the widest
+/// horizontal whitespace band wider than `min_gap` starts, among the
+/// positions `allowed` accepts, if any.
+fn widest_row_gap(
+    boxes: &[BBox],
+    idx: &[usize],
+    min_gap: f32,
+    allowed: impl Fn(usize) -> bool,
+) -> Option<usize> {
     let mut bottom = boxes[idx[0]].y0;
     let mut best: Option<(usize, f32)> = None;
     for (pos, &i) in idx.iter().enumerate().skip(1) {
         let gap = bottom - boxes[i].y1;
-        if gap > min_gap && best.is_none_or(|(_, g)| gap > g) {
+        if gap > min_gap && allowed(pos) && best.is_none_or(|(_, g)| gap > g) {
             best = Some((pos, gap));
         }
         bottom = bottom.min(boxes[i].y0);
     }
     best.map(|(pos, _)| pos)
+}
+
+/// Position in `idx` (sorted top-to-bottom here) at which the widest
+/// horizontal whitespace band wider than `min_gap` starts, if any.
+fn row_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> {
+    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
+    widest_row_gap(boxes, idx, min_gap, |_| true)
+}
+
+/// Number of margin lines at the top and at the bottom of `idx` (already
+/// sorted top-to-bottom). A margin line is either spanning (wider than
+/// `SPANNING_WIDTH` of the region's width: a title, running header or
+/// footer) or narrow and centred (narrower than `GUTTER_WIDTH` of the width
+/// with its centre within `GUTTER_OFFSET` of the width from the region's
+/// midpoint: a page number or short footer in the gutter).
+fn margin_runs(boxes: &[BBox], idx: &[usize]) -> (usize, usize) {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for &i in idx {
+        left = left.min(boxes[i].x0);
+        right = right.max(boxes[i].x1);
+    }
+    let width = right - left;
+    let middle = left.midpoint(right);
+    let margin: Vec<bool> = idx
+        .iter()
+        .map(|&i| {
+            let b = boxes[i];
+            let w = b.x1 - b.x0;
+            let centred = (centre_x(b) - middle).abs() <= GUTTER_OFFSET * width;
+            w > SPANNING_WIDTH * width || (w < GUTTER_WIDTH * width && centred)
+        })
+        .collect();
+    let top_run = margin.iter().take_while(|m| **m).count();
+    let bottom_run = margin.iter().rev().take_while(|m| **m).count();
+    (top_run, bottom_run)
+}
+
+/// Like [`row_cut`], but only a cut whose upper part or lower part consists
+/// of margin lines alone (see [`margin_runs`]) qualifies: it splits a
+/// title, running header, footer or page number off the top or bottom of
+/// the region and nothing else.
+fn spanning_row_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> {
+    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
+    let (top_run, bottom_run) = margin_runs(boxes, idx);
+    let bottom_start = idx.len() - bottom_run;
+    widest_row_gap(boxes, idx, min_gap, |pos| {
+        pos <= top_run || pos >= bottom_start
+    })
+}
+
+/// Whether a column cut exists once the margin lines at the top and bottom
+/// of the region (see [`margin_runs`]) are left out; at least one must be
+/// left out and at least two lines must remain.
+fn masked_column_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> bool {
+    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
+    let (top_run, bottom_run) = margin_runs(boxes, idx);
+    if top_run + bottom_run == 0 || top_run + bottom_run + 2 > idx.len() {
+        return false;
+    }
+    let mut inner: Vec<usize> = idx[top_run..idx.len() - bottom_run].to_vec();
+    let cut = column_cut(boxes, &mut inner, min_gap);
+    cut.is_some_and(|at| columns_coexist(boxes, &inner, at))
+}
+
+/// Vertical extent (`y0` low, `y1` high) of the boxes in `group`.
+fn y_extent(boxes: &[BBox], group: &[usize]) -> (f32, f32) {
+    let mut low = f32::INFINITY;
+    let mut high = f32::NEG_INFINITY;
+    for &i in group {
+        low = low.min(boxes[i].y0);
+        high = high.max(boxes[i].y1);
+    }
+    (low, high)
+}
+
+/// Whether the two sides of a column cut at `at` in `idx` (sorted
+/// left-to-right by [`column_cut`]) stand side by side as columns: their
+/// vertical extents overlap by at least `COEXIST_OVERLAP` of the shorter
+/// side's extent, and each side has at least `COEXIST_LINES` lines whose
+/// vertical centre lies inside the overlapping band. Horizontally disjoint
+/// blocks stacked one above the other (a right-aligned heading over
+/// left-aligned prose) are not columns.
+fn columns_coexist(boxes: &[BBox], idx: &[usize], at: usize) -> bool {
+    if at == 0 || at >= idx.len() {
+        return false;
+    }
+    let (left, right) = idx.split_at(at);
+    let (left_low, left_high) = y_extent(boxes, left);
+    let (right_low, right_high) = y_extent(boxes, right);
+    let low = left_low.max(right_low);
+    let high = left_high.min(right_high);
+    let overlap = high - low;
+    let shorter = (left_high - left_low).min(right_high - right_low);
+    if overlap <= 0.0 || overlap < COEXIST_OVERLAP * shorter {
+        return false;
+    }
+    let inside = |group: &[usize]| {
+        group
+            .iter()
+            .filter(|&&i| {
+                let centre = boxes[i].y0.midpoint(boxes[i].y1);
+                (low..=high).contains(&centre)
+            })
+            .count()
+    };
+    inside(left) >= COEXIST_LINES && inside(right) >= COEXIST_LINES
 }
 
 /// Position in `idx` (sorted left-to-right here) at which the widest
@@ -685,8 +815,15 @@ fn column_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> 
     best.map(|(pos, _)| pos)
 }
 
-/// Recursive XY-cut: split on the widest row gap, else on the widest column
-/// gap, else emit the indices as one leaf block sorted top-to-bottom.
+/// Recursive XY-cut. When a column gap runs through the whole region and
+/// the two sides stand side by side (see [`columns_coexist`]), only a row
+/// gap that splits margin lines (see [`margin_runs`]) off its top or bottom
+/// is taken before it (paragraph gaps that happen to line up across columns
+/// must not cut the columns into bands). When such a column gap appears
+/// only once those margin lines are left out, the row gap that splits them
+/// off is taken first. Otherwise split on the widest row gap, else on the
+/// widest column gap, else emit the indices as one leaf block sorted
+/// top-to-bottom.
 fn xy_cut(
     boxes: &[BBox],
     mut idx: Vec<usize>,
@@ -695,7 +832,20 @@ fn xy_cut(
     out: &mut Vec<Vec<usize>>,
 ) {
     if idx.len() > 1 && depth < MAX_DEPTH {
-        if let Some(at) = row_cut(boxes, &mut idx, params.row_gap) {
+        let cut = column_cut(boxes, &mut idx, params.column_gap);
+        let has_column = cut.is_some_and(|at| columns_coexist(boxes, &idx, at));
+        let row = if has_column {
+            spanning_row_cut(boxes, &mut idx, params.row_gap)
+        } else {
+            let masked = masked_column_cut(boxes, &mut idx, params.column_gap);
+            let margin = if masked {
+                spanning_row_cut(boxes, &mut idx, params.row_gap)
+            } else {
+                None
+            };
+            margin.or_else(|| row_cut(boxes, &mut idx, params.row_gap))
+        };
+        if let Some(at) = row {
             let lower = idx.split_off(at);
             xy_cut(boxes, idx, depth + 1, params, out);
             xy_cut(boxes, lower, depth + 1, params, out);
@@ -714,11 +864,13 @@ fn xy_cut(
 
 /// Order lines for reading with a recursive XY-cut over their boxes and set
 /// `column` to the index of the leaf block each line ends up in. Rows split
-/// on vertical whitespace wider than `ROW_GAP` median line heights, then
+/// on vertical whitespace wider than `ROW_GAP` median line heights and
 /// columns on horizontal whitespace wider than `COLUMN_GAP` median
 /// character widths (floored at 0.5 % of `page_width` against degenerate
 /// character widths). Lines without a finite box, and lines beyond
-/// `MAX_LINES`, keep their order and form one extra block at the end.
+/// `MAX_LINES`, keep their order and form one extra block at the end. A
+/// column split through a whole region wins over any row split except one
+/// that separates spanning lines at its top or bottom.
 pub fn order_lines(lines: Vec<Line>, page_width: f32) -> Vec<Line> {
     let mut placed: Vec<(Line, BBox)> = Vec::new();
     let mut loose: Vec<Line> = Vec::new();
@@ -1123,6 +1275,137 @@ mod tests {
         assert!(lines[7].starts_with("page footer"));
         let tail = "goes here\n\npage footer with the running title and the page number";
         assert!(page.text.ends_with(tail));
+    }
+
+    #[test]
+    fn aligned_paragraph_gaps_do_not_cut_columns_into_bands() {
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 0..8u16 {
+            let gap = if k > 3 { 20.0 } else { 0.0 };
+            let y0 = 700.0 - 18.0 * f32::from(k) - gap;
+            let right = format!("right row {k} of the two column body text goes here");
+            spans.push(span(&right, 320.0, y0, 560.0, y0 + 10.0, seq));
+            seq += 1;
+            if k == 5 {
+                spans.push(sized("Heading 5", 50.0, y0, 130.0, y0 + 12.0, 12.0, seq));
+            } else {
+                let left = format!("left row {k} of the two column body text goes here");
+                spans.push(span(&left, 50.0, y0, 290.0, y0 + 10.0, seq));
+            }
+            seq += 1;
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 16);
+        for (k, line) in lines[..8].iter().enumerate() {
+            if k == 5 {
+                assert_eq!(*line, "Heading 5");
+            } else {
+                assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+            }
+        }
+        for (k, line) in lines[8..].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+        let paragraph = "row 3 of the two column body text goes here\n\nleft row 4 ";
+        assert!(page.text.contains(paragraph));
+        assert!(page.text.contains("goes here\n\nright row 0 of"));
+    }
+
+    #[test]
+    fn running_head_and_gutter_page_number_frame_the_columns() {
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        spans.push(span(
+            "Running head of the paper that spans the full text width",
+            50.0,
+            750.0,
+            560.0,
+            760.0,
+            seq,
+        ));
+        seq += 1;
+        for k in 0..6u16 {
+            let gap = if k > 2 { 20.0 } else { 0.0 };
+            let y0 = 700.0 - 18.0 * f32::from(k) - gap;
+            let right = format!("right row {k} of the two column body text goes here");
+            spans.push(span(&right, 320.0, y0, 560.0, y0 + 10.0, seq));
+            let left = format!("left row {k} of the two column body text goes here");
+            spans.push(span(&left, 50.0, y0, 290.0, y0 + 10.0, seq + 1));
+            seq += 2;
+        }
+        spans.push(span("8", 300.0, 60.0, 312.0, 70.0, seq));
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 14);
+        assert!(lines[0].starts_with("Running head"));
+        for (k, line) in lines[1..7].iter().enumerate() {
+            assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+        }
+        for (k, line) in lines[7..13].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+        assert_eq!(lines[13], "8");
+        assert!(page.text.ends_with("goes here\n\n8"));
+    }
+
+    #[test]
+    fn right_aligned_heading_above_left_prose_is_read_first() {
+        let mut spans = Vec::new();
+        for k in 0..6u16 {
+            let y0 = 600.0 - 18.0 * f32::from(k);
+            let text = format!("prose row {k} of the single column body text");
+            spans.push(span(&text, 50.0, y0, 300.0, y0 + 10.0, u32::from(k)));
+        }
+        spans.push(span("Right heading", 400.0, 700.0, 560.0, 710.0, 6));
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0], "Right heading");
+        for (k, line) in lines[1..].iter().enumerate() {
+            assert!(line.starts_with(&format!("prose row {k} ")), "{line}");
+        }
+    }
+
+    #[test]
+    fn columns_coexist_needs_vertical_overlap_and_two_lines_each() {
+        let b = |x0: f32, y0: f32, x1: f32| BBox {
+            x0,
+            y0,
+            x1,
+            y1: y0 + 10.0,
+        };
+        // Side by side: two lines per side at the same heights.
+        let side = [
+            b(50.0, 700.0, 290.0),
+            b(50.0, 682.0, 290.0),
+            b(320.0, 700.0, 560.0),
+            b(320.0, 682.0, 560.0),
+        ];
+        assert!(columns_coexist(&side, &[0, 1, 2, 3], 2));
+        // Stacked: the right block sits wholly above the left one.
+        let stacked = [
+            b(50.0, 600.0, 290.0),
+            b(50.0, 582.0, 290.0),
+            b(400.0, 700.0, 560.0),
+            b(400.0, 682.0, 560.0),
+        ];
+        assert!(!columns_coexist(&stacked, &[0, 1, 2, 3], 2));
+        // Overlapping, but the right side has a single line.
+        let single = [
+            b(50.0, 700.0, 290.0),
+            b(50.0, 682.0, 290.0),
+            b(320.0, 691.0, 560.0),
+        ];
+        assert!(!columns_coexist(&single, &[0, 1, 2], 2));
+        assert!(!columns_coexist(&side, &[0, 1, 2, 3], 0));
     }
 
     #[test]

@@ -230,6 +230,17 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         meta.provenance
             .insert("arxiv_id".to_string(), "first_page:arxiv".to_string());
     }
+    // arXiv's own DOI for the preprint (`10.48550/arXiv.<id>`) also names it,
+    // whether or not that DOI became `doi` above: fill `arxiv_id` from it
+    // when page 1 carries one and nothing else already has.
+    if meta.arxiv_id.is_none()
+        && let Some(page) = first_page
+        && let Some(id) = page1_arxiv_doi_id(page)
+    {
+        meta.arxiv_id = Some(id);
+        meta.provenance
+            .insert("arxiv_id".to_string(), "doi".to_string());
+    }
 
     // Venue from Subject when it is not merely a copy of the title.
     if let Some(subject) = info
@@ -632,12 +643,40 @@ fn in_header_footer(page: &PageText, line: &Line) -> bool {
     line.bbox.is_some_and(|b| b.y0 >= top || b.y1 <= bottom)
 }
 
+/// Prefix of arXiv's own DOI for a preprint (`10.48550/arXiv.<id>`, the DOI
+/// arXiv assigns to every submission), matched case-insensitively.
+const ARXIV_DOI_PREFIX: &str = "10.48550/arxiv.";
+
+/// The arXiv id embedded in `doi` when it is arXiv's own DOI for the
+/// preprint (`10.48550/arXiv.<id>`, any case); `None` for a publisher's DOI.
+fn arxiv_id_from_doi(doi: &str) -> Option<&str> {
+    let prefix = doi.get(..ARXIV_DOI_PREFIX.len())?;
+    if prefix.eq_ignore_ascii_case(ARXIV_DOI_PREFIX) {
+        Some(&doi[ARXIV_DOI_PREFIX.len()..])
+    } else {
+        None
+    }
+}
+
+/// True when `doi` is arXiv's own DOI for the preprint rather than a
+/// publisher's DOI for a copy of it.
+fn is_arxiv_doi(doi: &str) -> bool {
+    arxiv_id_from_doi(doi).is_some()
+}
+
 /// The paper's own DOI on page 1 with its provenance.
 ///
 /// A DOI in the running header or footer band (the paper's own DOI in ACM,
 /// IEEE and Springer layouts) wins with `first_page:doi-header-footer`; then
 /// a DOI on a line that labels it (`DOI`, `doi.org`); then the first DOI in
-/// reading order, both with `first_page:doi`.
+/// reading order, both with `first_page:doi`. arXiv's own DOI for the
+/// preprint (`10.48550/arXiv.<id>`) never wins by the header/footer or
+/// label rules: a paper that is also published elsewhere (ACM, IEEE,
+/// Springer...) prints that publisher's DOI on the same page, and it always
+/// describes the copy being read while the arXiv DOI merely names the
+/// preprint. When no other DOI has that evidence, the arXiv DOI outranks a
+/// bare DOI in running text (usually a citation in the abstract), which is
+/// used only when page 1 carries no arXiv DOI at all.
 fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
     let found: Vec<(usize, String)> = (0..page.lines.len())
         .filter_map(|i| line_doi(page, i).map(|doi| (i, doi)))
@@ -650,19 +689,40 @@ fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
         in_header_footer(page, &page.lines[i])
             && page.lines[i].text.split_whitespace().count() <= 12
     };
-    if let Some((_, doi)) = found.iter().find(|(i, _)| furniture(*i) && labelled(*i)) {
+    let candidates: Vec<(usize, String)> = found
+        .iter()
+        .filter(|(_, doi)| !is_arxiv_doi(doi))
+        .cloned()
+        .collect();
+    if let Some((_, doi)) = candidates
+        .iter()
+        .find(|(i, _)| furniture(*i) && labelled(*i))
+    {
         return Some((doi.clone(), "first_page:doi-header-footer"));
     }
-    if let Some((_, doi)) = found.iter().find(|(i, _)| labelled(*i)) {
+    if let Some((_, doi)) = candidates.iter().find(|(i, _)| labelled(*i)) {
         return Some((doi.clone(), "first_page:doi"));
     }
-    if let Some((_, doi)) = found.iter().find(|(i, _)| furniture(*i)) {
+    if let Some((_, doi)) = candidates.iter().find(|(i, _)| furniture(*i)) {
         return Some((doi.clone(), "first_page:doi-header-footer"));
     }
-    found
+    // No positive evidence for a publisher DOI: arXiv's own DOI names this
+    // very paper, while a bare DOI in running text is usually a citation.
+    if let Some((_, doi)) = found.iter().find(|(_, doi)| is_arxiv_doi(doi)) {
+        return Some((doi.clone(), "first_page:doi"));
+    }
+    candidates
         .into_iter()
         .next()
         .map(|(_, doi)| (doi, "first_page:doi"))
+}
+
+/// The arXiv id inside the first `10.48550/arXiv.<id>` DOI printed anywhere
+/// on page 1, whether or not that DOI became [`page1_doi`]'s result.
+fn page1_arxiv_doi_id(page: &PageText) -> Option<String> {
+    (0..page.lines.len())
+        .filter_map(|i| line_doi(page, i))
+        .find_map(|doi| arxiv_id_from_doi(&doi).map(str::to_string))
 }
 
 /// First arXiv identifier (new or old style) that follows an `arXiv` marker.
@@ -2002,6 +2062,96 @@ mod tests {
         assert_eq!(meta.title.as_deref(), Some("Learning Widgets at Scale"));
         assert_eq!(author_names(&meta), vec!["Jane Doe", "John Smith"]);
         assert_eq!(meta.provenance["authors"], "first_page:authors");
+    }
+
+    /// arXiv:2410.19245 and similar: an ACM camera-ready hosted on arXiv
+    /// prints both the ACM footer DOI and arXiv's own DOI for the preprint
+    /// (`10.48550/arXiv.<id>`), on top of the usual arXiv margin stamp. The
+    /// publisher's DOI must win; arXiv's own DOI never outranks it.
+    #[test]
+    fn acm_footer_doi_wins_over_arxiv_own_doi() {
+        let page = page_at(&[
+            ("arXiv:2410.19245v2 [cs.CL] 3 Nov 2024", 8.0, 775.0),
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("University of Somewhere", 9.0, 658.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+            ("KDD '24, August 2024, Anchorage, AK, USA", 7.0, 70.0),
+            ("© 2024 Copyright held by owner/author.", 7.0, 60.0),
+            ("DOI: 10.48550/arXiv.2410.19245", 7.0, 50.0),
+            ("https://doi.org/10.1145/3744916.3773221", 7.0, 40.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1145/3744916.3773221"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi-header-footer");
+        // The bare arXiv stamp is untouched by this rule and already supplies
+        // arxiv_id, version suffix and all.
+        assert_eq!(meta.arxiv_id.as_deref(), Some("2410.19245v2"));
+        assert_eq!(meta.provenance["arxiv_id"], "first_page:arxiv");
+    }
+
+    /// A bare DOI cited in the abstract carries no evidence that it is the
+    /// paper's own; arXiv's own DOI in the footer names this paper and wins.
+    #[test]
+    fn arxiv_own_doi_wins_over_a_doi_cited_in_the_abstract() {
+        let page = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            (
+                "Building on the widget corpus 10.1000/xyz123 we propose sparse widgets and show gains.",
+                9.0,
+                628.0,
+            ),
+            ("https://doi.org/10.48550/arXiv.2410.19245", 7.0, 50.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arXiv.2410.19245"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi");
+    }
+
+    /// When arXiv's own DOI is the only one printed on page 1 (no publisher
+    /// copy), it is kept as `doi`, and its id part fills `arxiv_id` since
+    /// nothing else on the page does: here the DOI wraps across the footer's
+    /// two lines, so the plain arXiv-stamp scan (`first_page:arxiv`) never
+    /// sees a complete id and the fallback from `doi` is what fills it.
+    #[test]
+    fn arxiv_own_doi_is_kept_and_fills_arxiv_id_when_it_is_the_only_doi() {
+        let page = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+            ("DOI: 10.48550/arXiv.", 7.0, 50.0),
+            ("2410.19245", 7.0, 40.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arXiv.2410.19245"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi");
+        assert_eq!(meta.arxiv_id.as_deref(), Some("2410.19245"));
+        assert_eq!(meta.provenance["arxiv_id"], "doi");
+    }
+
+    #[test]
+    fn arxiv_doi_prefix_matched_case_insensitively() {
+        assert_eq!(
+            arxiv_id_from_doi("10.48550/arXiv.2410.19245"),
+            Some("2410.19245")
+        );
+        assert_eq!(
+            arxiv_id_from_doi("10.48550/ARXIV.2410.19245"),
+            Some("2410.19245")
+        );
+        assert_eq!(
+            arxiv_id_from_doi("10.48550/arxiv.2410.19245"),
+            Some("2410.19245")
+        );
+        assert!(is_arxiv_doi("10.48550/arXiv.2410.19245"));
+        assert_eq!(arxiv_id_from_doi("10.1145/3744916.3773221"), None);
+        assert!(!is_arxiv_doi("10.1145/3744916.3773221"));
+        // Shorter than the prefix: no panic, no match.
+        assert_eq!(arxiv_id_from_doi("10.48550/ar"), None);
     }
 
     #[test]

@@ -45,6 +45,9 @@ enum Style {
     /// The entries segment like author-year ones and take the printed
     /// numbers as labels.
     Detached,
+    /// `12 Q. Zhang, ...`: a bare number and a space (RSC `Notes and
+    /// references`), numbered consecutively from 1.
+    Bare,
 }
 
 /// One line of the reference section with the layout evidence needed for
@@ -239,12 +242,13 @@ const COMPOUND_HEADS: &[&str] = &[
 
 /// A reference-list heading: `References`, `7. References`, `A Bibliography`,
 /// `Supplementary References`, `References for the Appendices`,
-/// `References and Notes`.
+/// `References and Notes`, and the RSC `Notes and references` (either
+/// order in any case).
 fn heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"^\s*(?:(?:\d+|[IVX]+)\.?\s*|[A-Z]\.?\s+)?(?:(?:Supplementary|Supplemental|Additional|Appendix|Further|Extended|Online|SUPPLEMENTARY|SUPPLEMENTAL|ADDITIONAL|APPENDIX)\s+)?(?:References|REFERENCES|Reference List|Bibliography|BIBLIOGRAPHY|Works Cited|WORKS CITED|Literature Cited|LITERATURE CITED)(?:\s+(?:for|of|to|and|in|FOR|OF|TO|AND|IN)\s+[\p{L}\s’'\-]{1,40})?\s*:?\s*$",
+            r"^\s*(?:(?:\d+|[IVX]+)\.?\s*|[A-Z]\.?\s+)?(?:(?:Supplementary|Supplemental|Additional|Appendix|Further|Extended|Online|SUPPLEMENTARY|SUPPLEMENTAL|ADDITIONAL|APPENDIX)\s+)?(?:(?i:notes\s+and\s+references|references\s+and\s+notes)|References|REFERENCES|Reference List|Bibliography|BIBLIOGRAPHY|Works Cited|WORKS CITED|Literature Cited|LITERATURE CITED)(?:\s+(?:for|of|to|and|in|FOR|OF|TO|AND|IN)\s+[\p{L}\s’'\-]{1,40})?\s*:?\s*$",
         )
         .expect("valid regex")
     })
@@ -303,6 +307,32 @@ fn entry_start_re() -> &'static Regex {
 fn bracket_label_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\s*\[(\d+)\]\s*").expect("valid regex"))
+}
+
+/// A bare-number label (RSC): `12 Q. Zhang, ...`. Group 1 is the number;
+/// an uppercase letter must follow.
+fn bare_number_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(\d{1,4})\s+\p{Lu}").expect("valid regex"))
+}
+
+/// A bare number followed by any text (`8 arXiV, https://...`). Group 1 is
+/// the number.
+fn bare_number_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(\d{1,4})\s+\S").expect("valid regex"))
+}
+
+/// Printed number of a line opening with a bare number ([`bare_number_re`]).
+fn bare_number(text: &str) -> Option<u32> {
+    let caps = bare_number_re().captures(text)?;
+    caps.get(1)?.as_str().parse::<u32>().ok()
+}
+
+/// The first entry of an RSC list: `1 Q. Zhang, ...`.
+fn rsc_first_entry_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*1\s+\p{Lu}\.").expect("valid regex"))
 }
 
 fn dot_label_re() -> &'static Regex {
@@ -681,13 +711,14 @@ fn detached_run(lines: &[SectionLine]) -> bool {
     false
 }
 
-/// Could `text` be the first line of a reference entry: a numbered label,
-/// a surname-first or initials-first author list, or reference evidence (a
-/// year, DOI, arXiv id or URL)?
+/// Could `text` be the first line of a reference entry: a numbered label
+/// (`1 Q. Zhang` for RSC), a surname-first or initials-first author list,
+/// or reference evidence (a year, DOI, arXiv id or URL)?
 fn opens_entry(text: &str) -> bool {
     bracket_label_re().is_match(text)
         || dot_label_re().is_match(text)
         || paren_label_re().is_match(text)
+        || rsc_first_entry_re().is_match(text)
         || author_start_re().is_match(text)
         || initials_start_re().is_match(text)
         || has_reference_evidence(text)
@@ -796,7 +827,8 @@ fn numbered_run_follows(pages: &[PageText], pos: usize, first_line: usize) -> bo
 
 /// Every reference-list heading in document order: lines matching
 /// [`heading_re`] (`References`, `Bibliography`, `Supplementary References`,
-/// `References for the Appendices`, ...) that a reference entry follows
+/// `References for the Appendices`, `Notes and references`, ...) that a
+/// reference entry follows
 /// within a few lines. When no heading qualifies, the last heading line is
 /// taken as printed; without any heading, a `[1] ... [2] ... [3]` run opens
 /// a heading-less list (see [`headingless_section`]).
@@ -1019,12 +1051,15 @@ fn section_lines(
     lines
 }
 
-/// Printed number and label of a numbered entry start, per style.
+/// Printed number and label of a numbered entry start, per style. A bare
+/// number (`12 Q. Zhang`) labels as `12` and must be followed by an
+/// uppercase letter here (see [`entry_label`] for the lowercase case).
 fn numbered_label(style: Style, text: &str) -> Option<(u32, String)> {
     let re = match style {
         Style::Bracket => bracket_label_re(),
         Style::Dot => dot_label_re(),
         Style::Paren => paren_label_re(),
+        Style::Bare => bare_number_label_re(),
         Style::AuthorYear | Style::Detached => return None,
     };
     let caps = re.captures(text)?;
@@ -1033,16 +1068,65 @@ fn numbered_label(style: Style, text: &str) -> Option<(u32, String)> {
         Style::Bracket => format!("[{number}]"),
         Style::Dot => format!("{number}."),
         Style::Paren => format!("{number})"),
+        Style::Bare => number.to_string(),
         Style::AuthorYear | Style::Detached => return None,
     };
     Some((number, label))
+}
+
+/// Number and label of the entry that `text` starts in a numbered list
+/// whose next number is `expected` (`None` before the first entry): a label
+/// from `expected` to `expected + 2`. A bare number followed by a lowercase
+/// word (`8 arXiV, ...`) starts an entry only when it is exactly the
+/// expected one.
+fn entry_label(style: Style, text: &str, expected: Option<u32>) -> Option<(u32, String)> {
+    if let Some((number, label)) = numbered_label(style, text) {
+        return expected
+            .is_none_or(|e| (e..=e + 2).contains(&number))
+            .then_some((number, label));
+    }
+    if style == Style::Bare
+        && let Some(e) = expected
+        && bare_number(text) == Some(e)
+    {
+        return Some((e, e.to_string()));
+    }
+    None
+}
+
+/// Number of content lines after the `1` line of a bare-number list within
+/// which `2` and `3` must follow.
+const BARE_RUN_LOOKAHEAD: usize = 40;
+
+/// Does a bare-number list start here: a `1 Q. Zhang` line among the first
+/// three lines, then `2` and `3` lines in order within
+/// [`BARE_RUN_LOOKAHEAD`] lines?
+fn bare_run(lines: &[SectionLine]) -> bool {
+    let Some(first) = lines
+        .iter()
+        .take(3)
+        .position(|line| numbered_label(Style::Bare, &line.text).is_some_and(|(n, _)| n == 1))
+    else {
+        return false;
+    };
+    let mut expected: u32 = 2;
+    for line in lines.iter().skip(first + 1).take(BARE_RUN_LOOKAHEAD) {
+        if bare_number(&line.text) == Some(expected) {
+            expected += 1;
+            if expected > 3 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Numbering style from the first three lines (the first line may be a
 /// stray fragment or a column artefact). Bare `[n]` lines are labels the
 /// layout pass detached from their entries: they are no evidence of the
 /// bracket style, but a run of them ([`detached_run`]) numbers the list
-/// ([`Style::Detached`]).
+/// ([`Style::Detached`]). A bare-number run `1`, `2`, `3`
+/// ([`bare_run`]) is an RSC list ([`Style::Bare`]).
 fn detect_style(lines: &[SectionLine]) -> Style {
     let candidates = lines
         .iter()
@@ -1058,6 +1142,9 @@ fn detect_style(lines: &[SectionLine]) -> Style {
         if paren_label_re().is_match(&line.text) {
             return Style::Paren;
         }
+    }
+    if bare_run(lines) {
+        return Style::Bare;
     }
     if detached_run(lines) {
         return Style::Detached;
@@ -1133,7 +1220,7 @@ fn list_body(
             }
             lines.retain(|line| !bare_label_re().is_match(&line.text));
         }
-        Style::Bracket | Style::Dot | Style::Paren => {
+        Style::Bracket | Style::Dot | Style::Paren | Style::Bare => {
             lines = drop_foreign_column_lines(lines, style);
         }
     }
@@ -1145,14 +1232,27 @@ fn list_body(
         .join("\n");
     // The list ends at the first end heading. Everything after it (an
     // appendix, tables, biographies) is set at the entry-start x and must
-    // not feed the indent-level statistics of the list itself.
-    let cut = lines
-        .iter()
-        .position(|line| is_end_heading(line, style, median));
-    let end = cut.map(|k| (lines[k].page, lines[k].line));
-    if let Some(k) = cut {
-        lines.truncate(k);
+    // not feed the indent-level statistics of the list itself. A numbered
+    // list interrupted by a biography, caption or table resumes at its
+    // next expected label (see [`resume_index`]).
+    let mut kept: Vec<SectionLine> = Vec::with_capacity(lines.len());
+    let mut end: Option<(u32, usize)> = None;
+    let mut k = 0usize;
+    while k < lines.len() {
+        if !is_end_heading(&lines[k], style, median) {
+            kept.push(lines[k].clone());
+            k += 1;
+            continue;
+        }
+        let expected = next_expected_label(&kept, style);
+        if let Some(next) = resume_index(&lines, k, style, expected) {
+            k = next;
+        } else {
+            end = Some((lines[k].page, lines[k].line));
+            break;
+        }
     }
+    let lines = kept;
     let labels: Vec<u32> = detached
         .into_iter()
         .filter(|&(page, line, _)| end.is_none_or(|e| (page, line) < e))
@@ -1165,6 +1265,57 @@ fn list_body(
         end,
         labels,
     }
+}
+
+/// The number the next entry of the numbered list `lines` would carry (as
+/// [`segment_numbered`] reads the labels), or `None` before any label.
+fn next_expected_label(lines: &[SectionLine], style: Style) -> Option<u32> {
+    let mut expected: Option<u32> = None;
+    for line in lines {
+        if let Some((number, _)) = entry_label(style, &line.text, expected) {
+            expected = Some(number + 1);
+        }
+    }
+    expected
+}
+
+/// Where a `[n]` / `n.` / `n)` list cut at `lines[cut]` resumes: the index
+/// of the next line labelled `expected`, when the cut is not a section
+/// heading (`Appendix`, `Acknowledgments`, ...) but an interruption (an
+/// author biography, a caption, a table) and no heading and no label below
+/// `expected` (an appendix numbering its own items) comes before it
+/// (arXiv:2508.19485 sets biographies between entries 48 and 49). `None`
+/// ends the list at the cut.
+fn resume_index(
+    lines: &[SectionLine],
+    cut: usize,
+    style: Style,
+    expected: Option<u32>,
+) -> Option<usize> {
+    if !matches!(style, Style::Bracket | Style::Dot | Style::Paren) {
+        return None;
+    }
+    let expected = expected?;
+    let is_heading = |line: &SectionLine| {
+        line.text.chars().count() <= 80 && end_heading_re().is_match(&line.text)
+    };
+    if is_heading(lines.get(cut)?) {
+        return None;
+    }
+    for (k, line) in lines.iter().enumerate().skip(cut + 1) {
+        if is_heading(line) {
+            return None;
+        }
+        if let Some((number, _)) = numbered_label(style, &line.text) {
+            if number == expected {
+                return Some(k);
+            }
+            if number < expected {
+                return None;
+            }
+        }
+    }
+    None
 }
 
 /// Label the entries of a list whose `[n]` labels arrived on lines of
@@ -1193,7 +1344,7 @@ fn segment_list(
             assign_detached_labels(&mut entries, &body.labels);
             entries
         }
-        Style::Bracket | Style::Dot | Style::Paren => {
+        Style::Bracket | Style::Dot | Style::Paren | Style::Bare => {
             segment_numbered(&body.lines, body.style, &body.context)
         }
     }
@@ -1351,22 +1502,22 @@ fn append_continuation(entries: &mut [ReferenceEntry], text: &str, context: &str
 }
 
 /// Split the numbered list `lines` (already cut at the end heading) into
-/// entries: every `[n]` / `n.` / `n)` label in sequence starts one.
+/// entries: every `[n]` / `n.` / `n)` / bare `n` label in sequence starts
+/// one (see [`entry_label`]).
 fn segment_numbered(lines: &[SectionLine], style: Style, context: &str) -> Vec<ReferenceEntry> {
     let mut entries: Vec<ReferenceEntry> = Vec::new();
     let mut expected: Option<u32> = None;
     for line in lines {
-        if let Some((number, label)) = numbered_label(style, &line.text) {
-            let starts = expected.is_none_or(|e| (e..=e + 2).contains(&number));
-            if starts {
-                push_entry(&mut entries, Some(label), &line.text, line.page);
-                expected = Some(number + 1);
-                continue;
-            }
-            // A list that restarts at 1 is a second (supplementary) list.
-            if number == 1 && expected.is_some_and(|e| e > 3) {
-                break;
-            }
+        if let Some((number, label)) = entry_label(style, &line.text, expected) {
+            push_entry(&mut entries, Some(label), &line.text, line.page);
+            expected = Some(number + 1);
+            continue;
+        }
+        // A list that restarts at 1 is a second (supplementary) list.
+        if let Some((1, _)) = numbered_label(style, &line.text)
+            && expected.is_some_and(|e| e > 3)
+        {
+            break;
         }
         append_continuation(&mut entries, &line.text, context);
     }
@@ -1580,9 +1731,63 @@ fn apply_evidence_guard(entries: Vec<ReferenceEntry>, context: &str) -> Vec<Refe
     out
 }
 
+/// A surname-first author list closed by a parenthesised year:
+/// `Berlinet, A. & Thomas-Agnan, C. (2003)`, `Chiu, T. Y. M., Leonard, T. &
+/// Tsui, K.-W. (1996)`, `Omi, T., Aihara, K., et al. (2019)`.
+fn author_year_signature_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+(?:\s\p{Lu}[\p{L}'’\-]+)*,\s?\p{Lu}\.(?:\s?-?\p{L}\.)*(?:(?:,\s|,?\s&\s|,?\sand\s)(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+(?:\s\p{Lu}[\p{L}'’\-]+)*,\s?\p{Lu}\.(?:\s?-?\p{L}\.)*)*(?:,?\s(?:&\s)?et\s+al\.)?,?\s\((?:1[5-9]|20)\d{2}[a-z]?\)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Two surname-first names in a comma-separated list, the second followed
+/// by a comma, `&`, `and` or the year: `Elyahu, Y., Hekselman, I., ...`
+/// (an author list too long for its year to fit on the first line).
+fn author_list_signature_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+(?:\s\p{Lu}[\p{L}'’\-]+)*,\s?\p{Lu}\.(?:\s?-?\p{L}\.)*,\s(?:(?:&|and)\s)?(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+(?:\s\p{Lu}[\p{L}'’\-]+)*,\s?\p{Lu}\.(?:\s?-?\p{L}\.)*(?:,|\s&|\sand\b|\s\()",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// An organisation or name list closed by a period and followed by the
+/// year sentence (ACL / AAAI): `Alibaba Cloud Qwen Team. 2025a.`,
+/// `Anthropic. 2025b. Claude 4 Sonnet`, `(Maxwell-Jia), M. J. 2024.`,
+/// `xAI (Elon Musk’s AI Company). 2025.`.
+fn organisation_start_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:\p{Lu}|\p{Ll}+\p{Lu}|\(\p{Lu})[^.]{1,80}\.(?:\s\p{Lu}\.)*\s(?:19|20)\d{2}[a-z]?\.(?:\s|$)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Does `text` end a sentence: a final period (after any trailing
+/// replacement characters, `�`) that closes a word rather than an initial or
+/// abbreviation?
+fn ends_sentence(text: &str) -> bool {
+    let trimmed = text.trim_end_matches(|c: char| c.is_whitespace() || c == '\u{FFFD}');
+    trimmed
+        .strip_suffix('.')
+        .is_some_and(|head| !period_is_abbreviation(trimmed, head.len()))
+}
+
 /// Split the author-year list `lines` (already cut at the end heading) into
 /// entries, from the section's hanging-indent levels when it has them and
-/// from the name pattern otherwise.
+/// from the name pattern otherwise. A line that opens with a surname-first
+/// author list and its year ([`author_year_signature_re`],
+/// [`author_list_signature_re`]) starts an entry after a sentence end
+/// whatever the layout says (double-spaced lists, pages whose margins
+/// differ).
 fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEntry> {
     let layout = layout_starts(lines);
     let mut entries: Vec<ReferenceEntry> = Vec::new();
@@ -1594,10 +1799,12 @@ fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEnt
             && entries
                 .last()
                 .is_some_and(|e| e.raw.trim_end().ends_with('.'));
-        let starts = if entries.is_empty() {
-            true
-        } else {
-            match layout[i] {
+        let signature = author_year_signature_re().is_match(&line.text)
+            || author_list_signature_re().is_match(&line.text);
+        let sentence_done = entries.last().is_some_and(|e| ends_sentence(&e.raw));
+        let starts = entries.is_empty()
+            || (signature && sentence_done)
+            || match layout[i] {
                 Some(true) => can_start || handle,
                 Some(false) => false,
                 None => {
@@ -1605,13 +1812,13 @@ fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEnt
                         || (can_start
                             && author_start_re().is_match(&line.text)
                             && entries.last().is_some_and(|e| ends_like_entry(&e.raw)))
-                        || (initials_start_re().is_match(&line.text)
+                        || ((initials_start_re().is_match(&line.text)
+                            || organisation_start_re().is_match(&line.text))
                             && entries
                                 .last()
                                 .is_some_and(|e| ends_like_whole_entry(&e.raw)))
                 }
-            }
-        };
+            };
         if starts {
             push_entry(&mut entries, None, &line.text, line.page);
         } else {
@@ -2363,6 +2570,15 @@ fn comma_style(masked: &str) -> Option<CommaSplit> {
     if lower.starts_with("and ") || lower.starts_with("& ") || year_lead_re().is_match(stripped) {
         return None;
     }
+    // INFORMS / Springer author-year: the last author stands before the
+    // parenthesised year (`Kempe D, Kleinberg R (2008) Title`), so the part
+    // is still an author, not a title.
+    if let Some(paren) = year_paren_re().find(stripped) {
+        let prefix = stripped[..paren.start()].trim();
+        if !prefix.is_empty() && is_name_part(prefix) {
+            return None;
+        }
+    }
     // A name followed by a period (`Jones C. Title`, `A. B. Smith. Title`)
     // is the last author of a period-delimited entry, not a title.
     let stop = title_end(part);
@@ -2461,6 +2677,87 @@ fn lncs_authors_end(text: &str) -> Option<usize> {
     text[..found.end()].rfind(':')
 }
 
+/// Royal Society of Chemistry style has no title: `Q. Zhang, E. Uchaker
+/// and G. Cao, Chem. Soc. Rev., 2013, 42, 3127–3171.` After an
+/// initials-first author list comes the journal, then a bare year and a
+/// volume as their own comma-delimited parts. Returns the byte range of the
+/// journal part (the author list ends where it starts) and the volume.
+fn titleless_journal(masked: &str) -> Option<(Range<usize>, String)> {
+    let parts = comma_parts(masked);
+    let first = &masked[parts.first()?.clone()];
+    if !initials_first(first) || !is_name_part(first) {
+        return None;
+    }
+    let mut k = 1usize;
+    while k < parts.len() && is_name_part(&masked[parts[k].clone()]) {
+        k += 1;
+    }
+    let journal = parts.get(k)?.clone();
+    let year = masked[parts.get(k + 1)?.clone()].trim();
+    let volume = masked[parts.get(k + 2)?.clone()]
+        .trim()
+        .trim_end_matches('.');
+    if !year_token_re().is_match(year)
+        || volume.is_empty()
+        || !volume.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let text = masked[journal.clone()].trim();
+    if !text.chars().next().is_some_and(char::is_uppercase)
+        || text.contains(['“', '"', '„', '‘'])
+        || text.chars().count() > 80
+        || text
+            .split_whitespace()
+            .any(|w| w.chars().count() >= 4 && w.starts_with(char::is_lowercase))
+    {
+        return None;
+    }
+    Some((journal, volume.to_string()))
+}
+
+/// The no-date token that stands where the year would (`[n. d.]` in ACM,
+/// `(n.d.)` in APA, a bare `n.d.`), with the punctuation and space after it.
+fn no_date_lead_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*[\[(]?n\.\s?d\.[\])]?[.,:]?\s+").expect("valid regex"))
+}
+
+/// A date closing an unquoted title: `Mistral small 3.1, 2025`, `model
+/// card, 04 2025`, `, March 2005.`. Group 1 is the year.
+fn trailing_year_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r",\s*(?:\d{1,2}\s+|\p{Lu}\p{Ll}{2,8}\.?\s+)?((?:19|20)\d{2})[a-z]?\.?$")
+            .expect("valid regex")
+    })
+}
+
+/// `title` without a trailing `, 2025` that repeats the entry's year (the
+/// year sentence of `Title, 2025. Model card` absorbed into the title).
+fn strip_trailing_year(title: &str, year: Option<u16>) -> &str {
+    let Some(year) = year else {
+        return title;
+    };
+    if let Some(caps) = trailing_year_re().captures(title)
+        && let (Some(whole), Some(digits)) = (caps.get(0), caps.get(1))
+        && digits.as_str().parse::<u16>().ok() == Some(year)
+    {
+        let head = title[..whole.start()].trim_end();
+        if !head.is_empty() {
+            return head;
+        }
+    }
+    title
+}
+
+/// A bare printed number before an initials-first author list (RSC
+/// `1 Q. Zhang, ...`) left in `raw` when no numbered label was stripped.
+fn bare_number_lead_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\d{1,4}\s+\p{Lu}\.").expect("valid regex"))
+}
+
 /// Body of the entry without the printed label.
 fn strip_label(entry: &ReferenceEntry) -> &str {
     let raw = entry.raw.trim();
@@ -2469,6 +2766,11 @@ fn strip_label(entry: &ReferenceEntry) -> &str {
         && let Some(rest) = raw.strip_prefix(label)
     {
         return rest.trim_start();
+    }
+    if bare_number_lead_re().is_match(raw) {
+        return raw
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start();
     }
     raw
 }
@@ -2511,11 +2813,17 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
     let mut title_start: usize = 0;
     let mut title_limit: Option<usize> = None;
     let mut quoted_title: Option<(Range<usize>, String)> = None;
+    let mut titleless_volume: Option<String> = None;
     if let Some(colon) = lncs_authors_end(&masked) {
         // Springer LNCS: `Surname, I., Other, J.: Title. In: Venue (Year)`.
         authors_end = Some(colon);
         let after = masked[colon + 1..].trim_start();
         title_start = masked.len() - after.len();
+    } else if let Some((journal, volume)) = titleless_journal(&masked) {
+        // RSC: `A. Author and B. Author, Journal, Year, Volume, Pages.`
+        authors_end = Some(journal.start);
+        title_start = journal.start;
+        titleless_volume = Some(volume);
     } else if let Some(split) = comma_style(&masked) {
         authors_end = Some(split.authors_end);
         title_start = split.title_start;
@@ -2565,6 +2873,16 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         }
     }
 
+    // An undated entry puts `[n. d.]` where the year would be; the title
+    // follows it and any later date (`Accessed: ...`) is not the year.
+    if quoted_title.is_none()
+        && titleless_volume.is_none()
+        && let Some(lead) = no_date_lead_re().find(&masked[title_start..])
+    {
+        title_start += lead.end();
+        entry.year = None;
+    }
+
     let Some(end) = authors_end else {
         // No author/title structure: only the numeric evidence is safe to read.
         let (volume, issue, pages) = parse_numbers(&mask_year(&masked, year.as_ref()));
@@ -2586,7 +2904,10 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         entry.authors = vec![handle.as_str().to_string()];
     }
 
-    let rest_start: usize = if let Some((range, text)) = quoted_title {
+    let rest_start: usize = if titleless_volume.is_some() {
+        // The journal part opens the rest; there is no title to report.
+        title_start
+    } else if let Some((range, text)) = quoted_title {
         entry.title = Some(text);
         range.end
     } else {
@@ -2599,6 +2920,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         }
         let title = strip_wrapping_quotes(body[title_start..title_start + stop].trim());
         let title = strip_bracket_descriptor(title);
+        let title = strip_trailing_year(title, entry.year);
         if !title.is_empty() && title.chars().count() <= 500 {
             entry.title = Some(title.to_string());
         }
@@ -2611,7 +2933,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         .filter(|(range, _)| range.start >= rest_start)
         .map(|(range, value)| (range.start - rest_start..range.end - rest_start, *value));
     let (volume, issue, pages) = parse_numbers(&mask_year(rest_masked, year_in_rest.as_ref()));
-    entry.volume = volume;
+    entry.volume = volume.or(titleless_volume);
     entry.issue = issue;
     entry.pages = pages;
 }
@@ -4930,6 +5252,473 @@ mod tests {
         assert_eq!(refs[1].label.as_deref(), Some("Hawkins2016"));
     }
 
+    /// Loop 6 segmentation fixes, each built from the text of an arXiv
+    /// paper whose list the evaluation found mis-segmented.
+    mod loop6_segmentation_tests {
+        use super::*;
+
+        /// RSC and the other orders and cases of the notes heading.
+        #[test]
+        fn notes_and_references_headings() {
+            for text in [
+                "Notes and references",
+                "Notes and References",
+                "NOTES AND REFERENCES",
+                "References and notes",
+                "References and Notes",
+            ] {
+                assert!(heading_re().is_match(text), "{text}");
+            }
+            assert!(!heading_re().is_match("Notes and references are below."));
+        }
+
+        /// arXiv:2510.26824: the main paper's RSC list (`Notes and
+        /// references`, entries `1 Q. Zhang, ...` without brackets or
+        /// period) and the supplement's `[n]` list (`References and Notes`)
+        /// are both segmented; `8 arXiV, ...` starts its entry although a
+        /// lowercase word follows the number.
+        #[test]
+        fn rsc_bare_number_list_and_a_bracket_list() {
+            let first = page_of(
+                1,
+                [
+                    "for finetuning our image segmentation model.",
+                    "Notes and references",
+                    "1 Q. Zhang, E. Uchaker, S. L. Candelaria and G. Cao, Chem. Soc.",
+                    "Rev., 2013, 42, 3127–3171.",
+                    "2 C. Liu, F. Li, L.-P. Ma and H.-M. Cheng, Adv. Mater., 2010, 22,",
+                    "E28–E62.",
+                    "3 C. Vogt and B. M. Weckhuysen, Nat. Rev. Chem., 2022, 6, 89–",
+                    "111.",
+                    "4 K. T. Butler, D. W. Davies, H. Cartwright, O. Isayev and",
+                    "A. Walsh, Nature, 2018, 559, 547–555.",
+                    "5 J. J. de Pablo, B. Jones, C. L. Kovacs, V. Ozolins and A. P.",
+                    "Ramirez, Curr. Opin. Solid State Mater. Sci., 2014, 18, 99–117.",
+                    "6 J. Hachmann,",
+                    "R. Olivares-Amaya,",
+                    "S. Atahan-Evrenk,",
+                    "C. Amador-Bedolla, R. S. SÃąnchez-Carrera, A. Gold-Parker,",
+                    "L. Vogt, A. M. Brockway and A. Aspuru-Guzik, J. Phys. Chem.",
+                    "Lett., 2011, 2, 2241–2251.",
+                    "7 A. Jain, S. P. Ong, G. Hautier, W. Chen, W. D. Richards,",
+                    "S. Dacek, S. Cholia, D. Gunter, D. Skinner, G. Ceder and K. a.",
+                    "Persson, APL Mater., 2013, 1, 011002.",
+                    "8 arXiV, https://arxiv.org/, Accessed: 2025-08-11.",
+                    "9 ChemRxiv, https://chemrxiv.org/, Accessed: 2025-08-11.",
+                ]
+                .into_iter()
+                .map(bare_line)
+                .collect(),
+            );
+            let second = page_of(
+                2,
+                [
+                    "References and Notes",
+                    "[1] Mistral AI. Mistral small 3.1, 2025. Model card: https://huggingface.co/mistralai/",
+                    "Mistral-Small-3.1-24B-Instruct-2503.",
+                    "[2] Heegyu Kim, Taeyang Jeon, Seungtaek Choi, Ji Hoon Hong, Dong Won Jeon, Ga-Yeon Baek,",
+                    "Gyeong-Won Kwak, Dong-Hee Lee, Jisu Bae, Chihoon Lee, Yunseo Kim, Seon-Jin Choi,",
+                    "Jin-Seong Park, Sung Beom Cho, and Hyunsouk Cho. Towards fully-automated materials",
+                    "discovery via large-scale synthesis dataset and expert-level llm-as-a-judge, 2025.",
+                    "[3] Google DeepMind. Gemini 2 flash model card, 04 2025. Published April 2025.",
+                ]
+                .into_iter()
+                .map(bare_line)
+                .collect(),
+            );
+            let pages = vec![first, second];
+            let sections = find_reference_sections(&pages);
+            let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
+            assert_eq!(
+                headings,
+                vec!["Notes and references", "References and Notes"]
+            );
+
+            let stop = Some((2, 0));
+            let body = list_body(&pages, &sections[0], stop);
+            assert_eq!(body.style, Style::Bare);
+
+            let (refs, _) = extract_citations(&pages);
+            let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+            assert_eq!(
+                labels,
+                vec![
+                    "1", "2", "3", "4", "5", "6", "7", "8", "9", "[1]", "[2]", "[3]"
+                ]
+            );
+            assert_eq!(
+                refs[0].raw,
+                "1 Q. Zhang, E. Uchaker, S. L. Candelaria and G. Cao, Chem. Soc. Rev., 2013, \
+                 42, 3127–3171."
+            );
+            assert!(
+                refs[2]
+                    .raw
+                    .starts_with("3 C. Vogt and B. M. Weckhuysen, Nat. Rev. Chem.")
+            );
+            assert!(
+                refs[5]
+                    .raw
+                    .starts_with("6 J. Hachmann, R. Olivares-Amaya, S. Atahan-Evrenk,")
+            );
+            assert!(refs[5].raw.ends_with("Lett., 2011, 2, 2241–2251."));
+            assert_eq!(
+                refs[7].raw,
+                "8 arXiV, https://arxiv.org/, Accessed: 2025-08-11."
+            );
+            assert!(refs[9].raw.starts_with("[1] Mistral AI."));
+            let indices: Vec<u32> = refs.iter().map(|r| r.index).collect();
+            assert_eq!(indices, (1..=12).collect::<Vec<u32>>());
+        }
+
+        /// A bare-number run must start at `1` and continue with `2` and `3`:
+        /// a list whose lines merely start with numbers is not RSC.
+        #[test]
+        fn bare_number_style_needs_a_run_from_one() {
+            let section = |texts: &[&str]| -> Vec<SectionLine> {
+                texts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| SectionLine {
+                        page: 1,
+                        line: i,
+                        column: 0,
+                        x0: None,
+                        y0: None,
+                        size: None,
+                        text: (*t).to_string(),
+                    })
+                    .collect()
+            };
+            let rsc = section(&[
+                "1 Q. Zhang, E. Uchaker, S. L. Candelaria and G. Cao, Chem. Soc.",
+                "Rev., 2013, 42, 3127–3171.",
+                "2 C. Liu, F. Li, L.-P. Ma and H.-M. Cheng, Adv. Mater., 2010, 22,",
+                "3 C. Vogt and B. M. Weckhuysen, Nat. Rev. Chem., 2022, 6, 89–",
+            ]);
+            assert_eq!(detect_style(&rsc), Style::Bare);
+            let no_run = section(&[
+                "Smith, J. (2020). A title. Journal 3, 1–2.",
+                "2 Kinds of Things. Publisher, 2019.",
+                "Wang, X. (2021). Another title. Journal 4, 5–6.",
+            ]);
+            assert_eq!(detect_style(&no_run), Style::AuthorYear);
+            // A lowercase word after the number starts only the expected entry.
+            let text = "8 arXiV, https://arxiv.org/, Accessed: 2025-08-11.";
+            assert_eq!(
+                entry_label(Style::Bare, text, Some(8)),
+                Some((8, "8".to_string()))
+            );
+            assert_eq!(entry_label(Style::Bare, text, Some(7)), None);
+            assert_eq!(entry_label(Style::Bare, "111.", Some(4)), None);
+        }
+
+        /// arXiv:2506.23487: a double-spaced author-year list whose first
+        /// page is set at another x than the second page, so that the
+        /// section's indent levels call every first-page line a
+        /// continuation. `Surname, I. ... (year)` lines (and an author
+        /// list too long for its year, `Elyahu, Y., Hekselman, I., ...`)
+        /// start entries after a sentence end regardless; a stray `�` line
+        /// does not hide the sentence end before `Dudley`.
+        #[test]
+        fn author_year_signature_overrides_indent_levels() {
+            // Page 1 is set at x = 90 (the stray `\u{FFFD}` at x = 300); page 2
+            // starts its entries at x = 72 and indents continuations to 84.
+            let first_texts = [
+                "Berlinet, A. & Thomas-Agnan, C. (2003). Reproducing Kernel Hilbert Spaces in Probability and Statistics. Springer",
+                "US.",
+                "Bhatia, R. & Elsner, L. (1994). The hoffman–wielandt inequality in infinite dimensions. Proceedings of the Indian",
+                "Academy of Sciences (Mathematical Sciences) 104, 483–494.",
+                "Chiu, T. Y. M., Leonard, T. & Tsui, K.-W. (1996). The Matrix-Logarithmic Covariance Model. Journal of the",
+                "American Statistical Association 91, 198–210.",
+                "Dryden, I. L., Koloydenko, A. & Zhou, D. (2009). Non-Euclidean statistics for covariance matrices, with applications",
+                "to diffusion tensor imaging. The Annals of Applied Statistics 3, 1102–1123.",
+                "\u{FFFD}",
+                "Dudley, R. M. & Norvaisa, R. (2011). Concrete Functional Calculus. New York, NY: Springer.",
+                "Elyahu, Y., Hekselman, I., Eizenberg-Magar, I., Berner, O., Strominger, I., Schiller, M., Mittal, K., Ne-",
+                "mirovsky, A., Eremenko, E., Vital, A., Simonovsky, E., Chalifa-Caspi, V., Friedman, N., Yeger-Lotem, E.",
+                "& Monsonego, A. (2019). Aging promotes reorganization of the CD4 T cell landscape toward extreme regulatory",
+                "and effector phenotypes. Science Advances 5, eaaw8330.",
+                "Fillard, P., Arsigny, V., Pennec, X., Hayashi, K. M., Thompson, P. M. & Ayache, N. (2007). Measuring brain",
+                "variability by extrapolating sparse tensor fields measured on sulcal lines. Neuroimage 34, 639–650.",
+                "Friston, K. J. (2011). Functional and effective connectivity: a review. Brain Connectivity 1, 13–36.",
+                "Hoff, P. D. & Niu, X. (2012). A covariance regression model. Statistica Sinica , 729–753.",
+                "Hsing, T. & Eubank, R. (2015). Theoretical foundations of functional data analysis, with an introduction to linear",
+                "operators, vol. 997. John Wiley & Sons.",
+            ];
+            let mut lines: Vec<Line> = vec![line_at("References", 0, 72.0, 714.0)];
+            for (i, text) in first_texts.iter().enumerate() {
+                let x0 = if text.starts_with('\u{FFFD}') {
+                    300.0
+                } else {
+                    90.0
+                };
+                lines.push(line_at(text, 0, x0, 700.0 - 14.0 * i as f32));
+            }
+            let first = page_of(1, lines);
+            let second_texts = [
+                "Hu, W., Pan, T., Kong, D. & Shen, W. (2021). Nonparametric matrix response regression with application to brain",
+                "imaging data analysis. Biometrics 77, 1227–1240.",
+                "Kong, D., An, B., Zhang, J. & Zhu, H. (2020). L2rm: Low-rank linear regression models for high-dimensional",
+                "matrix responses. Journal of the American Statistical Association 115, 403–424.",
+                "Kroshnin, A., Spokoiny, V. & Suvorikova, A. (2021). Statistical inference for Bures–Wasserstein barycenters. The",
+                "Annals of Applied Probability 31, 1264–1298.",
+                "Kuchibhotla, A. K. & Chakrabortty, A. (2022). Moving beyond sub-Gaussianity in high-dimensional statistics:",
+                "Applications in covariance estimation and linear regression. Information and Inference: A Journal of the IMA 11,",
+                "1389–1456.",
+                "Lax, P. (2002). Functional Analysis. Pure and Applied Mathematics: A Wiley Series of Texts, Monographs and",
+                "Tracts. Wiley-Interscience.",
+                "Lee, A. J. (1990). U-Statistics: Theory and Practice. Statistics: A Series of Textbooks and Monographs. Boca Raton,",
+                "FL: CRC Press / Routledge. Reprinted or later editions also available.",
+                "Markus, A. S. (1964). The eigen- and singular values of the sum and product of linear operators. Russian Mathematical",
+                "Surveys 19, 91–120.",
+            ];
+            let second = page_of(
+                2,
+                second_texts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| {
+                        let starts = text.contains(" (");
+                        let x0 = if starts { 72.0 } else { 84.0 };
+                        line_at(text, 0, x0, 700.0 - 14.0 * i as f32)
+                    })
+                    .collect(),
+            );
+            let pages = vec![first, second];
+            let section = find_reference_section(&pages).expect("a list");
+            let body = list_body(&pages, &section, None);
+            let layout = layout_starts(&body.lines);
+            // The indent levels alone call every first-page line a continuation.
+            assert!(layout[..20].iter().all(|&start| start == Some(false)));
+
+            let (refs, _) = extract_citations(&pages);
+            let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+            assert_eq!(
+                labels,
+                vec![
+                    "Berlinet2003",
+                    "Bhatia1994",
+                    "Chiu1996",
+                    "Dryden2009",
+                    "Dudley2011",
+                    "Elyahu2019",
+                    "Fillard2007",
+                    "Friston2011",
+                    "Hoff2012",
+                    "Hsing2015",
+                    "Hu2021",
+                    "Kong2020",
+                    "Kroshnin2021",
+                    "Kuchibhotla2022",
+                    "Lax2002",
+                    "Lee1990",
+                    "Markus1964",
+                ]
+            );
+            assert_eq!(
+                refs[0].raw,
+                "Berlinet, A. & Thomas-Agnan, C. (2003). Reproducing Kernel Hilbert Spaces in \
+                 Probability and Statistics. Springer US."
+            );
+            assert!(
+                refs[5]
+                    .raw
+                    .contains("& Monsonego, A. (2019). Aging promotes")
+            );
+            assert!(refs[5].raw.ends_with("Science Advances 5, eaaw8330."));
+            assert!(refs[9].raw.ends_with("vol. 997. John Wiley & Sons."));
+        }
+
+        /// The sentence-end test behind the signature: a word's period
+        /// counts (after trailing `�`), an initial's does not.
+        #[test]
+        fn sentence_ends_for_the_signature() {
+            assert!(ends_sentence("Springer US."));
+            assert!(ends_sentence("1102–1123. \u{FFFD}"));
+            assert!(!ends_sentence("Yeger-Lotem, E."));
+            assert!(!ends_sentence("Mittal, K., Ne-"));
+            assert!(author_list_signature_re().is_match(
+                "Elyahu, Y., Hekselman, I., Eizenberg-Magar, I., Berner, O., Strominger, I."
+            ));
+            assert!(!author_list_signature_re().is_match("Series A, containing papers of a"));
+            assert!(!author_year_signature_re().is_match("& Monsonego, A. (2019). Aging"));
+            assert!(
+                author_year_signature_re()
+                    .is_match("Chiu, T. Y. M., Leonard, T. & Tsui, K.-W. (1996). The Matrix")
+            );
+        }
+
+        /// arXiv:2508.02208 (AAAI): organisation authors followed by the
+        /// year sentence (`Alibaba Cloud Qwen Team. 2025a.`, `Anthropic.
+        /// 2025b.`, `(Maxwell-Jia), M. J. 2024.`, `xAI (...). 2025.`) start
+        /// entries after a complete entry; without layout evidence they
+        /// had been merged into the entry before them.
+        #[test]
+        fn organisation_authors_with_year_sentences() {
+            let refs = refs_from_lines(&[
+                "AI, M. 2025. Kimi-K2: A Trillion-Parameter Open-Source",
+                "Agentic Language Model. GitHub repository and model",
+                "card. Released July 2025; utilizes a mixture-of-experts ar-",
+                "chitecture with 32B active parameters per forward pass; op-",
+                "timized for agentic tasks and tool integration.",
+                "Alibaba Cloud Qwen Team. 2025a.",
+                "Qwen3-30B-A3B:",
+                "A 30B MoE Model with Hybrid Reasoning Modes and",
+                "Long-Context Support. Qwen3 Technical Report, Model",
+                "Card (Apache 2.0, Hugging Face). Supports enable think-",
+                "ing mode (complex reasoning) or fast mode interchange-",
+                "ably; 30.5B total vs. 3.3B active params; context up to 131K.",
+                "Alibaba Cloud Qwen Team. 2025b. QwQ-32B: A Com-",
+                "pact 32B-Parameter Reasoning Model with Reinforcement",
+                "Learning and 131K-Token Context Support. Alibaba Cloud",
+                "Blog, Qwen Technical Blog.",
+                "Released March 5, 2025;",
+                "achieves performance comparable to DeepSeek-R1 and",
+                "OpenAI’s o1-mini on reasoning benchmarks.",
+                "Anthropic. 2025a. Claude 4 Opus. Accessed: 2025-06-01.",
+                "Anthropic. 2025b.",
+                "Claude 4 Sonnet: A Cost-Effective",
+                "Hybrid-Reasoning Model Optimized for Coding and Agen-",
+                "tic Workflows. Public release / Model card on Anthropic",
+                "Website and Shared via API Platforms.",
+                "Released May",
+                "22 2025 alongside Claude 4 Opus as a midsize hybrid-",
+                "reasoning model.",
+                "Cai, K.; and Singh, J. 2025. Google clinches milestone gold",
+                "at global math competition, while OpenAI also claims win.",
+                "Reuters. Accessed: 2025-07-25.",
+                "IMO-Board, T. 2025. International Mathematical Olympiad.",
+                "Accessed: 2025-06-01.",
+                "(Maxwell-Jia), M. J. 2024. AIME 2024 Dataset. Hugging",
+                "Face Dataset. Available at https://huggingface.co/datasets/",
+                "Maxwell-Jia/AIME 2024.",
+                "xAI (Elon Musk’s AI Company). 2025.",
+                "Grok 4: A",
+                "Reasoning-Capable Multimodal Model with Native Tool",
+                "Use and Real-Time Search Integration.",
+            ]);
+            let starts: Vec<String> = refs
+                .iter()
+                .map(|r| r.raw.chars().take(24).collect())
+                .collect();
+            assert_eq!(
+                starts,
+                vec![
+                    "AI, M. 2025. Kimi-K2: A ",
+                    "Alibaba Cloud Qwen Team.",
+                    "Alibaba Cloud Qwen Team.",
+                    "Anthropic. 2025a. Claude",
+                    "Anthropic. 2025b. Claude",
+                    "Cai, K.; and Singh, J. 2",
+                    "IMO-Board, T. 2025. Inte",
+                    "(Maxwell-Jia), M. J. 202",
+                    "xAI (Elon Musk’s AI Comp",
+                ]
+            );
+            assert!(
+                refs[1]
+                    .raw
+                    .starts_with("Alibaba Cloud Qwen Team. 2025a. Qwen3-30B-A3B:")
+            );
+            assert!(refs[1].raw.ends_with("context up to 131K."));
+            assert!(
+                refs[2]
+                    .raw
+                    .starts_with("Alibaba Cloud Qwen Team. 2025b. QwQ-32B")
+            );
+            assert!(refs[2].raw.ends_with("on reasoning benchmarks."));
+            assert!(refs[4].raw.ends_with("reasoning model."));
+            assert!(refs[5].raw.ends_with("Reuters. Accessed: 2025-07-25."));
+            // A continuation line after a sentence end is no organisation start.
+            assert!(!organisation_start_re().is_match("Reuters. Accessed: 2025-07-25."));
+            assert!(!organisation_start_re().is_match("Released March 5, 2025;"));
+        }
+
+        /// arXiv:2508.19485 (Springer LNCS, two columns): author
+        /// biographies interrupt the list after entry 48; the list resumes
+        /// at `49.` and ends at the next biography that no label follows.
+        #[test]
+        fn numbered_list_resumes_after_a_biography() {
+            let texts = [
+                "References",
+                "47. Ye, W., Zhao, J., Wang, S., Wang, Y., Zhang, D., Yuan, Z.: Dy-",
+                "namic texture based smoke detection using surfacelet transform",
+                "and hmt model. Fire Safety Journal 73, 91–101 (2015)",
+                "48. Ying, S., Kunming, S., Jing, W., Feng, H., Yuze, G.: Optical",
+                "gas detection: key technologies and applications review. Opto-",
+                "Electronic Engineering 47(4), 190280–1 (2020)",
+                "Xinlong Zhao received his Master’s",
+                "degree in Computer Science from",
+                "the University of British Columbia in",
+                "2025. He is an IEEE Student Member.",
+                "He is currently a Computer Vision Al-",
+                "gorithm Engineer at Qihoo 360 in Bei-",
+                "jing, China. His work focuses on de-",
+                "His research interests include Vi-",
+                "sion–Language Models, video inpaint-",
+                "ing, and camouflaged video object de-",
+                "academic research and cutting-edge in-",
+                "dustrial applications.",
+                "49. Yu, H., Wang, J., Wang, Z., Yang, J., Huang, K., Lu, G., Deng,",
+                "F., Zhou, Y.: A lightweight network based on local-global feature",
+                "fusion for real-time industrial invisible gas detection with infrared",
+                "thermography. Applied Soft Computing 152, 111138 (2024)",
+                "50. Yuan, J., Mao, W., Hu, C., Zheng, J., Zheng, D., Yang, Y.: Leak",
+                "detection and localization techniques in oil and gas pipeline: A",
+                "bibliometric and systematic review. Engineering Failure Analysis",
+                "146, 107060 (2023)",
+                "Qixiang Pang received his Ph.D.",
+                "from Beijing University of Posts and",
+                "Telecommunications and completed",
+            ];
+            let page = page_of(1, texts.iter().map(|t| bare_line(t)).collect());
+            let pages = vec![page];
+            let section = find_reference_section(&pages).expect("a list");
+            let body = list_body(&pages, &section, None);
+            assert_eq!(body.style, Style::Dot);
+            assert_eq!(body.end, Some((1, 27)));
+
+            let (refs, _) = extract_citations(&pages);
+            let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+            assert_eq!(labels, vec!["47.", "48.", "49.", "50."]);
+            assert!(
+                refs[1]
+                    .raw
+                    .ends_with("Opto-Electronic Engineering 47(4), 190280–1 (2020)")
+            );
+            assert!(refs[2].raw.starts_with("49. Yu, H., Wang, J."));
+            assert!(refs[3].raw.ends_with("146, 107060 (2023)"));
+            assert!(refs.iter().all(|r| !r.raw.contains("Xinlong")));
+            assert!(refs.iter().all(|r| !r.raw.contains("Qixiang")));
+        }
+
+        /// A list cut at a section heading (`Appendix A`) does not resume,
+        /// even when the next label follows; nor does one whose
+        /// interruption numbers its own items from 1.
+        #[test]
+        fn numbered_list_does_not_resume_after_a_heading() {
+            let refs = refs_from_lines(&[
+                "[1] A. Author. First. Venue, 2020.",
+                "[2] B. Author. Second. Venue, 2021.",
+                "Appendix A",
+                "[3] The appendix restates the bound.",
+            ]);
+            assert_eq!(refs.len(), 2);
+            assert!(refs[1].raw.ends_with("Venue, 2021."));
+
+            let refs = refs_from_lines(&[
+                "1. A. Author. First. Venue, 2020.",
+                "2. B. Author. Second. Venue, 2021.",
+                "Table 1: Settings of the runs.",
+                "1. Warm-up for ten epochs.",
+                "3. Decay the rate by half.",
+            ]);
+            assert_eq!(refs.len(), 2);
+            assert!(refs.iter().all(|r| !r.raw.contains("Decay")));
+        }
+    }
+
     /// Heading forms that open a list, and lines that do not.
     #[test]
     fn heading_variants() {
@@ -4946,7 +5735,6 @@ mod tests {
             assert!(heading_re().is_match(text), "{text}");
         }
         for text in [
-            "Notes and references",
             "The references are listed below.",
             "References [1] and [2] agree.",
         ] {
@@ -5721,5 +6509,181 @@ mod tests {
         assert!(glued_to_word("FPT[1] ", 3, 6));
         assert!(!glued_to_word("PEPNet[43], MoME[44]", 6, 10));
         assert!(!glued_to_word("see [1]", 4, 7));
+    }
+
+    mod loop6_parse_tests {
+        use super::parsed;
+
+        /// INFORMS / Springer author-year (arxiv 2504.10389): every
+        /// `Surname Initials` part before `(year)` is an author.
+        #[test]
+        fn informs_authors_run_to_the_parenthesised_year() {
+            let entry = parsed(
+                "Aminian MR, Manshadi V, Niazadeh R (2023) Markovian search with socially \
+                 aware constraints. Available at SSRN 4347447 .",
+                None,
+            );
+            assert_eq!(
+                entry.authors,
+                vec!["Aminian MR", "Manshadi V", "Niazadeh R"]
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Markovian search with socially aware constraints")
+            );
+            assert_eq!(entry.year, Some(2023));
+
+            let entry = parsed(
+                "Babaioff M, Immorlica N, Kempe D, Kleinberg R (2008) Online auctions and \
+                 generalized secretary problems. ACM SIGecom Exchanges 7(2):1–11.",
+                None,
+            );
+            assert_eq!(
+                entry.authors,
+                vec!["Babaioff M", "Immorlica N", "Kempe D", "Kleinberg R"]
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Online auctions and generalized secretary problems")
+            );
+            assert_eq!(entry.venue.as_deref(), Some("ACM SIGecom Exchanges"));
+            assert_eq!(entry.volume.as_deref(), Some("7"));
+            assert_eq!(entry.issue.as_deref(), Some("2"));
+            assert_eq!(entry.pages.as_deref(), Some("1–11"));
+            assert_eq!(entry.year, Some(2008));
+        }
+
+        /// ACM `[n. d.]` (arxiv 2506.03828): no year; the next sentence is
+        /// the title and the access date is not the year.
+        #[test]
+        fn acm_no_date_token_is_not_the_title() {
+            let entry = parsed(
+                "[49] WikiALM. [n. d.]. Asset lifecycle management. \
+                 https://en.wikipedia.org/wiki/ Enterprise_asset_management. \
+                 Accessed: 2025-11-25.",
+                Some("[49]"),
+            );
+            assert_eq!(entry.authors, vec!["WikiALM"]);
+            assert_eq!(entry.title.as_deref(), Some("Asset lifecycle management"));
+            assert_eq!(
+                entry.url.as_deref(),
+                Some("https://en.wikipedia.org/wiki/Enterprise_asset_management")
+            );
+            assert_eq!(entry.year, None);
+            assert_eq!(entry.venue, None);
+
+            let entry = parsed(
+                "[19] IBM. [n. d.]. IBM Maximo Application Suite. \
+                 https://www.ibm.com/products/ maximo Accessed: May 13, 2025.",
+                Some("[19]"),
+            );
+            assert_eq!(entry.authors, vec!["IBM"]);
+            assert_eq!(entry.title.as_deref(), Some("IBM Maximo Application Suite"));
+            assert_eq!(entry.year, None);
+
+            let entry = parsed(
+                "[7] CodabenchTeam. [n.d.]. Codabench. https://www.codabench.org/. \
+                 Accessed: 2026-02-06.",
+                Some("[7]"),
+            );
+            assert_eq!(entry.authors, vec!["CodabenchTeam"]);
+            assert_eq!(entry.title.as_deref(), Some("Codabench"));
+            assert_eq!(entry.year, None);
+
+            let entry = parsed(
+                "Smith, J. (n.d.). Title of an undated report. Example Institute.",
+                None,
+            );
+            assert_eq!(entry.authors, vec!["Smith, J."]);
+            assert_eq!(entry.title.as_deref(), Some("Title of an undated report"));
+            assert_eq!(entry.year, None);
+        }
+
+        /// RSC style (arxiv 2510.26824) has no title: authors, journal,
+        /// year, volume, pages.
+        #[test]
+        fn rsc_entries_have_a_journal_and_no_title() {
+            let entry = parsed(
+                "1 Q. Zhang, E. Uchaker, S. L. Candelaria and G. Cao, Chem. Soc. Rev., 2013, \
+                 42, 3127–3171.",
+                Some("1"),
+            );
+            assert_eq!(
+                entry.authors,
+                vec!["Q. Zhang", "E. Uchaker", "S. L. Candelaria", "G. Cao"]
+            );
+            assert_eq!(entry.title, None);
+            assert_eq!(entry.venue.as_deref(), Some("Chem. Soc. Rev."));
+            assert_eq!(entry.year, Some(2013));
+            assert_eq!(entry.volume.as_deref(), Some("42"));
+            assert_eq!(entry.issue, None);
+            assert_eq!(entry.pages.as_deref(), Some("3127–3171"));
+
+            // Unlabelled (the list's bare numbers are not a segmentation style).
+            let entry = parsed(
+                "1 Q. Zhang, E. Uchaker, S. L. Candelaria and G. Cao, Chem. Soc. Rev., 2013, \
+                 42, 3127–3171.",
+                None,
+            );
+            assert_eq!(
+                entry.authors,
+                vec!["Q. Zhang", "E. Uchaker", "S. L. Candelaria", "G. Cao"]
+            );
+            assert_eq!(entry.title, None);
+            assert_eq!(entry.venue.as_deref(), Some("Chem. Soc. Rev."));
+
+            // Letter-prefixed pages: the volume comes from its own part.
+            let entry = parsed(
+                "C. Liu, F. Li, L.-P. Ma and H.-M. Cheng, Adv. Mater., 2010, 22, E28–E62.",
+                None,
+            );
+            assert_eq!(
+                entry.authors,
+                vec!["C. Liu", "F. Li", "L.-P. Ma", "H.-M. Cheng"]
+            );
+            assert_eq!(entry.title, None);
+            assert_eq!(entry.venue.as_deref(), Some("Adv. Mater."));
+            assert_eq!(entry.year, Some(2010));
+            assert_eq!(entry.volume.as_deref(), Some("22"));
+
+            let entry = parsed(
+                "B. Keimer, S. A. Kivelson, M. R. Norman, S. Uchida and J. Zaanen, Nature, \
+                 2015, 518, 179–186.",
+                None,
+            );
+            assert_eq!(
+                entry.authors,
+                vec![
+                    "B. Keimer",
+                    "S. A. Kivelson",
+                    "M. R. Norman",
+                    "S. Uchida",
+                    "J. Zaanen"
+                ]
+            );
+            assert_eq!(entry.title, None);
+            assert_eq!(entry.venue.as_deref(), Some("Nature"));
+            assert_eq!(entry.year, Some(2015));
+            assert_eq!(entry.volume.as_deref(), Some("518"));
+            assert_eq!(entry.pages.as_deref(), Some("179–186"));
+        }
+
+        /// The year sentence after a title (`Mistral small 3.1, 2025.`) is not
+        /// part of the title.
+        #[test]
+        fn trailing_year_is_not_part_of_the_title() {
+            let entry = parsed(
+                "[1] Mistral AI. Mistral small 3.1, 2025. Model card: \
+                 https://huggingface.co/mistralai/ Mistral-Small-3.1-24B-Instruct-2503.",
+                Some("[1]"),
+            );
+            assert_eq!(entry.authors, vec!["Mistral AI"]);
+            assert_eq!(entry.title.as_deref(), Some("Mistral small 3.1"));
+            assert_eq!(entry.year, Some(2025));
+
+            let entry = parsed("[4] Mistral AI. Mistral ocr, 2025.", Some("[4]"));
+            assert_eq!(entry.title.as_deref(), Some("Mistral ocr"));
+            assert_eq!(entry.year, Some(2025));
+        }
     }
 }

@@ -45,6 +45,10 @@ const TITLE_JACCARD_MIN: f32 = 0.8;
 /// match, as `(numerator, denominator)` = 0.6 so the test stays in integers.
 const TEXT_JACCARD_MIN: (usize, usize) = (3, 5);
 
+/// Score of an `"author-venue"` match (a title-less extracted entry paired by
+/// first author, year and volume/page or venue plus a second author).
+const AUTHOR_VENUE_SCORE: f32 = 0.9;
+
 /// Minimum Jaccard similarity of title words for the paper's own title to
 /// count as correct when the normalised titles differ.
 const PAPER_TITLE_JACCARD_MIN: f32 = 0.9;
@@ -78,13 +82,14 @@ pub struct RefMatch {
     pub truth_key: String,
     /// `ReferenceEntry::index` of the paired entry, if any.
     pub extracted_index: Option<u32>,
-    /// `"doi"`, `"arxiv"`, `"title"`, `"author-year"`, `"text"` or `"none"`.
+    /// `"doi"`, `"arxiv"`, `"title"`, `"author-venue"`, `"author-year"`,
+    /// `"text"` or `"none"`.
     /// When duplicate truth entries swap partners (see [`match_references`])
     /// the method and score travel with the extracted entry.
     pub method: String,
     /// 1.0 for exact DOI/`arXiv`/title matches, the Jaccard value for fuzzy
-    /// title and text matches, 0.75 for author-year matches, 0.0 when
-    /// unmatched.
+    /// title and text matches, 0.9 for author-venue matches, 0.75 for
+    /// author-year matches, 0.0 when unmatched.
     pub score: f32,
 }
 
@@ -874,16 +879,181 @@ fn text_tokens(s: &str) -> BTreeSet<String> {
     words(strip_bracket_label(&joined)).into_iter().collect()
 }
 
+/// Digit runs of a title for the version check, with their counts: NFKC
+/// first (so `NH₃` gives `3`), leading zeros dropped (`04` is `4`), and
+/// 19xx/20xx years left out (extracted titles often swallow the year).
+fn title_digit_runs(title: &str) -> BTreeMap<String, u32> {
+    let compat: String = title.nfkc().collect();
+    let mut runs: BTreeMap<String, u32> = BTreeMap::new();
+    for run in compat
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+    {
+        let is_year = run.len() == 4 && (run.starts_with("19") || run.starts_with("20"));
+        if is_year {
+            continue;
+        }
+        let trimmed = run.trim_start_matches('0');
+        let key = if trimmed.is_empty() { "0" } else { trimmed };
+        *runs.entry(key.to_string()).or_insert(0) += 1;
+    }
+    runs
+}
+
+/// Whether two titles name different versions of a work (`Gemini 3` vs
+/// `Gemini 2`, `v1` vs `v2`): each side has a digit run the other lacks.
+/// Digits on one side only (page numbers or a month swallowed into the
+/// extracted title, a garbled superscript) are no conflict.
+fn digits_conflict(a: &BTreeMap<String, u32>, b: &BTreeMap<String, u32>) -> bool {
+    let has_extra = |x: &BTreeMap<String, u32>, y: &BTreeMap<String, u32>| {
+        x.iter()
+            .any(|(run, &count)| y.get(run).copied().unwrap_or(0) < count)
+    };
+    has_extra(a, b) && has_extra(b, a)
+}
+
+/// [`title_digit_runs`] of a non-empty title, `None` without one.
+fn optional_title_digits(title: Option<&String>) -> Option<BTreeMap<String, u32>> {
+    let title = title?;
+    if normalize_title(title).is_empty() {
+        None
+    } else {
+        Some(title_digit_runs(title))
+    }
+}
+
+/// First run of ASCII digits in `s` (`179` of `179–186`), without leading
+/// zeros.
+fn first_digit_run(s: &str) -> Option<String> {
+    let run = s
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|run| !run.is_empty())?;
+    let trimmed = run.trim_start_matches('0');
+    let digits = if trimmed.is_empty() { "0" } else { trimmed };
+    Some(digits.to_string())
+}
+
+/// Whether `needle` occurs as a contiguous run of words in `haystack`.
+fn contains_words(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// Number of `truth` surnames paired one-to-one with equal `extracted`
+/// surnames.
+fn surname_matches(truth: &[String], extracted: &[String]) -> usize {
+    let mut used = vec![false; extracted.len()];
+    let mut count = 0;
+    for sur in truth {
+        let found = (0..extracted.len()).find(|&pos| !used[pos] && extracted[pos] == *sur);
+        if let Some(pos) = found {
+            used[pos] = true;
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Truth-side evidence for the author-venue pass.
+struct AuthorVenueTruth {
+    /// Year of the truth entry (the pass skips entries without one).
+    year: u16,
+    /// Surname of the first truth author (never empty).
+    first_surname: String,
+    /// Non-empty surnames of all truth authors, in order.
+    surnames: Vec<String>,
+    /// Words of the truth text (NFKC, line-break hyphens joined).
+    text_words: Vec<String>,
+}
+
+impl AuthorVenueTruth {
+    /// Evidence of `truth_ref`, `None` without a year or a first-author
+    /// surname.
+    fn from_truth(truth_ref: &TruthReference) -> Option<Self> {
+        let year = truth_ref.year?;
+        let first_surname = surname(truth_ref.authors.first()?);
+        if first_surname.is_empty() {
+            return None;
+        }
+        let surnames: Vec<String> = truth_ref
+            .authors
+            .iter()
+            .map(|name| surname(name))
+            .filter(|sur| !sur.is_empty())
+            .collect();
+        let compat: String = truth_ref.text.nfkc().collect();
+        let text_words = words(&join_break_hyphens(&compat));
+        Some(Self {
+            year,
+            first_surname,
+            surnames,
+            text_words,
+        })
+    }
+
+    /// Whether the title-less `entry` is this truth entry: same first-author
+    /// surname and year, and either its volume and first page both appear as
+    /// words of the truth text, or its venue appears there as a run of words
+    /// and at least two author surnames match.
+    fn agrees(&self, entry: &ReferenceEntry) -> bool {
+        if title_key(entry.title.as_ref()).is_some() || entry.year != Some(self.year) {
+            return false;
+        }
+        let first_agrees = entry
+            .authors
+            .first()
+            .is_some_and(|name| surname(name) == self.first_surname);
+        if !first_agrees {
+            return false;
+        }
+        let has_word = |word: &str| self.text_words.iter().any(|w| w == word);
+        let volume = entry.volume.as_deref().map(words).unwrap_or_default();
+        let first_page = entry.pages.as_deref().and_then(first_digit_run);
+        let volume_page = !volume.is_empty()
+            && volume.iter().all(|word| has_word(word))
+            && first_page.is_some_and(|page| has_word(&page));
+        if volume_page {
+            return true;
+        }
+        let venue = entry.venue.as_deref().map(words).unwrap_or_default();
+        if !contains_words(&self.text_words, &venue) {
+            return false;
+        }
+        let ext_surnames: Vec<String> = entry
+            .authors
+            .iter()
+            .map(|name| surname(name))
+            .filter(|sur| !sur.is_empty())
+            .collect();
+        surname_matches(&self.surnames, &ext_surnames) >= 2
+    }
+}
+
 /// Mutable state of the greedy one-to-one matcher.
 struct Matcher<'a> {
     extracted: &'a [ReferenceEntry],
     matches: Vec<RefMatch>,
     used: Vec<bool>,
+    /// [`optional_title_digits`] of each truth title.
+    truth_digits: Vec<Option<BTreeMap<String, u32>>>,
+    /// [`optional_title_digits`] of each extracted title.
+    ext_digits: Vec<Option<BTreeMap<String, u32>>>,
 }
 
 impl Matcher<'_> {
     fn is_open(&self, truth_pos: usize) -> bool {
         self.matches[truth_pos].extracted_index.is_none()
+    }
+
+    /// Whether the two titles, when both exist, do not name different
+    /// versions of a work (see [`digits_conflict`]).
+    fn digits_compatible(&self, truth_pos: usize, ext_pos: usize) -> bool {
+        match (&self.truth_digits[truth_pos], &self.ext_digits[ext_pos]) {
+            (Some(t), Some(e)) => !digits_conflict(t, e),
+            _ => true,
+        }
     }
 
     fn assign(&mut self, truth_pos: usize, ext_pos: usize, method: &str, score: f32) {
@@ -895,13 +1065,15 @@ impl Matcher<'_> {
     }
 
     /// Pairs open truth entries with the first unused extracted entry whose
-    /// key equals theirs.
+    /// key equals theirs (and, with `check_digits`, whose title does not
+    /// name another version, see [`Self::digits_compatible`]).
     fn exact_pass(
         &mut self,
         truth_keys: &[Option<String>],
         ext_keys: &[Option<String>],
         method: &str,
         score: f32,
+        check_digits: bool,
     ) {
         for (truth_pos, key) in truth_keys.iter().enumerate() {
             let Some(key) = key else {
@@ -911,7 +1083,9 @@ impl Matcher<'_> {
                 continue;
             }
             let found = ext_keys.iter().enumerate().position(|(ext_pos, ext_key)| {
-                !self.used[ext_pos] && ext_key.as_deref() == Some(key.as_str())
+                !self.used[ext_pos]
+                    && ext_key.as_deref() == Some(key.as_str())
+                    && (!check_digits || self.digits_compatible(truth_pos, ext_pos))
             });
             if let Some(ext_pos) = found {
                 self.assign(truth_pos, ext_pos, method, score);
@@ -920,7 +1094,8 @@ impl Matcher<'_> {
     }
 
     /// Pairs open truth entries with the unused extracted entry whose title
-    /// words have the highest Jaccard similarity, when it reaches the minimum.
+    /// words have the highest Jaccard similarity, when it reaches the minimum
+    /// and the titles do not name different versions.
     fn fuzzy_title_pass(
         &mut self,
         truth_words: &[BTreeSet<String>],
@@ -932,7 +1107,7 @@ impl Matcher<'_> {
             }
             let mut best: Option<(usize, f32)> = None;
             for (ext_pos, ext_set) in ext_words.iter().enumerate() {
-                if self.used[ext_pos] {
+                if self.used[ext_pos] || !self.digits_compatible(truth_pos, ext_pos) {
                     continue;
                 }
                 let sim = jaccard(truth_set, ext_set);
@@ -948,7 +1123,8 @@ impl Matcher<'_> {
 
     /// Last resort: pairs each open truth entry, in order, with the unused
     /// extracted entry whose whole-text word set is most similar, when the
-    /// Jaccard similarity reaches [`TEXT_JACCARD_MIN`]. On equal similarity the
+    /// Jaccard similarity reaches [`TEXT_JACCARD_MIN`] and, when both have a
+    /// title, the titles do not name different versions. On equal similarity the
     /// entry agreeing with the truth on more of first-author surname and year
     /// wins, then the earliest one.
     fn text_pass(
@@ -965,7 +1141,10 @@ impl Matcher<'_> {
             // (extracted position, intersection, union, surname/year agreements)
             let mut best: Option<(usize, usize, usize, u32)> = None;
             for (ext_pos, ext_set) in ext_tokens.iter().enumerate() {
-                if self.used[ext_pos] || ext_set.is_empty() {
+                if self.used[ext_pos]
+                    || ext_set.is_empty()
+                    || !self.digits_compatible(truth_pos, ext_pos)
+                {
                     continue;
                 }
                 let (inter, union) = overlap(truth_set, ext_set);
@@ -986,6 +1165,25 @@ impl Matcher<'_> {
             if let Some((ext_pos, inter, union, _)) = best {
                 let sim = (inter as f64 / union as f64) as f32;
                 self.assign(truth_pos, ext_pos, "text", sim);
+            }
+        }
+    }
+
+    /// Pairs open truth entries that have a year with the first unused
+    /// extracted entry without a title (RSC-style entries print none) that
+    /// [`AuthorVenueTruth::agrees`] with, method `"author-venue"`.
+    fn author_venue_pass(&mut self, truth: &[TruthReference]) {
+        for (truth_pos, truth_ref) in truth.iter().enumerate() {
+            if !self.is_open(truth_pos) {
+                continue;
+            }
+            let Some(evidence) = AuthorVenueTruth::from_truth(truth_ref) else {
+                continue;
+            };
+            let found = (0..self.extracted.len())
+                .find(|&ext_pos| !self.used[ext_pos] && evidence.agrees(&self.extracted[ext_pos]));
+            if let Some(ext_pos) = found {
+                self.assign(truth_pos, ext_pos, "author-venue", AUTHOR_VENUE_SCORE);
             }
         }
     }
@@ -1109,11 +1307,17 @@ fn duplicate_groups(
 
 /// Greedy one-to-one pairing of truth references with extracted entries, in
 /// priority order: equal DOI (case-insensitive), equal `arXiv` id (version
-/// ignored), equal normalized title or title-word Jaccard >= 0.8, equal
-/// first-author surname (lower-case, ASCII-folded) plus year, then, as a last
+/// ignored), equal normalized title or title-word Jaccard >= 0.8, for
+/// extracted entries without a title first-author surname and year plus
+/// volume and first page or venue and a second surname (method
+/// `"author-venue"`), equal first-author surname (lower-case, ASCII-folded)
+/// plus year, then, as a last
 /// resort, the most similar whole entry text (word Jaccard >= 0.6 of the
 /// truth `text` and the extracted `raw`, method `"text"`). Each extracted
-/// entry is used at most once. Finally, truth entries that are duplicates of
+/// entry is used at most once. The fuzzy title, author-year and text passes
+/// reject a pair whose titles both carry digit runs the other lacks
+/// (`Gemini 3` vs `Gemini 2`; see [`digits_conflict`]). Finally, truth
+/// entries that are duplicates of
 /// each other (same normalised title or text) take their partners in index
 /// order unless that agrees worse on year and first author, so they are not
 /// paired crosswise. One [`RefMatch`] per truth reference, in order.
@@ -1130,6 +1334,14 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
             })
             .collect(),
         used: vec![false; extracted.len()],
+        truth_digits: truth
+            .iter()
+            .map(|truth_ref| optional_title_digits(truth_ref.title.as_ref()))
+            .collect(),
+        ext_digits: extracted
+            .iter()
+            .map(|entry| optional_title_digits(entry.title.as_ref()))
+            .collect(),
     };
 
     let truth_doi: Vec<Option<String>> = truth
@@ -1152,7 +1364,7 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
                 .filter(|doi| !doi.is_empty())
         })
         .collect();
-    matcher.exact_pass(&truth_doi, &ext_doi, "doi", 1.0);
+    matcher.exact_pass(&truth_doi, &ext_doi, "doi", 1.0, false);
 
     let truth_arxiv: Vec<Option<String>> = truth
         .iter()
@@ -1174,7 +1386,7 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
                 .filter(|id| !id.is_empty())
         })
         .collect();
-    matcher.exact_pass(&truth_arxiv, &ext_arxiv, "arxiv", 1.0);
+    matcher.exact_pass(&truth_arxiv, &ext_arxiv, "arxiv", 1.0, false);
 
     let truth_title: Vec<Option<String>> = truth
         .iter()
@@ -1184,7 +1396,7 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
         .iter()
         .map(|entry| title_key(entry.title.as_ref()))
         .collect();
-    matcher.exact_pass(&truth_title, &ext_title, "title", 1.0);
+    matcher.exact_pass(&truth_title, &ext_title, "title", 1.0, false);
 
     let truth_words: Vec<BTreeSet<String>> = truth_title
         .iter()
@@ -1209,6 +1421,7 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
         })
         .collect();
     matcher.fuzzy_title_pass(&truth_words, &ext_words);
+    matcher.author_venue_pass(truth);
 
     let truth_ay: Vec<Option<String>> = truth
         .iter()
@@ -1218,7 +1431,7 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
         .iter()
         .map(|entry| author_year_key(entry.authors.first(), entry.year))
         .collect();
-    matcher.exact_pass(&truth_ay, &ext_ay, "author-year", 0.75);
+    matcher.exact_pass(&truth_ay, &ext_ay, "author-year", 0.75, true);
 
     let truth_tokens: Vec<BTreeSet<String>> = truth
         .iter()
@@ -2669,6 +2882,199 @@ mod tests {
         assert_eq!(matches[0].extracted_index, Some(2));
         assert_eq!(matches[1].extracted_index, Some(1));
         assert!(matches.iter().all(|m| m.method == "doi"));
+    }
+
+    #[test]
+    fn title_digit_runs_conflict_only_on_both_sides() {
+        // Different model versions, the month swallowed on the extracted side.
+        assert!(digits_conflict(
+            &title_digit_runs("Gemini 3 Flash Model Card"),
+            &title_digit_runs("Gemini 2 flash model card, 04 2025"),
+        ));
+        assert!(digits_conflict(
+            &title_digit_runs("Model card v1"),
+            &title_digit_runs("Model card v2")
+        ));
+        // Extra digits on one side only: month, year, pages, lost superscript.
+        assert!(!digits_conflict(
+            &title_digit_runs("Gemini 3 Flash Model Card"),
+            &title_digit_runs("Gemini 3 flash model card, 12 2025"),
+        ));
+        assert!(!digits_conflict(
+            &title_digit_runs("Qwen3.5: Towards Native Multimodal Agents"),
+            &title_digit_runs("Qwen3.5: Towards native multimodal agents, 2 2026"),
+        ));
+        assert!(!digits_conflict(
+            &title_digit_runs("F^3Net: fusion, feedback and focus"),
+            &title_digit_runs("F net: fusion, feedback and focus"),
+        ));
+        // Years are ignored; subscripts are NFKC-folded; leading zeros dropped.
+        assert!(!digits_conflict(
+            &title_digit_runs("Proceedings of the 25th Conference"),
+            &title_digit_runs("Ngwe D (2024) Using gpt for market research"),
+        ));
+        assert!(!digits_conflict(
+            &title_digit_runs("NH₃ decomposition"),
+            &title_digit_runs("NH3 decomposition")
+        ));
+        assert!(!digits_conflict(
+            &title_digit_runs("Part 04"),
+            &title_digit_runs("Part 4")
+        ));
+    }
+
+    #[test]
+    fn match_references_rejects_other_version_titles() {
+        // arxiv 2510.26824: "Gemini 3 Flash Model Card" (2025) was paired by
+        // author-year with the first "Google DeepMind" 2025 entry, the
+        // Gemini 2 card; it must take the Gemini 3 card instead.
+        let mut gemini = truth_ref("Gemini3FlashModelCard2025");
+        gemini.title = Some("Gemini 3 Flash Model Card".to_string());
+        gemini.authors = vec!["Google DeepMind".to_string()];
+        gemini.year = Some(2025);
+        gemini.text = "Google DeepMind. Gemini 3 Flash Model Card. 2025".to_string();
+        // Fuzzy title (Jaccard 10/12) with another version number.
+        let mut llama = truth_ref("llama");
+        llama.title =
+            Some("Llama 2 open foundation and fine tuned chat models for everyone".to_string());
+        // Text pass (Jaccard 4/6) with another version number.
+        let mut card = truth_ref("card");
+        card.title = Some("Model card v1".to_string());
+        card.text = "Acme. Model card v1. 2024.".to_string();
+
+        let mut e3 = extracted(3);
+        e3.raw = "[3] Google DeepMind. Gemini 2 flash model card, 04 2025. Published April 2025."
+            .to_string();
+        e3.title = Some("Gemini 2 flash model card, 04 2025".to_string());
+        e3.authors = vec!["Google DeepMind".to_string()];
+        e3.year = Some(2025);
+        let mut e7 = extracted(7);
+        e7.title =
+            Some("Llama 3 open foundation and fine tuned chat models for everyone".to_string());
+        let mut e8 = extracted(8);
+        e8.title = Some("Model card v2".to_string());
+        e8.raw = "[8] Acme. Model card v2. 2024.".to_string();
+        let mut e44 = extracted(44);
+        e44.raw = "[44] Google DeepMind. Gemini 3 flash model card, 12 2025. Published December \
+                   2025."
+            .to_string();
+        e44.title = Some("Gemini 3 flash model card, 12 2025".to_string());
+        e44.authors = vec!["Google DeepMind".to_string()];
+        e44.year = Some(2025);
+
+        let matches = match_references(&[gemini, llama, card], &[e3, e7, e8, e44]);
+        assert_eq!(matches[0].extracted_index, Some(44));
+        assert_eq!(matches[0].method, "author-year");
+        assert_eq!(matches[1].extracted_index, None);
+        assert_eq!(matches[1].method, "none");
+        assert_eq!(matches[2].extracted_index, None);
+        assert_eq!(matches[2].method, "none");
+    }
+
+    #[test]
+    fn match_references_pairs_title_less_entries_by_author_and_venue() {
+        // RSC style prints no title: `B. Keimer, S. A. Kivelson, M. R. Norman,
+        // S. Uchida and J. Zaanen, Nature, 2015, 518, 179–186.` An earlier
+        // entry by the same first author and year must not take the pair.
+        let mut keimer = truth_ref("keimer2015");
+        keimer.title = Some(
+            "From Quantum Matter to High-Temperature Superconductivity in Copper Oxides"
+                .to_string(),
+        );
+        keimer.authors = vec![
+            "B. Keimer".to_string(),
+            "S. A. Kivelson".to_string(),
+            "M. R. Norman".to_string(),
+            "S. Uchida".to_string(),
+            "J. Zaanen".to_string(),
+        ];
+        keimer.year = Some(2015);
+        keimer.text = "B. Keimer, S. A. Kivelson, M. R. Norman, S. Uchida, J. Zaanen. From \
+                       Quantum Matter to High-Temperature Superconductivity in Copper Oxides. \
+                       Nature 2015"
+            .to_string();
+        // `.bbl` truth carries volume and pages in its text; the extracted
+        // venue abbreviation does not appear there.
+        let mut zaitsev = truth_ref("zaitsev2015");
+        zaitsev.title = Some("Motion artifacts in MRI: A review".to_string());
+        zaitsev.authors = vec!["M. Zaitsev".to_string()];
+        zaitsev.year = Some(2015);
+        zaitsev.text = "M. Zaitsev, J. Maclaren, and M. Herbst, \"Motion artifacts in MRI: A \
+                        review,\" NMR in Biomedicine, vol. 28, no. 7, pp. 911–935, 2015."
+            .to_string();
+
+        let mut e1 = extracted(1);
+        e1.authors = vec!["B. Keimer".to_string(), "A. Other".to_string()];
+        e1.venue = Some("Science".to_string());
+        e1.year = Some(2015);
+        e1.volume = Some("347".to_string());
+        e1.pages = Some("12–15".to_string());
+        let mut e2 = extracted(2);
+        e2.authors = vec!["M. Zaitsev".to_string()];
+        e2.venue = Some("Phys. Rev. B".to_string());
+        e2.year = Some(2015);
+        e2.volume = Some("91".to_string());
+        e2.pages = Some("1–9".to_string());
+        let mut e3 = extracted(3);
+        e3.authors = vec![
+            "B. Keimer".to_string(),
+            "S. A. Kivelson".to_string(),
+            "M. R. Norman".to_string(),
+            "S. Uchida".to_string(),
+            "J. Zaanen".to_string(),
+        ];
+        e3.venue = Some("Nature".to_string());
+        e3.year = Some(2015);
+        e3.volume = Some("518".to_string());
+        e3.pages = Some("179–186".to_string());
+        let mut e4 = extracted(4);
+        e4.authors = vec!["M. Zaitsev".to_string()];
+        e4.venue = Some("NMR Biomed.".to_string());
+        e4.year = Some(2015);
+        e4.volume = Some("28".to_string());
+        e4.pages = Some("911–935".to_string());
+
+        let matches = match_references(&[keimer, zaitsev], &[e1, e2, e3, e4]);
+        // Venue plus five surnames.
+        assert_eq!(matches[0].extracted_index, Some(3));
+        assert_eq!(matches[0].method, "author-venue");
+        assert!(close(matches[0].score, AUTHOR_VENUE_SCORE));
+        // Volume and first page.
+        assert_eq!(matches[1].extracted_index, Some(4));
+        assert_eq!(matches[1].method, "author-venue");
+    }
+
+    #[test]
+    fn match_references_author_venue_needs_truth_year_and_no_extracted_title() {
+        let mut no_year = truth_ref("keimer");
+        no_year.authors = vec!["B. Keimer".to_string(), "S. A. Kivelson".to_string()];
+        no_year.text = "B. Keimer, S. A. Kivelson. Copper oxides. Nature".to_string();
+        let mut titled_truth = truth_ref("lee");
+        titled_truth.authors = vec!["P. A. Lee".to_string(), "N. Nagaosa".to_string()];
+        titled_truth.year = Some(2006);
+        titled_truth.text = "P. A. Lee, N. Nagaosa. Doping a Mott insulator. Rev. Mod. Phys. \
+                             2006, 78, 17"
+            .to_string();
+
+        let mut e1 = extracted(1);
+        e1.authors = vec!["B. Keimer".to_string(), "S. A. Kivelson".to_string()];
+        e1.venue = Some("Nature".to_string());
+        e1.year = Some(2015);
+        // Venue, volume and page agree, but a titled extracted entry is left
+        // to the title and author-year passes.
+        let mut e2 = extracted(2);
+        e2.title = Some("Something else entirely".to_string());
+        e2.authors = vec!["P. A. Lee".to_string(), "N. Nagaosa".to_string()];
+        e2.venue = Some("Rev. Mod. Phys.".to_string());
+        e2.year = Some(2006);
+        e2.volume = Some("78".to_string());
+        e2.pages = Some("17–85".to_string());
+
+        let matches = match_references(&[no_year, titled_truth], &[e1, e2]);
+        assert_eq!(matches[0].extracted_index, None);
+        assert_eq!(matches[0].method, "none");
+        assert_eq!(matches[1].extracted_index, Some(2));
+        assert_eq!(matches[1].method, "author-year");
     }
 
     #[test]
