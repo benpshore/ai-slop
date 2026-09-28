@@ -16,17 +16,23 @@
 //! that shape that is not itself prose (`TABLE I`, `Algorithm 1 Name`).
 //! Continuation lines below a caption start, with no blank separator, are
 //! tagged `caption` up to the first continuation line ending a sentence
-//! (at most [`CAPTION_MAX_LINES`] lines in all). An untagged caption start
-//! is tagged `caption` once a region is found under it. A caption start
-//! directly under a prose line (no blank separator) is ignored.
+//! (at most [`CAPTION_MAX_LINES`] lines in all). A continuation stops at a
+//! prose-like line that opens a sentence (an uppercase first word and at
+//! least 10 words) and, under a caption spanning the middle of a
+//! two-column page, at a line that does not span it too. An untagged
+//! caption start is tagged `caption` once a region is found under it. A
+//! caption start directly under a prose line (no blank separator) is
+//! ignored.
 //!
 //! Regions:
 //! - figure: the lines above a figure caption up to the nearest prose
 //!   paragraph, tagged `figure` when the region is fragment-like (at least
-//!   60 % of its lines have at most 4 words or are numeric/axis-like, or
-//!   the left edges scatter by more than 15 % of the band width). When
-//!   nothing fragment-like lies above, the lines below the caption are
-//!   tried the same way (caption above the figure).
+//!   60 % of its lines have at most 4 words or are numeric/axis-like, or,
+//!   in a band at most 60 % of the page wide, the left edges scatter by
+//!   more than 15 % of the band width). When nothing fragment-like lies
+//!   above and the caption is among the top 20 % of its band's lines, the
+//!   lines below the caption are tried the same way (caption above the
+//!   figure).
 //! - table: the lines below a table caption (caption above, ACM/IEEE) up
 //!   to the next prose paragraph, else the lines above it (Elsevier),
 //!   tagged `table` when at least 50 % of the lines have at most 5 words or
@@ -41,8 +47,16 @@
 //! rows are not prose; inside an algorithm walk marker lines never are).
 //! A walk stops at two consecutive prose lines, at a prose line after or
 //! before a blank separator, and (walking up) at a line ending a sentence
-//! with a blank separator below it. Figure and table regions need at least
-//! [`MIN_REGION_LINES`] lines.
+//! with a blank separator below it.
+//!
+//! Hard guards: a *prose-like* line (at least 7 words, at most 30 %
+//! numeric tokens, at most 2 all-caps or abbreviation tokens, and at least
+//! 2 words starting lowercase) is never tagged `figure`, `table` or
+//! `algorithm` (pseudo-code marker lines excepted under an `Algorithm`
+//! caption), and every walk stops at the first one. Figure and table
+//! regions need at least [`MIN_REGION_LINES`] lines, and a region longer
+//! than [`REGION_MAX_LINES`] lines is dropped, not tagged. A page that
+//! already carries a `regions:` warning is not tagged again.
 
 use std::cmp::Ordering;
 
@@ -53,6 +67,9 @@ use crate::schema::{BBox, Line, PageText};
 pub const CAPTION_MAX_LINES: usize = 6;
 /// Fewest lines a figure or table region needs to be tagged.
 pub const MIN_REGION_LINES: usize = 2;
+/// Most lines a figure, table or algorithm region may take; a longer walk
+/// ran through body text, so the region is dropped.
+pub const REGION_MAX_LINES: usize = 40;
 /// A vertical gap wider than this many median line heights is a blank
 /// separator. Boxes span one font size per line and lines advance about
 /// 1.2 sizes, so ordinary leading leaves a gap near 0.2.
@@ -61,12 +78,26 @@ const BLANK_GAP: f32 = 0.6;
 const FALLBACK_HEIGHT: f32 = 10.0;
 /// Fewest words in a prose line.
 const PROSE_WORDS: usize = 6;
+/// Fewest words in a prose-like line (the hard guard).
+const PROSE_LIKE_WORDS: usize = 7;
+/// Most all-caps or abbreviation tokens in a prose-like line.
+const PROSE_LIKE_CAPS: usize = 2;
+/// Fewest words starting lowercase in a prose-like line.
+const PROSE_LIKE_LOWER: usize = 2;
+/// Fewest words in a prose-like line that opens a sentence and so cannot
+/// continue a caption.
+const SENTENCE_WORDS: usize = 10;
 /// Most words in a figure fragment.
 const FRAGMENT_WORDS: usize = 4;
 /// Most words in a table cell line.
 const CELL_WORDS: usize = 5;
 /// Share of the page width around the middle treated as the gutter.
 const GUTTER: f32 = 0.02;
+/// Widest band, as a share of the page width, where the left-edge scatter
+/// test applies (one column; a whole two-column page always scatters).
+const SCATTER_BAND: f32 = 0.6;
+/// Prefix of the page warnings this pass adds.
+const WARNING_PREFIX: &str = "regions: ";
 
 const ROLE_BODY: &str = "body";
 const ROLE_CAPTION: &str = "caption";
@@ -139,6 +170,9 @@ struct Band {
     lo: f32,
     hi: f32,
     width: f32,
+    /// The gutter of a two-column page when the caption spans it: caption
+    /// continuation lines must span it too.
+    cross: Option<(f32, f32)>,
 }
 
 impl Band {
@@ -151,6 +185,11 @@ impl Band {
         }
         let overlap = b.x1.min(self.hi) - b.x0.max(self.lo);
         overlap >= 0.5 * w
+    }
+
+    /// The box spans the gutter, or the band has none to span.
+    fn crossed_by(self, b: BBox) -> bool {
+        self.cross.is_none_or(|(lo, hi)| b.x0 < lo && b.x1 > hi)
     }
 }
 
@@ -165,8 +204,8 @@ struct PageGeometry {
 /// Tag caption continuations, figure text, table cells and algorithm
 /// blocks on every page (see the module documentation). Adds a page
 /// warning such as `regions: figure text N lines` for each role with new
-/// tags. Idempotent: tagged lines are no longer `body`, so a second run
-/// tags nothing.
+/// tags. Idempotent: a page already carrying such a warning is skipped,
+/// and a page without one had nothing to tag.
 pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
     let mut total = RegionReport::default();
     for page in pages {
@@ -183,7 +222,7 @@ pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
         ];
         for (name, n) in counts {
             if n > 0 {
-                let msg = format!("regions: {name} {n} lines");
+                let msg = format!("{WARNING_PREFIX}{name} {n} lines");
                 if !page.warnings.contains(&msg) {
                     page.warnings.push(msg);
                 }
@@ -197,6 +236,9 @@ pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
 fn tag_page(page: &mut PageText) -> RegionReport {
     let mut report = RegionReport::default();
     if page.width <= 0.0 || page.lines.is_empty() {
+        return report;
+    }
+    if page.warnings.iter().any(|w| w.starts_with(WARNING_PREFIX)) {
         return report;
     }
     let geometry = measure(page);
@@ -218,7 +260,7 @@ fn tag_page(page: &mut PageText) -> RegionReport {
         if inside_prose(page, &entries, pos, geometry.blank) {
             continue;
         }
-        let more = caption_continuation(page, &entries, pos, kind, geometry.blank);
+        let more = caption_continuation(page, &entries, pos, kind, band, geometry.blank);
         for i in more {
             report.caption += tag(&mut page.lines[i], ROLE_CAPTION);
         }
@@ -235,7 +277,10 @@ fn tag_page(page: &mut PageText) -> RegionReport {
         if inside_prose(page, &entries, pos, geometry.blank) {
             continue;
         }
-        let region = find_region(page, &entries, pos, kind, band, geometry.blank);
+        let region: Vec<usize> = find_region(page, &entries, pos, kind, band, &geometry)
+            .into_iter()
+            .filter(|&i| taggable(&page.lines[i].text, kind))
+            .collect();
         if !region.is_empty() {
             report.caption += tag(&mut page.lines[k], ROLE_CAPTION);
         }
@@ -261,6 +306,12 @@ fn tag(line: &mut Line, role: &str) -> usize {
     } else {
         0
     }
+}
+
+/// A line with this text may take the region role of `kind`: it is not
+/// prose-like, or it is a pseudo-code line under an `Algorithm` caption.
+fn taggable(text: &str, kind: Kind) -> bool {
+    !is_prose_like(text) || (kind == Kind::Algorithm && is_algorithm_line(text))
 }
 
 /// Median line height, page middle and whether the page is two-column
@@ -306,6 +357,7 @@ fn band_for(geometry: &PageGeometry, b: BBox) -> Band {
         lo: f32::NEG_INFINITY,
         hi: f32::INFINITY,
         width: geometry.width,
+        cross: None,
     };
     if !geometry.two_column {
         return whole;
@@ -313,7 +365,10 @@ fn band_for(geometry: &PageGeometry, b: BBox) -> Band {
     let margin = GUTTER * geometry.width;
     let spans = b.x0 < geometry.mid - margin && b.x1 > geometry.mid + margin;
     if spans {
-        return whole;
+        return Band {
+            cross: Some((geometry.mid - margin, geometry.mid + margin)),
+            ..whole
+        };
     }
     let half = 0.5 * geometry.width;
     if f32::midpoint(b.x0, b.x1) < geometry.mid {
@@ -321,12 +376,14 @@ fn band_for(geometry: &PageGeometry, b: BBox) -> Band {
             lo: f32::NEG_INFINITY,
             hi: geometry.mid,
             width: half,
+            cross: None,
         }
     } else {
         Band {
             lo: geometry.mid,
             hi: f32::INFINITY,
             width: half,
+            cross: None,
         }
     }
 }
@@ -424,16 +481,24 @@ fn caption_kind(line: &Line) -> Option<Kind> {
     }
 }
 
+/// The line may continue a caption in `band`: it does not open a prose
+/// sentence and spans the gutter when the caption does.
+fn continues_caption(line: &Line, band: Band) -> bool {
+    !opens_sentence(&line.text) && finite_box(line).is_some_and(|b| band.crossed_by(b))
+}
+
 /// Body lines continuing the caption at `entries[pos]`: below it with no
 /// blank separator, prose-like or ending a sentence, through the first
 /// one that ends a sentence (the start's own full stop, as in
 /// `Table 1: Main Leaderboard.`, does not end the caption). Under an
-/// `Algorithm` caption a pseudo-code line ends it.
+/// `Algorithm` caption a pseudo-code line ends it; so does a line that
+/// cannot continue a caption (see [`continues_caption`]).
 fn caption_continuation(
     page: &PageText,
     entries: &[usize],
     pos: usize,
     kind: Kind,
+    band: Band,
     blank: f32,
 ) -> Vec<usize> {
     let mut more: Vec<usize> = Vec::new();
@@ -444,6 +509,9 @@ fn caption_continuation(
         }
         let line = &page.lines[i];
         if line.role != ROLE_BODY || gap(page, prev, i) > blank {
+            break;
+        }
+        if !continues_caption(line, band) {
             break;
         }
         let text = line.text.as_str();
@@ -470,27 +538,30 @@ fn find_region(
     pos: usize,
     kind: Kind,
     band: Band,
-    blank: f32,
+    geometry: &PageGeometry,
 ) -> Vec<usize> {
+    let blank = geometry.blank;
+    let scatter = band.width <= SCATTER_BAND * geometry.width;
     match kind {
         Kind::Figure => {
             let above = walk_up(page, entries, pos, blank);
-            if fragment_like(page, &above, band) {
+            if fragment_like(page, &above, band, scatter) {
                 return above;
             }
             let has_fragments = above.iter().any(|&i| is_fragment(&page.lines[i].text));
-            if has_fragments {
+            let near_top = pos * 5 < entries.len();
+            if has_fragments || !near_top {
                 return Vec::new();
             }
-            let below = walk_down(page, entries, pos, blank, false);
-            if fragment_like(page, &below, band) {
+            let below = walk_down(page, entries, pos, band, blank, false);
+            if fragment_like(page, &below, band, scatter) {
                 below
             } else {
                 Vec::new()
             }
         }
         Kind::Table => {
-            let below = walk_down(page, entries, pos, blank, false);
+            let below = walk_down(page, entries, pos, band, blank, false);
             if table_like(page, &below) {
                 return below;
             }
@@ -502,7 +573,7 @@ fn find_region(
             }
         }
         Kind::Algorithm => {
-            let below = walk_down(page, entries, pos, blank, true);
+            let below = walk_down(page, entries, pos, band, blank, true);
             if algorithm_like(page, &below) {
                 below
             } else {
@@ -512,8 +583,9 @@ fn find_region(
     }
 }
 
-/// Body lines above `entries[pos]` up to the nearest prose paragraph,
-/// nearest first. Furniture is skipped; any other non-body line stops.
+/// Body lines above `entries[pos]` up to the nearest prose paragraph or
+/// prose-like line, nearest first. Furniture is skipped; any other
+/// non-body line stops. Stops once past [`REGION_MAX_LINES`] lines.
 fn walk_up(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> Vec<usize> {
     let mut region: Vec<usize> = Vec::new();
     let mut below = entries[pos];
@@ -526,6 +598,9 @@ fn walk_up(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> Vec<us
             break;
         }
         let text = line.text.as_str();
+        if is_prose_like(text) {
+            break;
+        }
         if ends_sentence(text) && gap(page, i, below) > blank {
             break;
         }
@@ -537,18 +612,23 @@ fn walk_up(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> Vec<us
             break;
         }
         region.push(i);
+        if region.len() > REGION_MAX_LINES {
+            break;
+        }
         below = i;
     }
     region
 }
 
 /// Body lines below the caption at `entries[pos]` (after its continuation
-/// lines) up to the next prose paragraph. With `algorithm`, marker lines
-/// never count as prose.
+/// lines, at most [`CAPTION_MAX_LINES`] in all) up to the next prose
+/// paragraph or prose-like line. With `algorithm`, marker lines never
+/// count as prose. Stops once past [`REGION_MAX_LINES`] lines.
 fn walk_down(
     page: &PageText,
     entries: &[usize],
     pos: usize,
+    band: Band,
     blank: f32,
     algorithm: bool,
 ) -> Vec<usize> {
@@ -556,9 +636,14 @@ fn walk_down(
         let text = page.lines[i].text.as_str();
         is_prose(text) && !(algorithm && is_algorithm_line(text))
     };
+    let prose_like = |i: usize| -> bool {
+        let text = page.lines[i].text.as_str();
+        is_prose_like(text) && !(algorithm && is_algorithm_line(text))
+    };
     let mut region: Vec<usize> = Vec::new();
     let mut above = entries[pos];
     let mut in_caption = true;
+    let mut caption_lines: usize = 1;
     for (k, &i) in entries.iter().enumerate().skip(pos + 1) {
         let line = &page.lines[i];
         if line.role == ROLE_FURNITURE {
@@ -566,17 +651,20 @@ fn walk_down(
         }
         let gap_above = gap(page, above, i);
         if in_caption {
-            if line.role == ROLE_CAPTION {
-                above = i;
-                continue;
-            }
-            if line.role == ROLE_BODY && gap_above <= blank && prose(i) {
+            let room = caption_lines < CAPTION_MAX_LINES;
+            let continues = line.role == ROLE_CAPTION
+                || (line.role == ROLE_BODY
+                    && gap_above <= blank
+                    && prose(i)
+                    && continues_caption(line, band));
+            if room && continues {
+                caption_lines += 1;
                 above = i;
                 continue;
             }
             in_caption = false;
         }
-        if line.role != ROLE_BODY {
+        if line.role != ROLE_BODY || prose_like(i) {
             break;
         }
         if prose(i) {
@@ -589,16 +677,20 @@ fn walk_down(
             }
         }
         region.push(i);
+        if region.len() > REGION_MAX_LINES {
+            break;
+        }
         above = i;
     }
     region
 }
 
-/// At least 60 % short or axis-like lines, or left edges scattered by more
-/// than 15 % of the band width.
-fn fragment_like(page: &PageText, region: &[usize], band: Band) -> bool {
+/// Between [`MIN_REGION_LINES`] and [`REGION_MAX_LINES`] lines, of which at
+/// least 60 % are short or axis-like, or (with `scatter`, for a one-column
+/// band) whose left edges scatter by more than 15 % of the band width.
+fn fragment_like(page: &PageText, region: &[usize], band: Band, scatter: bool) -> bool {
     let n = region.len();
-    if n < MIN_REGION_LINES {
+    if !(MIN_REGION_LINES..=REGION_MAX_LINES).contains(&n) {
         return false;
     }
     let short = region
@@ -608,7 +700,7 @@ fn fragment_like(page: &PageText, region: &[usize], band: Band) -> bool {
     if short * 10 >= n * 6 {
         return true;
     }
-    if n < 3 {
+    if !scatter || n < 3 {
         return false;
     }
     let xs: Vec<f32> = region
@@ -625,10 +717,11 @@ fn fragment_like(page: &PageText, region: &[usize], band: Band) -> bool {
     variance.sqrt() > 0.15 * band.width
 }
 
-/// At least 50 % of lines with at most 5 words or at least 2 numeric tokens.
+/// Between [`MIN_REGION_LINES`] and [`REGION_MAX_LINES`] lines, at least
+/// 50 % of them with at most 5 words or at least 2 numeric tokens.
 fn table_like(page: &PageText, region: &[usize]) -> bool {
     let n = region.len();
-    if n < MIN_REGION_LINES {
+    if !(MIN_REGION_LINES..=REGION_MAX_LINES).contains(&n) {
         return false;
     }
     let cells = region
@@ -641,10 +734,11 @@ fn table_like(page: &PageText, region: &[usize]) -> bool {
     cells * 2 >= n
 }
 
-/// At least 30 % of lines carry a pseudo-code marker.
+/// At most [`REGION_MAX_LINES`] lines, at least 30 % of them carrying a
+/// pseudo-code marker.
 fn algorithm_like(page: &PageText, region: &[usize]) -> bool {
     let n = region.len();
-    if n == 0 {
+    if n == 0 || n > REGION_MAX_LINES {
         return false;
     }
     let marked = region
@@ -733,6 +827,47 @@ fn is_prose(text: &str) -> bool {
         })
         .count();
     lower * 2 >= total && numeric_count(text) * 10 < total * 3
+}
+
+/// A token with at least two uppercase letters: `LLM`, `GPT-4o`, `DeepSeek`.
+fn is_caps_token(token: &str) -> bool {
+    token.chars().filter(|c| c.is_uppercase()).count() >= 2
+}
+
+/// The hard prose guard: at least 7 words, at most 30 % numeric tokens, at
+/// most 2 all-caps or abbreviation tokens and at least 2 words starting
+/// lowercase (so a title-case table header row is not prose-like).
+fn is_prose_like(text: &str) -> bool {
+    let total = word_count(text);
+    if total < PROSE_LIKE_WORDS {
+        return false;
+    }
+    let mut caps: usize = 0;
+    let mut lower: usize = 0;
+    for token in text.split_whitespace() {
+        if is_caps_token(token) {
+            caps += 1;
+        }
+        let starts_lower = token
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .is_some_and(char::is_lowercase);
+        if starts_lower {
+            lower += 1;
+        }
+    }
+    numeric_count(text) * 10 <= total * 3 && caps <= PROSE_LIKE_CAPS && lower >= PROSE_LIKE_LOWER
+}
+
+/// A prose-like line of at least 10 words whose first word starts
+/// uppercase: body text opening a sentence, never a caption continuation.
+fn opens_sentence(text: &str) -> bool {
+    let upper = text
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(char::is_uppercase);
+    upper && word_count(text) >= SENTENCE_WORDS && is_prose_like(text)
 }
 
 /// Ends with `.`, `?` or `!`, ignoring closing quotes and brackets.
@@ -949,6 +1084,127 @@ mod tests {
         );
     }
 
+    /// Two-column body text in the style of the LLM papers that were
+    /// over-tagged: author-year citations, names and scores, so no two
+    /// neighbouring lines pass the lowercase-majority `is_prose` test and
+    /// half carry two numeric tokens (cell-like), yet most are prose-like.
+    /// Before the hard guards every walk below ran through it.
+    const COLUMN_PROSE: [&str; 12] = [
+        "Recent work by Aher, Arriaga and Kalai (2023) shows",
+        "Horton (2023), Argyle, Busby and Fulda (2023) and",
+        "Park, O'Brien and Cai (2024) find that LLM Agents",
+        "Match Humans in Economics (Horton, 2023; Manning,",
+        "2024), Political Science (Argyle et al., 2023) and",
+        "Marketing (Brand, Israeli and Ngwe, 2023), while",
+        "Dillion et al. (2023) and Hewitt et al. (2024) see",
+        "Mixed Agreement on Moral Norms (Tjuatja, 2024). In",
+        "Table 2, GPT-4o reaches 0.61 and Claude Haiku 0.58,",
+        "Gemini Flash 0.52 and Mistral Nemo only 0.41, with",
+        "Human Baselines of 1.00 on 9 of 12 Studies (Hu et",
+        "al., 2025; Wang, 2025) and Figure 4 shows the Gaps.",
+    ];
+
+    /// `n` lines of [`COLUMN_PROSE`] (cycled) at `x0`, 12 pt leading from
+    /// `top` down, as layout block `column`.
+    fn prose_column(lines: &mut Vec<Line>, x0: f32, top: f32, n: usize, column: u32) {
+        let mut baseline = top;
+        for k in 0..n {
+            let text = COLUMN_PROSE[k % COLUMN_PROSE.len()];
+            lines.push(line(text, x0, baseline, column));
+            baseline -= 12.0;
+        }
+    }
+
+    /// Every line but the caption start keeps the role `body`.
+    fn only_caption_tagged(page: &PageText, caption: &str) {
+        for l in &page.lines {
+            if l.text != caption {
+                assert_eq!(l.role, "body", "{}", l.text);
+            }
+        }
+    }
+
+    #[test]
+    fn column_prose_is_prose_like() {
+        for text in COLUMN_PROSE {
+            let chars = text.chars().count();
+            assert!(chars <= 52, "{text} must fit a column");
+        }
+        let like = COLUMN_PROSE.iter().filter(|t| is_prose_like(t)).count();
+        assert!(like >= 9, "{like}");
+    }
+
+    #[test]
+    fn a_full_width_figure_caption_above_two_prose_columns_tags_nothing() {
+        let caption =
+            "Figure 3: Agreement between simulated and human participants across twelve studies";
+        let mut lines: Vec<Line> = vec![captioned(caption, 54.0, 700.0, 0)];
+        prose_column(&mut lines, 54.0, 686.0, 40, 1);
+        prose_column(&mut lines, 312.0, 686.0, 40, 2);
+        let mut pages = vec![page_of(lines)];
+        let report = tag_regions(&mut pages);
+        assert_eq!(report, RegionReport::default());
+        assert!(pages[0].warnings.is_empty());
+        only_caption_tagged(&pages[0], caption);
+    }
+
+    #[test]
+    fn a_table_caption_followed_by_prose_tags_nothing() {
+        let caption = "Table 2: Effect sizes by study.";
+        let mut lines: Vec<Line> = Vec::new();
+        prose_column(&mut lines, 54.0, 760.0, 5, 0);
+        lines.push(captioned(caption, 54.0, 690.0, 1));
+        prose_column(&mut lines, 54.0, 676.0, 30, 2);
+        prose_column(&mut lines, 312.0, 760.0, 50, 3);
+        let mut pages = vec![page_of(lines)];
+        let report = tag_regions(&mut pages);
+        assert_eq!(report, RegionReport::default());
+        only_caption_tagged(&pages[0], caption);
+    }
+
+    #[test]
+    fn a_caption_at_the_top_of_a_column_above_prose_tags_nothing() {
+        let caption = "Figure 5: Calibration of the agents.";
+        let mut lines: Vec<Line> = Vec::new();
+        prose_column(&mut lines, 54.0, 760.0, 50, 0);
+        lines.push(captioned(caption, 312.0, 760.0, 1));
+        let mut baseline = 746.0;
+        for k in 0..30 {
+            if k % 5 == 3 {
+                lines.push(line(
+                    "L(\u{3b8}) = \u{3a3} w\u{2083} \u{2113}",
+                    420.0,
+                    baseline,
+                    2,
+                ));
+                lines.push(line("(3)", 560.0, baseline, 3));
+            } else {
+                let text = COLUMN_PROSE[k % COLUMN_PROSE.len()];
+                lines.push(line(text, 312.0, baseline, 4));
+            }
+            baseline -= 12.0;
+        }
+        let mut pages = vec![page_of(lines)];
+        let report = tag_regions(&mut pages);
+        assert_eq!(report, RegionReport::default());
+        only_caption_tagged(&pages[0], caption);
+    }
+
+    #[test]
+    fn a_region_longer_than_the_cap_is_dropped() {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 760.0;
+        for k in 0..45 {
+            lines.push(line(&format!("node {k}"), 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(captioned("Figure 1: Graph.", 72.0, baseline - 4.0, 1));
+        let mut pages = vec![page_of(lines)];
+        let report = tag_regions(&mut pages);
+        assert_eq!(report, RegionReport::default());
+        assert!(pages[0].lines.iter().all(|l| l.role != "figure"));
+    }
+
     const CELLS: [&str; 8] = [
         "Method PAS ECS",
         "GPT-4o 0.61 0.42",
@@ -1152,6 +1408,20 @@ mod tests {
         assert!(is_axis_like("0.0 0.2 0.4 0.6 0.8 1.0"));
         assert!(!is_axis_like("Robot State"));
         assert!(is_prose(LEFT_PROSE[0]));
+        assert!(is_prose_like(LEFT_PROSE[0]));
+        assert!(is_prose_like(COLUMN_PROSE[0]));
+        assert!(!is_prose_like("GPT-4o 0.61 0.42 0.33 0.55 0.21 0.18"));
+        assert!(!is_prose_like(
+            "Model Size Accuracy Recall Precision Latency Memory"
+        ));
+        assert!(!is_prose_like("the LLM uses GPT-4o and BERT for SFT"));
+        assert!(opens_sentence(
+            "We compare the simulated participants with the human ones here."
+        ));
+        assert!(!opens_sentence(COLUMN_PROSE[0]));
+        assert!(!opens_sentence(
+            "best performing models are highlighted in teal and worst in salmon."
+        ));
         assert!(!is_prose("GPT-4o 0.61 0.42 0.33 0.55 0.21"));
         assert!(!is_prose(
             "Method Category Characteristics Advantages Limitations Example"

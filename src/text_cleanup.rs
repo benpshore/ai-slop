@@ -9,7 +9,9 @@
 //!   body lines, and only leaves `text`; the page gets the warning
 //!   `furniture removed: N`;
 //! - a script line merged into its base line hands its span indices to
-//!   that line;
+//!   that line; a detached superscript citation number (`5`, `5–7`,
+//!   `10,11`) or a subscript digit is written with Unicode super- or
+//!   subscript characters (`literature.⁵`, `Initiative⁵⁻⁷`, `NH₃`);
 //! - a hyphen join moves the first word of the next line onto the line that
 //!   ends with the hyphen, in both line texts and page text.
 //!
@@ -68,6 +70,42 @@ const SCRIPT_OVERLAP: f32 = 0.5;
 /// Longest script fragment, in characters and in words.
 const SCRIPT_MAX_CHARS: usize = 16;
 const SCRIPT_MAX_WORDS: usize = 3;
+/// Longest superscript or subscript fragment (`10, 11, 12`), in characters.
+const SUPERSCRIPT_MAX_CHARS: usize = 12;
+/// Rounding slack on `SCRIPT_RATIO` for the superscript rule: sizes taken
+/// from scaled text matrices come out as 5.98 on 7.97 for a 6 on 8 pt pair.
+const RATIO_SLACK: f32 = 0.005;
+/// Distance from a span box's bottom up to its baseline, as a share of its
+/// font size (the backends' descent estimate).
+const DESCENT_SHARE: f32 = 0.2;
+/// Window for a superscript's box bottom above the base line's baseline, in
+/// base font sizes. A superscript sits so far above the base line's
+/// x-height that its box barely overlaps the base line's box, and reading
+/// order gives it a line of its own.
+const RAISED_LOW: f32 = -0.2;
+const RAISED_HIGH: f32 = 0.9;
+/// Lowest box bottom of a subscript, in base font sizes from the baseline
+/// (a subscript's bottom lies below `RAISED_LOW`).
+const LOWERED_LOW: f32 = -0.7;
+/// Typical box-bottom offsets of a superscript and a subscript, used to
+/// pick between two candidate base lines (a subscript of one line also lies
+/// in the superscript window of the line below).
+const RAISED_IDEAL: f32 = 0.3;
+const LOWERED_IDEAL: f32 = -0.4;
+/// How far outside the base line's box a superscript may sit, in base font
+/// sizes.
+const SUPERSCRIPT_REACH: f32 = 0.5;
+/// Unicode superscript and subscript digits, indexed by value.
+const SUPERSCRIPT_DIGITS: [char; 10] = [
+    '\u{2070}', '\u{00B9}', '\u{00B2}', '\u{00B3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}',
+    '\u{2078}', '\u{2079}',
+];
+const SUBSCRIPT_DIGITS: [char; 10] = [
+    '\u{2080}', '\u{2081}', '\u{2082}', '\u{2083}', '\u{2084}', '\u{2085}', '\u{2086}', '\u{2087}',
+    '\u{2088}', '\u{2089}',
+];
+/// Superscript minus, written for `-`, `–` and `−` in a raised range.
+const SUPERSCRIPT_MINUS: char = '\u{207B}';
 /// A span is vertical text when its box is this many times taller than wide.
 const VERTICAL_RATIO: f32 = 3.0;
 /// Shortest line the vertical-text stamp rule applies to (a lone `l` or `1`
@@ -101,8 +139,13 @@ pub struct CleanupReport {
     pub page_numbers: usize,
     /// `arXiv` margin stamps on page 1.
     pub stamps: usize,
-    /// Sub/superscript lines merged into their base line.
+    /// Sub/superscript lines merged into their base line as they read
+    /// (the general rule; not counting `superscripts_merged`).
     pub scripts_merged: usize,
+    /// Detached superscript numbers (`5`, `5–7`, `10,11`), single-letter or
+    /// asterisk marks and subscript digits merged into their base line in
+    /// Unicode super- or subscript form.
+    pub superscripts_merged: usize,
     /// Line-end hyphens removed by joining the word halves.
     pub hyphens_joined: usize,
     /// Line-end hyphens kept as compounds.
@@ -579,16 +622,208 @@ fn insertion_point(page: &PageText, line: &Line, x0: f32) -> (usize, usize) {
         if piece.is_empty() {
             continue;
         }
-        let Some(rel) = line.text.get(cursor..).and_then(|rest| rest.find(piece)) else {
+        let Some((start, len)) = locate(&line.text, cursor, piece) else {
             continue;
         };
-        let start = cursor + rel;
         if span.bbox.is_some_and(|b| norm(b).x0 >= x0) {
             return (start, slot);
         }
-        cursor = start + piece.len();
+        cursor = start + len;
     }
     (line.text.len(), line.spans.len())
+}
+
+/// Byte offset at or after `cursor` where `piece` shows in `text`, and the
+/// byte length it shows with: as itself or, for a merged fragment, in its
+/// super- or subscript form, whichever comes first.
+fn locate(text: &str, cursor: usize, piece: &str) -> Option<(usize, usize)> {
+    let rest = text.get(cursor..)?;
+    let mut best: Option<(usize, usize)> = rest.find(piece).map(|at| (at, piece.len()));
+    for raised in [true, false] {
+        let Some(form) = script_form(piece, raised) else {
+            continue;
+        };
+        let found = rest
+            .find(form.as_str())
+            .filter(|at| best.is_none_or(|(b, _)| *at < b));
+        if let Some(at) = found {
+            best = Some((at, form.len()));
+        }
+    }
+    best.map(|(at, len)| (cursor + at, len))
+}
+
+/// `text` written as a superscript (`raised`) or subscript fragment, when
+/// it is one: at most `SUPERSCRIPT_MAX_CHARS` characters of digits with
+/// optional `,`, `-`, `–`, `−` and spaces (raised only; a subscript is
+/// digits alone), or, raised, a single letter or asterisk. Digits become
+/// Unicode super- or subscript digits, dashes the superscript minus, spaces
+/// are dropped; a letter or asterisk stays as it is. `None` for anything
+/// else, words of two or more letters included.
+fn script_form(text: &str, raised: bool) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > SUPERSCRIPT_MAX_CHARS {
+        return None;
+    }
+    let mut chars = text.chars();
+    if let (Some(only), None) = (chars.next(), chars.next())
+        && raised
+        && (only.is_alphabetic() || matches!(only, '*' | '\u{2217}'))
+    {
+        return Some(only.to_string());
+    }
+    let mut out = String::with_capacity(3 * text.len());
+    let mut digits: usize = 0;
+    for ch in text.chars() {
+        if ch.is_whitespace() && raised {
+            continue;
+        }
+        let mapped = match ch {
+            '0'..='9' => {
+                digits += 1;
+                let index = usize::try_from(ch.to_digit(10)?).ok()?;
+                let table = if raised {
+                    &SUPERSCRIPT_DIGITS
+                } else {
+                    &SUBSCRIPT_DIGITS
+                };
+                table.get(index).copied()?
+            }
+            '-' | '\u{2013}' | '\u{2212}' if raised => SUPERSCRIPT_MINUS,
+            ',' if raised => ',',
+            _ => return None,
+        };
+        out.push(mapped);
+    }
+    (digits > 0).then_some(out)
+}
+
+/// True for a character `script_form` writes for a digit or a dash.
+fn is_script_char(ch: char) -> bool {
+    ch == SUPERSCRIPT_MINUS || SUPERSCRIPT_DIGITS.contains(&ch) || SUBSCRIPT_DIGITS.contains(&ch)
+}
+
+/// Baseline of the line and its dominant font size, from the first
+/// non-blank span of that size (the line box grows with merged scripts).
+fn baseline_of(page: &PageText, line: &Line) -> Option<(f32, f32)> {
+    let dominant = line_size(page, line)?;
+    line.spans.iter().find_map(|idx| {
+        let span = page.spans.get(*idx as usize)?;
+        if span.text.trim().is_empty() {
+            return None;
+        }
+        let size = span
+            .size
+            .filter(|s| s.is_finite() && *s >= 0.9 * dominant)?;
+        let bbox = norm(span.bbox?);
+        Some((bbox.y0 + DESCENT_SHARE * size, dominant))
+    })
+}
+
+/// Rule 3a: the body line a detached superscript or subscript fragment at
+/// `index` belongs to, with the fragment's rendered form. Every body line of
+/// the page is a candidate, not only the neighbours in reading order:
+/// fragments printed on one row follow each other (`8`, `9`, `10,11`), and
+/// when two columns interleave the base line can be further away. The base
+/// line has a font size of at least `1 / SCRIPT_RATIO` times the
+/// fragment's, reaches the fragment horizontally within
+/// `SUPERSCRIPT_REACH`, and has its baseline at a box-bottom offset in the
+/// raised window (superscript) or, for digits only, just below it
+/// (subscript). The candidate closest to the typical offset wins.
+fn superscript_target(page: &PageText, w: &PageWork, index: usize) -> Option<(usize, String)> {
+    let line = page.lines.get(index)?;
+    let raised_form = script_form(&line.text, true);
+    let lowered_form = script_form(&line.text, false);
+    if raised_form.is_none() && lowered_form.is_none() {
+        return None;
+    }
+    let bbox = norm(line.bbox?);
+    let size = line_size(page, line)?;
+    let mut best: Option<(usize, f32, bool)> = None;
+    for (j, other) in page.lines.iter().enumerate() {
+        if j == index || !w.is_body(j) {
+            continue;
+        }
+        let (Some(ob), Some((baseline, other_size))) =
+            (other.bbox.map(norm), baseline_of(page, other))
+        else {
+            continue;
+        };
+        if size > (SCRIPT_RATIO + RATIO_SLACK) * other_size {
+            continue;
+        }
+        let gap = (ob.x0 - bbox.x1).max(bbox.x0 - ob.x1).max(0.0);
+        if gap > SUPERSCRIPT_REACH * other_size {
+            continue;
+        }
+        let offset = (bbox.y0 - baseline) / other_size;
+        let (raised, miss) =
+            if raised_form.is_some() && (RAISED_LOW..=RAISED_HIGH).contains(&offset) {
+                (true, (offset - RAISED_IDEAL).abs())
+            } else if lowered_form.is_some() && (LOWERED_LOW..RAISED_LOW).contains(&offset) {
+                (false, (offset - LOWERED_IDEAL).abs())
+            } else {
+                continue;
+            };
+        let score = miss + gap / other_size;
+        if best.is_none_or(|(_, s, _)| score < s) {
+            best = Some((j, score, raised));
+        }
+    }
+    let (target, _, raised) = best?;
+    let form = if raised { raised_form } else { lowered_form };
+    form.map(|f| (target, f))
+}
+
+/// Insert the rendered fragment `form` of line `script` into line `target`
+/// at its horizontal position, attached to the word before it with no
+/// space (`literature.⁵`, `Initiative⁶,`), or to the word after it when it
+/// opens the line (`⁵Prein`). The fragment's span indices go into the
+/// target line's spans at the same place.
+fn merge_superscript(page: &mut PageText, script: usize, target: usize, form: &str) {
+    let Some(line) = page.lines.get(script) else {
+        return;
+    };
+    let spans = line.spans.clone();
+    let bbox = line.bbox;
+    let x0 = bbox.map_or(f32::INFINITY, |b| norm(b).x0);
+    let Some(base) = page.lines.get(target) else {
+        return;
+    };
+    let (byte, slot) = insertion_point(page, base, x0);
+    let Some(base) = page.lines.get_mut(target) else {
+        return;
+    };
+    let Some(head) = base.text.get(..byte) else {
+        return;
+    };
+    let tail = base.text.get(byte..).unwrap_or("");
+    let head = head.trim_end();
+    let mut text = String::with_capacity(base.text.len() + form.len() + 1);
+    text.push_str(head);
+    text.push_str(form);
+    if head.is_empty() {
+        text.push_str(tail.trim_start());
+    } else {
+        let word_follows = tail
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() && !is_script_char(c));
+        if word_follows {
+            text.push(' ');
+        }
+        text.push_str(tail);
+    }
+    base.text = text;
+    let slot = slot.min(base.spans.len());
+    let mut merged: Vec<u32> = base.spans[..slot].to_vec();
+    merged.extend(spans);
+    merged.extend_from_slice(&base.spans[slot..]);
+    base.spans = merged;
+    base.bbox = match (base.bbox, bbox) {
+        (Some(a), Some(b)) => Some(union(norm(a), norm(b))),
+        (a, b) => a.or(b),
+    };
 }
 
 /// Insert the script line `script` into line `target` at its horizontal
@@ -631,20 +866,26 @@ fn merge_script(page: &mut PageText, script: usize, target: usize) {
     };
 }
 
-/// Rule 3 over one page; returns the number of merged script lines.
-fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> usize {
-    let mut merged = 0;
+/// Rules 3a and 3 over one page; returns the number of lines merged by
+/// the general script rule and by the superscript rule.
+fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
+    let mut merged: usize = 0;
+    let mut superscripts: usize = 0;
     for k in 0..page.lines.len() {
         if !w.is_body(k) {
             continue;
         }
-        if let Some(target) = script_target(page, w, k) {
+        if let Some((target, form)) = superscript_target(page, w, k) {
+            merge_superscript(page, k, target, &form);
+            w.mark(k, State::Merged);
+            superscripts += 1;
+        } else if let Some(target) = script_target(page, w, k) {
             merge_script(page, k, target);
             w.mark(k, State::Merged);
             merged += 1;
         }
     }
-    merged
+    (merged, superscripts)
 }
 
 /// Words and hyphenated word pairs of every body line, lower-cased, in
@@ -1042,7 +1283,9 @@ pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
     mark_furniture(pages, &mut work, &mut report);
     for (page, w) in pages.iter_mut().zip(work.iter_mut()) {
         if w.eligible {
-            report.scripts_merged += merge_scripts(page, w);
+            let (merged, superscripts) = merge_scripts(page, w);
+            report.scripts_merged += merged;
+            report.superscripts_merged += superscripts;
         }
     }
     let vocab = vocabulary(pages, &work);
@@ -1720,5 +1963,171 @@ mod tests {
         assert_eq!(line.role, "figure");
         assert!(tag(&mut line, ROLE_FURNITURE));
         assert_eq!(line.role, "furniture");
+    }
+
+    /// Page 1 with `spans` and one body line per entry of `lines` (span
+    /// indices); a line's text is its span texts joined by spaces.
+    fn page_with(spans: Vec<Span>, lines: &[&[u32]]) -> PageText {
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        page.spans = spans;
+        for members in lines {
+            let texts: Vec<&str> = members
+                .iter()
+                .map(|i| page.spans[*i as usize].text.as_str())
+                .collect();
+            let text = texts.join(" ");
+            let mut bbox: Option<BBox> = None;
+            for i in *members {
+                let b = page.spans[*i as usize].bbox.unwrap();
+                bbox = Some(bbox.map_or(b, |a| union(a, b)));
+            }
+            page.lines.push(Line {
+                text,
+                bbox,
+                column: 0,
+                spans: members.to_vec(),
+                role: ROLE_BODY.to_string(),
+            });
+        }
+        page.text = joined(&page.lines);
+        page
+    }
+
+    #[test]
+    fn script_forms() {
+        assert_eq!(script_form("5", true).as_deref(), Some("\u{2075}"));
+        assert_eq!(
+            script_form("5\u{2013}7", true).as_deref(),
+            Some("\u{2075}\u{207B}\u{2077}")
+        );
+        assert_eq!(
+            script_form("10, 11", true).as_deref(),
+            Some("\u{00B9}\u{2070},\u{00B9}\u{00B9}")
+        );
+        assert_eq!(script_form("a", true).as_deref(), Some("a"));
+        assert_eq!(script_form("*", true).as_deref(), Some("*"));
+        assert_eq!(script_form("3", false).as_deref(), Some("\u{2083}"));
+        assert_eq!(script_form("a", false), None);
+        assert_eq!(script_form("ing", true), None);
+        assert_eq!(script_form("ab", true), None);
+        assert_eq!(script_form("-", true), None);
+        assert_eq!(script_form("1234567890123", true), None);
+        assert_eq!(script_form("1-2", false), None);
+    }
+
+    #[test]
+    fn raised_number_attaches_to_the_word_before_it() {
+        let spans = vec![
+            span_at("the literature.", 50.0, 398.0, 10.0, 0),
+            span_at("5", 125.5, 401.0, 6.0, 1),
+        ];
+        let mut pages = vec![page_with(spans, &[&[1], &[0]])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(report.scripts_merged, 0);
+        assert_eq!(pages[0].text, "the literature.\u{2075}");
+        assert_eq!(pages[0].lines.len(), 1);
+        assert_eq!(pages[0].lines[0].spans, [0, 1]);
+        assert_eq!(pages[0].spans.len(), 2);
+        let once = pages.clone();
+        let again = clean_document(&mut pages);
+        assert_eq!(again.superscripts_merged, 0);
+        assert_eq!(pages, once);
+    }
+
+    #[test]
+    fn raised_range_becomes_superscript_digits_and_minus() {
+        let spans = vec![
+            span_at("the Initiative", 50.0, 398.0, 10.0, 0),
+            span_at("5\u{2013}7", 120.5, 401.0, 6.0, 1),
+        ];
+        let mut pages = vec![page_with(spans, &[&[1], &[0]])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(pages[0].text, "the Initiative\u{2075}\u{207B}\u{2077}");
+    }
+
+    #[test]
+    fn raised_number_before_a_comma_span_drops_the_space() {
+        let spans = vec![
+            span_at("the Initiative", 50.0, 398.0, 10.0, 0),
+            span_at(",", 124.0, 398.0, 10.0, 1),
+            span_at("6", 120.5, 401.0, 6.0, 2),
+        ];
+        let mut pages = vec![page_with(spans, &[&[2], &[0, 1]])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(pages[0].text, "the Initiative\u{2076},");
+        assert_eq!(pages[0].lines[0].spans, [0, 2, 1]);
+    }
+
+    #[test]
+    fn raised_number_at_line_start_attaches_to_the_next_word() {
+        let spans = vec![
+            span_at("Prior work by Smith et al.", 50.0, 412.0, 10.0, 0),
+            span_at("38", 50.0, 401.0, 6.0, 1),
+            span_at("Prein and co", 50.0, 398.0, 10.0, 2),
+        ];
+        let mut pages = vec![page_with(spans, &[&[0], &[1], &[2]])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(
+            pages[0].text,
+            "Prior work by Smith et al.\n\u{00B3}\u{2078}Prein and co"
+        );
+        assert_eq!(pages[0].lines[1].spans, [1, 2]);
+    }
+
+    #[test]
+    fn fragments_on_one_row_merge_at_their_positions() {
+        let spans = vec![
+            span_at("papers from arXiv", 50.0, 398.0, 10.0, 0),
+            span_at(", ChemRxiv", 140.0, 398.0, 10.0, 1),
+            span_at(", and 1999 data", 195.0, 398.0, 10.0, 2),
+            span_at("9", 135.5, 401.0, 6.0, 3),
+            span_at("10, 11", 190.5, 401.0, 6.0, 4),
+        ];
+        let mut pages = vec![page_with(spans, &[&[3], &[4], &[0, 1, 2]])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 2);
+        assert_eq!(
+            pages[0].text,
+            "papers from arXiv\u{2079}, ChemRxiv\u{00B9}\u{2070},\u{00B9}\u{00B9}, and 1999 data"
+        );
+        assert_eq!(pages[0].lines[0].spans, [0, 3, 1, 4, 2]);
+    }
+
+    #[test]
+    fn raised_letters_and_body_size_numbers_stay() {
+        // `ing` sits in the raised window but overlaps the base line too
+        // little for the general script rule.
+        for (text, size, y0) in [("ing", 6.0, 406.0), ("38", 10.0, 401.0)] {
+            let spans = vec![
+                span_at("the literature.", 50.0, 398.0, 10.0, 0),
+                span_at(text, 125.5, y0, size, 1),
+            ];
+            let mut pages = vec![page_with(spans, &[&[1], &[0]])];
+            let before = pages[0].clone();
+            let report = clean_document(&mut pages);
+            assert_eq!(report.superscripts_merged, 0, "{text}");
+            assert_eq!(report.scripts_merged, 0, "{text}");
+            assert_eq!(pages[0], before, "{text}");
+        }
+    }
+
+    #[test]
+    fn lowered_digit_becomes_a_subscript_of_its_own_line() {
+        // The `3` also lies in the raised window of the line below; the
+        // offset closer to a typical subscript wins.
+        let spans = vec![
+            span_at("NH", 50.0, 398.0, 10.0, 0),
+            span_at("3", 60.5, 396.0, 6.0, 1),
+            span_at("and water", 50.0, 386.0, 10.0, 2),
+        ];
+        let mut pages = vec![page_with(spans, &[&[0], &[1], &[2]])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(pages[0].text, "NH\u{2083}\nand water");
+        assert_eq!(pages[0].lines[0].spans, [0, 1]);
     }
 }

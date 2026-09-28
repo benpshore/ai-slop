@@ -859,8 +859,11 @@ fn print_summary(report: &CorpusReport) {
     println!("doi_accuracy: {:.3}", s.doi_accuracy);
     println!("year_accuracy: {:.3}", s.year_accuracy);
     println!("title_accuracy: {:.3}", s.title_accuracy);
+    println!("title_not_applicable: {}", s.title_not_applicable);
     println!("marker_resolution_rate: {:.3}", s.marker_resolution_rate);
-    println!("marker_recall: {:.3}", s.marker_recall);
+    println!("marker_precision: {:.3}", s.marker_precision);
+    println!("marker_key_recall: {:.3}", s.marker_key_recall);
+    println!("marker_count_ratio: {:.3}", s.marker_recall);
     println!("marker_command_ratio: {:.3}", s.marker_command_ratio);
     match s.mean_body_alignment {
         Some(alignment) => println!("mean_body_alignment: {alignment:.3}"),

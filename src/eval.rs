@@ -6,8 +6,9 @@
 //! first-author surname plus year, then whole-entry text similarity),
 //! DOI/year/title field accuracy over the
 //! matched pairs only (so segmentation recall is not counted twice), in-text
-//! marker resolution and marker recall (resolved marker targets against the
-//! keys the source's `\cite` commands cite), and a word-alignment diagnostic
+//! marker resolution, marker precision and key recall (a marker target is
+//! correct when its extracted entry is matched to a key the source's `\cite`
+//! commands cite), and a word-alignment diagnostic
 //! of the body text order. The alignment is reported twice: over body text
 //! only (extracted text before the reference section with citation markers,
 //! caption paragraphs and math-heavy lines removed, against the truth body
@@ -167,8 +168,9 @@ pub struct PaperEval {
     /// markers cite (`[1, 2]` and `[1], [2]` both count 2).
     #[serde(default)]
     pub resolved_targets: u32,
-    /// `min(1, resolved_targets / truth_cited_keys)`; `None` when the source
-    /// cites no key.
+    /// Diagnostic only, the occurrence-based count ratio
+    /// `min(1, resolved_targets / truth_cited_keys)`; it does not check that a
+    /// target is the right entry. `None` when the source cites no key.
     #[serde(default)]
     pub marker_recall: Option<f32>,
     /// Diagnostic only, the old per-marker count ratio
@@ -179,6 +181,16 @@ pub struct PaperEval {
     pub marker_command_ratio: Option<f32>,
     /// Sum of resolved targets over all markers (same as `resolved_targets`).
     pub marker_targets: u32,
+    /// Marker targets whose extracted entry is matched (see `matches`) to a
+    /// truth key that is cited somewhere in the document.
+    #[serde(default)]
+    pub marker_targets_correct: u32,
+    /// Distinct cited truth keys with at least one correct marker target.
+    #[serde(default)]
+    pub marker_keys_hit: u32,
+    /// Distinct keys in `TruthCitations::cited_keys`.
+    #[serde(default)]
+    pub marker_keys_cited: u32,
     /// [`word_alignment`] of the extracted body text against the detexed
     /// body, both prepared by `alignment_texts`: the extracted side is the
     /// page text before the reference section with lines tagged with a
@@ -259,11 +271,20 @@ pub struct Summary {
     pub title_not_applicable: u32,
     /// Precision-like: resolved markers over extracted markers.
     pub marker_resolution_rate: f32,
-    /// Resolved marker targets over truth cited keys, each paper's targets
-    /// capped at its cited keys, summed over the non-failed papers whose
-    /// source cites at least one key.
+    /// Diagnostic only (`Marker count ratio`): resolved marker targets over
+    /// truth cited-key occurrences, each paper's targets capped at its cited
+    /// keys, summed over the non-failed papers whose source cites at least
+    /// one key. It does not check that a target is the right entry.
     #[serde(default)]
     pub marker_recall: f32,
+    /// `marker_targets_correct / resolved_targets`, summed over the
+    /// non-failed papers whose source cites at least one key.
+    #[serde(default)]
+    pub marker_precision: f32,
+    /// `marker_keys_hit / marker_keys_cited`, summed over the non-failed
+    /// papers whose source cites at least one key.
+    #[serde(default)]
+    pub marker_key_recall: f32,
     /// Diagnostic only: resolved markers over truth `\cite` commands, summed
     /// over the non-failed papers whose source has at least one cite command
     /// (the old, uncapped marker count ratio).
@@ -1787,6 +1808,38 @@ fn doi_is_printed(doi: &str, squashed: &str) -> bool {
     !needle.is_empty() && squashed.contains(&needle)
 }
 
+/// Correctness of the marker targets against the reference `matches`:
+/// `(correct targets, distinct cited keys hit, distinct cited keys)`. A target
+/// is correct when its extracted entry is matched to a truth key that occurs
+/// in `cited_keys`; a key is hit when at least one correct target points at
+/// its matched entry.
+fn marker_correctness(
+    markers: &[CitationMarker],
+    matches: &[RefMatch],
+    cited_keys: &[String],
+) -> (u32, u32, u32) {
+    let cited: BTreeSet<&str> = cited_keys.iter().map(String::as_str).collect();
+    let mut key_of: HashMap<u32, &str> = HashMap::new();
+    for m in matches {
+        if let Some(idx) = m.extracted_index {
+            key_of.insert(idx, m.truth_key.as_str());
+        }
+    }
+    let mut correct = 0_u32;
+    let mut hit: BTreeSet<&str> = BTreeSet::new();
+    for target in markers.iter().flat_map(|marker| marker.targets.iter()) {
+        if let Some(key) = key_of
+            .get(target)
+            .copied()
+            .filter(|key| cited.contains(key))
+        {
+            correct += 1;
+            hit.insert(key);
+        }
+    }
+    (correct, hit.len() as u32, cited.len() as u32)
+}
+
 /// Scores one extraction result against its ground truth.
 pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> PaperEval {
     let matches = match_references(&truth.references, &result.references);
@@ -1871,6 +1924,8 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
             u64::from(truth_cite_commands),
         ))
     };
+    let (marker_targets_correct, marker_keys_hit, marker_keys_cited) =
+        marker_correctness(&result.citations, &matches, &truth.citations.cited_keys);
 
     let (body_alignment, body_alignment_raw, body_counts) = if truth.body_text.trim().is_empty() {
         (None, None, AlignCounts::default())
@@ -1949,6 +2004,9 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         marker_recall,
         marker_command_ratio,
         marker_targets,
+        marker_targets_correct,
+        marker_keys_hit,
+        marker_keys_cited,
         body_alignment,
         body_alignment_raw,
         body_words_extracted: body_counts.left as u32,
@@ -2003,6 +2061,9 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         marker_recall: None,
         marker_command_ratio: None,
         marker_targets: 0,
+        marker_targets_correct: 0,
+        marker_keys_hit: 0,
+        marker_keys_cited: 0,
         body_alignment: None,
         body_alignment_raw: None,
         body_words_extracted: 0,
@@ -2047,9 +2108,11 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
 
 /// Corpus-level rates over the non-failed papers. Recall is total matched
 /// over total truth references, precision total matched over total extracted;
-/// field accuracies are over matched pairs only; marker recall is resolved
-/// marker targets (capped per paper at its cited keys) over truth cited keys
-/// for papers that cite any key; percentiles
+/// field accuracies are over matched pairs only; marker precision (correct
+/// over resolved targets), marker key recall (keys hit over distinct cited
+/// keys) and the diagnostic marker count ratio (resolved targets, capped per
+/// paper at its cited-key occurrences, over those occurrences) are summed
+/// over the papers that cite any key; percentiles
 /// are nearest-rank over `ms_per_chunk`.
 pub fn summarize(papers: &[PaperEval]) -> Summary {
     let ok: Vec<&PaperEval> = papers.iter().filter(|p| !is_failed(p)).collect();
@@ -2066,9 +2129,17 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
     }
     let mut targets_capped = 0_u64;
     let mut cited_keys = 0_u64;
+    let mut targets_resolved = 0_u64;
+    let mut targets_correct = 0_u64;
+    let mut keys_hit = 0_u64;
+    let mut keys_cited = 0_u64;
     for p in ok.iter().filter(|p| p.truth_cited_keys > 0) {
         targets_capped += u64::from(p.resolved_targets.min(p.truth_cited_keys));
         cited_keys += u64::from(p.truth_cited_keys);
+        targets_resolved += u64::from(p.resolved_targets);
+        targets_correct += u64::from(p.marker_targets_correct);
+        keys_hit += u64::from(p.marker_keys_hit);
+        keys_cited += u64::from(p.marker_keys_cited);
     }
 
     let mean_of = |f: fn(&PaperEval) -> Option<f32>| -> Option<f32> {
@@ -2127,6 +2198,8 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         title_not_applicable: sum(|p| p.title_not_applicable) as u32,
         marker_resolution_rate: ratio(sum(|p| p.resolved_markers), sum(|p| p.extracted_markers)),
         marker_recall: ratio(targets_capped, cited_keys),
+        marker_precision: ratio(targets_correct, targets_resolved),
+        marker_key_recall: ratio(keys_hit, keys_cited),
         marker_command_ratio: ratio(cited_resolved, cited_commands),
         mean_body_alignment,
         mean_body_alignment_raw,
@@ -2172,11 +2245,6 @@ fn cell(s: &str) -> String {
 fn pct(rate: f32) -> String {
     let value = rate * 100.0;
     format!("{value:.1}%")
-}
-
-/// Formats an optional marker recall as a percentage.
-fn recall_cell(recall: Option<f32>) -> String {
-    recall.map_or_else(|| "n/a".to_string(), pct)
 }
 
 /// `✓`, `✗` or `n/a` for an optional check.
@@ -2265,13 +2333,19 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     let _ = writeln!(
         out,
-        "| Marker recall (resolved targets/truth cited keys, capped per paper) | {} |",
-        pct(s.marker_recall)
+        "| Marker precision (correct targets / resolved targets) | {} |",
+        pct(s.marker_precision)
     );
     let _ = writeln!(
         out,
-        "| Marker count ratio (diagnostic, resolved markers/truth cite commands) | {} |",
-        pct(s.marker_command_ratio)
+        "| Marker key recall (cited keys with a correct marker / cited keys) | {} |",
+        pct(s.marker_key_recall)
+    );
+    let _ = writeln!(
+        out,
+        "| Marker count ratio (diagnostic, resolved targets/truth cited-key occurrences, \
+         capped per paper) | {} |",
+        pct(s.marker_recall)
     );
     let _ = writeln!(
         out,
@@ -2323,7 +2397,7 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     out.push_str(
         "| id | status | pages | refs truth/extracted/matched | count exact | ext/truth | \
          doi c/t/printed | year c/t | markers resolved/extracted | truth cites | \
-         targets/cited keys | marker recall | align | ms/chunk | warnings | title ✓/✗ | \
+         targets/cited keys | mk P/R | align | ms/chunk | warnings | title ✓/✗ | \
          authors c/t | paper doi ✓/✗/n/a | align raw | body words m/e/t |\n",
     );
     out.push_str(
@@ -2332,6 +2406,10 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
+        let marker_pr = format!(
+            "{}/{} {}/{}",
+            p.marker_targets_correct, p.resolved_targets, p.marker_keys_hit, p.marker_keys_cited
+        );
         let _ = writeln!(
             out,
             "| {} | {} | {} | {}/{}/{} | {} | {:.2} | {}/{}/{} | {}/{} | {}/{} | {} | {}/{} | {} | \
@@ -2354,7 +2432,7 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             p.truth_cite_commands,
             p.resolved_targets,
             p.truth_cited_keys,
-            recall_cell(p.marker_recall),
+            marker_pr,
             align_cell(p.body_alignment),
             p.ms_per_chunk,
             p.warnings,
@@ -2451,6 +2529,14 @@ pub struct PaperDump {
     /// [`BODY_TEXT_CAP`] bytes.
     #[serde(default)]
     pub body_text_truth: String,
+    /// Lines tagged with a role other than `body`, `heading` or empty, for
+    /// diagnosing role tagging offline (see [`tagged_lines`]).
+    #[serde(default)]
+    pub tagged_lines: Vec<TaggedLine>,
+    /// Count of every line role, including `body`, across `pages` (see
+    /// [`role_counts`]).
+    #[serde(default)]
+    pub role_counts: BTreeMap<String, usize>,
 }
 
 /// Reference heading on a single text line, for pages without `lines`.
@@ -2564,7 +2650,8 @@ fn body_text_with_markers(pages: &[PageText], markers: &[CitationMarker]) -> Str
 
 /// Collects the truth, the extracted entries, the pairing from `eval`, the
 /// markers, warnings, timings, reference-section text, the extracted and
-/// truth paper metadata, and the extracted and truth body texts for one
+/// truth paper metadata, the extracted and truth body texts, and the
+/// tagged-line diagnostics ([`tagged_lines`], [`role_counts`]) for one
 /// paper.
 pub fn dump_paper(
     id: &str,
@@ -2597,7 +2684,86 @@ pub fn dump_paper(
         paper_truth: truth.paper.clone(),
         body_text_extracted: body_text_with_markers(&result.pages, &result.citations),
         body_text_truth,
+        tagged_lines: tagged_lines(&result.pages),
+        role_counts: role_counts(&result.pages),
     }
+}
+
+/// Max entries in [`PaperDump::tagged_lines`]; when there are more tagged
+/// lines than this, only the first `TAGGED_LINES_CAP - 1` are kept and a
+/// final marker entry takes the last slot (see [`tagged_lines`]).
+pub const TAGGED_LINES_CAP: usize = 600;
+
+/// Character cap on [`TaggedLine::text`] (a `char` count, so a truncated
+/// multi-byte character is never split).
+pub const TAGGED_LINE_TEXT_CHARS: usize = 160;
+
+/// One line of [`PaperDump::tagged_lines`]: a line whose role was not
+/// `body`, `heading` or empty.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaggedLine {
+    pub page: u32,
+    pub role: String,
+    /// The line's text, truncated to [`TAGGED_LINE_TEXT_CHARS`] `char`s.
+    pub text: String,
+}
+
+/// Truncates `s` to at most `max_chars` `char`s (never splits a multi-byte
+/// `char`, unlike a byte-length cap).
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
+/// Every line of `pages` whose role is not `body`, `heading` or empty (see
+/// [`is_body_role`]), in page order, text truncated with [`truncate_chars`]
+/// to [`TAGGED_LINE_TEXT_CHARS`]. Capped at [`TAGGED_LINES_CAP`] entries:
+/// when more lines are tagged, only the first `TAGGED_LINES_CAP - 1` are
+/// kept and a final `{page: 0, role: "truncated", text: "<N more>"}` entry
+/// (`N` the number of lines left out) takes the last slot.
+pub fn tagged_lines(pages: &[PageText]) -> Vec<TaggedLine> {
+    let mut tagged: Vec<(u32, &str, &str)> = Vec::new();
+    for page in pages {
+        for line in &page.lines {
+            if !is_body_role(&line.role) {
+                tagged.push((page.page, line.role.as_str(), line.text.as_str()));
+            }
+        }
+    }
+    let total = tagged.len();
+    let keep = if total > TAGGED_LINES_CAP {
+        TAGGED_LINES_CAP - 1
+    } else {
+        total
+    };
+    let mut out: Vec<TaggedLine> = Vec::with_capacity(keep + 1);
+    for &(page, role, text) in &tagged[..keep] {
+        out.push(TaggedLine {
+            page,
+            role: role.to_string(),
+            text: truncate_chars(text, TAGGED_LINE_TEXT_CHARS),
+        });
+    }
+    if total > keep {
+        let more = total - keep;
+        out.push(TaggedLine {
+            page: 0,
+            role: "truncated".to_string(),
+            text: format!("<{more} more>"),
+        });
+    }
+    out
+}
+
+/// Count of `line.role` for every line of `pages`, across every role
+/// (including `body` and the empty role).
+pub fn role_counts(pages: &[PageText]) -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for page in pages {
+        for line in &page.lines {
+            *counts.entry(line.role.clone()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 /// File-name-safe form of a paper id: every character other than ASCII
@@ -3379,6 +3545,10 @@ mod tests {
         assert_eq!(eval.resolved_targets, 1);
         let command_ratio = eval.marker_command_ratio.expect("cite commands");
         assert!(close(command_ratio, 0.2), "got {command_ratio}");
+        // `[1]` resolves to e1, matched to the cited key `a`.
+        assert_eq!(eval.marker_targets_correct, 1);
+        assert_eq!(eval.marker_keys_hit, 1);
+        assert_eq!(eval.marker_keys_cited, 3);
         let alignment = eval.body_alignment.expect("body text present");
         assert!(close(alignment, 1.0), "got {alignment}");
         let raw = eval.body_alignment_raw.expect("body text present");
@@ -3584,6 +3754,10 @@ mod tests {
         // The old per-marker ratio overcounts the split command: 3 / 2.
         let old = eval.marker_command_ratio.expect("commands");
         assert!(close(old, 1.5), "got {old}");
+        // No extracted references are matched, so no target is correct.
+        assert_eq!(eval.marker_targets_correct, 0);
+        assert_eq!(eval.marker_keys_hit, 0);
+        assert_eq!(eval.marker_keys_cited, 5);
 
         // More targets than cited keys (false markers) is capped at 1.
         let noisy: Vec<CitationMarker> = (1..=8).map(|i| marker("[1]", vec![i])).collect();
@@ -3606,6 +3780,76 @@ mod tests {
             "{}",
             s.marker_command_ratio
         );
+        assert!(close(s.marker_precision, 0.0), "{}", s.marker_precision);
+        assert!(close(s.marker_key_recall, 0.0), "{}", s.marker_key_recall);
+    }
+
+    /// Truth `a` (cited) and `z` (not cited); e1 matches `z` and e2 matches
+    /// `a` by DOI; one `[n]` marker with the given targets.
+    fn wrong_or_right_marker(targets: Vec<u32>) -> PaperEval {
+        let mut ref_a = truth_ref("a");
+        ref_a.doi = Some("10.1/a".to_string());
+        let mut ref_z = truth_ref("z");
+        ref_z.doi = Some("10.1/z".to_string());
+        let mut e1 = extracted(1);
+        e1.doi = Some("10.1/z".to_string());
+        let mut e2 = extracted(2);
+        e2.doi = Some("10.1/a".to_string());
+        let marker = CitationMarker {
+            page: 1,
+            offset: 0,
+            text: "[n]".to_string(),
+            targets,
+        };
+        let mut truth = truth_with(vec![ref_a, ref_z], "");
+        truth.citations.cite_commands = 1;
+        truth.citations.cited_keys = vec!["a".to_string()];
+        let eval = evaluate("x", &sample_result(vec![e1, e2], vec![marker]), &truth);
+        assert_eq!(eval.matches[0].extracted_index, Some(2));
+        assert_eq!(eval.matches[1].extracted_index, Some(1));
+        eval
+    }
+
+    #[test]
+    fn marker_resolving_to_the_wrong_entry_is_not_correct() {
+        // `\cite{a}` printed as `[1]`, but entry 1 is `z` (never cited).
+        let eval = wrong_or_right_marker(vec![1]);
+        assert_eq!(eval.resolved_targets, 1);
+        assert_eq!(eval.marker_targets_correct, 0);
+        assert_eq!(eval.marker_keys_hit, 0);
+        assert_eq!(eval.marker_keys_cited, 1);
+        // The occurrence-based diagnostic still reports 100%.
+        let count_ratio = eval.marker_recall.expect("keys cited");
+        assert!(close(count_ratio, 1.0), "got {count_ratio}");
+        let s = summarize(&[eval]);
+        assert!(close(s.marker_precision, 0.0), "{}", s.marker_precision);
+        assert!(close(s.marker_key_recall, 0.0), "{}", s.marker_key_recall);
+        assert!(close(s.marker_recall, 1.0), "{}", s.marker_recall);
+    }
+
+    #[test]
+    fn marker_resolving_to_the_right_entry_is_correct() {
+        let eval = wrong_or_right_marker(vec![2]);
+        assert_eq!(eval.resolved_targets, 1);
+        assert_eq!(eval.marker_targets_correct, 1);
+        assert_eq!(eval.marker_keys_hit, 1);
+        assert_eq!(eval.marker_keys_cited, 1);
+        let s = summarize(&[eval]);
+        assert!(close(s.marker_precision, 1.0), "{}", s.marker_precision);
+        assert!(close(s.marker_key_recall, 1.0), "{}", s.marker_key_recall);
+        // A second target at the same key counts once towards key recall;
+        // an unmatched index is a resolved but wrong target.
+        let eval = wrong_or_right_marker(vec![2, 2, 7]);
+        assert_eq!(eval.resolved_targets, 3);
+        assert_eq!(eval.marker_targets_correct, 2);
+        assert_eq!(eval.marker_keys_hit, 1);
+        let s = summarize(&[eval]);
+        assert!(
+            close(s.marker_precision, 2.0 / 3.0),
+            "{}",
+            s.marker_precision
+        );
+        assert!(close(s.marker_key_recall, 1.0), "{}", s.marker_key_recall);
     }
 
     #[test]
@@ -3658,6 +3902,9 @@ mod tests {
         p1.truth_cite_commands = 20;
         p1.truth_cited_keys = 40;
         p1.resolved_targets = 10;
+        p1.marker_targets_correct = 6;
+        p1.marker_keys_hit = 12;
+        p1.marker_keys_cited = 20;
         p1.body_alignment = Some(0.8);
         p1.body_alignment_raw = Some(0.5);
         p1.body_words_extracted = 100;
@@ -3673,7 +3920,7 @@ mod tests {
         p2.body_words_extracted = 100;
         p2.body_words_truth = 120;
         p2.body_words_matched = 90;
-        // No truth cite commands: excluded from marker recall entirely.
+        // No truth cite commands: excluded from the marker metrics entirely.
         p2.extracted_markers = 4;
         p2.resolved_markers = 4;
         p2.resolved_targets = 4;
@@ -3686,6 +3933,10 @@ mod tests {
         let mut failed = failed_paper("p6", "boom");
         failed.truth_cite_commands = 100;
         failed.truth_cited_keys = 100;
+        failed.resolved_targets = 100;
+        failed.marker_targets_correct = 100;
+        failed.marker_keys_hit = 100;
+        failed.marker_keys_cited = 100;
         failed.body_words_truth = 1000;
 
         let s = summarize(&[p1, p2, p3, p4, p5, failed]);
@@ -3718,6 +3969,9 @@ mod tests {
             s.marker_resolution_rate
         );
         assert!(close(s.marker_recall, 0.25), "{}", s.marker_recall);
+        // Only p1 cites keys (p2's four targets are left out).
+        assert!(close(s.marker_precision, 0.6), "{}", s.marker_precision);
+        assert!(close(s.marker_key_recall, 0.6), "{}", s.marker_key_recall);
         assert!(
             close(s.marker_command_ratio, 0.25),
             "{}",
@@ -3770,6 +4024,9 @@ mod tests {
         p1.truth_cited_keys = 10;
         p1.resolved_targets = 5;
         p1.marker_recall = Some(0.5);
+        p1.marker_targets_correct = 3;
+        p1.marker_keys_hit = 2;
+        p1.marker_keys_cited = 4;
         let p2 = failed_paper("arxiv:9999.99999", "offline | no cache\nsecond line");
         let report = build_report("lopdf", "ci-arm64", vec![p1, p2]);
         assert!(report.generated_unix > 0);
@@ -3781,7 +4038,7 @@ mod tests {
         assert!(
             md.contains("| id | status | pages | refs truth/extracted/matched | count exact |")
         );
-        assert!(md.contains("| truth cites | targets/cited keys | marker recall | align |"));
+        assert!(md.contains("| truth cites | targets/cited keys | mk P/R | align |"));
         assert!(md.contains(
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
         ));
@@ -3789,15 +4046,19 @@ mod tests {
         assert!(md.contains("| ext/truth | doi c/t/printed | year c/t |"));
         assert!(md.contains("| DOI accuracy (of printed DOIs) | 0.0% |"));
         assert!(md.contains("## Stage timings (mean ms per document)\n"));
-        assert!(md.contains("| 4/6 | 8 | 5/10 | 50.0% | 0.912 | 12.5 | 0 |"));
-        assert!(md.contains("| 0/0 | 0 | 0/0 | n/a | n/a | 0.0 | 0 |"));
+        assert!(md.contains("| 4/6 | 8 | 5/10 | 3/5 2/4 | 0.912 | 12.5 | 0 |"));
+        assert!(md.contains("| 0/0 | 0 | 0/0 | 0/0 0/0 | n/a | 0.0 | 0 |"));
         assert!(md.contains("| Marker resolution (precision-like, resolved/extracted) | 66.7% |"));
+        assert!(md.contains("| Marker precision (correct targets / resolved targets) | 60.0% |"));
         assert!(md.contains(
-            "| Marker recall (resolved targets/truth cited keys, capped per paper) | 50.0% |"
+            "| Marker key recall (cited keys with a correct marker / cited keys) | 50.0% |"
         ));
         assert!(md.contains(
-            "| Marker count ratio (diagnostic, resolved markers/truth cite commands) | 50.0% |"
+            "| Marker count ratio (diagnostic, resolved targets/truth cited-key occurrences, \
+             capped per paper) | 50.0% |"
         ));
+        assert!(!md.contains("| Marker recall"));
+        assert!(!md.contains("marker recall"));
         assert!(md.contains("| arxiv:9999.99999 | failed:offline \\| no cache second line | 0 |"));
         assert!(md.contains("## Unmatched truth keys\n"));
         assert!(md.contains("- arxiv:2108.04588: `key0`, `key1`"));
@@ -3826,6 +4087,26 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let back: CorpusReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, report);
+    }
+
+    #[test]
+    fn report_without_marker_correctness_fields_still_loads() {
+        let report = build_report("lopdf", "host", vec![paper_with("p", 1.0)]);
+        let mut value = serde_json::to_value(&report).unwrap();
+        let paper = value["papers"][0].as_object_mut().unwrap();
+        for key in [
+            "marker_targets_correct",
+            "marker_keys_hit",
+            "marker_keys_cited",
+        ] {
+            assert!(paper.remove(key).is_some(), "{key}");
+        }
+        let summary = value["summary"].as_object_mut().unwrap();
+        for key in ["marker_precision", "marker_key_recall"] {
+            assert!(summary.remove(key).is_some(), "{key}");
+        }
+        let old: CorpusReport = serde_json::from_value(value).unwrap();
+        assert_eq!(old, report);
     }
 
     fn lined_page(number: u32, lines: &[&str]) -> PageText {
@@ -3903,6 +4184,11 @@ mod tests {
             "Intro\nReferences\nnot the real section\n\u{c}\nBody text\n"
         );
         assert_eq!(dump.body_text_truth, "Intro text.");
+        // All lines built by `lined_page` are role "body": nothing tagged,
+        // and role_counts has just the one key (3 + 3 + 1 lines).
+        assert_eq!(dump.tagged_lines, Vec::new());
+        assert_eq!(dump.role_counts.len(), 1);
+        assert_eq!(dump.role_counts["body"], 7);
     }
 
     #[test]
@@ -3938,11 +4224,115 @@ mod tests {
         object.remove("paper_truth");
         object.remove("body_text_extracted");
         object.remove("body_text_truth");
+        object.remove("tagged_lines");
+        object.remove("role_counts");
         let old: PaperDump = serde_json::from_value(value).unwrap();
         assert_eq!(old.metadata, Metadata::default());
         assert_eq!(old.paper_truth, TruthPaper::default());
         assert_eq!(old.body_text_extracted, "");
         assert_eq!(old.body_text_truth, "");
+        assert_eq!(old.tagged_lines, Vec::new());
+        assert_eq!(old.role_counts, BTreeMap::new());
+    }
+
+    #[test]
+    fn dump_paper_collects_tagged_lines_and_role_counts_across_pages() {
+        let roles = ["heading", "body", "figure", "table", "body", "toc", "front"];
+        let page1_lines: Vec<(&str, &str)> = ROLED_LINES.iter().copied().zip(roles).collect();
+        let page1 = roled_page(1, ROLED_TEXT, &page1_lines);
+
+        let long = "\u{e9}".repeat(200);
+        let page2_lines = [(long.as_str(), "figure"), ("Untagged line", "")];
+        let page2 = roled_page(2, "Untagged line", &page2_lines);
+
+        let mut result = sample_result(Vec::new(), Vec::new());
+        result.pages = vec![page1, page2];
+        let truth = truth_with(Vec::new(), "");
+        let eval = evaluate("roles", &result, &truth);
+        let dump = dump_paper("roles", &result, &truth, &eval);
+
+        let truncated_long = "\u{e9}".repeat(TAGGED_LINE_TEXT_CHARS);
+        assert_eq!(
+            dump.tagged_lines,
+            vec![
+                TaggedLine {
+                    page: 1,
+                    role: "figure".to_string(),
+                    text: "Epoch 0 Epoch 50".to_string(),
+                },
+                TaggedLine {
+                    page: 1,
+                    role: "table".to_string(),
+                    text: "Method Score".to_string(),
+                },
+                TaggedLine {
+                    page: 1,
+                    role: "toc".to_string(),
+                    text: "Contents . . . 3".to_string(),
+                },
+                TaggedLine {
+                    page: 1,
+                    role: "front".to_string(),
+                    text: "A Title Line".to_string(),
+                },
+                TaggedLine {
+                    page: 2,
+                    role: "figure".to_string(),
+                    text: truncated_long,
+                },
+            ]
+        );
+        assert_eq!(
+            dump.tagged_lines[4].text.chars().count(),
+            TAGGED_LINE_TEXT_CHARS
+        );
+
+        assert_eq!(dump.role_counts.len(), 7);
+        assert_eq!(dump.role_counts["heading"], 1);
+        assert_eq!(dump.role_counts["body"], 2);
+        assert_eq!(dump.role_counts["figure"], 2);
+        assert_eq!(dump.role_counts["table"], 1);
+        assert_eq!(dump.role_counts["toc"], 1);
+        assert_eq!(dump.role_counts["front"], 1);
+        assert_eq!(dump.role_counts[""], 1);
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let back: PaperDump = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dump);
+    }
+
+    #[test]
+    fn tagged_lines_capped_with_truncated_marker() {
+        let truth = truth_with(Vec::new(), "");
+
+        let exact_texts: Vec<String> = (0..TAGGED_LINES_CAP).map(|i| format!("line {i}")).collect();
+        let exact_lines: Vec<(&str, &str)> =
+            exact_texts.iter().map(|t| (t.as_str(), "figure")).collect();
+        let mut exact_result = sample_result(Vec::new(), Vec::new());
+        exact_result.pages = vec![roled_page(1, "irrelevant", &exact_lines)];
+        let eval = evaluate("cap-exact", &exact_result, &truth);
+        let dump = dump_paper("cap-exact", &exact_result, &truth, &eval);
+        assert_eq!(dump.tagged_lines.len(), TAGGED_LINES_CAP);
+        assert_eq!(dump.tagged_lines.last().unwrap().role, "figure");
+
+        let over_texts: Vec<String> = (0..(TAGGED_LINES_CAP + 5))
+            .map(|i| format!("line {i}"))
+            .collect();
+        let over_lines: Vec<(&str, &str)> =
+            over_texts.iter().map(|t| (t.as_str(), "figure")).collect();
+        let mut over_result = sample_result(Vec::new(), Vec::new());
+        over_result.pages = vec![roled_page(1, "irrelevant", &over_lines)];
+        let eval = evaluate("cap-over", &over_result, &truth);
+        let dump = dump_paper("cap-over", &over_result, &truth, &eval);
+        assert_eq!(dump.tagged_lines.len(), TAGGED_LINES_CAP);
+        assert_eq!(
+            dump.tagged_lines[TAGGED_LINES_CAP - 2].text,
+            format!("line {}", TAGGED_LINES_CAP - 2)
+        );
+        let marker = dump.tagged_lines.last().unwrap();
+        assert_eq!(marker.page, 0);
+        assert_eq!(marker.role, "truncated");
+        assert_eq!(marker.text, "<6 more>");
     }
 
     #[test]
