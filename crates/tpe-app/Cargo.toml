@@ -1,0 +1,32 @@
+[package]
+name = "tpe-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPUI workbench skeleton: corpus list, document view and an Ask Claude / ChatGPT panel over the engine ledger"
+
+[lib]
+name = "tpe_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tpe-app"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+thiserror = "2"
+tpe-common = { path = "../tpe-common" }
+ureq = "3"
+
+# GPUI is a macOS-only dependency. Its default features (`x11`, `wayland`,
+# `font-kit`; gpui-0.2.2/Cargo.toml [features] default) pull x11rb, wayland-client,
+# xkbcommon, zed-font-kit (fontconfig via dlopen), cosmic-text, ashpd, oo7 and
+# blade-graphics (Vulkan) on Linux, which the CI runners do not provide. Keeping
+# the dependency target-scoped means Linux builds never fetch or compile it.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = "0.2"
+
+[lints]
+workspace = true
