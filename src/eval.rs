@@ -22,8 +22,10 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::citations::find_reference_section;
-use crate::latex_refs::{GroundTruth, TruthReference};
-use crate::schema::{CitationMarker, ExtractionResult, PageText, ReferenceEntry, StageTimings};
+use crate::latex_refs::{GroundTruth, TruthPaper, TruthReference};
+use crate::schema::{
+    CitationMarker, ExtractionResult, Metadata, PageText, ReferenceEntry, StageTimings,
+};
 
 /// Product target: warm service time per 20-page chunk, in milliseconds.
 pub const TARGET_MS_PER_CHUNK: f64 = 30.0;
@@ -45,6 +47,14 @@ const PAPER_TITLE_JACCARD_MIN: f32 = 0.9;
 
 /// Unmatched truth keys listed per paper in the markdown report.
 const UNMATCHED_KEYS_SHOWN: usize = 10;
+
+/// Characters of an extracted or truth value quoted in a paper metadata
+/// mismatch line.
+const MISMATCH_VALUE_CHARS: usize = 100;
+
+/// Trailing punctuation that is never part of a DOI (as in
+/// `metadata::find_doi` and `citations::find_doi`).
+const DOI_TRAILING: [char; 8] = ['.', ',', ';', ')', ']', ':', '}', '\''];
 
 /// Byte cap on [`PaperDump::reference_section_text`] (60 kB).
 pub const REFERENCE_TEXT_CAP: usize = 60_000;
@@ -156,9 +166,14 @@ pub struct PaperEval {
     #[serde(default)]
     pub authors_correct: u32,
     /// `metadata.doi` equals the source's DOI after normalisation; `None`
-    /// when the source states no DOI.
+    /// when the source states no DOI (or only a template placeholder DOI).
     #[serde(default)]
     pub paper_doi_correct: Option<bool>,
+    /// One line per wrong paper title or DOI, `title extracted "…" vs truth
+    /// "…"` / `doi extracted "…" vs truth "…"`, each value capped at 100
+    /// characters; empty when both are right or unknown.
+    #[serde(default)]
+    pub paper_metadata_mismatches: Vec<String>,
 }
 
 /// Corpus-level rates; all rates are over non-failed papers.
@@ -211,7 +226,9 @@ pub struct Summary {
     /// Correct paper authors over truth paper authors.
     #[serde(default)]
     pub paper_author_recall: f32,
-    /// Correct paper authors over extracted paper authors.
+    /// Correct paper authors over extracted paper authors, counting only
+    /// papers whose source names at least one author (extracted names cannot
+    /// be judged against an empty truth list).
     #[serde(default)]
     pub paper_author_precision: f32,
     /// Papers whose extracted DOI is correct over papers whose source states
@@ -323,9 +340,27 @@ pub fn word_alignment(a: &str, b: &str) -> f32 {
     ((2 * lcs) as f64 / (left.len() + right.len()) as f64) as f32
 }
 
+/// `10.NNNN/`: where a DOI starts inside a longer string.
+fn doi_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"10\.\d{4,9}/").expect("valid regex"))
+}
+
 /// Lower-case DOI without resolver prefixes or trailing punctuation.
+///
+/// Everything before the first `10.NNNN/` is dropped, so `doi:`, `DOI: `,
+/// `https://doi.org/`, `https://www.doi.org/` and combinations such as
+/// `doi: https://doi.org/` all reduce to the bare DOI; the same trailing
+/// punctuation as `metadata::find_doi` is trimmed. Both sides of every DOI
+/// comparison go through this function.
 fn normalize_doi(s: &str) -> String {
     let lower = s.trim().to_lowercase();
+    if let Some(found) = doi_prefix_re().find(&lower) {
+        return lower[found.start()..]
+            .trim()
+            .trim_end_matches(DOI_TRAILING)
+            .to_string();
+    }
     let mut rest: &str = &lower;
     for prefix in [
         "https://doi.org/",
@@ -340,7 +375,62 @@ fn normalize_doi(s: &str) -> String {
             rest = stripped.trim();
         }
     }
-    rest.trim_end_matches(['.', ',', ';']).to_string()
+    rest.trim_end_matches(DOI_TRAILING).to_string()
+}
+
+/// True for the DOIs that `LaTeX` templates ship as placeholders
+/// (`10.1145/nnnnnnn.nnnnnnn`, `10.1145/1122445.1122456`, `10.475/123_4`):
+/// a source stating one of these states no DOI.
+fn is_placeholder_doi(doi: &str) -> bool {
+    let norm = normalize_doi(doi);
+    if matches!(norm.as_str(), "10.1145/1122445.1122456" | "10.475/123_4") {
+        return true;
+    }
+    let Some((_, suffix)) = norm.split_once('/') else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix
+            .chars()
+            .all(|c| matches!(c, 'n' | 'x' | '.' | '-' | '_' | '#'))
+}
+
+/// `"value"` capped at [`MISMATCH_VALUE_CHARS`] characters (with `…` when
+/// cut), or `none` when absent.
+fn mismatch_value(value: Option<&str>) -> String {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return "none".to_string();
+    };
+    let mut capped: String = value.chars().take(MISMATCH_VALUE_CHARS).collect();
+    if value.chars().count() > MISMATCH_VALUE_CHARS {
+        capped.push('…');
+    }
+    format!("\"{capped}\"")
+}
+
+/// Mismatch lines for a wrong paper title and a wrong paper DOI.
+fn paper_mismatches(
+    meta: &Metadata,
+    paper: &TruthPaper,
+    title_correct: Option<bool>,
+    doi_correct: Option<bool>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if title_correct == Some(false) {
+        lines.push(format!(
+            "title extracted {} vs truth {}",
+            mismatch_value(meta.title.as_deref()),
+            mismatch_value(paper.title.as_deref())
+        ));
+    }
+    if doi_correct == Some(false) {
+        lines.push(format!(
+            "doi extracted {} vs truth {}",
+            mismatch_value(meta.doi.as_deref()),
+            mismatch_value(paper.doi.as_deref())
+        ));
+    }
+    lines
 }
 
 /// `arXiv` id without a `vN` version suffix (`2101.00001v2` -> `2101.00001`).
@@ -1114,7 +1204,10 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         .paper
         .doi
         .as_ref()
+        .filter(|doi| !normalize_doi(doi).is_empty() && !is_placeholder_doi(doi))
         .map(|doi| doi_equal(Some(doi), meta.doi.as_ref()));
+    let paper_metadata_mismatches =
+        paper_mismatches(meta, &truth.paper, paper_title_correct, paper_doi_correct);
 
     PaperEval {
         id: id.to_string(),
@@ -1155,6 +1248,7 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         authors_extracted: extracted_names.len() as u32,
         authors_correct,
         paper_doi_correct,
+        paper_metadata_mismatches,
     }
 }
 
@@ -1199,6 +1293,7 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         authors_extracted: 0,
         authors_correct: 0,
         paper_doi_correct: None,
+        paper_metadata_mismatches: Vec::new(),
     }
 }
 
@@ -1268,6 +1363,11 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
     let titled: Vec<bool> = ok.iter().filter_map(|p| p.paper_title_correct).collect();
     let titles_right = titled.iter().filter(|correct| **correct).count() as u64;
     let authors_right = sum(|p| p.authors_correct);
+    let authors_judged: u64 = ok
+        .iter()
+        .filter(|p| p.authors_truth > 0)
+        .map(|p| u64::from(p.authors_extracted))
+        .sum();
     let doi_checked: Vec<bool> = ok.iter().filter_map(|p| p.paper_doi_correct).collect();
     let dois_right = doi_checked.iter().filter(|correct| **correct).count() as u64;
 
@@ -1295,7 +1395,7 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         mean_write_ms: mean_stage(|t| t.write_ms),
         paper_title_accuracy: ratio(titles_right, titled.len() as u64),
         paper_author_recall: ratio(authors_right, sum(|p| p.authors_truth)),
-        paper_author_precision: ratio(authors_right, sum(|p| p.authors_extracted)),
+        paper_author_precision: ratio(authors_right, authors_judged),
         paper_doi_accuracy: ratio(dois_right, doi_checked.len() as u64),
     }
 }
@@ -1346,7 +1446,8 @@ fn align_cell(alignment: Option<f32>) -> String {
 }
 
 /// Renders the report as `GitHub`-flavoured markdown: a summary table, a
-/// per-paper table, then the unmatched truth keys (at most ten per paper).
+/// per-paper table, the paper metadata mismatches (wrong title or DOI, one
+/// line each), then the unmatched truth keys (at most ten per paper).
 pub fn render_markdown(report: &CorpusReport) -> String {
     let s = &report.summary;
     let mut out = String::new();
@@ -1390,10 +1491,19 @@ pub fn render_markdown(report: &CorpusReport) -> String {
         "| Paper author precision | {} |",
         pct(s.paper_author_precision)
     );
+    let doi_checked = report
+        .papers
+        .iter()
+        .filter(|p| !is_failed(p) && p.paper_doi_correct.is_some())
+        .count();
+    let doi_cell = if doi_checked == 0 {
+        "n/a (no source states a DOI)".to_string()
+    } else {
+        pct(s.paper_doi_accuracy)
+    };
     let _ = writeln!(
         out,
-        "| Paper DOI accuracy (of papers whose source states a DOI) | {} |",
-        pct(s.paper_doi_accuracy)
+        "| Paper DOI accuracy (of papers whose source states a DOI) | {doi_cell} |"
     );
     let _ = writeln!(
         out,
@@ -1480,6 +1590,18 @@ pub fn render_markdown(report: &CorpusReport) -> String {
         );
     }
 
+    out.push_str("\n## Paper metadata mismatches\n\n");
+    let mut any_mismatch = false;
+    for p in &report.papers {
+        for line in &p.paper_metadata_mismatches {
+            any_mismatch = true;
+            let _ = writeln!(out, "- {}: {}", cell(&p.id), cell(line));
+        }
+    }
+    if !any_mismatch {
+        out.push_str("- none\n");
+    }
+
     out.push_str("\n## Unmatched truth keys\n\n");
     let mut any = false;
     for p in &report.papers {
@@ -1533,6 +1655,13 @@ pub struct PaperDump {
     /// document, pages joined by [`DUMP_PAGE_SEPARATOR`], capped at
     /// [`REFERENCE_TEXT_CAP`] bytes; empty when no heading was found.
     pub reference_section_text: String,
+    /// The extracted paper metadata (`ExtractionResult::metadata`).
+    #[serde(default)]
+    pub metadata: Metadata,
+    /// Title, authors and identifiers the `LaTeX` source states
+    /// (`GroundTruth::paper`).
+    #[serde(default)]
+    pub paper_truth: TruthPaper,
 }
 
 /// Reference heading on a single text line, for pages without `lines`.
@@ -1628,7 +1757,8 @@ pub fn reference_section_text(pages: &[PageText]) -> String {
 }
 
 /// Collects the truth, the extracted entries, the pairing from `eval`, the
-/// markers, warnings, timings and reference-section text for one paper.
+/// markers, warnings, timings, reference-section text, and the extracted
+/// and truth paper metadata for one paper.
 pub fn dump_paper(
     id: &str,
     result: &ExtractionResult,
@@ -1654,6 +1784,8 @@ pub fn dump_paper(
         timings: result.timings,
         pages: result.pages.len() as u32,
         reference_section_text: reference_section_text(&result.pages),
+        metadata: result.metadata.clone(),
+        paper_truth: truth.paper.clone(),
     }
 }
 
@@ -1848,6 +1980,48 @@ mod tests {
         assert_eq!(sampled, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
         assert_eq!(sample_evenly(tokens.clone(), 100), tokens);
         assert_eq!(sample_evenly(vec![1, 2, 3], 5), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn normalize_doi_is_symmetric_over_prefixes_case_and_punctuation() {
+        let bare = "10.1145/3292500.3330701";
+        for printed in [
+            "10.1145/3292500.3330701",
+            "DOI: 10.1145/3292500.3330701",
+            "doi:10.1145/3292500.3330701.",
+            "https://doi.org/10.1145/3292500.3330701",
+            "https://www.doi.org/10.1145/3292500.3330701)",
+            "http://dx.doi.org/10.1145/3292500.3330701;",
+            "doi: https://doi.org/10.1145/3292500.3330701",
+            "DOI 10.1145/3292500.3330701]",
+        ] {
+            assert_eq!(normalize_doi(printed), bare, "{printed}");
+        }
+        assert_eq!(
+            normalize_doi("10.1109/TPAMI.2020.1234567"),
+            "10.1109/tpami.2020.1234567"
+        );
+        let upper = "DOI:10.1109/TPAMI.2020.1234567".to_string();
+        let lower = "https://doi.org/10.1109/tpami.2020.1234567".to_string();
+        assert!(doi_equal(Some(&upper), Some(&lower)));
+        assert!(doi_equal(Some(&lower), Some(&upper)));
+        let other = "10.1109/TPAMI.2020.7654321".to_string();
+        assert!(!doi_equal(Some(&upper), Some(&other)));
+        assert!(!doi_equal(Some(&upper), None));
+        // Without a `10.NNNN/` the old prefix stripping still applies.
+        assert_eq!(normalize_doi("doi:ABC."), "abc");
+    }
+
+    #[test]
+    fn placeholder_dois_are_recognised() {
+        assert!(is_placeholder_doi("10.1145/nnnnnnn.nnnnnnn"));
+        assert!(is_placeholder_doi(
+            "https://doi.org/10.1145/XXXXXXX.XXXXXXX"
+        ));
+        assert!(is_placeholder_doi("10.1145/1122445.1122456"));
+        assert!(is_placeholder_doi("10.475/123_4"));
+        assert!(!is_placeholder_doi("10.1145/3292500.3330701"));
+        assert!(!is_placeholder_doi("10.1038/nature14539"));
     }
 
     #[test]
@@ -2496,6 +2670,44 @@ mod tests {
             dump.reference_section_text,
             "1 References\n[1] A. Smith. Alpha title. 2020.\n\u{c}\n[2] B. Jones. Other. 2021."
         );
+        assert_eq!(dump.metadata, result.metadata);
+        assert_eq!(dump.paper_truth, truth.paper);
+    }
+
+    #[test]
+    fn dump_carries_extracted_metadata_and_paper_truth() {
+        let mut result = sample_result(Vec::new(), Vec::new());
+        result.metadata.title = Some("Extracted Title".to_string());
+        result.metadata.doi = Some("10.1000/abc".to_string());
+        result
+            .metadata
+            .provenance
+            .insert("title".to_string(), "first_page:largest-font".to_string());
+        let mut truth = truth_with(Vec::new(), "");
+        truth.paper = TruthPaper {
+            title: Some("True Title".to_string()),
+            authors: names(&["Ada Lovelace"]),
+            doi: Some("10.1000/ABC".to_string()),
+            arxiv_id: None,
+        };
+        let eval = evaluate("m", &result, &truth);
+        let dump = dump_paper("m", &result, &truth, &eval);
+        assert_eq!(dump.metadata.title.as_deref(), Some("Extracted Title"));
+        assert_eq!(dump.metadata.provenance["title"], "first_page:largest-font");
+        assert_eq!(dump.paper_truth.title.as_deref(), Some("True Title"));
+        assert_eq!(dump.paper_truth.authors, names(&["Ada Lovelace"]));
+        let json = serde_json::to_string(&dump).unwrap();
+        let back: PaperDump = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dump);
+
+        // Dumps written before these fields existed still load.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("metadata");
+        object.remove("paper_truth");
+        let old: PaperDump = serde_json::from_value(value).unwrap();
+        assert_eq!(old.metadata, Metadata::default());
+        assert_eq!(old.paper_truth, TruthPaper::default());
     }
 
     #[test]
@@ -2786,14 +2998,16 @@ mod tests {
             "{}",
             s.paper_title_accuracy
         );
-        // 6 correct of 8 truth authors (the third paper has none), 6 of 12 extracted.
+        // 6 correct of 8 truth authors (the third paper has none). Precision
+        // counts only papers whose source names authors: 6 of 8 extracted
+        // (the third paper's 4 names cannot be judged).
         assert!(
             close(s.paper_author_recall, 0.75),
             "{}",
             s.paper_author_recall
         );
         assert!(
-            close(s.paper_author_precision, 0.5),
+            close(s.paper_author_precision, 0.75),
             "{}",
             s.paper_author_precision
         );
@@ -2876,5 +3090,84 @@ mod tests {
         assert!(row("p1").ends_with("| ✓ |"), "{}", row("p1"));
         assert!(row("p3").ends_with("| ✗ |"), "{}", row("p3"));
         assert!(row("p4").ends_with("| n/a |"), "{}", row("p4"));
+    }
+
+    #[test]
+    fn evaluate_paper_doi_matches_prefixed_upper_case_extraction() {
+        let mut result = sample_result(Vec::new(), Vec::new());
+        result.metadata.doi = Some("DOI:10.1145/ABC.123.".to_string());
+        let mut truth = truth_with(Vec::new(), "");
+        truth.paper.doi = Some("https://doi.org/10.1145/abc.123".to_string());
+        let eval = evaluate("p", &result, &truth);
+        assert_eq!(eval.paper_doi_correct, Some(true));
+        assert!(eval.paper_metadata_mismatches.is_empty());
+
+        // A template placeholder in the source is no DOI at all.
+        truth.paper.doi = Some("10.1145/nnnnnnn.nnnnnnn".to_string());
+        let placeholder = evaluate("q", &result, &truth);
+        assert_eq!(placeholder.paper_doi_correct, None);
+        assert!(placeholder.paper_metadata_mismatches.is_empty());
+    }
+
+    #[test]
+    fn evaluate_lists_paper_metadata_mismatches() {
+        let mut result = sample_result(Vec::new(), Vec::new());
+        result.metadata.title = Some("Received August 2026".to_string());
+        result.metadata.doi = Some("10.1000/wrong".to_string());
+        let mut truth = truth_with(Vec::new(), "");
+        truth.paper.title = Some("Uncertainty Estimators".to_string());
+        truth.paper.doi = Some("10.1000/right".to_string());
+        let eval = evaluate("arxiv:1", &result, &truth);
+        assert_eq!(
+            eval.paper_metadata_mismatches,
+            vec![
+                "title extracted \"Received August 2026\" vs truth \"Uncertainty Estimators\""
+                    .to_string(),
+                "doi extracted \"10.1000/wrong\" vs truth \"10.1000/right\"".to_string(),
+            ]
+        );
+
+        result.metadata.title = None;
+        result.metadata.doi = None;
+        let missing = evaluate("arxiv:2", &result, &truth);
+        assert_eq!(
+            missing.paper_metadata_mismatches,
+            vec![
+                "title extracted none vs truth \"Uncertainty Estimators\"".to_string(),
+                "doi extracted none vs truth \"10.1000/right\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mismatch_values_are_capped_at_100_chars() {
+        let long = "é".repeat(150);
+        let shown = mismatch_value(Some(long.as_str()));
+        assert_eq!(shown.chars().count(), 100 + 3);
+        assert!(shown.ends_with("é…\""));
+        assert_eq!(mismatch_value(Some("  ")), "none");
+        assert_eq!(mismatch_value(None), "none");
+    }
+
+    #[test]
+    fn render_markdown_lists_paper_metadata_mismatches() {
+        let mut p1 = paper_with("p1", 1.0);
+        p1.paper_title_correct = Some(false);
+        p1.paper_metadata_mismatches = vec!["title extracted \"A | B\" vs truth \"C\"".to_string()];
+        let p2 = paper_with("p2", 1.0);
+        let md = render_markdown(&build_report("lopdf", "h", vec![p1, p2]));
+        assert!(md.contains(
+            "\n## Paper metadata mismatches\n\n- p1: title extracted \"A \\| B\" vs truth \"C\"\n\n## Unmatched truth keys\n"
+        ));
+        let clean = render_markdown(&build_report("lopdf", "h", vec![paper_with("p", 1.0)]));
+        assert!(clean.contains("## Paper metadata mismatches\n\n- none\n"));
+    }
+
+    #[test]
+    fn render_markdown_paper_doi_accuracy_is_na_without_truth_dois() {
+        let md = render_markdown(&build_report("lopdf", "h", vec![paper_with("p", 1.0)]));
+        assert!(md.contains(
+            "| Paper DOI accuracy (of papers whose source states a DOI) | n/a (no source states a DOI) |"
+        ));
     }
 }

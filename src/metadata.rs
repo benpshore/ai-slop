@@ -19,10 +19,42 @@ const SUPERSCRIPT_RATIO: f32 = 0.8;
 const MAX_AUTHOR_LINES: usize = 30;
 /// Maximum number of lines collected for the abstract.
 const MAX_ABSTRACT_LINES: usize = 80;
+/// Fraction of the page height at the top and at the bottom that counts as
+/// the running header / footer band.
+const HEADER_FOOTER_BAND: f32 = 0.1;
+/// Longest piece that a line wrap may split off a DOI and still be joined.
+const MAX_DOI_WRAP_TOKEN: usize = 64;
+/// Trailing punctuation that is never part of a DOI.
+const DOI_TRAILING: [char; 8] = ['.', ',', ';', ')', ']', ':', '}', '\''];
 
-fn doi_re() -> &'static Regex {
+/// Start of a DOI, tolerating the single spaces a wrap leaves inside the
+/// prefix (`10. 1145/`, `10.1145 /`).
+fn doi_start_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"10\.\d{4,9}/[^\s"<>]+"#).expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"\b10\. ?\d{4,9} ?/").expect("valid regex"))
+}
+
+/// A DOI that runs to the end of a line (its suffix possibly empty).
+fn doi_at_line_end_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\b10\. ?\d{4,9} ?/[^\s"<>]*$"#).expect("valid regex"))
+}
+
+/// A bare year token (`2020`, `2020a`), never the rest of a wrapped DOI.
+fn year_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(?:19|20)\d{2}[a-z]?$").expect("valid regex"))
+}
+
+/// `, Member, IEEE` / `, Senior Member, IEEE` / `, Fellow, IEEE` after a name.
+fn ieee_membership_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i),?\s*\b(?:(?:student|senior|life|graduate\s+student)\s+)?(?:member|fellow)\s*,?\s*ieee\b",
+        )
+        .expect("valid regex")
+    })
 }
 
 fn arxiv_re() -> &'static Regex {
@@ -78,12 +110,12 @@ fn affiliation_re() -> &'static Regex {
 
 fn marker_chars_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"[\d¹²³⁴⁵⁶⁷⁸⁹⁰⁺*†‡§¶‖#]+").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"[\d¹²³⁴⁵⁶⁷⁸⁹⁰⁺*∗⋆★☆†‡§¶‖#✉]+").expect("valid regex"))
 }
 
 fn info_split_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\s*(?:,|;|&|\band\b)\s*").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"\s*(?:,|;|&|·|\band\b)\s*").expect("valid regex"))
 }
 
 fn name_group_split_re() -> &'static Regex {
@@ -159,11 +191,11 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
     }
     if meta.doi.is_none()
         && let Some(page) = first_page
-        && let Some(doi) = first_in_lines(page, find_doi)
+        && let Some((doi, source)) = page1_doi(page)
     {
         meta.doi = Some(doi);
         meta.provenance
-            .insert("doi".to_string(), "first_page:doi".to_string());
+            .insert("doi".to_string(), source.to_string());
     }
 
     // arXiv id: Info values first, then page 1.
@@ -330,7 +362,8 @@ fn author_is_generic(author: &str) -> bool {
         || !lower.chars().any(char::is_alphabetic)
 }
 
-/// Split a printed author line on commas, semicolons, `&` and `and`.
+/// Split a printed author line on commas, semicolons, `&`, the middle dot
+/// that Springer prints between authors, and `and`.
 fn split_author_names(text: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for part in info_split_re().split(text) {
@@ -481,16 +514,138 @@ fn split_keywords(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Byte length of the identifier token at the start of `text`: up to the
+/// first whitespace, quote or angle bracket.
+fn id_token_len(text: &str) -> usize {
+    text.find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>'))
+        .unwrap_or(text.len())
+}
+
+/// Can `token` be the rest of a DOI that a line wrap split off
+/// (`3330701`, `BF01504345.`)? It must carry a digit and at least three
+/// characters; a bare year or anything starting a URL or parenthesis cannot.
+fn doi_wrap_token(token: &str) -> bool {
+    let core = token.trim_end_matches(['.', ',', ';', ')']);
+    let chars = core.chars().count();
+    if !(3..=MAX_DOI_WRAP_TOKEN).contains(&chars) || core.starts_with('(') {
+        return false;
+    }
+    core.chars().any(|c| c.is_ascii_digit())
+        && !year_token_re().is_match(core)
+        && !core.to_ascii_lowercase().starts_with("http")
+}
+
 /// First DOI in `text`, with trailing punctuation removed.
+///
+/// Accepts the bare form and any prefix before it (`doi:10.`, `DOI: 10.`,
+/// `https://doi.org/10.`). Single spaces that a line wrap left inside the
+/// DOI are closed up, as `citations::find_doi` does: `10. 1145/…`,
+/// `10.1145/ 3292500`, `10.1145/3292500. 3330701`. A piece is joined when
+/// the DOI so far ends in `/ . - _` or the piece is a run of at least three
+/// digits, and the piece passes `doi_wrap_token` (so an ISBN or a year after
+/// the DOI is never glued on).
 fn find_doi(text: &str) -> Option<String> {
-    let found = doi_re().find(text)?;
-    let trimmed = found
-        .as_str()
-        .trim_end_matches(['.', ',', ';', ')', ']', ':', '}']);
-    if trimmed.len() < 8 {
+    let found = doi_start_re().find(text)?;
+    let start = found.start();
+    let mut end = found.end() + id_token_len(&text[found.end()..]);
+    while let Some(rest) = text[end..].strip_prefix(' ') {
+        let token_len = id_token_len(rest);
+        if token_len == 0 {
+            break;
+        }
+        let token = &rest[..token_len];
+        let consumed = &text[start..end];
+        // A sentence-final `.` followed by an ISBN / price line
+        // (`978-1-7281-1234-5/20/$31.00`) is not a wrap.
+        if consumed.ends_with([',', ';']) || (consumed.ends_with('.') && token.contains(['$', '/']))
+        {
+            break;
+        }
+        // Only a DOI cut right after a separator continues on the next token;
+        // a complete DOI followed by a page or article number stays as it is.
+        let after_separator = consumed.ends_with(['/', '.', '-', '_']);
+        if !after_separator || !doi_wrap_token(token) {
+            break;
+        }
+        end += 1 + token_len;
+    }
+    let joined: String = text[start..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let trimmed = joined.trim_end_matches(DOI_TRAILING);
+    let suffix_ok = trimmed
+        .split_once('/')
+        .is_some_and(|(_, suffix)| suffix.chars().any(char::is_alphanumeric));
+    if trimmed.len() < 8 || !suffix_ok {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+/// DOI printed on line `index` of `page`, joined with the start of the next
+/// line when the DOI runs to the end of the line and is cut after `10.NNNN/`
+/// or after a `/ . - _` separator (a DOI split across a line break in a
+/// footer or header).
+fn line_doi(page: &PageText, index: usize) -> Option<String> {
+    let text = page.lines.get(index)?.text.trim();
+    let single = find_doi(text);
+    let cut = doi_at_line_end_re()
+        .find(text)
+        .is_some_and(|m| m.as_str().ends_with(['/', '.', '-', '_']));
+    if cut && let Some(next) = page.lines.get(index + 1) {
+        let combined = format!("{text} {}", next.text.trim());
+        if let Some(joined) = find_doi(&combined)
+            && single.as_ref().is_none_or(|s| joined.len() > s.len())
+        {
+            return Some(joined);
+        }
+    }
+    single
+}
+
+/// True when `line` lies in the top or bottom [`HEADER_FOOTER_BAND`] of the
+/// page (PDF coordinates, y grows upwards). False without a bbox or height.
+fn in_header_footer(page: &PageText, line: &Line) -> bool {
+    if page.height <= 0.0 {
+        return false;
+    }
+    let top = page.height * (1.0 - HEADER_FOOTER_BAND);
+    let bottom = page.height * HEADER_FOOTER_BAND;
+    line.bbox.is_some_and(|b| b.y0 >= top || b.y1 <= bottom)
+}
+
+/// The paper's own DOI on page 1 with its provenance.
+///
+/// A DOI in the running header or footer band (the paper's own DOI in ACM,
+/// IEEE and Springer layouts) wins with `first_page:doi-header-footer`; then
+/// a DOI on a line that labels it (`DOI`, `doi.org`); then the first DOI in
+/// reading order, both with `first_page:doi`.
+fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
+    let found: Vec<(usize, String)> = (0..page.lines.len())
+        .filter_map(|i| line_doi(page, i).map(|doi| (i, doi)))
+        .collect();
+    let labelled = |i: usize| page.lines[i].text.to_lowercase().contains("doi");
+    // Publisher furniture: a short line (no running sentence) in the margin
+    // band. A cited DOI inside a paragraph that merely reaches the band must
+    // not outrank the paper's labelled DOI.
+    let furniture = |i: usize| {
+        in_header_footer(page, &page.lines[i])
+            && page.lines[i].text.split_whitespace().count() <= 12
+    };
+    if let Some((_, doi)) = found.iter().find(|(i, _)| furniture(*i) && labelled(*i)) {
+        return Some((doi.clone(), "first_page:doi-header-footer"));
+    }
+    if let Some((_, doi)) = found.iter().find(|(i, _)| labelled(*i)) {
+        return Some((doi.clone(), "first_page:doi"));
+    }
+    if let Some((_, doi)) = found.iter().find(|(i, _)| furniture(*i)) {
+        return Some((doi.clone(), "first_page:doi-header-footer"));
+    }
+    found
+        .into_iter()
+        .next()
+        .map(|(_, doi)| (doi, "first_page:doi"))
 }
 
 /// First arXiv identifier (new or old style) that follows an `arXiv` marker.
@@ -748,14 +903,160 @@ fn page1_authors(page: &PageText, start: usize) -> Vec<String> {
             continue;
         }
         let stripped = strip_superscripts(page, line);
+        let stripped = ieee_membership_re().replace_all(&stripped, "");
         let stripped = marker_chars_re().replace_all(&stripped, "");
-        let candidates = split_author_names(&stripped);
-        if candidates.is_empty() || !candidates.iter().all(|c| looks_like_person_name(c)) {
+        if last_segment_is_country(&stripped) {
+            continue;
+        }
+        let candidates: Vec<String> = split_author_names(&stripped)
+            .into_iter()
+            .filter(|c| !is_marker_letters(c))
+            .collect();
+        if candidates.is_empty() || !candidates.iter().all(|c| is_page1_person_name(c)) {
             continue;
         }
         names.extend(candidates);
     }
     names
+}
+
+/// A page-1 author candidate: a person name that is not a front-matter
+/// label (`ARTICLE INFO`, `Corresponding Author`) and not a country.
+fn is_page1_person_name(candidate: &str) -> bool {
+    looks_like_person_name(candidate)
+        && !has_front_matter_token(candidate)
+        && !is_country(candidate)
+}
+
+/// One or two lower-case letters left over from affiliation markers printed
+/// in the body font (`Jane Doe1,a,b` gives the pieces `a` and `b`).
+fn is_marker_letters(piece: &str) -> bool {
+    let count = piece.chars().count();
+    (1..=2).contains(&count) && piece.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// True when a word of `candidate` is a front-matter label word rather than
+/// part of a name (`ARTICLE INFO`, `Received`, `Corresponding Author`).
+fn has_front_matter_token(candidate: &str) -> bool {
+    candidate.split_whitespace().any(|token| {
+        let lower = token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        matches!(
+            lower.as_str(),
+            "article"
+                | "info"
+                | "information"
+                | "highlights"
+                | "abstract"
+                | "received"
+                | "revised"
+                | "accepted"
+                | "published"
+                | "corresponding"
+                | "correspondence"
+                | "author"
+                | "authors"
+                | "preprint"
+                | "copyright"
+                | "keywords"
+                | "submitted"
+                | "journal"
+                | "proceedings"
+                | "conference"
+                | "volume"
+                | "contents"
+                | "homepage"
+                | "equal"
+                | "contribution"
+                | "email"
+                | "e-mail"
+                | "orcid"
+                | "affiliation"
+                | "affiliations"
+        )
+    })
+}
+
+/// True for a country name (`China`, `The Netherlands`, `United States`),
+/// compared case-insensitively after trimming punctuation. Used on whole
+/// comma-separated segments only, never on single name tokens, so names such
+/// as `Michael I. Jordan` stay.
+fn is_country(segment: &str) -> bool {
+    let lower = collapse_whitespace(
+        segment
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+            .as_str(),
+    );
+    let name = lower.strip_prefix("the ").unwrap_or(&lower);
+    matches!(
+        name,
+        "usa"
+            | "u.s.a"
+            | "us"
+            | "uk"
+            | "u.k"
+            | "united states"
+            | "united states of america"
+            | "united kingdom"
+            | "united arab emirates"
+            | "netherlands"
+            | "new zealand"
+            | "south korea"
+            | "republic of korea"
+            | "korea"
+            | "hong kong"
+            | "saudi arabia"
+            | "south africa"
+            | "czech republic"
+            | "china"
+            | "p.r. china"
+            | "pr china"
+            | "japan"
+            | "germany"
+            | "france"
+            | "italy"
+            | "spain"
+            | "portugal"
+            | "canada"
+            | "australia"
+            | "india"
+            | "singapore"
+            | "switzerland"
+            | "austria"
+            | "belgium"
+            | "denmark"
+            | "finland"
+            | "norway"
+            | "sweden"
+            | "poland"
+            | "greece"
+            | "ireland"
+            | "russia"
+            | "taiwan"
+            | "turkey"
+            | "mexico"
+            | "brazil"
+            | "argentina"
+            | "chile"
+            | "egypt"
+            | "iran"
+            | "pakistan"
+            | "vietnam"
+            | "thailand"
+            | "malaysia"
+            | "indonesia"
+    )
+}
+
+/// True when the last comma-separated segment of an author-block line is a
+/// country: the line is an address (`Delft, The Netherlands`), not names.
+fn last_segment_is_country(text: &str) -> bool {
+    text.rsplit(',')
+        .map(str::trim)
+        .find(|segment| !segment.is_empty())
+        .is_some_and(is_country)
 }
 
 /// Line text with spans much smaller than the line's dominant size removed
@@ -1262,5 +1563,258 @@ mod tests {
         );
         assert!(split_info_authors("Microsoft Office User").is_empty());
         assert!(split_info_authors("MIT Media Lab").is_empty());
+    }
+
+    /// Build page 1 from `(text, font size, baseline y)` triples in reading
+    /// order, one span per line, on a 612 x 792 page (y grows upwards).
+    fn page_at(lines: &[(&str, f32, f32)]) -> PageText {
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        let mut parts: Vec<&str> = Vec::new();
+        for (i, (text, size, y)) in lines.iter().enumerate() {
+            let width = text.chars().count() as f32 * size * 0.5;
+            let bbox = BBox {
+                x0: 72.0,
+                y0: *y,
+                x1: 72.0 + width,
+                y1: y + size,
+            };
+            page.spans.push(Span {
+                text: (*text).to_string(),
+                bbox: Some(bbox),
+                font: None,
+                size: Some(*size),
+                seq: i as u32,
+            });
+            page.lines.push(Line {
+                text: (*text).to_string(),
+                bbox: Some(bbox),
+                column: 0,
+                spans: vec![i as u32],
+            });
+            parts.push(*text);
+        }
+        page.text = parts.join("\n");
+        page
+    }
+
+    #[test]
+    fn find_doi_accepts_prefixes_and_closes_wraps() {
+        let cases: [(&str, Option<&str>); 13] = [
+            (
+                "DOI: 10.1109/X.2020.00123. 978-1-7281-1234-5/20/$31.00",
+                Some("10.1109/X.2020.00123"),
+            ),
+            (
+                "DOI: 10.1145/3292500.3330701",
+                Some("10.1145/3292500.3330701"),
+            ),
+            (
+                "doi:10.1145/3292500.3330701.",
+                Some("10.1145/3292500.3330701"),
+            ),
+            (
+                "https://doi.org/10.1007/s10994-021-05946-3",
+                Some("10.1007/s10994-021-05946-3"),
+            ),
+            ("10. 1145/3292500", Some("10.1145/3292500")),
+            (
+                "https://doi.org/10.1145/ 3292500.3330701",
+                Some("10.1145/3292500.3330701"),
+            ),
+            (
+                "doi: 10.1145/3292500. 3330701",
+                Some("10.1145/3292500.3330701"),
+            ),
+            (
+                "DOI 10.1109/5.771073 978-1-7281-1234-5",
+                Some("10.1109/5.771073"),
+            ),
+            ("doi:10.1000/abc. 2020 was a year", Some("10.1000/abc")),
+            ("doi:10.1000/abc. The next sentence", Some("10.1000/abc")),
+            ("https://doi.org/10.1000/", None),
+            ("version 10.2 of the tool", None),
+            ("no identifier", None),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(find_doi(text).as_deref(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn acm_footer_doi_wins_over_cited_doi_in_body() {
+        let page = page_at(&[
+            ("Learning Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("University of Somewhere", 9.0, 658.0),
+            ("Los Angeles, United States", 9.0, 646.0),
+            ("jane.doe@somewhere.edu", 9.0, 634.0),
+            ("John Smith", 11.0, 610.0),
+            ("Example Research Institute", 9.0, 598.0),
+            ("ABSTRACT", 9.0, 570.0),
+            (
+                "We build on prior work (doi:10.5555/3294771.3294864) and",
+                9.0,
+                558.0,
+            ),
+            ("show that widgets scale.", 9.0, 546.0),
+            ("KDD '19, August 4-8, 2019, Anchorage, AK, USA", 7.0, 70.0),
+            ("© 2019 Association for Computing Machinery.", 7.0, 60.0),
+            ("ACM ISBN 978-1-4503-6201-6/19/08...$15.00", 7.0, 50.0),
+            ("https://doi.org/10.1145/3292500.3330701", 7.0, 40.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1145/3292500.3330701"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi-header-footer");
+        assert_eq!(meta.title.as_deref(), Some("Learning Widgets at Scale"));
+        assert_eq!(author_names(&meta), vec!["Jane Doe", "John Smith"]);
+        assert_eq!(meta.provenance["authors"], "first_page:authors");
+    }
+
+    #[test]
+    fn ieee_header_doi_split_across_lines_and_member_suffixes() {
+        let page = page_at(&[
+            ("IEEE ACCESS, VOL. 8, 2020", 8.0, 760.0),
+            ("Digital Object Identifier 10.1109/ACCESS.2020.", 8.0, 740.0),
+            ("2991234", 8.0, 730.0),
+            ("Robust Widget Estimation", 22.0, 660.0),
+            (
+                "John Smith, Member, IEEE, and Jane Doe, Senior Member, IEEE",
+                11.0,
+                630.0,
+            ),
+            ("Abstract—We estimate widgets robustly.", 9.0, 600.0),
+            ("Index Terms—widgets, estimation", 9.0, 580.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1109/ACCESS.2020.2991234"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi-header-footer");
+        assert_eq!(meta.year, Some(2020));
+        assert_eq!(meta.provenance["year"], "doi");
+        assert_eq!(meta.title.as_deref(), Some("Robust Widget Estimation"));
+        assert_eq!(author_names(&meta), vec!["John Smith", "Jane Doe"]);
+    }
+
+    #[test]
+    fn springer_doi_line_is_preferred_over_bare_doi_and_rejoined() {
+        let page = page_at(&[
+            ("Machine Learning (2021) 110:1-30", 8.0, 690.0),
+            ("Kernel Widgets", 18.0, 650.0),
+            ("Ada Lovelace1 · Charles Babbage2", 11.0, 620.0),
+            ("Received: 3 March 2020 / Accepted: 1 June 2021", 8.0, 600.0),
+            (
+                "Abstract We compare with 10.5555/12345.678 and others.",
+                9.0,
+                580.0,
+            ),
+            ("https://doi.org/10.1007/s10994-021-", 8.0, 300.0),
+            ("05946-3", 8.0, 290.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1007/s10994-021-05946-3"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi");
+        assert_eq!(meta.title.as_deref(), Some("Kernel Widgets"));
+        assert_eq!(author_names(&meta), vec!["Ada Lovelace", "Charles Babbage"]);
+        assert_eq!(meta.provenance["authors"], "first_page:authors");
+    }
+
+    #[test]
+    fn line_doi_does_not_join_words_or_years_from_the_next_line() {
+        let page = page_at(&[
+            ("https://doi.org/10.1000/xyz123.", 8.0, 40.0),
+            ("Permission to make digital copies", 8.0, 30.0),
+            ("doi:10.2000/abc.", 8.0, 20.0),
+            ("2020", 8.0, 10.0),
+        ]);
+        assert_eq!(line_doi(&page, 0).as_deref(), Some("10.1000/xyz123"));
+        assert_eq!(line_doi(&page, 2).as_deref(), Some("10.2000/abc"));
+        assert_eq!(line_doi(&page, 1), None);
+    }
+
+    #[test]
+    fn header_footer_band_needs_a_bbox_and_height() {
+        let page = page_at(&[
+            ("top", 8.0, 740.0),
+            ("middle", 8.0, 400.0),
+            ("bottom", 8.0, 50.0),
+        ]);
+        assert!(in_header_footer(&page, &page.lines[0]));
+        assert!(!in_header_footer(&page, &page.lines[1]));
+        assert!(in_header_footer(&page, &page.lines[2]));
+        let mut no_box = page.lines[0].clone();
+        no_box.bbox = None;
+        assert!(!in_header_footer(&page, &no_box));
+        let flat = PageText::new(1, 612.0, 0.0, 0);
+        assert!(!in_header_footer(&flat, &page.lines[0]));
+    }
+
+    #[test]
+    fn author_block_with_interleaved_affiliations_keeps_only_people() {
+        let page = page_at(&[
+            ("Deep Graph Kernel Point Processes", 17.0, 720.0),
+            ("Zheng Dong1,2, Matthew Repasky1", 11.0, 690.0),
+            (
+                "1H. Milton Stewart School of Industrial and Systems Engineering,",
+                9.0,
+                678.0,
+            ),
+            ("Georgia Institute of Technology", 9.0, 666.0),
+            ("and", 11.0, 654.0),
+            ("Xiuyuan Cheng3", 11.0, 642.0),
+            ("3Department of Mathematics, Duke University", 9.0, 630.0),
+            ("Los Angeles, United States", 9.0, 618.0),
+            ("Hong Kong, China", 9.0, 606.0),
+            ("ARTICLE INFO", 9.0, 594.0),
+            ("Ruiping Yin∗, Zhen Yang⋆", 11.0, 582.0),
+            ("Jane Doe1,a,b", 11.0, 570.0),
+            ("Equal Contribution", 9.0, 558.0),
+            ("September 1, 2026", 9.0, 546.0),
+            ("{zdong, mrepasky}@gatech.edu", 9.0, 534.0),
+            ("Abstract", 11.0, 510.0),
+            ("Point process models are widely used.", 10.0, 498.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(
+            author_names(&meta),
+            vec![
+                "Zheng Dong",
+                "Matthew Repasky",
+                "Xiuyuan Cheng",
+                "Ruiping Yin",
+                "Zhen Yang",
+                "Jane Doe"
+            ]
+        );
+        assert_eq!(meta.provenance["authors"], "first_page:authors");
+    }
+
+    #[test]
+    fn affiliation_and_label_rules() {
+        assert!(is_country("China"));
+        assert!(is_country("The Netherlands."));
+        assert!(is_country("  United States of America "));
+        assert!(!is_country("Michael I. Jordan"));
+        assert!(!is_country("Georgia Tech"));
+        assert!(last_segment_is_country("Delft, The Netherlands"));
+        assert!(last_segment_is_country("Pasadena, CA 91125, USA"));
+        assert!(!last_segment_is_country("Jane Doe, John Smith"));
+        assert!(!last_segment_is_country("Jane Doe and Michael Jordan"));
+        assert!(has_front_matter_token("ARTICLE INFO"));
+        assert!(has_front_matter_token("Corresponding Author"));
+        assert!(!has_front_matter_token("DAVID E. J. VAN WIJK"));
+        assert!(is_page1_person_name("DAVID E. J. VAN WIJK"));
+        assert!(!is_page1_person_name("ARTICLE INFO"));
+        assert!(!is_page1_person_name("United Kingdom"));
+        assert!(!is_page1_person_name("Plato"));
+        assert!(is_marker_letters("a"));
+        assert!(is_marker_letters("ab"));
+        assert!(!is_marker_letters("Al"));
+        assert!(!is_marker_letters("abc"));
+        assert_eq!(
+            ieee_membership_re().replace_all(
+                "John Smith, Student Member, IEEE, and Ann Lee, Fellow, IEEE",
+                ""
+            ),
+            "John Smith, and Ann Lee"
+        );
     }
 }

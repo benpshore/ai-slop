@@ -68,12 +68,21 @@ impl SectionLine {
         (a - b).abs() <= 0.4 * size
     }
 
-    /// Append the fragment `other` to this row.
+    /// Join the fragment `other` into this row in x order: a fragment that
+    /// sits to the left goes in front even when it arrived later (a DOI set
+    /// in a second font sorts before the text beside it).
     fn absorb(&mut self, other: &Self) {
-        if !self.text.is_empty() && !other.text.is_empty() {
-            self.text.push(' ');
+        let before = matches!((self.x0, other.x0), (Some(a), Some(b)) if b < a);
+        if self.text.is_empty() {
+            self.text.clone_from(&other.text);
+        } else if !other.text.is_empty() {
+            if before {
+                self.text = format!("{} {}", other.text, self.text);
+            } else {
+                self.text.push(' ');
+                self.text.push_str(&other.text);
+            }
         }
-        self.text.push_str(&other.text);
         self.x0 = match (self.x0, other.x0) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -86,12 +95,71 @@ impl SectionLine {
     }
 }
 
-/// `text` with every digit replaced by `#`, so that `Page 30 of 35` and
-/// `Page 31 of 35` compare equal.
+/// `text` with every run of up to three digits replaced by one `#`, so that
+/// `Page 30 of 35`, `Page 31 of 35` and `Page 9 of 35` compare equal. Longer
+/// runs (years, arXiv ids, DOIs) stay as printed: the `arXiv:` line that
+/// ends a full column is not a repeated footer just because other pages end
+/// with `arXiv:` lines too.
 fn digit_key(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_ascii_digit() { '#' } else { c })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    let mut digits = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        flush_digit_run(&mut out, &mut digits);
+        out.push(c);
+    }
+    flush_digit_run(&mut out, &mut digits);
+    out
+}
+
+/// Append the pending digit run of [`digit_key`] to `out` and clear it.
+fn flush_digit_run(out: &mut String, digits: &mut String) {
+    if digits.is_empty() {
+        return;
+    }
+    if digits.len() <= 3 {
+        out.push('#');
+    } else {
+        out.push_str(digits);
+    }
+    digits.clear();
+}
+
+/// A floating accent: `´`, `¨`, `¸`, `¯`, a spacing modifier letter
+/// (`ˆ`, `˜`, `˘`, `˙`, `˚`, `˝`, `ˇ`) or a combining mark. OT1 fonts set the
+/// accent of `Verdú` or `Güngör` as a glyph of its own, which the layout pass
+/// leaves as a separate line on the row's baseline.
+fn is_accent_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{A8}'
+            | '\u{AF}'
+            | '\u{B4}'
+            | '\u{B8}'
+            | '`'
+            | '^'
+            | '~'
+            | '\u{2B0}'..='\u{2FF}'
+            | '\u{300}'..='\u{36F}'
+    )
+}
+
+/// Does `text` consist of floating accents only? Such a line carries no
+/// text and would otherwise be joined in front of the row it sits on,
+/// hiding the `[n]` label there.
+fn is_accent_only(text: &str) -> bool {
+    let mut marks = false;
+    for c in text.chars() {
+        if is_accent_mark(c) {
+            marks = true;
+        } else if !c.is_whitespace() {
+            return false;
+        }
+    }
+    marks
 }
 
 /// Largest gap in points between an entry start and its continuation lines
@@ -165,7 +233,7 @@ fn end_heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)^\s*[-–—\s]*(?:(?:\d+|[A-Z]|[IVX]+)[.:]?\s+)?(?:appendix|appendices|supplementary|supplemental|supporting information|acknowledg\w*|author biograph\w*|biograph\w*)\b",
+            r"(?i)^\s*[-–—\s]*(?:(?:\d+|[A-Z]|[IVX]+)[.:]?\s+)?(?:(?:technical|online)\s+)?(?:appendix|appendices|supplementary|supplemental|supporting information|acknowledg\w*|author biograph\w*|biograph\w*)\b",
         )
         .expect("valid regex")
     })
@@ -559,6 +627,10 @@ fn section_lines(pages: &[PageText], section: &ReferenceSection) -> Vec<SectionL
             0
         };
         for line in page.lines.iter().skip(skip) {
+            let text = line.text.trim();
+            if is_accent_only(text) {
+                continue;
+            }
             let edge = line
                 .bbox
                 .is_none_or(|b| b.y1 > page.height * 0.92 || b.y0 < page.height * 0.08);
@@ -569,7 +641,7 @@ fn section_lines(pages: &[PageText], section: &ReferenceSection) -> Vec<SectionL
                 y0: line.bbox.map(|b| b.y0),
                 size: line_size(page, line),
                 edge,
-                text: line.text.trim().to_string(),
+                text: text.to_string(),
             };
             // Justified columns leave gaps wider than the layout pass joins,
             // so one printed row can arrive as several lines: re-join them.
@@ -581,10 +653,12 @@ fn section_lines(pages: &[PageText], section: &ReferenceSection) -> Vec<SectionL
             }
         }
     }
-    // Texts that repeat on several pages near the page edge are running
-    // headers or footers (`Page 30 of 35` counts as repeating).
+    // Texts that repeat near the page edge on several pages are running
+    // headers or footers (`Page 30 of 35` counts as repeating). Only edge
+    // occurrences count: an entry line that happens to land in the margin
+    // band once is a body line elsewhere.
     let mut pages_per_text: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-    for line in &lines {
+    for line in lines.iter().filter(|line| line.edge) {
         let seen = pages_per_text.entry(digit_key(&line.text)).or_default();
         if !seen.contains(&line.page) {
             seen.push(line.page);
@@ -680,10 +754,18 @@ pub fn segment_entries(pages: &[PageText], section: &ReferenceSection) -> Vec<Re
         .map(|l| l.text.as_str())
         .collect::<Vec<&str>>()
         .join("\n");
+    // The list ends at the first end heading. Everything after it (an
+    // appendix, tables, biographies) is set at the entry-start x and must
+    // not feed the indent-level statistics of the list itself.
+    let end = lines
+        .iter()
+        .position(|line| is_end_heading(line, style, median))
+        .unwrap_or(lines.len());
+    let lines = &lines[..end];
     if style == Style::AuthorYear {
-        segment_author_year(&lines, median, &context)
+        segment_author_year(lines, &context)
     } else {
-        segment_numbered(&lines, style, median, &context)
+        segment_numbered(lines, style, &context)
     }
 }
 
@@ -792,18 +874,12 @@ fn append_continuation(entries: &mut [ReferenceEntry], text: &str, context: &str
     last.raw.push_str(text);
 }
 
-fn segment_numbered(
-    lines: &[SectionLine],
-    style: Style,
-    median: Option<f32>,
-    context: &str,
-) -> Vec<ReferenceEntry> {
+/// Split the numbered list `lines` (already cut at the end heading) into
+/// entries: every `[n]` / `n.` / `n)` label in sequence starts one.
+fn segment_numbered(lines: &[SectionLine], style: Style, context: &str) -> Vec<ReferenceEntry> {
     let mut entries: Vec<ReferenceEntry> = Vec::new();
     let mut expected: Option<u32> = None;
     for line in lines {
-        if is_end_heading(line, style, median) {
-            break;
-        }
         if let Some((number, label)) = numbered_label(style, &line.text) {
             let starts = expected.is_none_or(|e| (e..=e + 2).contains(&number));
             if starts {
@@ -990,17 +1066,13 @@ fn apply_evidence_guard(entries: Vec<ReferenceEntry>, context: &str) -> Vec<Refe
     out
 }
 
-fn segment_author_year(
-    lines: &[SectionLine],
-    median: Option<f32>,
-    context: &str,
-) -> Vec<ReferenceEntry> {
+/// Split the author-year list `lines` (already cut at the end heading) into
+/// entries, from the section's hanging-indent levels when it has them and
+/// from the name pattern otherwise.
+fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEntry> {
     let layout = layout_starts(lines);
     let mut entries: Vec<ReferenceEntry> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if is_end_heading(line, Style::AuthorYear, median) {
-            break;
-        }
         let can_start = entry_start_re().is_match(&line.text);
         let starts = if entries.is_empty() {
             true
@@ -3551,6 +3623,7 @@ mod tests {
         ));
         assert!(ends("0.85 0.91 0.77"));
         assert!(ends("Appendix A"));
+        assert!(ends("Technical Appendix"));
         assert!(!ends(
             "[3] A. Author, Deep Learning is a Robust Method, Venue, 2020."
         ));
@@ -3641,5 +3714,309 @@ mod tests {
             Some("How well can llms negotiate? negotiationarena platform and analysis")
         );
         assert_eq!(bianchi.arxiv_id.as_deref(), Some("2402.05863"));
+    }
+
+    /// OT1 fonts set the accent of `Verdú` or `Güngör` as a glyph of its own
+    /// on the row's baseline; the layout pass leaves it as a separate line
+    /// that sorts before the row, so it used to be joined in front of the
+    /// `[n]` label and hide it (arXiv:2507.08599 `[2]`, arXiv:2608.28714
+    /// `[13]` with four accents).
+    #[test]
+    fn floating_accents_do_not_hide_numbered_labels() {
+        type Row<'a> = (&'a str, f32, Vec<(&'a str, f32)>);
+        let rows: Vec<Row<'_>> = vec![
+            (
+                "[1] Y. Polyanskiy, H. V. Poor, and S. Verdu, “Channel coding rate in the finite",
+                72.0,
+                vec![],
+            ),
+            (
+                "blocklength regime,” IEEE Transactions on Information Theory, vol. 56,",
+                86.0,
+                vec![],
+            ),
+            ("no. 5, pp. 2307–2359, 2010.", 86.0, vec![]),
+            (
+                "[2] S. Verdu, “Non-asymptotic achievability bounds in multiuser information",
+                72.0,
+                vec![("´", 118.0)],
+            ),
+            (
+                "theory,” in 2012 50th Annual Allerton Conference on Communication,",
+                86.0,
+                vec![],
+            ),
+            (
+                "Control, and Computing (Allerton), 2012, pp. 1–8.",
+                86.0,
+                vec![],
+            ),
+            (
+                "[3] A. Gungor, S. U. Dar, C. Ozturk, Y. Korkmaz, H. A. Bedel, G. Elmas, M. Ozbey,",
+                72.0,
+                vec![("¨", 100.0), ("¨", 160.0), ("¨", 330.0), ("¨", 400.0)],
+            ),
+            (
+                "and T. Cukur, “Adaptive diffusion priors for accelerated MRI reconstruction,”",
+                86.0,
+                vec![("¸", 100.0)],
+            ),
+            (
+                "Medical image analysis, 2023, pMID: 37384951.",
+                86.0,
+                vec![],
+            ),
+        ];
+        let mut lines: Vec<Line> = vec![line_at("References", 0, 72.0, 754.0)];
+        for (i, (text, x0, accents)) in rows.iter().enumerate() {
+            let y = 740.0 - 14.0 * i as f32;
+            for (mark, x) in accents {
+                lines.push(line_at(mark, 0, *x, y + 0.04));
+            }
+            lines.push(line_at(text, 0, *x0, y));
+        }
+        let page = page_of(6, lines);
+        let (refs, _) = extract_citations(&[page]);
+
+        assert_eq!(refs.len(), 3);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]"]);
+        assert!(refs[0].raw.ends_with("no. 5, pp. 2307–2359, 2010."));
+        assert!(refs[1].raw.starts_with("[2] S. Verdu, “Non-asymptotic"));
+        assert!(refs[1].raw.ends_with("(Allerton), 2012, pp. 1–8."));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("Non-asymptotic achievability bounds in multiuser information theory")
+        );
+        assert_eq!(refs[1].year, Some(2012));
+        assert!(refs[2].raw.starts_with("[3] A. Gungor, S. U. Dar"));
+        assert!(refs[2].raw.contains("M. Ozbey, and T. Cukur, “Adaptive"));
+        assert_eq!(
+            refs[2].title.as_deref(),
+            Some("Adaptive diffusion priors for accelerated MRI reconstruction")
+        );
+        assert_eq!(refs[2].year, Some(2023));
+        assert!(refs.iter().all(|r| !r.raw.contains(['´', '¨', '¸'])));
+    }
+
+    /// ACL style (arXiv:2505.16990): the hanging-indent levels are read from
+    /// the list itself. The supplementary material after it is set at the
+    /// entry-start x, and counting its lines used to bury the indented
+    /// share, discard the layout and fall back to the name pattern, which
+    /// does not accept `Mozhgan Nasr Azadani,`, `Fnu Mohbat and` or
+    /// `Shitong Xu. 2022.`.
+    #[test]
+    fn indent_levels_ignore_the_appendix_after_the_list() {
+        let rows: Vec<(&str, f32, Option<&str>)> = vec![
+            (
+                "Jacob Austin, Daniel D. Johnson, Jonathan Ho, Daniel",
+                72.0,
+                None,
+            ),
+            (
+                "Tarlow, and Rianne van den Berg. 2023. Structured",
+                86.0,
+                None,
+            ),
+            (
+                "denoising diffusion models in discrete state-spaces.",
+                86.0,
+                None,
+            ),
+            ("Preprint, arXiv:2107.03006.", 86.0, None),
+            (
+                "Mozhgan Nasr Azadani, James Riddell, Sean Sedwards,",
+                72.0,
+                None,
+            ),
+            (
+                "and Krzysztof Czarnecki. 2025. Leo: Boosting mix-",
+                86.0,
+                None,
+            ),
+            (
+                "ture of vision encoders for multimodal large language",
+                86.0,
+                None,
+            ),
+            ("models. Preprint, arXiv:2501.06986.", 86.0, None),
+            (
+                "Fnu Mohbat and Mohammed J. Zaki. 2024. Llava-chef:",
+                72.0,
+                None,
+            ),
+            (
+                "A multi-modal generative model for food recipes.",
+                86.0,
+                None,
+            ),
+            ("Preprint, arXiv:2408.16889.", 86.0, None),
+            (
+                "Shitong Xu. 2022.",
+                72.0,
+                Some("Clip-diffusion-lm: Apply dif-"),
+            ),
+            ("fusion model on image captioning.", 86.0, Some("Preprint,")),
+            ("arXiv:2210.04559.", 86.0, None),
+            ("- Supplementary Material -", 72.0, None),
+        ];
+        let mut lines: Vec<Line> = vec![line_at("References", 0, 72.0, 754.0)];
+        for (i, (text, x0, fragment)) in rows.iter().enumerate() {
+            let y = 740.0 - 14.0 * i as f32;
+            lines.push(line_at(text, 0, *x0, y));
+            if let Some(fragment) = fragment {
+                lines.push(line_at(fragment, 0, 220.0, y));
+            }
+        }
+        // Thirty lines of appendix prose at the entry-start x: two thirds
+        // of the section's lines, all of them unindented.
+        let appendix: Vec<String> = (1..=30)
+            .map(|k| format!("Appendix sentence {k} about the training data and the setup."))
+            .collect();
+        for (k, text) in appendix.iter().enumerate() {
+            let y = 740.0 - 14.0 * (rows.len() + k) as f32;
+            lines.push(line_at(text, 0, 72.0, y));
+        }
+        let page = page_of(11, lines);
+        let (refs, _) = extract_citations(&[page]);
+
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0].label.as_deref(), Some("Jacob2023"));
+        assert_eq!(refs[0].arxiv_id.as_deref(), Some("2107.03006"));
+        assert_eq!(
+            refs[1].raw,
+            "Mozhgan Nasr Azadani, James Riddell, Sean Sedwards, and Krzysztof Czarnecki. \
+             2025. Leo: Boosting mixture of vision encoders for multimodal large language \
+             models. Preprint, arXiv:2501.06986."
+        );
+        assert_eq!(refs[1].label.as_deref(), Some("Mozhgan2025"));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("Leo: Boosting mixture of vision encoders for multimodal large language models")
+        );
+        assert!(
+            refs[2]
+                .raw
+                .starts_with("Fnu Mohbat and Mohammed J. Zaki. 2024. Llava-chef:")
+        );
+        assert_eq!(refs[2].arxiv_id.as_deref(), Some("2408.16889"));
+        assert_eq!(
+            refs[3].raw,
+            "Shitong Xu. 2022. Clip-diffusion-lm: Apply diffusion model on image captioning. \
+             Preprint, arXiv:2210.04559."
+        );
+        assert_eq!(refs[3].year, Some(2022));
+        assert!(refs.iter().all(|r| !r.raw.contains("Appendix sentence")));
+    }
+
+    /// The last line of a full column sits in the bottom margin band. An
+    /// `arXiv:` line there is not a running footer even though the next
+    /// page ends with an `arXiv:` line too: only short digit runs are
+    /// wildcarded, so `Page 9 of 11` and `Page 10 of 11` still repeat while
+    /// two arXiv ids do not (arXiv:2505.16990, `Muse`).
+    #[test]
+    fn arxiv_lines_at_the_page_edge_are_not_furniture() {
+        let mut first = column_page(
+            9,
+            &[
+                "References",
+                "Huiwen Chang, Han Zhang, Jarred Barber, and Dilip Krishnan. 2023. Muse: Text-to-image",
+                "generation via masked generative transformers. Preprint,",
+            ],
+        );
+        first
+            .lines
+            .push(line_at("arXiv:2301.00704.", 0, 72.0, 40.0));
+        first.lines.push(line_at("Page 9 of 11", 0, 250.0, 20.0));
+        let mut second = column_page(
+            10,
+            &[
+                "Huiwen Chang, Han Zhang, Lu Jiang, Ce Liu, and William T. Freeman. 2022. Maskgit:",
+                "Masked generative image transformer. Preprint,",
+            ],
+        );
+        second
+            .lines
+            .push(line_at("arXiv:2202.04200.", 0, 72.0, 40.0));
+        second.lines.push(line_at("Page 10 of 11", 0, 250.0, 20.0));
+        let (refs, _) = extract_citations(&[first, second]);
+
+        assert_eq!(refs.len(), 2);
+        assert!(
+            refs[0]
+                .raw
+                .ends_with("transformers. Preprint, arXiv:2301.00704.")
+        );
+        assert_eq!(refs[0].arxiv_id.as_deref(), Some("2301.00704"));
+        assert_eq!(refs[0].label.as_deref(), Some("Huiwen2023"));
+        assert!(refs[1].raw.starts_with("Huiwen Chang, Han Zhang, Lu Jiang"));
+        assert!(
+            refs[1]
+                .raw
+                .ends_with("transformer. Preprint, arXiv:2202.04200.")
+        );
+        assert_eq!(refs[1].arxiv_id.as_deref(), Some("2202.04200"));
+        assert_eq!(refs[1].page, 10);
+        assert!(refs.iter().all(|r| !r.raw.contains("Page ")));
+        assert_eq!(digit_key("Page 9 of 11"), digit_key("Page 10 of 11"));
+        assert_ne!(
+            digit_key("arXiv:2301.00704."),
+            digit_key("arXiv:2202.04200.")
+        );
+    }
+
+    /// biblatex (arXiv:2501.17300): a DOI set in a second font can arrive
+    /// before the text to its left on the same printed row. The row is
+    /// joined in x order, so the DOI follows `doi:` and the entry does not
+    /// end in `doi:`.
+    #[test]
+    fn row_fragments_join_in_x_order() {
+        let lines = vec![
+            line_at("References", 0, 72.0, 754.0),
+            line_at(
+                "Centola, D. and A. Baronchelli (2015). “The spontaneous emergence of conventions: An",
+                0,
+                72.0,
+                740.0,
+            ),
+            line_at(
+                "experimental study of cultural evolution”. In: Proceedings of the National Academy of",
+                0,
+                89.93,
+                726.0,
+            ),
+            line_at("10.1073/pnas.1418838112.", 0, 300.0, 712.2),
+            line_at("Sciences 112.7, pp. 1989–1994. doi:", 0, 89.93, 712.0),
+            line_at(
+                "Hawkins, R. X. and R. L. Goldstone (2016). “The Formation of Social Conventions in",
+                0,
+                72.0,
+                698.0,
+            ),
+            line_at(
+                "Real-Time Environments”. In: PLOS ONE 11.3. Ed. by C. T. Bauch, e0151670. doi:",
+                0,
+                89.93,
+                684.0,
+            ),
+            line_at("10.1371/journal.pone.0151670.", 0, 89.93, 670.0),
+        ];
+        let page = page_of(21, lines);
+        let (refs, _) = extract_citations(&[page]);
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs[0].raw.ends_with(
+            "Proceedings of the National Academy of Sciences 112.7, pp. 1989–1994. doi: \
+             10.1073/pnas.1418838112."
+        ));
+        assert_eq!(refs[0].doi.as_deref(), Some("10.1073/pnas.1418838112"));
+        assert_eq!(refs[0].label.as_deref(), Some("Centola2015"));
+        assert!(
+            refs[1]
+                .raw
+                .starts_with("Hawkins, R. X. and R. L. Goldstone (2016).")
+        );
+        assert_eq!(refs[1].doi.as_deref(), Some("10.1371/journal.pone.0151670"));
+        assert_eq!(refs[1].label.as_deref(), Some("Hawkins2016"));
     }
 }
