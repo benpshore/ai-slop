@@ -658,8 +658,42 @@ fn locate(text: &str, cursor: usize, piece: &str) -> Option<(usize, usize)> {
 /// optional `,`, `-`, `–`, `−` and spaces (raised only; a subscript is
 /// digits alone), or, raised, a single letter or asterisk. Digits become
 /// Unicode super- or subscript digits, dashes the superscript minus, spaces
-/// are dropped; a letter or asterisk stays as it is. `None` for anything
+/// are dropped; a lowercase letter becomes its Unicode superscript letter (none for `q`), an asterisk stays as it is. `None` for anything
 /// else, words of two or more letters included.
+/// The Unicode superscript form of a lowercase Latin letter, when one
+/// exists (there is no superscript `q`).
+fn superscript_letter(letter: char) -> Option<char> {
+    let mapped = match letter {
+        'a' => '\u{1D43}',
+        'b' => '\u{1D47}',
+        'c' => '\u{1D9C}',
+        'd' => '\u{1D48}',
+        'e' => '\u{1D49}',
+        'f' => '\u{1DA0}',
+        'g' => '\u{1D4D}',
+        'h' => '\u{02B0}',
+        'i' => '\u{2071}',
+        'j' => '\u{02B2}',
+        'k' => '\u{1D4F}',
+        'l' => '\u{02E1}',
+        'm' => '\u{1D50}',
+        'n' => '\u{207F}',
+        'o' => '\u{1D52}',
+        'p' => '\u{1D56}',
+        'r' => '\u{02B3}',
+        's' => '\u{02E2}',
+        't' => '\u{1D57}',
+        'u' => '\u{1D58}',
+        'v' => '\u{1D5B}',
+        'w' => '\u{02B7}',
+        'x' => '\u{02E3}',
+        'y' => '\u{02B8}',
+        'z' => '\u{1DBB}',
+        _ => return None,
+    };
+    Some(mapped)
+}
+
 fn script_form(text: &str, raised: bool) -> Option<String> {
     let text = text.trim();
     if text.is_empty() || text.chars().count() > SUPERSCRIPT_MAX_CHARS {
@@ -668,9 +702,16 @@ fn script_form(text: &str, raised: bool) -> Option<String> {
     let mut chars = text.chars();
     if let (Some(only), None) = (chars.next(), chars.next())
         && raised
-        && (only.is_alphabetic() || matches!(only, '*' | '\u{2217}'))
     {
-        return Some(only.to_string());
+        if matches!(only, '*' | '\u{2217}') {
+            return Some(only.to_string());
+        }
+        if only.is_alphabetic() {
+            // Only letters with a real superscript form are merged; a raised
+            // `q` or capital is left to the general script rule so `xⁿ`
+            // never collapses into `xn`.
+            return superscript_letter(only).map(|c| c.to_string());
+        }
     }
     let mut out = String::with_capacity(3 * text.len());
     let mut digits: usize = 0;
@@ -2004,7 +2045,10 @@ mod tests {
             script_form("10, 11", true).as_deref(),
             Some("\u{00B9}\u{2070},\u{00B9}\u{00B9}")
         );
-        assert_eq!(script_form("a", true).as_deref(), Some("a"));
+        assert_eq!(script_form("a", true).as_deref(), Some("\u{1D43}"));
+        assert_eq!(script_form("n", true).as_deref(), Some("\u{207F}"));
+        assert_eq!(script_form("q", true), None);
+        assert_eq!(script_form("N", true), None);
         assert_eq!(script_form("*", true).as_deref(), Some("*"));
         assert_eq!(script_form("3", false).as_deref(), Some("\u{2083}"));
         assert_eq!(script_form("a", false), None);
