@@ -48,6 +48,9 @@ const VERTICAL_MIN_CHARS: usize = 10;
 const HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{00AD}'];
 /// Opening punctuation allowed before a hyphenated word.
 const OPENERS: [char; 7] = ['(', '[', '{', '"', '\'', '\u{201C}', '\u{2018}'];
+/// Shortest word half that counts as attested on its own when deciding to
+/// keep a line-end hyphen (`in-` + `formation` must still join).
+const MIN_ATTESTED_HALF: usize = 3;
 /// Prefixes that usually form real compounds (`self-supervised`); a line-end
 /// hyphen after one is kept unless the joined word is attested.
 const COMPOUND_PREFIXES: [&str; 25] = [
@@ -116,6 +119,9 @@ enum Decision {
 }
 
 /// Lower-cased words and hyphenated pairs seen in the document's body lines.
+/// Word halves at a line-end hyphen (the last word before it and the first
+/// word of the next body line) are not recorded as words, so a split
+/// `cost-` / `effective` does not attest its own halves.
 struct Vocabulary {
     words: BTreeSet<String>,
     compounds: BTreeSet<String>,
@@ -541,27 +547,42 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> usize {
     merged
 }
 
-/// Words and hyphenated word pairs of every body line, lower-cased.
+/// Words and hyphenated word pairs of every body line, lower-cased, in
+/// reading order (see [`Vocabulary`] for the halves left out).
 fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
     let mut vocab = Vocabulary {
         words: BTreeSet::new(),
         compounds: BTreeSet::new(),
     };
     let alphabetic = |piece: &str| !piece.is_empty() && piece.chars().all(char::is_alphabetic);
+    let mut after_hyphen = false;
     for (page, w) in pages.iter().zip(work) {
         if !w.eligible {
+            after_hyphen = false;
             continue;
         }
         for (k, line) in page.lines.iter().enumerate() {
             if !w.is_body(k) {
                 continue;
             }
-            for token in line.text.split_whitespace() {
+            let ends_hyphen = strip_final_hyphen(&line.text).is_some();
+            let tokens: Vec<&str> = line.text.split_whitespace().collect();
+            let last_token = tokens.len().saturating_sub(1);
+            for (t, token) in tokens.iter().enumerate() {
                 let core = token.trim_matches(|c: char| !c.is_alphanumeric());
                 let parts: Vec<&str> = core.split(HYPHENS).collect();
-                for part in &parts {
-                    for word in part.split(|c: char| !c.is_alphabetic()) {
-                        if !word.is_empty() {
+                let last_part = parts.len().saturating_sub(1);
+                for (i, part) in parts.iter().enumerate() {
+                    let words: Vec<&str> = part
+                        .split(|c: char| !c.is_alphabetic())
+                        .filter(|word| !word.is_empty())
+                        .collect();
+                    let last_word = words.len().saturating_sub(1);
+                    for (j, word) in words.iter().enumerate() {
+                        let split_head = after_hyphen && t == 0 && i == 0 && j == 0;
+                        let split_tail =
+                            ends_hyphen && t == last_token && i == last_part && j == last_word;
+                        if !split_head && !split_tail {
                             vocab.words.insert(word.to_lowercase());
                         }
                     }
@@ -574,6 +595,7 @@ fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
                     }
                 }
             }
+            after_hyphen = ends_hyphen;
         }
     }
     vocab
@@ -590,7 +612,11 @@ fn strip_final_hyphen(text: &str) -> Option<&str> {
     }
 }
 
-/// Rule 2 for one pair of consecutive lines.
+/// Rule 2 for one pair of consecutive lines. The halves join when the
+/// joined word is attested; otherwise the hyphen stays when the hyphenated
+/// pair is attested, when both halves are attested as whole words
+/// (`cost-` / `effective`), or when the left half is a compound prefix; any
+/// other split (`algo-` / `rithm`) joins.
 fn hyphen_decision(first: &str, second: &str, vocab: &Vocabulary) -> Decision {
     let Some(stem) = strip_final_hyphen(first) else {
         return Decision::NotApplicable;
@@ -615,9 +641,12 @@ fn hyphen_decision(first: &str, second: &str, vocab: &Vocabulary) -> Decision {
     let right = suffix.to_lowercase();
     let joined = format!("{left}{right}");
     let hyphenated = format!("{left}-{right}");
+    let whole_word =
+        |half: &str| half.chars().count() >= MIN_ATTESTED_HALF && vocab.words.contains(half);
     let attested = vocab.words.contains(&joined);
-    let compound =
-        vocab.compounds.contains(&hyphenated) || COMPOUND_PREFIXES.contains(&left.as_str());
+    let compound = vocab.compounds.contains(&hyphenated)
+        || (whole_word(left.as_str()) && whole_word(right.as_str()))
+        || COMPOUND_PREFIXES.contains(&left.as_str());
     if attested || !compound {
         let tail = rest
             .get(head.len()..)
@@ -640,11 +669,18 @@ fn line_at_mut(pages: &mut [PageText], at: (usize, usize)) -> Option<&mut Line> 
         .and_then(|page| page.lines.get_mut(at.1))
 }
 
+/// Whether a separator in `text` is a paragraph break (two or more line
+/// breaks).
+fn is_paragraph_break(sep: &str) -> bool {
+    sep.matches('\n').count() >= 2
+}
+
 /// Rule 2 decision for body line `second` following body line `first`:
-/// same page and column, or the last and first body lines of consecutive
-/// pages.
+/// same page and column with no paragraph break between them in `text`,
+/// or the last and first body lines of consecutive pages.
 fn plan_join(
     pages: &[PageText],
+    work: &[PageWork],
     first: (usize, usize),
     second: (usize, usize),
     vocab: &Vocabulary,
@@ -653,7 +689,12 @@ fn plan_join(
         return Decision::NotApplicable;
     };
     let continues = if first.0 == second.0 {
-        a.column == b.column
+        let paragraph_break = work.get(first.0).is_some_and(|w| {
+            (first.1 + 1..=second.1)
+                .filter_map(|k| w.seps.get(k))
+                .any(|sep| is_paragraph_break(sep))
+        });
+        a.column == b.column && !paragraph_break
     } else {
         let earlier_number = pages.get(first.0).map(|page| page.page);
         let later_number = pages.get(second.0).map(|page| page.page);
@@ -689,7 +730,7 @@ fn join_hyphens(
             }
             let mut consumed = false;
             if let Some(earlier) = prev {
-                match plan_join(pages, earlier, current, vocab) {
+                match plan_join(pages, work, earlier, current, vocab) {
                     Decision::NotApplicable => {}
                     Decision::Keep => report.hyphens_kept += 1,
                     Decision::Join(first_text, second_text) => {
@@ -1016,6 +1057,68 @@ mod tests {
         let report = clean_document(&mut pages);
         assert_eq!(report.hyphens_kept, 1);
         assert_eq!(report.hyphens_joined, 0);
+        assert_eq!(pages[0].text, before);
+    }
+
+    #[test]
+    fn hyphen_stays_when_both_halves_are_words_elsewhere() {
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("a cost-", 60.0, 600.0, 0),
+                ("effective method at low cost.", 60.0, 588.0, 0),
+                ("It is effective in practice.", 60.0, 576.0, 0),
+                ("the Dual-", 60.0, 564.0, 0),
+                ("channel design uses a dual layout", 60.0, 552.0, 0),
+                ("and one channel per link.", 60.0, 540.0, 0),
+            ],
+        )];
+        let before = pages[0].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.hyphens_kept, 2);
+        assert_eq!(report.hyphens_joined, 0);
+        assert_eq!(pages[0].text, before);
+        assert_eq!(texts(&pages[0])[0], "a cost-");
+        assert_eq!(texts(&pages[0])[3], "the Dual-");
+    }
+
+    #[test]
+    fn hyphen_joins_when_attested_or_when_halves_are_not_words() {
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("the opti-", 60.0, 600.0, 0),
+                ("mization step runs first.", 60.0, 588.0, 0),
+                ("Our optimization is fast.", 60.0, 576.0, 0),
+                ("the algo-", 60.0, 564.0, 0),
+                ("rithm ends.", 60.0, 552.0, 0),
+            ],
+        )];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.hyphens_joined, 2);
+        assert_eq!(report.hyphens_kept, 0);
+        assert_eq!(
+            pages[0].text,
+            "the optimization\nstep runs first.\nOur optimization is fast.\n\
+             the algorithm\nends."
+        );
+    }
+
+    #[test]
+    fn hyphen_is_not_joined_across_a_paragraph_break() {
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("a list ends with comprehen-", 60.0, 600.0, 0),
+                ("sive text starts a new paragraph.", 60.0, 580.0, 0),
+            ],
+        )];
+        pages[0].text =
+            "a list ends with comprehen-\n\nsive text starts a new paragraph.".to_string();
+        let before = pages[0].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.hyphens_joined, 0);
+        assert_eq!(report.hyphens_kept, 0);
         assert_eq!(pages[0].text, before);
     }
 

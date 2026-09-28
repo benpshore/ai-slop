@@ -489,21 +489,48 @@ fn drop_math_lines(text: &str) -> String {
         .join("\n")
 }
 
-/// `text` without caption paragraphs (a [`caption_start_re`] line up to the
-/// next blank line) and without math-heavy lines.
+/// Most lines a caption paragraph may run past its [`caption_start_re`]
+/// line when no blank line or sentence end closes it first.
+const CAPTION_MAX_EXTRA_LINES: usize = 3;
+
+/// Whether the line ends a sentence or a parenthetical (`.`, `!`, `?` or
+/// `)` after trailing whitespace).
+fn ends_sentence(line: &str) -> bool {
+    line.trim_end().ends_with(['.', '!', '?', ')'])
+}
+
+/// `text` without caption paragraphs and without math-heavy lines. A
+/// caption paragraph is a [`caption_start_re`] line plus at most
+/// `CAPTION_MAX_EXTRA_LINES` further lines; it ends early at a blank line or
+/// after the first line (the start line included) that ends a sentence, so
+/// prose that follows a caption without a blank line is kept.
 fn drop_caption_and_math_lines(text: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
-    let mut in_caption = false;
+    // `Some(n)`: inside a caption that may drop `n` more lines.
+    let mut caption_left: Option<usize> = None;
     for line in text.split('\n') {
         if line.trim().is_empty() {
-            in_caption = false;
+            caption_left = None;
             kept.push(line);
             continue;
         }
         if caption_start_re().is_match(line) {
-            in_caption = true;
+            caption_left = if ends_sentence(line) {
+                None
+            } else {
+                Some(CAPTION_MAX_EXTRA_LINES)
+            };
+            continue;
         }
-        if !in_caption && !is_math_heavy(line) {
+        if let Some(left) = caption_left {
+            caption_left = if ends_sentence(line) || left <= 1 {
+                None
+            } else {
+                Some(left - 1)
+            };
+            continue;
+        }
+        if !is_math_heavy(line) {
             kept.push(line);
         }
     }
@@ -3455,6 +3482,28 @@ mod tests {
         let alignment = eval.body_alignment.expect("body text present");
         assert!(close(alignment, 1.0), "got {alignment}");
         assert_eq!(eval.body_words_extracted, 8);
+    }
+
+    #[test]
+    fn caption_without_blank_line_does_not_swallow_following_prose() {
+        let text = "Body one.\n\
+                    Figure 3: Accuracy against model size for\n\
+                    all three datasets.\n\
+                    The prose resumes here.\n\
+                    More prose follows.";
+        assert_eq!(
+            drop_caption_and_math_lines(text),
+            "Body one.\nThe prose resumes here.\nMore prose follows."
+        );
+        let one_line = "Table 2: Results.\nProse after the table.";
+        assert_eq!(
+            drop_caption_and_math_lines(one_line),
+            "Prose after the table."
+        );
+        let paren = "Figure 1: Results (left) and (right)\nProse here.";
+        assert_eq!(drop_caption_and_math_lines(paren), "Prose here.");
+        let long = "Figure 1: a\nb\nc\nd\nkept line\nkept too";
+        assert_eq!(drop_caption_and_math_lines(long), "kept line\nkept too");
     }
 
     #[test]
