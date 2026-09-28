@@ -3079,7 +3079,7 @@ mod tests {
             .collect();
         assert_eq!(table.len(), 4, "{table:?}");
         let columns = table[0].matches('|').count();
-        assert_eq!(columns, 18);
+        assert_eq!(columns, 19);
         for row in &table {
             assert_eq!(row.matches('|').count(), columns, "{row}");
         }
