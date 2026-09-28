@@ -168,6 +168,7 @@ const BRIDGE_COLUMN: f32 = 0.3;
 const BRIDGE_OVERLAP: f32 = 0.25;
 
 /// Thresholds of one XY-cut run, in points.
+#[allow(clippy::struct_field_names)]
 struct CutParams {
     row_gap: f32,
     column_gap: f32,
@@ -733,12 +734,10 @@ fn flag_glyph_stacks(spans: &[Span], all: &[(usize, BBox)], width: f32, flags: &
 
 /// Split `all` into vertical spans (see [`is_tall_text`] and
 /// [`flag_glyph_stacks`]) and the rest, each keeping the order of `all`.
-fn split_vertical(
-    spans: &[Span],
-    all: Vec<(usize, BBox)>,
-    fallback: f32,
-    width: f32,
-) -> (Vec<(usize, BBox)>, Vec<(usize, BBox)>) {
+/// Indexed boxes: a span index and the box it draws.
+type Placed = Vec<(usize, BBox)>;
+
+fn split_vertical(spans: &[Span], all: Placed, fallback: f32, width: f32) -> (Placed, Placed) {
     let mut flags: Vec<bool> = all
         .iter()
         .map(|(i, b)| is_tall_text(&spans[*i], *b, fallback))
