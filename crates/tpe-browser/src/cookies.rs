@@ -15,6 +15,7 @@ use std::sync::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 use crate::BrowserError;
+use crate::psl::is_registrable_or_below;
 use crate::url::{NormalizedUrl, host_in_domain};
 
 /// Credential-store service name under which cookies live.
@@ -81,24 +82,30 @@ impl Cookie {
         domain_ok && path_matches(&self.path, path)
     }
 
-    /// Parse a `Set-Cookie` header received from `request_host`. Returns `None`
-    /// for an empty name, a `Domain` that does not cover the request host, or
-    /// a `Domain` without a dot (a public suffix such as `com`). `Max-Age`
-    /// wins over `Expires`; a non-positive `Max-Age` yields a cookie that is
-    /// already expired at `now_unix`.
-    pub fn parse_set_cookie(header: &str, request_host: &str, now_unix: i64) -> Option<Self> {
+    /// Parse a `Set-Cookie` header received in the response to `request`.
+    ///
+    /// Returns `None` for an empty name or a `Domain` attribute the request
+    /// host may not set: one that does not domain-match the host, or one that
+    /// is a public suffix ([`crate::psl`]: `uk`, `ac.uk`, `github.io`). As in
+    /// RFC 6265 5.3 step 5, a public-suffix `Domain` equal to the request host
+    /// itself yields a host-only cookie; an IP-literal host only accepts a
+    /// `Domain` equal to itself. Without a valid `Path` attribute the path is
+    /// the RFC 6265 5.1.4 default path of the request URL ([`default_path`]).
+    /// `Max-Age` wins over `Expires`; a non-positive `Max-Age` yields a cookie
+    /// that is already expired at `now_unix`.
+    pub fn parse_set_cookie(header: &str, request: &NormalizedUrl, now_unix: i64) -> Option<Self> {
         let mut parts = header.split(';');
         let (name, value) = parts.next()?.split_once('=')?;
         let name = name.trim();
         if name.is_empty() {
             return None;
         }
-        let host = request_host.trim_end_matches('.').to_ascii_lowercase();
+        let host = request.host.trim_end_matches('.').to_ascii_lowercase();
         let mut cookie = Self {
             name: name.to_string(),
             value: unquote(value.trim()),
             domain: host.clone(),
-            path: "/".to_string(),
+            path: default_path(&request.path),
             expires_unix: None,
             secure: false,
             http_only: false,
@@ -120,10 +127,11 @@ impl Cookie {
                     if d.is_empty() {
                         continue;
                     }
-                    if !d.contains('.') || !host_in_domain(&host, &d) {
-                        return None;
+                    match domain_attribute_scope(&host, &d) {
+                        DomainScope::Reject => return None,
+                        DomainScope::HostOnly => cookie.domain.clone_from(&host),
+                        DomainScope::Domain => cookie.domain = format!(".{d}"),
                     }
-                    cookie.domain = format!(".{d}");
                 }
                 "path" => {
                     if val.starts_with('/') {
@@ -427,6 +435,61 @@ impl CookieSecretStore for MemoryCookieStore {
     }
 }
 
+/// What a `Set-Cookie` `Domain` attribute does to the cookie's scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainScope {
+    /// Refuse the whole cookie.
+    Reject,
+    /// Keep the cookie host-only (the attribute named the request host itself).
+    HostOnly,
+    /// Store a domain cookie `.<domain>` sent to the domain and its subdomains.
+    Domain,
+}
+
+/// Judge `domain` (lower-case, no surrounding dots) as the `Domain` attribute
+/// of a cookie set by `host`. A domain cookie is allowed only when `domain` is
+/// a registrable domain or below it (see [`crate::psl`]) and `host` equals it
+/// or ends with `.` + `domain`.
+fn domain_attribute_scope(host: &str, domain: &str) -> DomainScope {
+    if is_ip_literal(host) {
+        return if host == domain {
+            DomainScope::HostOnly
+        } else {
+            DomainScope::Reject
+        };
+    }
+    if !host_in_domain(host, domain) {
+        return DomainScope::Reject;
+    }
+    if is_registrable_or_below(domain) {
+        DomainScope::Domain
+    } else if host == domain {
+        DomainScope::HostOnly
+    } else {
+        DomainScope::Reject
+    }
+}
+
+fn is_ip_literal(host: &str) -> bool {
+    host.starts_with('[') || host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// RFC 6265 5.1.4 default cookie path of a request path: everything up to,
+/// but not including, the rightmost `/`; `/` when the path is empty, does not
+/// start with `/`, or has no `/` after the first character.
+pub fn default_path(request_path: &str) -> String {
+    let path = request_path
+        .split_once('?')
+        .map_or(request_path, |(before, _)| before);
+    if !path.starts_with('/') {
+        return "/".to_string();
+    }
+    match path.rsplit_once('/') {
+        Some((head, _)) if !head.is_empty() => head.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {
     request_path
         .strip_prefix(cookie_path)
@@ -560,7 +623,7 @@ mod tests {
     fn set_cookie_basic_attributes() {
         let c = Cookie::parse_set_cookie(
             "ezproxy=abc123; Path=/; Domain=.ezproxy.lib.edu; Secure; HttpOnly; Max-Age=3600",
-            "login.ezproxy.lib.edu",
+            &url("https://login.ezproxy.lib.edu/"),
             NOW,
         )
         .unwrap();
@@ -576,50 +639,146 @@ mod tests {
 
     #[test]
     fn set_cookie_defaults_and_rejections() {
-        let c = Cookie::parse_set_cookie("a=\"quoted\"", "WWW.Example.org.", NOW).unwrap();
+        let c = Cookie::parse_set_cookie("a=\"quoted\"", &url("https://WWW.Example.org/"), NOW)
+            .unwrap();
         assert_eq!(c.domain, "www.example.org");
         assert_eq!(c.value, "quoted");
         assert_eq!(c.path, "/");
         assert_eq!(c.expires_unix, None);
-        assert!(Cookie::parse_set_cookie("=novalue", "x.org", NOW).is_none());
-        assert!(Cookie::parse_set_cookie("nothing", "x.org", NOW).is_none());
-        assert!(Cookie::parse_set_cookie("a=1; Domain=other.org", "x.org", NOW).is_none());
-        assert!(Cookie::parse_set_cookie("a=1; Domain=org", "x.org", NOW).is_none());
-        let sub =
-            Cookie::parse_set_cookie("a=1; Domain=x.org; Path=relative", "a.x.org", NOW).unwrap();
+        assert!(Cookie::parse_set_cookie("=novalue", &url("https://x.org/"), NOW).is_none());
+        assert!(Cookie::parse_set_cookie("nothing", &url("https://x.org/"), NOW).is_none());
+        assert!(
+            Cookie::parse_set_cookie("a=1; Domain=other.org", &url("https://x.org/"), NOW)
+                .is_none()
+        );
+        assert!(Cookie::parse_set_cookie("a=1; Domain=org", &url("https://x.org/"), NOW).is_none());
+        let sub = Cookie::parse_set_cookie(
+            "a=1; Domain=x.org; Path=relative",
+            &url("https://a.x.org/"),
+            NOW,
+        )
+        .unwrap();
         assert_eq!(sub.domain, ".x.org");
         assert_eq!(sub.path, "/");
     }
 
     #[test]
-    fn set_cookie_expiry_forms() {
-        let exp =
-            Cookie::parse_set_cookie("a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT", "x.org", NOW)
+    fn set_cookie_rejects_public_suffix_domains() {
+        let parse =
+            |header: &str, request: &str| Cookie::parse_set_cookie(header, &url(request), NOW);
+        assert!(parse("a=1; Domain=ac.uk", "https://www.ebi.ac.uk/").is_none());
+        assert!(parse("a=1; Domain=.ac.uk", "https://ebi.ac.uk/").is_none());
+        assert!(parse("a=1; Domain=uk", "https://ebi.ac.uk/").is_none());
+        assert!(parse("a=1; Domain=github.io", "https://user.github.io/").is_none());
+        assert!(parse("a=1; Domain=co.jp", "https://www.example.co.jp/").is_none());
+        assert!(
+            parse(
+                "a=1; Domain=s3.amazonaws.com",
+                "https://b.s3.amazonaws.com/"
+            )
+            .is_none()
+        );
+
+        let ebi = parse("a=1; Domain=ebi.ac.uk", "https://www.ebi.ac.uk/").unwrap();
+        assert_eq!(ebi.domain, ".ebi.ac.uk");
+        let same = parse("a=1; Domain=ebi.ac.uk", "https://ebi.ac.uk/").unwrap();
+        assert_eq!(same.domain, ".ebi.ac.uk");
+        let example = parse("a=1; Domain=example.com", "https://www.example.com/").unwrap();
+        assert_eq!(example.domain, ".example.com");
+        let pages = parse("a=1; Domain=user.github.io", "https://user.github.io/").unwrap();
+        assert_eq!(pages.domain, ".user.github.io");
+
+        // RFC 6265 5.3 step 5: a public suffix naming the host itself stays host-only.
+        let host_only = parse("a=1; Domain=github.io", "https://github.io/").unwrap();
+        assert_eq!(host_only.domain, "github.io");
+        // Suffix matching is label-aligned: `ample.com` does not cover `www.example.com`.
+        assert!(parse("a=1; Domain=ample.com", "https://www.example.com/").is_none());
+        // IP literals take no domain cookies.
+        assert!(parse("a=1; Domain=0.1", "http://10.0.0.1/").is_none());
+        let ip = parse("a=1; Domain=10.0.0.1", "http://10.0.0.1/").unwrap();
+        assert_eq!(ip.domain, "10.0.0.1");
+    }
+
+    #[test]
+    fn set_cookie_without_path_uses_the_default_path() {
+        let c =
+            Cookie::parse_set_cookie("sid=1", &url("https://x.org/account/login"), NOW).unwrap();
+        assert_eq!(c.path, "/account");
+        let mut jar = CookieJar::new();
+        jar.insert(c);
+        assert_eq!(
+            jar.header_for(&url("https://x.org/account/profile"), NOW),
+            Some("sid=1".to_string())
+        );
+        assert_eq!(
+            jar.header_for(&url("https://x.org/account"), NOW),
+            Some("sid=1".to_string())
+        );
+        assert_eq!(jar.header_for(&url("https://x.org/other"), NOW), None);
+        assert_eq!(jar.header_for(&url("https://x.org/"), NOW), None);
+
+        let root = Cookie::parse_set_cookie("a=1", &url("https://x.org/login"), NOW).unwrap();
+        assert_eq!(root.path, "/");
+        let bad_attr =
+            Cookie::parse_set_cookie("a=1; Path=relative", &url("https://x.org/a/b/c"), NOW)
                 .unwrap();
+        assert_eq!(bad_attr.path, "/a/b");
+        let explicit =
+            Cookie::parse_set_cookie("a=1; Path=/", &url("https://x.org/account/login"), NOW)
+                .unwrap();
+        assert_eq!(explicit.path, "/");
+    }
+
+    #[test]
+    fn default_path_follows_rfc_6265() {
+        assert_eq!(default_path("/account/login"), "/account");
+        assert_eq!(default_path("/account/"), "/account");
+        assert_eq!(default_path("/a/b/c"), "/a/b");
+        assert_eq!(default_path("/login"), "/");
+        assert_eq!(default_path("/"), "/");
+        assert_eq!(default_path(""), "/");
+        assert_eq!(default_path("relative/x"), "/");
+        assert_eq!(default_path("/a/b?q=/c/d"), "/a");
+    }
+
+    #[test]
+    fn set_cookie_expiry_forms() {
+        let exp = Cookie::parse_set_cookie(
+            "a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT",
+            &url("https://x.org/"),
+            NOW,
+        )
+        .unwrap();
         assert_eq!(exp.expires_unix, Some(1_445_412_480));
         let rfc850 = Cookie::parse_set_cookie(
             "a=1; expires=Wednesday, 21-Oct-15 07:28:00 GMT",
-            "x.org",
+            &url("https://x.org/"),
             NOW,
         )
         .unwrap();
         assert_eq!(rfc850.expires_unix, Some(1_445_412_480));
-        let asctime =
-            Cookie::parse_set_cookie("a=1; Expires=Wed Oct 21 07:28:00 2015", "x.org", NOW)
-                .unwrap();
+        let asctime = Cookie::parse_set_cookie(
+            "a=1; Expires=Wed Oct 21 07:28:00 2015",
+            &url("https://x.org/"),
+            NOW,
+        )
+        .unwrap();
         assert_eq!(asctime.expires_unix, Some(1_445_412_480));
         let max_age_wins = Cookie::parse_set_cookie(
             "a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Max-Age=10",
-            "x.org",
+            &url("https://x.org/"),
             NOW,
         )
         .unwrap();
         assert_eq!(max_age_wins.expires_unix, Some(NOW + 10));
-        let deleted = Cookie::parse_set_cookie("a=; Max-Age=0", "x.org", NOW).unwrap();
+        let deleted =
+            Cookie::parse_set_cookie("a=; Max-Age=0", &url("https://x.org/"), NOW).unwrap();
         assert!(deleted.is_expired(NOW));
-        let negative = Cookie::parse_set_cookie("a=1; Max-Age=-5", "x.org", NOW).unwrap();
+        let negative =
+            Cookie::parse_set_cookie("a=1; Max-Age=-5", &url("https://x.org/"), NOW).unwrap();
         assert!(negative.is_expired(NOW));
-        let garbage = Cookie::parse_set_cookie("a=1; Expires=never", "x.org", NOW).unwrap();
+        let garbage =
+            Cookie::parse_set_cookie("a=1; Expires=never", &url("https://x.org/"), NOW).unwrap();
         assert_eq!(garbage.expires_unix, None);
     }
 

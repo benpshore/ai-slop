@@ -213,7 +213,9 @@ impl BrowserSession {
     }
 
     /// Store a `Set-Cookie` header received from `raw_url`; `Ok(false)` when
-    /// the header was rejected (bad name or a domain the host may not set).
+    /// the header was rejected (bad name, or a `Domain` the host may not set:
+    /// a foreign domain or a public suffix). Without a `Path` attribute the
+    /// cookie is scoped to the default path of `raw_url` (RFC 6265 5.1.4).
     pub fn on_set_cookie(
         &mut self,
         raw_url: &str,
@@ -221,7 +223,7 @@ impl BrowserSession {
         now_unix: i64,
     ) -> Result<bool, BrowserError> {
         let url = NormalizedUrl::parse(raw_url)?;
-        let Some(cookie) = Cookie::parse_set_cookie(header, &url.host, now_unix) else {
+        let Some(cookie) = Cookie::parse_set_cookie(header, &url, now_unix) else {
             return Ok(false);
         };
         self.jar.insert(cookie);
@@ -496,6 +498,60 @@ mod tests {
         assert_eq!(s.jar().len(), 1);
         s.jar_mut().remove_expired(NOW);
         assert_eq!(s.jar().len(), 1);
+    }
+
+    #[test]
+    fn set_cookie_path_defaults_from_the_request_url() {
+        let mut s = BrowserSession::open();
+        assert!(
+            s.on_set_cookie("https://www.ebi.ac.uk/account/login", "sid=1", NOW)
+                .unwrap()
+        );
+        assert_eq!(s.jar().all()[0].path, "/account");
+        assert_eq!(
+            s.cookie_header("https://www.ebi.ac.uk/account/settings", NOW)
+                .unwrap(),
+            Some("sid=1".to_string())
+        );
+        assert_eq!(
+            s.cookie_header("https://www.ebi.ac.uk/other", NOW).unwrap(),
+            None
+        );
+        assert!(
+            !s.on_set_cookie("https://www.ebi.ac.uk/", "wide=1; Domain=ac.uk", NOW)
+                .unwrap()
+        );
+        assert_eq!(s.jar().len(), 1);
+    }
+
+    #[test]
+    fn denied_origins_stay_blocked_behind_the_proxy() {
+        let policy = ResearchPolicy::open()
+            .refuse("example.com")
+            .with_proxy(LibraryProxy::ezproxy("ezproxy.lib.edu"));
+        let mut s = BrowserSession::new(policy);
+        assert_eq!(
+            s.navigate("https://www-example-com.ezproxy.lib.edu/paper")
+                .unwrap(),
+            Navigation::Blocked {
+                url: "https://www-example-com.ezproxy.lib.edu/paper".to_string(),
+                host: "www-example-com.ezproxy.lib.edu".to_string(),
+            }
+        );
+        assert!(matches!(
+            s.navigate("https://www.example.com.ezproxy.lib.edu/")
+                .unwrap(),
+            Navigation::Blocked { .. }
+        ));
+        assert!(matches!(
+            s.navigate("https://www-nature-com.ezproxy.lib.edu/articles/x")
+                .unwrap(),
+            Navigation::Load {
+                proxied_origin: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(s.history().len(), 1);
     }
 
     #[test]

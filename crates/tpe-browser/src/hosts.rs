@@ -297,17 +297,22 @@ impl ResearchPolicy {
         self
     }
 
-    /// Judge a host. Denied suffixes win; then the proxy is unwrapped and the
-    /// origin judged; then the allowlists apply (only when `enabled`).
+    /// Judge a host. Denied suffixes win, checked against the raw host and,
+    /// for a host under the library proxy, against the unwrapped publisher
+    /// origin too, so a denied origin stays blocked when reached through the
+    /// proxy. A proxied host is then allowed only when its origin is (the
+    /// proxy host being allowed never vouches for arbitrary origins); other
+    /// hosts are judged by the allowlists (only when `enabled`).
     pub fn decide(&self, host: &str) -> HostDecision {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        if self.deny.iter().any(|d| host_in_domain(&host, d)) {
+        if self.is_denied(&host) {
             return HostDecision::Block;
         }
         if let Some(proxy) = &self.proxy
             && proxy.is_proxy_host(&host)
         {
             return match proxy.unproxy_host(&host) {
+                Some(origin) if self.is_denied(&origin) => HostDecision::Block,
                 Some(origin) if self.host_allowed(&origin) => HostDecision::Proxied { origin },
                 // The proxy's own login/menu pages are always needed.
                 None => HostDecision::Allow,
@@ -319,6 +324,11 @@ impl ResearchPolicy {
         } else {
             HostDecision::Block
         }
+    }
+
+    /// `true` when `host` is, or is under, a denied domain (no proxy unwrapping).
+    pub fn is_denied(&self, host: &str) -> bool {
+        self.deny.iter().any(|d| host_in_domain(host, d))
     }
 
     /// `true` when `host` is allowed as itself (no proxy unwrapping, deny list ignored).
@@ -421,6 +431,42 @@ mod tests {
             policy.decide("www-example-com.ezproxy.lib.example.edu"),
             HostDecision::Block
         );
+    }
+
+    #[test]
+    fn deny_applies_to_the_unwrapped_proxy_origin() {
+        let proxy = LibraryProxy::ezproxy("ezproxy.lib.edu");
+        let open = ResearchPolicy::open()
+            .refuse("example.com")
+            .with_proxy(proxy.clone());
+        assert_eq!(
+            open.decide("www-example-com.ezproxy.lib.edu"),
+            HostDecision::Block
+        );
+        assert_eq!(
+            open.decide("www.example.com.ezproxy.lib.edu"),
+            HostDecision::Block
+        );
+        assert_eq!(open.decide("www.example.com"), HostDecision::Block);
+        assert_eq!(
+            open.decide("www-nature-com.ezproxy.lib.edu"),
+            HostDecision::Proxied {
+                origin: "www.nature.com".to_string()
+            }
+        );
+        assert_eq!(open.decide("ezproxy.lib.edu"), HostDecision::Allow);
+
+        // Research mode: an explicitly allowed origin is still refused when denied.
+        let research = ResearchPolicy::research()
+            .allow("example.com")
+            .refuse("example.com")
+            .with_proxy(proxy);
+        assert_eq!(
+            research.decide("www-example-com.ezproxy.lib.edu"),
+            HostDecision::Block
+        );
+        assert!(research.is_denied("www.example.com"));
+        assert!(!research.is_denied("www.nature.com"));
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub mod doi;
 pub mod hosts;
 pub mod html;
 pub mod pdf;
+pub mod psl;
 pub mod session;
 pub mod url;
 
