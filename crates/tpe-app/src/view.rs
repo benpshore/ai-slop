@@ -1,10 +1,14 @@
 //! Pure view models for the three screens. Nothing here depends on GPUI, so
-//! the labels, line numbering, marker placement and keyboard-pane cycling are
-//! unit tested on Linux CI even though the GUI only builds on macOS.
+//! the labels, line numbering, marker placement, keyboard-pane cycling and
+//! the stale-answer guard of the Ask panel are unit tested on Linux CI even
+//! though the GUI only builds on macOS.
+
+use std::fmt::Write as _;
 
 use tpe_common::{PaperRecord, normalize_doi};
 
 use crate::ledger::{CitationRow, CorpusRow, DocumentDetail, ReferenceRow};
+use crate::tpe_ai::Provider;
 
 /// System prompt sent with every question. It tells the model to stay inside
 /// the extracted text rather than invent content, matching the engine's
@@ -148,10 +152,10 @@ pub fn numbered_lines(page_text: &str, citations: &[CitationRow], page: u32) -> 
     }
     for citation in citations.iter().filter(|c| c.page == page) {
         let offset = usize::try_from(citation.offset).unwrap_or(usize::MAX);
-        if let Some(ix) = line_index_of_offset(page_text, offset) {
-            if let Some(line) = lines.get_mut(ix) {
-                line.markers.push(marker_label(citation));
-            }
+        if let Some(ix) = line_index_of_offset(page_text, offset)
+            && let Some(line) = lines.get_mut(ix)
+        {
+            line.markers.push(marker_label(citation));
         }
     }
     lines
@@ -239,32 +243,150 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
 /// The document context sent to the model: metadata header plus the page
 /// texts (each prefixed with its page number), truncated to `max_chars`.
 pub fn document_context(detail: &DocumentDetail, max_chars: usize) -> String {
+    // Writing to a `String` cannot fail, so the `fmt::Result`s are dropped.
     let mut header = String::new();
-    header.push_str(&format!("Document {}\n", short_hash(&detail.hash)));
+    let _ = writeln!(header, "Document {}", short_hash(&detail.hash));
     if let Some(title) = detail.title.as_deref() {
-        header.push_str(&format!("Title: {title}\n"));
+        let _ = writeln!(header, "Title: {title}");
     }
     if !detail.authors.is_empty() {
-        header.push_str(&format!("Authors: {}\n", detail.authors.join(", ")));
+        let _ = writeln!(header, "Authors: {}", detail.authors.join(", "));
     }
     if let Some(doi) = detail.doi.as_deref() {
-        header.push_str(&format!("DOI: {doi}\n"));
+        let _ = writeln!(header, "DOI: {doi}");
     }
     if let Some(year) = detail.year {
-        header.push_str(&format!("Year: {year}\n"));
+        let _ = writeln!(header, "Year: {year}");
     }
-    header.push_str(&format!(
-        "References extracted: {}. Citation markers: {}.\n\n",
+    let _ = writeln!(
+        header,
+        "References extracted: {}. Citation markers: {}.\n",
         detail.references.len(),
         detail.citations.len()
-    ));
+    );
     let mut body = String::new();
     for page in &detail.pages {
-        body.push_str(&format!("=== Page {} ===\n{}\n\n", page.page, page.text));
+        let _ = writeln!(body, "=== Page {} ===\n{}\n", page.page, page.text);
     }
     let budget = max_chars.saturating_sub(header.chars().count());
     header.push_str(&truncate_chars(&body, budget));
     header
+}
+
+/// One question sent to a provider, tagged with the state it was issued for
+/// so that an answer arriving late can be recognised as stale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskRequest {
+    /// Monotonically increasing per [`AskTracker`]; the latest issued wins.
+    pub id: u64,
+    /// Provider the question was sent to.
+    pub provider: Provider,
+    /// Content hash of the document the question was about, if one was loaded.
+    pub document: Option<String>,
+}
+
+impl AskRequest {
+    /// `Claude · 0123456789ab`, or `Claude · no document`.
+    pub fn label(&self) -> String {
+        match self.document.as_deref() {
+            Some(hash) => format!("{} · {}", self.provider.label(), short_hash(hash)),
+            None => format!("{} · no document", self.provider.label()),
+        }
+    }
+}
+
+/// What to do with the answer of a request that has just completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionVerdict {
+    /// Latest request, and the workbench still shows the document and
+    /// provider it was issued for: show the answer.
+    Apply,
+    /// Latest request, but the document or provider changed meanwhile: drop
+    /// the answer and tell the user.
+    Stale,
+    /// A newer request was issued since (or none is awaited): drop silently.
+    Superseded,
+}
+
+/// Pure guard for a completed request `done`: `latest` is the request whose
+/// answer is awaited (`None` when none is), `provider` and `document` (content
+/// hash) are what the workbench shows at the moment the answer arrives.
+pub fn completion_verdict(
+    latest: Option<&AskRequest>,
+    done: &AskRequest,
+    provider: Provider,
+    document: Option<&str>,
+) -> CompletionVerdict {
+    match latest {
+        Some(latest) if latest.id == done.id => {
+            if done.provider == provider && done.document.as_deref() == document {
+                CompletionVerdict::Apply
+            } else {
+                CompletionVerdict::Stale
+            }
+        }
+        _ => CompletionVerdict::Superseded,
+    }
+}
+
+/// Issues [`AskRequest`]s with increasing ids and remembers the one in flight.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AskTracker {
+    next_id: u64,
+    inflight: Option<AskRequest>,
+}
+
+impl AskTracker {
+    /// The request whose answer is awaited, if any.
+    pub fn inflight(&self) -> Option<&AskRequest> {
+        self.inflight.as_ref()
+    }
+
+    /// True while a request for exactly this provider and document is
+    /// awaited. A request issued for another document or provider does not
+    /// block a new one; its answer is dropped as superseded when it arrives.
+    pub fn is_busy_for(&self, provider: Provider, document: Option<&str>) -> bool {
+        self.inflight.as_ref().is_some_and(|request| {
+            request.provider == provider && request.document.as_deref() == document
+        })
+    }
+
+    /// Issues the next request; any earlier in-flight request is superseded.
+    pub fn issue(&mut self, provider: Provider, document: Option<&str>) -> AskRequest {
+        self.next_id += 1;
+        let request = AskRequest {
+            id: self.next_id,
+            provider,
+            document: document.map(str::to_owned),
+        };
+        self.inflight = Some(request.clone());
+        request
+    }
+
+    /// Records that `done` finished and returns the verdict for its answer
+    /// (see [`completion_verdict`]). The in-flight slot is cleared unless a
+    /// newer request owns it.
+    pub fn complete(
+        &mut self,
+        done: &AskRequest,
+        provider: Provider,
+        document: Option<&str>,
+    ) -> CompletionVerdict {
+        let verdict = completion_verdict(self.inflight.as_ref(), done, provider, document);
+        if verdict != CompletionVerdict::Superseded {
+            self.inflight = None;
+        }
+        verdict
+    }
+}
+
+/// Title of the answer panel: names the provider and document the shown
+/// answer belongs to, or just `Answer` when nothing has been answered yet.
+pub fn answer_title(answered: Option<&AskRequest>) -> String {
+    match answered {
+        Some(request) => format!("Answer from {}", request.label()),
+        None => String::from("Answer"),
+    }
 }
 
 /// Maps the loaded document to the shared record type other tracks consume.
@@ -455,6 +577,115 @@ mod tests {
         let cut = document_context(&detail, 120);
         assert!(cut.contains("[... truncated]"));
         assert!(cut.chars().count() < full.chars().count());
+    }
+
+    fn request(id: u64, provider: Provider, document: Option<&str>) -> AskRequest {
+        AskRequest {
+            id,
+            provider,
+            document: document.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn completion_applies_only_to_the_latest_request_in_the_same_context() {
+        let done = request(3, Provider::Anthropic, Some("abc"));
+        let apply = completion_verdict(Some(&done), &done, Provider::Anthropic, Some("abc"));
+        assert_eq!(apply, CompletionVerdict::Apply);
+        assert_eq!(
+            completion_verdict(Some(&done), &done, Provider::OpenAI, Some("abc")),
+            CompletionVerdict::Stale,
+            "provider changed"
+        );
+        assert_eq!(
+            completion_verdict(Some(&done), &done, Provider::Anthropic, Some("other")),
+            CompletionVerdict::Stale,
+            "document changed"
+        );
+        assert_eq!(
+            completion_verdict(Some(&done), &done, Provider::Anthropic, None),
+            CompletionVerdict::Stale,
+            "document unloaded"
+        );
+        let newer = request(4, Provider::Anthropic, Some("abc"));
+        assert_eq!(
+            completion_verdict(Some(&newer), &done, Provider::Anthropic, Some("abc")),
+            CompletionVerdict::Superseded,
+            "a newer request owns the slot"
+        );
+        assert_eq!(
+            completion_verdict(None, &done, Provider::Anthropic, Some("abc")),
+            CompletionVerdict::Superseded,
+            "nothing awaited"
+        );
+        let no_document = request(5, Provider::OpenAI, None);
+        assert_eq!(
+            completion_verdict(Some(&no_document), &no_document, Provider::OpenAI, None),
+            CompletionVerdict::Apply
+        );
+    }
+
+    #[test]
+    fn tracker_issues_increasing_ids_and_clears_on_completion() {
+        let mut tracker = AskTracker::default();
+        assert!(tracker.inflight().is_none());
+        assert!(!tracker.is_busy_for(Provider::Anthropic, Some("abc")));
+
+        let first = tracker.issue(Provider::Anthropic, Some("abc"));
+        assert_eq!(first.id, 1);
+        assert_eq!(first.document.as_deref(), Some("abc"));
+        assert_eq!(tracker.inflight(), Some(&first));
+        assert!(tracker.is_busy_for(Provider::Anthropic, Some("abc")));
+        assert!(
+            !tracker.is_busy_for(Provider::OpenAI, Some("abc")),
+            "switching provider allows a new question"
+        );
+        assert!(
+            !tracker.is_busy_for(Provider::Anthropic, Some("def")),
+            "switching document allows a new question"
+        );
+
+        let second = tracker.issue(Provider::OpenAI, Some("abc"));
+        assert_eq!(second.id, 2);
+        assert_eq!(tracker.inflight(), Some(&second));
+        assert_eq!(
+            tracker.complete(&first, Provider::OpenAI, Some("abc")),
+            CompletionVerdict::Superseded
+        );
+        assert_eq!(
+            tracker.inflight(),
+            Some(&second),
+            "still awaiting the second"
+        );
+        assert_eq!(
+            tracker.complete(&second, Provider::OpenAI, Some("abc")),
+            CompletionVerdict::Apply
+        );
+        assert!(tracker.inflight().is_none());
+
+        let third = tracker.issue(Provider::Anthropic, None);
+        assert_eq!(third.id, 3, "ids keep increasing after completion");
+        assert_eq!(
+            tracker.complete(&third, Provider::Anthropic, Some("abc")),
+            CompletionVerdict::Stale
+        );
+        assert!(tracker.inflight().is_none(), "a stale request is over too");
+    }
+
+    #[test]
+    fn answer_title_names_provider_and_document() {
+        assert_eq!(answer_title(None), "Answer");
+        let with_document = request(1, Provider::Anthropic, Some("0123456789abcdef"));
+        assert_eq!(with_document.label(), "Claude · 0123456789ab");
+        assert_eq!(
+            answer_title(Some(&with_document)),
+            "Answer from Claude · 0123456789ab"
+        );
+        let without = request(2, Provider::OpenAI, None);
+        assert_eq!(
+            answer_title(Some(&without)),
+            "Answer from ChatGPT · no document"
+        );
     }
 
     #[test]

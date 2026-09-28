@@ -34,7 +34,8 @@
 //!   `src/element.rs:161/170`; `FluentBuilder::when`: `src/util.rs:23`.
 //! - `Styled` methods: `src/styled.rs` (`flex` `:44`, `whitespace_normal` `:65`,
 //!   `whitespace_nowrap` `:74`, `truncate` `:123`, `flex_col` `:137`, `flex_1` `:165`,
-//!   `flex_shrink_0` `:221`, `items_center` `:263`, `justify_between` `:299`,
+//!   `flex_shrink_0` `:221`, `items_start` `:249`, `items_center` `:263`,
+//!   `justify_between` `:299`,
 //!   `bg` `:372`, `text_color` `:396`, `font_weight` `:404`, `text_sm` `:442`,
 //!   `font_family` `:616`); the `gpui_macros` generated helpers `size_full`,
 //!   `w_full`, `h_full`, `w(px)`, `p_2`, `px_2`, `px_3`, `py_1`, `gap_1`, `gap_2`,
@@ -44,8 +45,13 @@
 //!   `examples/data_table.rs`).
 //! - Text: `String`/`&'static str` are elements (`src/elements/text.rs:77/69`);
 //!   `SharedString: From<&str>` (`src/shared_string.rs:116`); `FontWeight::{SEMIBOLD,
-//!   BOLD}`: `src/text_system.rs:674/676`; `rgb`: `src/color.rs:14`.
-//! - Lists: `uniform_list(id, count, f)`: `src/elements/uniform_list.rs:22`.
+//!   BOLD}`: `src/text_system.rs:674/676`; `rgb`: `src/color.rs:14`. Wrapping:
+//!   `WhiteSpace::Normal` is the default (`src/style.rs:321-329`, `:416`) and a
+//!   text element wraps at the available width only under `Normal`
+//!   (`src/elements/text.rs:347-352`); `truncate()` is `overflow_hidden` +
+//!   `whitespace_nowrap` + `text_ellipsis` (`src/styled.rs:123-125`).
+//! - Lists: `uniform_list(id, count, f)`: `src/elements/uniform_list.rs:22`
+//!   (uniform row heights only, `:1-5`; the page text uses a scroll container).
 //! - Actions and keys: `actions!`: `src/action.rs:24`; `KeyBinding::new(keys, action,
 //!   context)`: `src/keymap/binding.rs:33`; keystroke syntax and the `cmd--` form:
 //!   `src/platform/keystroke.rs:115-163`; macOS key names `enter`, `backspace`,
@@ -88,7 +94,9 @@ use gpui::{
 use tpe_app::keys::{self, EnvKeyProvider, KeyProvider};
 use tpe_app::ledger::{CorpusRow, DocumentDetail, LedgerReader};
 use tpe_app::tpe_ai::{self, Provider};
-use tpe_app::view::{self, NumberedLine, Pane, TextScale};
+use tpe_app::view::{
+    self, AskRequest, AskTracker, CompletionVerdict, NumberedLine, Pane, TextScale,
+};
 
 actions!(
     workbench,
@@ -138,7 +146,10 @@ pub struct Workbench {
     provider: Provider,
     question: String,
     answer: String,
-    busy: bool,
+    /// The request the shown `answer` belongs to; `None` for placeholders.
+    answer_from: Option<AskRequest>,
+    /// Issues request ids and remembers the request whose answer is awaited.
+    ask: AskTracker,
     status: String,
     root_focus: FocusHandle,
     corpus_focus: FocusHandle,
@@ -178,7 +189,8 @@ impl Workbench {
             provider: Provider::Anthropic,
             question: String::new(),
             answer: String::from("Ask a question about the selected document."),
-            busy: false,
+            answer_from: None,
+            ask: AskTracker::default(),
             status,
             root_focus: cx.focus_handle(),
             corpus_focus,
@@ -285,19 +297,27 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Content hash of the loaded document, the identity a request is tagged with.
+    fn document_hash(&self) -> Option<String> {
+        self.detail.as_ref().map(|detail| detail.hash.clone())
+    }
+
     fn send(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        let provider = self.provider;
+        let document = self.document_hash();
+        if self.ask.is_busy_for(provider, document.as_deref()) {
             return;
         }
         let question = self.question.trim().to_owned();
         if question.is_empty() {
             self.answer = String::from("Type a question first.");
+            self.answer_from = None;
             cx.notify();
             return;
         }
-        let provider = self.provider;
         let Some(key) = self.keys.api_key(provider.credential_service()) else {
             self.answer = keys::missing_key_message(provider);
+            self.answer_from = None;
             cx.notify();
             return;
         };
@@ -307,8 +327,11 @@ impl Workbench {
         };
         let user = format!("{context}\n\nQuestion: {question}");
         let system = view::SYSTEM_PROMPT.to_owned();
-        self.busy = true;
-        self.answer = format!("Asking {} ...", provider.label());
+        // Any earlier request still in flight is superseded by this id; its
+        // answer is dropped in `finish_ask`.
+        let request = self.ask.issue(provider, document.as_deref());
+        self.answer = format!("Asking {} ...", request.label());
+        self.answer_from = None;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             tpe_ai::ask(provider, &key, &system, &user).map_err(|error| format!("Error: {error}"))
@@ -316,14 +339,45 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = false;
-                this.answer = match result {
-                    Ok(text) | Err(text) => text,
-                };
-                cx.notify();
+                this.finish_ask(&request, result, cx);
             });
         })
         .detach();
+    }
+
+    /// Applies a completed request only when it is still the latest one and
+    /// the workbench shows the document and provider it was issued for
+    /// (`view::completion_verdict`); a late answer for something the user has
+    /// moved away from is dropped instead of overwriting the panel.
+    fn finish_ask(
+        &mut self,
+        request: &AskRequest,
+        result: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let document = self.document_hash();
+        match self
+            .ask
+            .complete(request, self.provider, document.as_deref())
+        {
+            CompletionVerdict::Apply => {
+                self.answer = match result {
+                    Ok(text) | Err(text) => text,
+                };
+                self.answer_from = Some(request.clone());
+            }
+            CompletionVerdict::Stale => {
+                let label = request.label();
+                self.answer = format!(
+                    "The answer from {label} arrived after you switched document or model \
+                     and was discarded. Ask again."
+                );
+                self.answer_from = None;
+                self.status = format!("Discarded a late answer from {label}");
+            }
+            CompletionVerdict::Superseded => return,
+        }
+        cx.notify();
     }
 
     // Action handlers (bound in `run`).
@@ -597,30 +651,32 @@ impl Workbench {
                     .flex()
                     .flex_1()
                     .overflow_hidden()
-                    .child(self.render_page_lines(cx))
+                    .child(self.render_page_lines())
                     .child(render_references(detail, cx)),
             )
     }
 
-    fn render_page_lines(&self, cx: &mut Context<Self>) -> Div {
-        let count = self.lines.len();
+    /// The page text as a vertically scrolling column of wrapped lines. This
+    /// is a plain scroll container rather than a `uniform_list`: that element
+    /// measures one item and gives every row the same height
+    /// (`src/elements/uniform_list.rs:1-5`), which wrapped rows do not have.
+    /// A page is at most a few hundred lines, so laying them all out is cheap.
+    fn render_page_lines(&self) -> Stateful<Div> {
         div()
+            .id("page-lines")
             .flex_1()
             .overflow_hidden()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .border_r_1()
             .border_color(rgb(BORDER))
             .font_family("Menlo")
-            .child(
-                uniform_list(
-                    "page-lines",
-                    count,
-                    cx.processor(|this, range: Range<usize>, _window, _cx| {
-                        range
-                            .filter_map(|ix| this.lines.get(ix).map(|line| render_line(ix, line)))
-                            .collect()
-                    }),
-                )
-                .h_full(),
+            .children(
+                self.lines
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, line)| render_line(ix, line)),
             )
     }
 
@@ -680,11 +736,15 @@ impl Workbench {
                     .child(button(
                         "send",
                         30,
-                        String::from(if self.busy { "Sending..." } else { "Send" }),
+                        String::from(if self.ask.inflight().is_some() {
+                            "Sending..."
+                        } else {
+                            "Send"
+                        }),
                         cx.listener(|this, _: &ClickEvent, _window, cx| this.send(cx)),
                     )),
             )
-            .child(pane_title(String::from("Answer")))
+            .child(pane_title(view::answer_title(self.answer_from.as_ref())))
             .child(
                 div()
                     .id("answer")
@@ -798,25 +858,50 @@ fn pane_title(text: String) -> Div {
 
 /// One page-text row: gutter with the reading-order line number, the text,
 /// and any citation markers whose offset falls on this line.
+///
+/// The text cell soft-wraps so that nothing extracted is hidden: GPUI text
+/// wraps whenever its `white_space` is `Normal` (the default,
+/// `src/style.rs:321-329` and `:416`) and the cell has a definite width
+/// (`src/elements/text.rs:347-352`); `truncate()` would instead set
+/// `nowrap` plus an ellipsis (`src/styled.rs:123-125`). The cell keeps
+/// `overflow_hidden` so its flex minimum width is zero and it wraps at the
+/// pane width rather than growing to the longest line. The gutter and marker
+/// cells stay `nowrap` and the row uses `items_start` (`src/styled.rs:249`)
+/// so the line number sits on the first wrapped line. An empty line still
+/// takes one line height (`src/text_system/line_layout.rs:248-253`), so
+/// paragraph breaks keep their spacing.
 fn render_line(ix: usize, line: &NumberedLine) -> Stateful<Div> {
     let number = line.number.map_or_else(String::new, |n| n.to_string());
     let markers = line.markers.join("  ");
     div()
         .id(("line", ix))
         .flex()
+        .items_start()
         .gap_2()
         .px_2()
-        .whitespace_nowrap()
         .child(
             div()
                 .w(px(GUTTER_PX))
                 .flex_shrink_0()
+                .whitespace_nowrap()
                 .text_color(rgb(MUTED))
                 .child(number),
         )
-        .child(div().flex_1().truncate().child(line.text.clone()))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_normal()
+                .child(line.text.clone()),
+        )
         .when(!markers.is_empty(), |row| {
-            row.child(div().flex_shrink_0().text_color(rgb(MARKER)).child(markers))
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_color(rgb(MARKER))
+                    .child(markers),
+            )
         })
 }
 

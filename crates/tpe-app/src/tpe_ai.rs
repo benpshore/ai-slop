@@ -252,10 +252,10 @@ fn error_object(value: &Value) -> Option<(String, String)> {
 /// Human-readable message for a non-2xx body: the provider's error message
 /// when the body is JSON, else a short excerpt.
 pub fn error_message(body: &str) -> String {
-    if let Ok(value) = serde_json::from_str::<Value>(body) {
-        if let Some((kind, message)) = error_object(&value) {
-            return format!("{kind}: {message}");
-        }
+    if let Ok(value) = serde_json::from_str::<Value>(body)
+        && let Some((kind, message)) = error_object(&value)
+    {
+        return format!("{kind}: {message}");
     }
     let excerpt: String = body.chars().take(ERROR_EXCERPT_CHARS).collect();
     excerpt.trim().to_owned()
