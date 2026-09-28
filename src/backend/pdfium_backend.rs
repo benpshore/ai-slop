@@ -1001,7 +1001,10 @@ mod tests {
         assert_eq!(figure.mime, None);
         assert_eq!(figure.width_px, Some(2));
         assert_eq!(figure.height_px, Some(2));
-        assert_eq!(figure.sha256, None);
+        assert!(
+            figure.sha256.is_some(),
+            "the session records the stream digest"
+        );
         assert_eq!(figure.file, None);
         let figure_box = figure.bbox.unwrap();
         assert!(close(figure_box.x0, 200.0, 0.5), "x0 {}", figure_box.x0);
