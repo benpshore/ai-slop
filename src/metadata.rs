@@ -670,11 +670,13 @@ fn is_arxiv_doi(doi: &str) -> bool {
 /// IEEE and Springer layouts) wins with `first_page:doi-header-footer`; then
 /// a DOI on a line that labels it (`DOI`, `doi.org`); then the first DOI in
 /// reading order, both with `first_page:doi`. arXiv's own DOI for the
-/// preprint (`10.48550/arXiv.<id>`) never wins by any of those rules: a
-/// paper that is also published elsewhere (ACM, IEEE, Springer...) prints
-/// that publisher's DOI on the same page, and it always describes the copy
-/// being read while the arXiv DOI merely names the preprint. The arXiv DOI
-/// is used only when it is the only DOI found on page 1.
+/// preprint (`10.48550/arXiv.<id>`) never wins by the header/footer or
+/// label rules: a paper that is also published elsewhere (ACM, IEEE,
+/// Springer...) prints that publisher's DOI on the same page, and it always
+/// describes the copy being read while the arXiv DOI merely names the
+/// preprint. When no other DOI has that evidence, the arXiv DOI outranks a
+/// bare DOI in running text (usually a citation in the abstract), which is
+/// used only when page 1 carries no arXiv DOI at all.
 fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
     let found: Vec<(usize, String)> = (0..page.lines.len())
         .filter_map(|i| line_doi(page, i).map(|doi| (i, doi)))
@@ -704,12 +706,14 @@ fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
     if let Some((_, doi)) = candidates.iter().find(|(i, _)| furniture(*i)) {
         return Some((doi.clone(), "first_page:doi-header-footer"));
     }
-    if let Some((_, doi)) = candidates.into_iter().next() {
-        return Some((doi, "first_page:doi"));
+    // No positive evidence for a publisher DOI: arXiv's own DOI names this
+    // very paper, while a bare DOI in running text is usually a citation.
+    if let Some((_, doi)) = found.iter().find(|(_, doi)| is_arxiv_doi(doi)) {
+        return Some((doi.clone(), "first_page:doi"));
     }
-    found
+    candidates
         .into_iter()
-        .find(|(_, doi)| is_arxiv_doi(doi))
+        .next()
         .map(|(_, doi)| (doi, "first_page:doi"))
 }
 
@@ -2085,6 +2089,26 @@ mod tests {
         // arxiv_id, version suffix and all.
         assert_eq!(meta.arxiv_id.as_deref(), Some("2410.19245v2"));
         assert_eq!(meta.provenance["arxiv_id"], "first_page:arxiv");
+    }
+
+    /// A bare DOI cited in the abstract carries no evidence that it is the
+    /// paper's own; arXiv's own DOI in the footer names this paper and wins.
+    #[test]
+    fn arxiv_own_doi_wins_over_a_doi_cited_in_the_abstract() {
+        let page = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            (
+                "Building on the widget corpus 10.1000/xyz123 we propose sparse widgets and show gains.",
+                9.0,
+                628.0,
+            ),
+            ("https://doi.org/10.48550/arXiv.2410.19245", 7.0, 50.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arXiv.2410.19245"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi");
     }
 
     /// When arXiv's own DOI is the only one printed on page 1 (no publisher
