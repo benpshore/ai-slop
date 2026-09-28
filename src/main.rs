@@ -866,6 +866,12 @@ fn print_summary(report: &CorpusReport) {
         Some(alignment) => println!("mean_body_alignment: {alignment:.3}"),
         None => println!("mean_body_alignment: -"),
     }
+    match s.mean_body_alignment_raw {
+        Some(alignment) => println!("mean_body_alignment_raw: {alignment:.3}"),
+        None => println!("mean_body_alignment_raw: -"),
+    }
+    println!("body_word_recall: {:.3}", s.body_word_recall);
+    println!("body_word_precision: {:.3}", s.body_word_precision);
     println!("p50_ms_per_chunk: {:.2}", s.p50_ms_per_chunk);
     println!("p95_ms_per_chunk: {:.2}", s.p95_ms_per_chunk);
     println!("target_ms_per_chunk: {:.1}", s.target_ms_per_chunk);
