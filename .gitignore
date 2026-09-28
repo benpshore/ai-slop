@@ -156,3 +156,6 @@ pgdata/
 postgres-data/
 *.pgdump
 .docker/
+
+# engine outputs
+/out/
