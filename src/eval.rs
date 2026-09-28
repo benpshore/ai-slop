@@ -38,8 +38,17 @@ pub const TARGET_MS_PER_CHUNK: f64 = 30.0;
 
 /// Safety cap on the tokens per side considered by [`word_alignment`], far
 /// above any paper: a longer side is cut to its first this many tokens (with
-/// a warning), which bounds the bit-parallel LCS memory.
-pub const MAX_ALIGN_TOKENS: usize = 200_000;
+/// a warning).
+pub const MAX_ALIGN_TOKENS: usize = 100_000;
+
+/// Memory budget of the bit-parallel LCS match masks, in `u64` words
+/// (64 MB): see [`lcs_bounded`].
+const LCS_MAX_WORDS: usize = 8_000_000;
+
+/// Tokens per side kept when the match masks of the whole sides would
+/// exceed [`LCS_MAX_WORDS`]: at most this many distinct tokens times
+/// `ceil(22_000 / 64) = 344` words is 7.57 M, within the budget.
+const LCS_FALLBACK_TOKENS: usize = 22_000;
 
 /// Minimum Jaccard similarity of title words for a fuzzy title match.
 const TITLE_JACCARD_MIN: f32 = 0.8;
@@ -394,36 +403,65 @@ fn intern_tokens<'a>(words: &'a [String], table: &mut HashMap<&'a str, u32>) -> 
         .collect()
 }
 
+/// What [`lcs_bounded`] allocated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LcsStats {
+    /// Match-mask rows built: one per distinct token of the shorter side
+    /// that also occurs in the longer side. Read by the tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    rows_built: usize,
+}
+
 /// Length of the longest common subsequence, exact, by the bit-parallel
 /// algorithm of Allison and Dix (in Hyyrö's form): one bit per token of the
 /// shorter side, one `u64` word per 64 of them, and a match bitset per
-/// distinct shorter-side token. Each token of the longer side updates the
-/// row as `V' = (V + U) | (V - U)` with `U = V & M[token]`; since `U` is a
-/// subset of `V`, `V - U` is `V & !U` and only the addition carries across
-/// words. The result is the number of zero bits among the `short.len()`
-/// low bits. Time `O(n * m / 64)`, memory `O(distinct * m / 64)` words.
-fn lcs_len(left: &[u32], right: &[u32]) -> usize {
+/// distinct shorter-side token that also occurs in the longer side (a
+/// token absent from the longer side is never looked up, and a longer-side
+/// token absent from the shorter side has an all-zero mask, which leaves
+/// the row unchanged, so neither needs a row). Each token of the longer
+/// side updates the row as `V' = (V + U) | (V - U)` with `U = V & M[token]`;
+/// since `U` is a subset of `V`, `V - U` is `V & !U` and only the addition
+/// carries across words. The result is the number of zero bits among the
+/// `short.len()` low bits. Time `O(n * m / 64)`, memory
+/// `O(common * m / 64)` words. `None`, before any mask is allocated, when
+/// the masks would take more than `max_words` words.
+fn lcs_bounded(left: &[u32], right: &[u32], max_words: usize) -> Option<(usize, LcsStats)> {
     let (long, short) = if left.len() >= right.len() {
         (left, right)
     } else {
         (right, left)
     };
     if short.is_empty() {
-        return 0;
+        return Some((0, LcsStats::default()));
     }
     let words_per_row = short.len().div_ceil(64);
     let max_id = short.iter().copied().max().unwrap_or(0) as usize;
-    // Row of each token id in `masks`; `usize::MAX` when the id is not in
-    // the shorter side (its tokens never change the row).
-    let mut row_of: Vec<usize> = vec![usize::MAX; max_id + 1];
-    let mut masks: Vec<u64> = Vec::new();
-    for (bit, &token) in short.iter().enumerate() {
-        let slot = &mut row_of[token as usize];
-        if *slot == usize::MAX {
-            *slot = masks.len() / words_per_row;
-            masks.resize(masks.len() + words_per_row, 0);
+    let mut in_long: Vec<bool> = vec![false; max_id + 1];
+    for &token in long {
+        if let Some(flag) = in_long.get_mut(token as usize) {
+            *flag = true;
         }
-        masks[*slot * words_per_row + bit / 64] |= 1_u64 << (bit % 64);
+    }
+    // Row of each token id in `masks`; `usize::MAX` when the id has no row
+    // (not in both sides: its tokens never change the row).
+    let mut row_of: Vec<usize> = vec![usize::MAX; max_id + 1];
+    let mut rows = 0_usize;
+    for &token in short {
+        let id = token as usize;
+        if in_long[id] && row_of[id] == usize::MAX {
+            row_of[id] = rows;
+            rows += 1;
+        }
+    }
+    if rows.saturating_mul(words_per_row) > max_words {
+        return None;
+    }
+    let mut masks: Vec<u64> = vec![0; rows * words_per_row];
+    for (bit, &token) in short.iter().enumerate() {
+        let mask_row = row_of[token as usize];
+        if mask_row != usize::MAX {
+            masks[mask_row * words_per_row + bit / 64] |= 1_u64 << (bit % 64);
+        }
     }
     let mut row: Vec<u64> = vec![u64::MAX; words_per_row];
     for &token in long {
@@ -453,13 +491,15 @@ fn lcs_len(left: &[u32], right: &[u32]) -> usize {
         };
         zeros += (!word & valid).count_ones() as usize;
     }
-    zeros
+    Some((zeros, LcsStats { rows_built: rows }))
 }
 
 /// Order-sensitive similarity of two texts: `2 * lcs / (n + m)` over
 /// lower-case alphanumeric word tokens, with the exact longest common
-/// subsequence ([`lcs_len`]); each side is cut to its first
-/// [`MAX_ALIGN_TOKENS`] tokens only past that safety cap. Returns 1.0 when
+/// subsequence ([`lcs_bounded`]); each side is cut to its first
+/// [`MAX_ALIGN_TOKENS`] tokens only past that safety cap (and to its first
+/// [`LCS_FALLBACK_TOKENS`] only when the match masks would exceed
+/// [`LCS_MAX_WORDS`]). Returns 1.0 when
 /// both sides have no tokens and 0.0 when exactly one side has none.
 pub fn word_alignment(a: &str, b: &str) -> f32 {
     alignment_score(align_counts(a, b))
@@ -468,9 +508,9 @@ pub fn word_alignment(a: &str, b: &str) -> f32 {
 /// Word tokens and their matches behind [`word_alignment`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AlignCounts {
-    /// Tokens of the left text (at most [`MAX_ALIGN_TOKENS`]).
+    /// Tokens of the left text (at most [`MAX_ALIGN_TOKENS`]) that were aligned.
     left: usize,
-    /// Tokens of the right text (at most [`MAX_ALIGN_TOKENS`]).
+    /// Tokens of the right text (at most [`MAX_ALIGN_TOKENS`]) that were aligned.
     right: usize,
     /// Longest common subsequence of the two token sequences.
     matched: usize,
@@ -478,7 +518,9 @@ struct AlignCounts {
 
 /// Token counts and LCS length of `a` against `b`, as [`word_alignment`]
 /// computes them. A side longer than [`MAX_ALIGN_TOKENS`] is cut to its
-/// first `MAX_ALIGN_TOKENS` tokens, with a warning on stderr.
+/// first `MAX_ALIGN_TOKENS` tokens, with a warning on stderr; when the LCS
+/// match masks of the two sides would exceed [`LCS_MAX_WORDS`], both sides
+/// are cut to their first [`LCS_FALLBACK_TOKENS`] tokens, with a warning.
 fn align_counts(a: &str, b: &str) -> AlignCounts {
     let mut left_words = words(a);
     let mut right_words = words(b);
@@ -500,9 +542,21 @@ fn align_counts(a: &str, b: &str) -> AlignCounts {
         };
     }
     let mut table: HashMap<&str, u32> = HashMap::new();
-    let left = intern_tokens(&left_words, &mut table);
-    let right = intern_tokens(&right_words, &mut table);
-    let matched = lcs_len(&left, &right);
+    let mut left = intern_tokens(&left_words, &mut table);
+    let mut right = intern_tokens(&right_words, &mut table);
+    let matched = if let Some((matched, _)) = lcs_bounded(&left, &right, LCS_MAX_WORDS) {
+        matched
+    } else {
+        eprintln!(
+            "warning: word alignment masks over {LCS_MAX_WORDS} words ({} and {} tokens); \
+             each side cut to its first {LCS_FALLBACK_TOKENS}",
+            left.len(),
+            right.len()
+        );
+        left.truncate(LCS_FALLBACK_TOKENS);
+        right.truncate(LCS_FALLBACK_TOKENS);
+        lcs_bounded(&left, &right, usize::MAX).map_or(0, |(matched, _)| matched)
+    };
     AlignCounts {
         left: left.len(),
         right: right.len(),
@@ -937,8 +991,10 @@ fn reference_extents(pages: &[PageText]) -> Vec<ReferenceExtent> {
 /// `start` that is on or after the page of the last segmented entry
 /// (`last_entry`, a position in `pages`) and that no numbered entry
 /// ([`entry_label_re`]) follows within [`LIST_RESUME_LINES`] lines (a list
-/// interrupted by a caption or table resumes, as in `citations`); else the
-/// start of the page after `last_entry`, or `limit`, whichever comes first.
+/// interrupted by a caption or table resumes, as in `citations`); else,
+/// when the last entry wraps onto the following page(s), the end that
+/// [`continuation_end`] finds there; else the start of the page after
+/// `last_entry`, or `limit`, whichever comes first.
 fn reference_end(
     pages: &[PageText],
     start: (usize, usize),
@@ -970,7 +1026,111 @@ fn reference_end(
             return (*pos, line.offset);
         }
     }
+    if let Some(entry) = last_entry
+        && bound == (entry + 1, 0)
+        && bound < limit
+    {
+        let tail = lines
+            .iter()
+            .rev()
+            .map(|(_, line)| line.text.trim())
+            .find(|text| !text.is_empty());
+        return continuation_end(pages, bound, limit, median, tail);
+    }
     bound
+}
+
+/// Lines past the page of the last reference entry that
+/// [`continuation_end`] may still count as that entry's continuation.
+const CONTINUATION_MAX_LINES: usize = 12;
+
+/// A line that reads like the rest of a reference entry: it starts with a
+/// lower-case letter, or holds a year, a DOI, a URL, an `arXiv` id or a
+/// `pp.`/`vol.` page or volume mark.
+fn entry_tail_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*\p{Ll}|\b(?:19|20)\d{2}[a-z]?\b|(?i:\bdoi\b|https?://|\barxiv\b|\bpp?\.\s*\d|\bvol\.)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A non-blank line of the pages after a reference list, as
+/// [`continuation_end`] scans them.
+struct ContinuationLine<'a> {
+    pos: usize,
+    line: TextLine<'a>,
+    /// Whether a blank line separates it from the text before it on its
+    /// page.
+    paragraph_start: bool,
+}
+
+/// Where a reference list ends when its last entry started on the page
+/// before `from` (the start of the following page) and may wrap onto it.
+/// The following lines, up to `limit`, count as the entry's continuation
+/// only when the list's last line (`tail`) does not end with `.` or the
+/// first following line reads like an entry's rest ([`entry_tail_re`]);
+/// the continuation then runs until the first [`is_reference_end`] line
+/// (a heading, a caption or a line set clearly larger than the list's
+/// `median`) or the first line of a blank-separated prose paragraph (two
+/// lines of at least 8 words each), at most [`CONTINUATION_MAX_LINES`]
+/// non-blank lines, or to `limit` when that comes first. Returns `from`
+/// when nothing continues the entry.
+fn continuation_end(
+    pages: &[PageText],
+    from: (usize, usize),
+    limit: (usize, usize),
+    median: Option<f32>,
+    tail: Option<&str>,
+) -> (usize, usize) {
+    let mut window: Vec<ContinuationLine<'_>> = Vec::new();
+    'pages: for (pos, page) in pages.iter().enumerate().take(limit.0 + 1).skip(from.0) {
+        for line in page_line_starts(page) {
+            if (pos, line.offset) >= limit {
+                break 'pages;
+            }
+            if line.text.trim().is_empty() {
+                continue;
+            }
+            let paragraph_start = page.text[..line.offset]
+                .trim_end_matches([' ', '\t'])
+                .ends_with("\n\n");
+            window.push(ContinuationLine {
+                pos,
+                line,
+                paragraph_start,
+            });
+            if window.len() > CONTINUATION_MAX_LINES {
+                break 'pages;
+            }
+        }
+    }
+    let Some(first) = window.first() else {
+        return from;
+    };
+    let unfinished = tail.is_some_and(|text| !text.ends_with('.'));
+    if !unfinished && !entry_tail_re().is_match(first.line.text) {
+        return from;
+    }
+    let is_prose = |text: &str| text.split_whitespace().count() >= 8;
+    for (k, item) in window.iter().enumerate().take(CONTINUATION_MAX_LINES) {
+        if is_reference_end(item.line.text, item.line.size, median) {
+            return (item.pos, item.line.offset);
+        }
+        let prose_paragraph = item.paragraph_start
+            && is_prose(item.line.text)
+            && window
+                .get(k + 1)
+                .is_some_and(|next| !next.paragraph_start && is_prose(next.line.text));
+        if prose_paragraph {
+            return (item.pos, item.line.offset);
+        }
+    }
+    window
+        .get(CONTINUATION_MAX_LINES)
+        .map_or(limit, |item| (item.pos, item.line.offset))
 }
 
 /// Non-blank lines after a candidate list end within which a numbered entry
@@ -3375,6 +3535,11 @@ mod tests {
         assert!((0.5..0.67).contains(&a), "got {a}");
     }
 
+    /// The exact LCS length by [`lcs_bounded`] with no memory budget.
+    fn lcs_len(left: &[u32], right: &[u32]) -> usize {
+        lcs_bounded(left, right, usize::MAX).map_or(0, |(matched, _)| matched)
+    }
+
     #[test]
     fn lcs_len_small_cases() {
         assert_eq!(lcs_len(&[1, 2, 3, 4], &[2, 4]), 2);
@@ -3433,6 +3598,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lcs_builds_mask_rows_only_for_tokens_in_both_sides() {
+        // The right side is 5,000 distinct tokens; the left side shares
+        // only 100 of them (every 50th position) among 700 others.
+        let right: Vec<u32> = (0..5_000).collect();
+        let left: Vec<u32> = (0..5_000_u32)
+            .map(|i| if i % 50 == 0 { i } else { 10_000 + i % 700 })
+            .collect();
+        let expected = dp_lcs_len(&left, &right);
+        assert_eq!(expected, 100);
+        for (a, b) in [(&left, &right), (&right, &left)] {
+            let (matched, stats) = lcs_bounded(a, b, LCS_MAX_WORDS).unwrap();
+            assert_eq!(matched, expected);
+            assert_eq!(stats, LcsStats { rows_built: 100 });
+        }
+        // 100 rows of 79 words exceed a 7,899-word budget: nothing built.
+        assert!(lcs_bounded(&left, &right, 7_899).is_none());
+        assert!(lcs_bounded(&left, &right, 7_900).is_some());
+        // The fallback length always fits the budget.
+        let fallback = std::hint::black_box(LCS_FALLBACK_TOKENS);
+        assert!(fallback * fallback.div_ceil(64) <= LCS_MAX_WORDS);
     }
 
     #[test]
@@ -5367,6 +5555,71 @@ mod tests {
         assert_eq!(
             words(&body_text_extracted(&pages)),
             vec!["body", "text", "proof", "details", "continue", "here"]
+        );
+    }
+
+    #[test]
+    fn body_excludes_last_entry_wrapped_onto_the_next_page() {
+        let pages = vec![
+            lined_page(
+                1,
+                &[
+                    "Body text.",
+                    "References",
+                    "[1] A. Author. First title. 2020.",
+                    "[2] B. Author. A second title that runs",
+                ],
+            ),
+            lined_page(
+                2,
+                &[
+                    "over the page break. In Proc. Conf.,",
+                    "pages 1-10, 2021.",
+                    "Appendix A",
+                    "Proof text of the appendix here.",
+                ],
+            ),
+        ];
+        let body = body_text_extracted(&pages);
+        assert_eq!(
+            words(&body),
+            vec![
+                "body", "text", "appendix", "a", "proof", "text", "of", "the", "appendix", "here"
+            ]
+        );
+        assert!(!body.contains("2021"), "{body:?}");
+    }
+
+    #[test]
+    fn wrapped_last_entry_ends_at_a_prose_paragraph_or_the_line_cap() {
+        let head = lined_page(
+            1,
+            &[
+                "Body text.",
+                "References",
+                "[1] A. Author. A title that runs",
+            ],
+        );
+        // A blank-separated paragraph of two long lines ends the entry.
+        let prose = page(
+            2,
+            "over the page break. In Proc. Conf., 2021.\n\n\
+             We now prove the main theorem of this paper in full detail.\n\
+             The argument follows the standard route through the lemma above.",
+        );
+        assert_eq!(
+            words(&body_text_extracted(&[head.clone(), prose])),
+            words(
+                "Body text. We now prove the main theorem of this paper in full detail. \
+                 The argument follows the standard route through the lemma above."
+            )
+        );
+        // Without any boundary, at most 12 lines continue the entry.
+        let lines: Vec<String> = (1..=15).map(|i| format!("line {i}")).collect();
+        let tail = page(2, &lines.join("\n"));
+        assert_eq!(
+            words(&body_text_extracted(&[head, tail])),
+            words("Body text. line 13 line 14 line 15")
         );
     }
 
