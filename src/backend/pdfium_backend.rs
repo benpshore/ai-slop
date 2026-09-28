@@ -381,13 +381,9 @@ fn extract_page(doc: &PdfDocument<'_>, page: u32, index: u16) -> Result<Extracte
     let text_page = pdf_page
         .text()
         .map_err(|err| page_error(page, format!("text page: {err:?}")))?;
+    let (width, height) = unrotated_size(pdf_page.width().value, pdf_page.height().value, rotation);
     let mut collector = Collector {
-        page: PageText::new(
-            page,
-            pdf_page.width().value,
-            pdf_page.height().value,
-            rotation,
-        ),
+        page: PageText::new(page, width, height, rotation),
         figures: Vec::new(),
         seq: 0,
         paths: 0,
@@ -396,6 +392,30 @@ fn extract_page(doc: &PdfDocument<'_>, page: u32, index: u16) -> Result<Extracte
     };
     collector.visit(pdf_page.objects().iter(), &text_page, None, 0);
     Ok(collector.finish())
+}
+
+/// The unrotated page size from the size `pdfium` reports, so that
+/// [`PageText`] matches the `lopdf` backend: `width`/`height` are the
+/// `CropBox`/`MediaBox` extent before `/Rotate`, and `rotation` carries the
+/// turn that `reading_order` applies.
+///
+/// `FPDF_GetPageWidthF`/`FPDF_GetPageHeightF` (behind `PdfPage::width` and
+/// `PdfPage::height`) return the displayed size: the `pdfium-render` 0.8.37
+/// binding docs say "changing the rotation of the page affects the return
+/// value" (`bindings.rs`, the two getters), because `pdfium` swaps the box
+/// extents for an odd number of quarter turns. So 90 and 270 swap back here.
+///
+/// Span and figure boxes need no such treatment: `PdfPageObjectCommon::bounds`
+/// calls `FPDFPageObj_GetRotatedBounds` or `FPDFPageObj_GetBounds` directly
+/// (`object/private.rs`, `bounds_impl`) without consulting the page's
+/// `/Rotate`; those return the object's box in PDF user space (the "rotated"
+/// refers to the object's own matrix), the same frame as the text matrix
+/// origin that `add_text` widens the box with.
+fn unrotated_size(width: f32, height: f32, rotation: i32) -> (f32, f32) {
+    match rotation {
+        90 | 270 => (height, width),
+        _ => (width, height),
+    }
 }
 
 /// Accumulates spans, figures and object counts while walking a page.
@@ -1089,6 +1109,92 @@ mod tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0].text, "Hello world");
         assert_eq!(lines[0].spans, vec![0, 1, 2]);
+    }
+
+    /// Copy of `Turn::point` in `reading_order.rs` (private there): the
+    /// user-space point `(x, y)` of an unrotated `width` x `height` page in
+    /// the frame turned clockwise by `degrees`, or back with `back`.
+    fn turn_point(
+        degrees: i32,
+        width: f32,
+        height: f32,
+        point: (f32, f32),
+        back: bool,
+    ) -> (f32, f32) {
+        let (x, y) = point;
+        match (degrees, back) {
+            (90, false) => (y, width - x),
+            (90, true) => (width - y, x),
+            (270, false) => (height - y, x),
+            (270, true) => (y, height - x),
+            (180, _) => (width - x, height - y),
+            _ => (x, y),
+        }
+    }
+
+    #[test]
+    fn unrotated_size_matches_the_reading_order_turn() {
+        // A portrait 612 x 792 page as `pdfium` reports it when displayed.
+        for (degrees, display_width, display_height) in [
+            (0, 612.0, 792.0),
+            (90, 792.0, 612.0),
+            (180, 612.0, 792.0),
+            (270, 792.0, 612.0),
+        ] {
+            let (width, height) = unrotated_size(display_width, display_height, degrees);
+            assert!(close(width, 612.0, 1e-3), "{degrees}: width {width}");
+            assert!(close(height, 792.0, 1e-3), "{degrees}: height {height}");
+            // Near the top-left corner of the unrotated page.
+            let point = (72.0_f32, 700.0_f32);
+            let shown = turn_point(degrees, width, height, point, false);
+            assert!(
+                (0.0..=display_width).contains(&shown.0)
+                    && (0.0..=display_height).contains(&shown.1),
+                "{degrees}: {shown:?} outside {display_width} x {display_height}"
+            );
+            let back = turn_point(degrees, width, height, shown, true);
+            assert!(
+                close(back.0, point.0, 1e-3) && close(back.1, point.1, 1e-3),
+                "{degrees}: {back:?}"
+            );
+        }
+        // A quarter turn clockwise moves the top edge to the right and the
+        // left edge to the top: (x, y) shows at (y, width - x).
+        let shown = turn_point(90, 612.0, 792.0, (72.0, 700.0), false);
+        assert!(close(shown.0, 700.0, 1e-3) && close(shown.1, 540.0, 1e-3));
+    }
+
+    #[test]
+    fn rotated_page_reports_unrotated_geometry() {
+        if !pdfium_available() {
+            return;
+        }
+        let plain = build_pdf(vec![text_ops(10, 72, 700, "Turned")], None, false);
+        let mut doc = Document::load_mem(&plain).unwrap();
+        for object in doc.objects.values_mut() {
+            if let Ok(dict) = object.as_dict_mut()
+                && dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"Page".as_slice())
+            {
+                dict.set("Rotate", 90_i64);
+            }
+        }
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        let page = {
+            let mut session = PdfiumBackend::default().open(&bytes, None).unwrap();
+            session.page_text(1).unwrap()
+        };
+        assert_eq!(page.rotation, 90);
+        // Unrotated MediaBox, as the lopdf backend reports it.
+        assert!(close(page.width, 612.0, 0.5), "width {}", page.width);
+        assert!(close(page.height, 792.0, 0.5), "height {}", page.height);
+        assert_eq!(page.spans.len(), 1);
+        // User-space box: displayed-frame bounds would put x0 near 700 and
+        // y0 near 540 instead.
+        let bbox = page.spans[0].bbox.unwrap();
+        assert!(close(bbox.x0, 72.0, 1.0), "box {bbox:?}");
+        assert!(bbox.y0 <= 700.5 && bbox.y0 >= 696.0, "box {bbox:?}");
     }
 
     #[test]
