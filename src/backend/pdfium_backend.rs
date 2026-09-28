@@ -547,7 +547,7 @@ impl Collector {
 /// an existing space). Every other character, spaces included, is kept as
 /// reported. Pure ASCII without separators is returned unchanged.
 fn clean_object_text(raw: &str) -> String {
-    let has_break = raw.contains(|ch: char| ch == '\r' || ch == '\n');
+    let has_break = raw.contains(['\r', '\n']);
     if !has_break {
         return raw.nfc().collect();
     }
