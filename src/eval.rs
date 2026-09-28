@@ -129,6 +129,12 @@ pub struct PaperEval {
     /// All truth references that carry a title, matched or not.
     #[serde(default)]
     pub title_truth_total: u32,
+    /// Matched truth references with a title whose extracted entry has no
+    /// title but both a venue and a year: a title-less journal style (RSC
+    /// `…, Nature, 2015, 518, 179–186.`). Counted in `title_truth`, but left
+    /// out of the summary's title-accuracy denominator.
+    #[serde(default)]
+    pub title_not_applicable: u32,
     /// Matched truth references with a DOI that is printed in the PDF: the
     /// normalised DOI occurs in the concatenated page text (case-insensitive,
     /// whitespace ignored on both sides so line-wrapped DOIs count), or the
@@ -243,7 +249,13 @@ pub struct Summary {
     #[serde(default)]
     pub doi_accuracy_printed: f32,
     pub year_accuracy: f32,
+    /// `title_correct` over `title_truth - title_not_applicable`, summed
+    /// over papers: matched entries of a title-less style do not count.
     pub title_accuracy: f32,
+    /// Summed `PaperEval::title_not_applicable`: matched entries left out of
+    /// the title-accuracy denominator as a title-less style.
+    #[serde(default)]
+    pub title_not_applicable: u32,
     /// Precision-like: resolved markers over extracted markers.
     pub marker_resolution_rate: f32,
     /// Resolved marker targets over truth cited keys, each paper's targets
@@ -1702,6 +1714,7 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
     let mut doi_truth_total = 0_u32;
     let mut year_truth_total = 0_u32;
     let mut title_truth_total = 0_u32;
+    let mut title_not_applicable = 0_u32;
     let mut doi_printed = 0_u32;
     let printed_text = squashed_page_text(&result.pages);
 
@@ -1730,6 +1743,8 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
             doi_correct += u32::from(correct);
             year_correct += u32::from(truth_ref.year.is_some() && truth_ref.year == ext.year);
             title_correct += u32::from(title_equal(truth_ref.title.as_ref(), ext.title.as_ref()));
+            let titleless_style = ext.title.is_none() && ext.venue.is_some() && ext.year.is_some();
+            title_not_applicable += u32::from(truth_ref.title.is_some() && titleless_style);
         }
     }
 
@@ -1832,6 +1847,7 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         doi_truth_total,
         year_truth_total,
         title_truth_total,
+        title_not_applicable,
         doi_printed,
         over_segmentation: ratio(u64::from(extracted_refs), u64::from(truth_refs)),
         timings: result.timings,
@@ -1885,6 +1901,7 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         doi_truth_total: 0,
         year_truth_total: 0,
         title_truth_total: 0,
+        title_not_applicable: 0,
         doi_printed: 0,
         over_segmentation: 0.0,
         timings: StageTimings::default(),
@@ -2014,7 +2031,11 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         doi_accuracy: ratio(sum(|p| p.doi_correct), sum(|p| p.doi_truth)),
         doi_accuracy_printed: ratio(sum(|p| p.doi_correct), sum(|p| p.doi_printed)),
         year_accuracy: ratio(sum(|p| p.year_correct), sum(|p| p.year_truth)),
-        title_accuracy: ratio(sum(|p| p.title_correct), sum(|p| p.title_truth)),
+        title_accuracy: ratio(
+            sum(|p| p.title_correct),
+            sum(|p| p.title_truth).saturating_sub(sum(|p| p.title_not_applicable)),
+        ),
+        title_not_applicable: sum(|p| p.title_not_applicable) as u32,
         marker_resolution_rate: ratio(sum(|p| p.resolved_markers), sum(|p| p.extracted_markers)),
         marker_recall: ratio(targets_capped, cited_keys),
         marker_command_ratio: ratio(cited_resolved, cited_commands),
@@ -2114,6 +2135,11 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     let _ = writeln!(out, "| Year accuracy | {} |", pct(s.year_accuracy));
     let _ = writeln!(out, "| Title accuracy | {} |", pct(s.title_accuracy));
+    let _ = writeln!(
+        out,
+        "| Title n/a (title-less style) | {} |",
+        s.title_not_applicable
+    );
     let _ = writeln!(
         out,
         "| Paper title accuracy | {} |",
@@ -3281,6 +3307,46 @@ mod tests {
         assert_eq!(eval.matches[0].method, "doi");
         assert_eq!(eval.matches[1].method, "arxiv");
         assert_eq!(eval.matches[2].method, "none");
+    }
+
+    /// A matched entry without a title but with a venue and a year (RSC
+    /// `…, Nature, 2015, 518, 179–186.`) leaves the title-accuracy
+    /// denominator; one without a venue still counts as a miss.
+    #[test]
+    fn title_accuracy_skips_titleless_styles() {
+        let mut truth_refs: Vec<TruthReference> = Vec::new();
+        for i in 0..3_u16 {
+            let mut r = truth_ref(&format!("k{i}"));
+            r.doi = Some(format!("10.1000/ref{i}"));
+            r.year = Some(2000 + i);
+            r.title = Some(format!("Distinct title number {i}"));
+            truth_refs.push(r);
+        }
+        let mut e1 = extracted(1);
+        e1.doi = Some("10.1000/ref0".to_string());
+        e1.year = Some(2000);
+        e1.title = Some("Distinct title number 0".to_string());
+        let mut e2 = extracted(2);
+        e2.doi = Some("10.1000/ref1".to_string());
+        e2.year = Some(2001);
+        e2.venue = Some("Nature".to_string());
+        let mut e3 = extracted(3);
+        e3.doi = Some("10.1000/ref2".to_string());
+        e3.year = Some(2002);
+        let result = sample_result(vec![e1, e2, e3], Vec::new());
+        let truth = truth_with(truth_refs, "");
+
+        let eval = evaluate("p", &result, &truth);
+        assert_eq!(eval.matched_refs, 3);
+        assert_eq!(eval.title_truth, 3);
+        assert_eq!(eval.title_correct, 1);
+        assert_eq!(eval.title_not_applicable, 1);
+
+        let s = summarize(std::slice::from_ref(&eval));
+        assert_eq!(s.title_not_applicable, 1);
+        assert!(close(s.title_accuracy, 0.5), "{}", s.title_accuracy);
+        let md = render_markdown(&build_report("lopdf", "h", vec![eval]));
+        assert!(md.contains("| Title accuracy | 50.0% |\n| Title n/a (title-less style) | 1 |\n"));
     }
 
     #[test]

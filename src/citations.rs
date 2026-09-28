@@ -5991,6 +5991,54 @@ mod tests {
         assert_marker_offsets(&body, &markers);
     }
 
+    /// arXiv:2309.10334 (`REVTeX`): the list starts at the foot of the last
+    /// appendix page without a heading and its first entry wraps onto the
+    /// next page. Pins the heading-less `[n]` path on correctly ordered page
+    /// text (the loop-6 failure on this paper came from the reading order,
+    /// which interleaved the appendix with the list; see `reading_order.rs`).
+    #[test]
+    fn headingless_revtex_list_wrapping_across_pages() {
+        let last = column_page(
+            10,
+            &[
+                "is the L 2 norm given by",
+                "matrix: G = 1.",
+                "[1] U. Seifert, Stochastic thermodynamics, fluctuation theorems",
+                "and molecular machines, Reports on progress in",
+                "physics 75, 126001 (2012).",
+            ],
+        );
+        let next = column_page(
+            11,
+            &[
+                "[2] N. Shiraishi, An Introduction to Stochastic Thermodynamics:",
+                "From Basic to Advanced, Vol. 212 (Springer Nature,",
+                "2023).",
+                "[3] R. Kawai, J. M. R. Parrondo, and C. V. den Broeck, Dissipation:",
+                "The phase-space perspective, Phys. Rev. Lett.",
+                "98, 080602 (2007).",
+                "[4] H. Miyahara and K. Aihara, Work relations with measurement",
+                "and feedback control on nonuniform temperature",
+                "systems, Phys. Rev. E 98, 042138 (2018).",
+            ],
+        );
+        let pages = [last, next];
+        let sections = find_reference_sections(&pages);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].first_page, 10);
+        assert_eq!(sections[0].first_line, 2);
+        assert_eq!(sections[0].heading, "");
+
+        let (refs, _) = extract_citations(&pages);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]", "[4]"]);
+        assert!(refs[0].raw.starts_with("[1] U. Seifert"), "{}", refs[0].raw);
+        assert!(refs[0].raw.contains("126001 (2012)"), "{}", refs[0].raw);
+        assert_eq!(refs[0].year, Some(2012));
+        assert_eq!(refs[2].year, Some(2007));
+        assert_eq!(refs[3].year, Some(2018));
+    }
+
     /// hyperref `backref` prints the citing pages after the DOI: `039. 4`
     /// and `3639. 2, 3, 8` are not wrapped pieces of the DOI, while `005`,
     /// `00045` and `112670` still are (arXiv:2603.21379, 2108.04588 forms).
