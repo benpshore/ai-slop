@@ -321,6 +321,25 @@ fn trailing_year_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\s*\((?:19|20)\d{2}[a-z]?\)\.?\s*$").expect("valid regex"))
 }
 
+/// `Authors (2023b) Title.` as the first `\newblock` segment (INFORMS,
+/// `spbasic`): group 1 is the author list, group 2 the title.
+fn author_year_title_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(.+?)\s*\((?:19|20)\d{2}[a-z]?\)\s*[.,:]?\s+(\S.*)$").expect("valid regex")
+    })
+}
+
+/// `, volume 375 of Mathematics and Its Applications` (or a bare `, volume
+/// 48`) closing a book title: the series belongs to the entry text, not the
+/// title.
+fn series_suffix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i),\s+(?:volume|vol\.)\s+\d+(?:\s+of\s+.+)?$").expect("valid regex")
+    })
+}
+
 fn input_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1119,10 +1138,14 @@ fn parse_bibitem(item: &str) -> Option<TruthReference> {
     let text = latex_to_text(rest);
     let segments: Vec<&str> = newblock_re().split(rest).collect();
     let (authors, title) = if segments.len() >= 2 {
-        (
-            split_bbl_authors(&latex_to_text(segments[0])),
-            bbl_title(rest, segments[1]),
-        )
+        let first = latex_to_text(segments[0]);
+        if let Some((names, title)) = author_year_title(&first)
+            && !acm_title_re().is_match(rest)
+        {
+            (split_bbl_authors(names), Some(title))
+        } else {
+            (split_bbl_authors(&first), bbl_title(rest, segments[1]))
+        }
     } else if let Some((inline_authors, inline_title)) = inline_title(rest) {
         (inline_authors, Some(inline_title))
     } else {
@@ -1158,11 +1181,37 @@ fn bbl_title(rest: &str, segment: &str) -> Option<String> {
     }
     let full = latex_to_text(segment);
     let title = full.strip_suffix('.').unwrap_or(&full).trim();
+    let title = series_suffix_re()
+        .find(title)
+        .filter(|m| m.start() > 0)
+        .map_or(title, |m| title[..m.start()].trim_end());
     if title.is_empty() {
         None
     } else {
         Some(title.to_owned())
     }
+}
+
+/// Authors and title of a first `\newblock` segment that carries both
+/// around a parenthesised year (`Gui G, Toubia O (2023) The challenge of
+/// using llms. \newblock arXiv preprint`); the later segments are the
+/// venue. `None` when nothing that reads as a title follows the year.
+fn author_year_title(first: &str) -> Option<(&str, String)> {
+    let caps = author_year_title_re().captures(first)?;
+    let names = caps.get(1)?.as_str().trim();
+    let tail = caps.get(2)?.as_str().trim();
+    // An `aea`-like quoted title (`“Title,”`) loses its quotes and comma.
+    let mut title = tail.trim_end_matches(['.', ',', ' ']);
+    if let Some(inner) = title
+        .strip_prefix(['“', '"'])
+        .and_then(|t| t.strip_suffix(['”', '"']))
+    {
+        title = inner.trim_end_matches([',', '.', ' ']).trim();
+    }
+    if names.is_empty() || title.split_whitespace().count() < 2 {
+        return None;
+    }
+    Some((names, title.to_owned()))
 }
 
 /// Byte index of the first `pat` in `s` at or after `from` that is not
@@ -3584,6 +3633,83 @@ Text \cite{k1}.
         );
         assert_eq!(refs[0].title.as_deref(), Some("Title here"));
         assert_eq!(refs[0].label.as_deref(), Some("Aamand et al., 2021"));
+    }
+
+    /// INFORMS / `spbasic` output: authors, year and title share the first
+    /// `\newblock` segment (entries from 2602.16061; the markup is
+    /// reconstructed from the detexed truth).
+    const INFORMS_BBL: &str = r"\begin{thebibliography}{2}
+\bibitem[{Gui and Toubia(2023)}]{gui2023challenge}
+Gui G, Toubia O (2023) The challenge of using llms to simulate human behavior:
+  A causal inference perspective. \newblock \emph{arXiv preprint
+  arXiv:2312.15524} .
+
+\bibitem[{Abrevaya and Donald(2017)}]{abrevaya2017gmm}
+Abrevaya J, Donald SG (2017) A gmm approach for dealing with missing data on
+  regressors. \newblock \emph{Review of Economics and Statistics}
+  99(4):657--662.
+\end{thebibliography}
+";
+
+    #[test]
+    fn parse_bbl_informs_title_in_first_block() {
+        let refs = parse_bbl(INFORMS_BBL);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some(
+                "The challenge of using llms to simulate human behavior: A causal inference \
+                 perspective"
+            )
+        );
+        assert_eq!(refs[0].authors, ["Gui G", "Toubia O"]);
+        assert_eq!(refs[0].year, Some(2023));
+        assert_eq!(refs[0].arxiv_id.as_deref(), Some("2312.15524"));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("A gmm approach for dealing with missing data on regressors")
+        );
+        assert_eq!(refs[1].authors, ["Abrevaya J", "Donald SG"]);
+    }
+
+    /// `apalike`-style books whose title block carries the series (entries
+    /// from 2603.05575): the series stays in the text, not the title.
+    const SERIES_BBL: &str = r"\begin{thebibliography}{2}
+\bibitem[Engl et~al.(1996)Engl, Hanke, and Neubauer]{engl1996regularization}
+Engl, H.~W., Hanke, M., and Neubauer, A. (1996).
+\newblock {\em Regularization of Inverse Problems}, volume 375 of {\em
+  Mathematics and Its Applications}.
+\newblock Kluwer Academic Publishers, Dordrecht.
+
+\bibitem[Wainwright(2019)]{wainwright2019high}
+Wainwright, M.~J. (2019).
+\newblock {\em High-Dimensional Statistics: A Non-Asymptotic Viewpoint},
+  volume~48.
+\newblock Cambridge University Press.
+\end{thebibliography}
+";
+
+    #[test]
+    fn parse_bbl_series_is_not_part_of_the_title() {
+        let refs = parse_bbl(SERIES_BBL);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("Regularization of Inverse Problems")
+        );
+        assert!(
+            refs[0]
+                .text
+                .contains("volume 375 of Mathematics and Its Applications"),
+            "{}",
+            refs[0].text
+        );
+        assert_eq!(refs[0].authors.len(), 3);
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("High-Dimensional Statistics: A Non-Asymptotic Viewpoint")
+        );
+        assert_eq!(refs[1].year, Some(2019));
     }
 
     /// `IEEEtran` output without `\newblock` (entries from 2608.28714).

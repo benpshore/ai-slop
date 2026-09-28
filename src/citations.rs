@@ -433,13 +433,16 @@ fn leading_year_re() -> &'static Regex {
 /// `Y.`.
 fn initial_token_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\p{Lu}\.(?:-?\p{Lu}\.|-\p{Ll}\.)*-?$").expect("valid regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"^\p{Lu}\p{M}*\.(?:-?\p{Lu}\p{M}*\.|-\p{Ll}\.)*-?$").expect("valid regex")
+    })
 }
 
-/// A capitalised word: `Smith`, `O'Brien`, `Ahmadi-Asl`, `IEEE`.
+/// A capitalised word: `Smith`, `O'Brien`, `Ahmadi-Asl`, `IEEE`, `Martı́` (a
+/// letter with a combining accent as extracted).
 fn cap_word_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\p{Lu}[\p{L}'’\-]*$").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"^\p{Lu}[\p{L}\p{M}'’\-]*$").expect("valid regex"))
 }
 
 /// Up to three capitals: Vancouver initials (`AB`) or a short acronym.
@@ -640,14 +643,99 @@ fn numeric_item_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(\d+)\s*(?:[–\-—]\s*(\d+))?").expect("valid regex"))
 }
 
+/// Lower-case surname particles that may open or sit inside a marker name
+/// (`de Moura`, `van den Oord`).
+const MARKER_PARTICLES: &str = "(?:de|van|von|der|den|del|della|di|da|du|le|la|dos|das|ten|ter)";
+
+/// Regex source of a first-author name in a citation marker: optional
+/// initials (`J. Wu`), then one or more capitalised tokens, each possibly
+/// after particles (`Tchetgen Tchetgen`, `de Moura`, `Van Roy`, `Alibaba
+/// Cloud Qwen Team`, `Nomic AI`). With `capture`, the name without the
+/// initials is capture group 1 of the source.
+fn marker_name_source(capture: bool) -> String {
+    let token = r"\p{Lu}[\p{L}'’\-]+";
+    let particles = MARKER_PARTICLES;
+    let surname = format!(r"(?:{particles}\s+)*{token}(?:\s+(?:{particles}\s+)*{token})*");
+    let initials = r"(?:\p{Lu}\.\s?)*";
+    if capture {
+        format!("{initials}({surname})")
+    } else {
+        format!("{initials}{surname}")
+    }
+}
+
+/// Regex source (no capture groups) of what may follow the first author
+/// before the year: co-authors (`and Kim`, `& Kim`, `, Paulson, and
+/// Wenzel`) or `et al.` (with or without the period).
+fn marker_coauthors_source() -> String {
+    let author = marker_name_source(false);
+    format!(r"(?:(?:\s*,\s*{author})*\s*,?\s+(?:and|&)\s+{author}|\s+et\s+al(?-u:\b)\.?)?")
+}
+
+/// Regex source (no capture groups) of the years of one author: a year
+/// with an optional letter, letter lists (`2023a,b`, `2025c,b,a`) and
+/// further years of the same author (`2022, 2023a`).
+const MARKER_YEARS: &str = r"(?:19|20)\d{2}[a-h]?(?-u:\b)(?:\s*,\s*[a-h](?-u:\b))*(?:\s*,\s*(?:19|20)\d{2}[a-h]?(?-u:\b)(?:\s*,\s*[a-h](?-u:\b))*)*";
+
+/// Narrative marker `Name (2020)`, `Smith et al. (2020a)`, `Duan et al
+/// (2020)`, `Politis and Romano (1994, Theorem 3.1)`, `Doan (2021, 2022)`.
+/// Group 1 is the first author, group 2 the years.
 fn narrative_marker_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r"(\p{Lu}[\p{L}'’\-]+(?:\s+(?:and|&)\s+\p{Lu}[\p{L}'’\-]+|\s+et\s+al\.?)?)\s+\(((?:19|20)\d{2})([a-z]?)\)",
-        )
+        let name = marker_name_source(true);
+        let coauthors = marker_coauthors_source();
+        let years = MARKER_YEARS;
+        Regex::new(&format!(
+            r"{name}{coauthors}\s+\(({years})(?:\s*[,;][^()]{{0,40}})?\)"
+        ))
         .expect("valid regex")
     })
+}
+
+/// One author-year clause anywhere inside a parenthetical: `Rubin 1976`,
+/// `Robins et al. 1994`, `Nipkow, Paulson, and Wenzel 2002`, `Banerjee et
+/// al. 2023a,b`, `Qwen Team 2024, 2025`. Group 1 is the first author,
+/// group 2 the years ([`MARKER_YEARS`]).
+fn clause_scan_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        let name = marker_name_source(true);
+        let coauthors = marker_coauthors_source();
+        let years = MARKER_YEARS;
+        Regex::new(&format!(r"{name}{coauthors}\s*,?\s*({years})")).expect("valid regex")
+    })
+}
+
+/// An `et al.` citation without parentheses (a table cell `Duan et al
+/// 2020`, a narrative `As Alexander et al. 2015 put it`, a tail whose `(`
+/// was separated by the layout `Barrault et al., 2023)`). Group 1 is the
+/// first author, group 2 the year, group 3 the letter.
+fn bare_et_al_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        let name = marker_name_source(true);
+        Regex::new(&format!(
+            r"{name}\s+et\s+al(?-u:\b)\.?\s*,?\s*((?:19|20)\d{{2}})([a-h]?)(?-u:\b)"
+        ))
+        .expect("valid regex")
+    })
+}
+
+/// One item of a [`MARKER_YEARS`] run: a year and its letter (groups 1
+/// and 2) or a further letter of the previous year (group 3).
+fn year_item_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"((?:19|20)\d{2})([a-h]?)|(?-u:\b)([a-h])(?-u:\b)").expect("valid regex")
+    })
+}
+
+/// A run of superscript digits attached to a word (`literature.⁵`,
+/// `Initiative⁵⁻⁷`, `data⁸,⁹`): a superscript citation.
+fn superscript_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:[,⁻–][⁰¹²³⁴⁵⁶⁷⁸⁹]+)*").expect("valid regex"))
 }
 
 fn parenthetical_re() -> &'static Regex {
@@ -655,6 +743,10 @@ fn parenthetical_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\(([^()]*?(?:19|20)\d{2}[a-z]?[^()]*)\)").expect("valid regex"))
 }
 
+/// The strict form of one `;`-separated clause of a parenthetical: a
+/// single-token name (or `Name and Name`, `Name et al.`) and a year at the
+/// start of the clause. A parenthetical none of whose clauses resolves is
+/// still a marker when a clause has this form.
 fn clause_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1017,8 +1109,10 @@ fn section_lines(
             if text.is_empty() || is_accent_only(text) {
                 continue;
             }
+            // A bare `[n]` label at the top of two pages (`[15]` and `[37]`
+            // of a detached label column) is not a running header.
             let furniture = flags.get(i).copied().unwrap_or(true);
-            if furniture && repeated.contains(&digit_key(text)) {
+            if furniture && repeated.contains(&digit_key(text)) && !bare_label_re().is_match(text) {
                 continue;
             }
             if page_number_re().is_match(text) {
@@ -1191,8 +1285,52 @@ struct ListBody {
     /// runs to `stop` or to the end of the document.
     end: Option<(u32, usize)>,
     /// Printed numbers of the bare `[n]` lines of a [`Style::Detached`]
-    /// list, in reading order and before the cut; empty for other styles.
+    /// list, in reading order and before the cut, preceded by the labels
+    /// set above the heading when they number the entries before the
+    /// first label in the list; empty for other styles.
     labels: Vec<u32>,
+    /// The bare `[n]` lines of a [`Style::Detached`] list with their
+    /// positions: those above the heading on its page, then those of the
+    /// list before the cut; empty for other styles.
+    label_rows: Vec<LabelRow>,
+}
+
+/// A bare `[n]` label line of a detached label column.
+#[derive(Clone, Copy, Debug)]
+struct LabelRow {
+    /// `(page number, line index)` of the label line.
+    at: (u32, usize),
+    x0: Option<f32>,
+    y0: Option<f32>,
+    size: Option<f32>,
+    number: u32,
+}
+
+/// The bare `[n]` lines above the heading line on the heading's page (an
+/// IEEE list whose first labels the layout pass set before `REFERENCES`,
+/// arXiv:2509.12458), in reading order. None for a heading-less list.
+fn labels_above_heading(pages: &[PageText], section: &ReferenceSection) -> Vec<LabelRow> {
+    if section.heading.is_empty() {
+        return Vec::new();
+    }
+    let Some(page) = pages.iter().find(|p| p.page == section.first_page) else {
+        return Vec::new();
+    };
+    page.lines
+        .iter()
+        .enumerate()
+        .take(section.first_line)
+        .filter_map(|(i, line)| {
+            let number = bare_label_number(&line.text)?;
+            Some(LabelRow {
+                at: (page.page, i),
+                x0: line.bbox.map(|b| b.x0),
+                y0: line.bbox.map(|b| b.y0),
+                size: line_size(page, line),
+                number,
+            })
+        })
+        .collect()
 }
 
 /// Collect, clean and cut the lines of the list that starts at `section`
@@ -1207,7 +1345,7 @@ fn list_body(
     // Labels the layout pass detached from their entries carry no text;
     // a detached list keeps their numbers (with their positions) to label
     // the entries with.
-    let mut detached: Vec<(u32, usize, u32)> = Vec::new();
+    let mut detached: Vec<LabelRow> = Vec::new();
     match style {
         Style::AuthorYear => {
             lines.retain(|line| !bare_label_re().is_match(&line.text));
@@ -1215,7 +1353,13 @@ fn list_body(
         Style::Detached => {
             for line in &lines {
                 if let Some(number) = bare_label_number(&line.text) {
-                    detached.push((line.page, line.line, number));
+                    detached.push(LabelRow {
+                        at: (line.page, line.line),
+                        x0: line.x0,
+                        y0: line.y0,
+                        size: line.size,
+                        number,
+                    });
                 }
             }
             lines.retain(|line| !bare_label_re().is_match(&line.text));
@@ -1253,17 +1397,31 @@ fn list_body(
         }
     }
     let lines = kept;
-    let labels: Vec<u32> = detached
-        .into_iter()
-        .filter(|&(page, line, _)| end.is_none_or(|e| (page, line) < e))
-        .map(|(_, _, number)| number)
-        .collect();
+    detached.retain(|row| end.is_none_or(|e| row.at < e));
+    let mut labels: Vec<u32> = detached.iter().map(|row| row.number).collect();
+    let mut label_rows: Vec<LabelRow> = Vec::new();
+    if style == Style::Detached {
+        let above = labels_above_heading(pages, section);
+        let above_numbers: Vec<u32> = above.iter().map(|row| row.number).collect();
+        if let Some(&first) = labels.first()
+            && first > 1
+        {
+            let mut missing: Vec<u32> = (1..first).collect();
+            if above_numbers.ends_with(&missing) {
+                missing.extend_from_slice(&labels);
+                labels = missing;
+            }
+        }
+        label_rows = above;
+        label_rows.extend(detached);
+    }
     ListBody {
         lines,
         style,
         context,
         end,
         labels,
+        label_rows,
     }
 }
 
@@ -1318,6 +1476,80 @@ fn resume_index(
     None
 }
 
+/// Largest distance from the left edge of a detached `[n]` label to the
+/// left edge of the entry text it labels.
+const LABEL_TEXT_GAP: f32 = 40.0;
+
+/// The unused label row in `rows` that labels `line`: on the same page and
+/// printed row (baselines within 0.4 × the font size), left of the line by
+/// at most [`LABEL_TEXT_GAP`]; the nearest one when several qualify (the
+/// label columns of two text columns share their rows).
+fn label_for_line(line: &SectionLine, rows: &[LabelRow], used: &[bool]) -> Option<usize> {
+    let (Some(x0), Some(y0)) = (line.x0, line.y0) else {
+        return None;
+    };
+    let mut best: Option<(usize, f32)> = None;
+    for (k, row) in rows.iter().enumerate() {
+        let (Some(rx), Some(ry)) = (row.x0, row.y0) else {
+            continue;
+        };
+        if used.get(k).copied().unwrap_or(true) || row.at.0 != line.page {
+            continue;
+        }
+        let size = line.size.or(row.size).unwrap_or(10.0);
+        let gap = x0 - rx;
+        if (ry - y0).abs() > 0.4 * size || gap <= 0.0 || gap > LABEL_TEXT_GAP {
+            continue;
+        }
+        if best.is_none_or(|(_, g)| gap < g) {
+            best = Some((k, gap));
+        }
+    }
+    best.map(|(k, _)| k)
+}
+
+/// Segment a detached list by its label column: a line printed on the row
+/// of a `[n]` label ([`label_for_line`]) starts the entry labelled `[n]`;
+/// every other line continues the entry before it. The labels are read,
+/// never counted: a list whose first labels sit above the heading or at a
+/// page top keeps its printed numbers. `None` (segment by the text
+/// instead) without at least [`DETACHED_RUN`] positioned labels or when
+/// fewer than half of them label a line.
+fn segment_by_label_rows(
+    lines: &[SectionLine],
+    rows: &[LabelRow],
+    context: &str,
+) -> Option<Vec<ReferenceEntry>> {
+    let placed = rows
+        .iter()
+        .filter(|row| row.x0.is_some() && row.y0.is_some())
+        .count();
+    if placed < DETACHED_RUN {
+        return None;
+    }
+    let mut used: Vec<bool> = vec![false; rows.len()];
+    let mut entries: Vec<ReferenceEntry> = Vec::new();
+    let mut matched = 0usize;
+    for line in lines {
+        if let Some(k) = label_for_line(line, rows, &used) {
+            used[k] = true;
+            matched += 1;
+            let number = rows[k].number;
+            push_entry(
+                &mut entries,
+                Some(format!("[{number}]")),
+                &line.text,
+                line.page,
+            );
+        } else if entries.is_empty() {
+            push_entry(&mut entries, None, &line.text, line.page);
+        } else {
+            append_continuation(&mut entries, &line.text, context);
+        }
+    }
+    (matched * 2 >= placed).then_some(entries)
+}
+
 /// Label the entries of a list whose `[n]` labels arrived on lines of
 /// their own: the k-th printed label goes to the k-th entry in reading
 /// order; entries beyond the last label continue the sequence.
@@ -1340,6 +1572,11 @@ fn segment_list(
     match body.style {
         Style::AuthorYear => segment_author_year(&body.lines, &body.context),
         Style::Detached => {
+            if let Some(entries) =
+                segment_by_label_rows(&body.lines, &body.label_rows, &body.context)
+            {
+                return entries;
+            }
             let mut entries = segment_author_year(&body.lines, &body.context);
             assign_detached_labels(&mut entries, &body.labels);
             entries
@@ -2271,6 +2508,16 @@ fn clean_venue(text: &str) -> Option<String> {
 /// Venue from the text that follows the title.
 fn parse_venue(rest: &str) -> Option<String> {
     let rest = rest.trim_start_matches(|c: char| c == ',' || c == '.' || c.is_whitespace());
+    // A book in a series: `volume 375 of Mathematics and Its Applications.
+    // Kluwer` names the series as the venue; a bare `volume 48.` is skipped.
+    if let Some(caps) = series_volume_re().captures(rest)
+        && let Some(series) = caps.get(1)
+    {
+        return clean_venue(series.as_str());
+    }
+    let rest = bare_volume_lead_re()
+        .find(rest)
+        .map_or(rest, |lead| &rest[lead.end()..]);
     if rest.is_empty() {
         return None;
     }
@@ -2410,6 +2657,46 @@ fn is_particle(token: &str) -> bool {
     )
 }
 
+/// A single lowercase letter with a period: an abbreviated particle (`v.`
+/// for `van`, `d.` for `de`) or an initial whose capital was lost.
+fn is_lowercase_initial(token: &str) -> bool {
+    let mut chars = token.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(c), Some('.'), None) if c.is_lowercase()
+    )
+}
+
+/// Loose test for an author name in an IEEE list that ends at a quoted
+/// title: at most six tokens, no digits, every token capitalised, an
+/// initial, a particle or an elided particle (`d'Aspremont`), and at least
+/// one initial (`A.`, `v.`, `J.-M.`).
+fn loose_name_part(part: &str) -> bool {
+    let mut text = part.trim();
+    if let Some(rest) = text
+        .strip_prefix("and ")
+        .or_else(|| text.strip_prefix("& "))
+    {
+        text = rest.trim_start();
+    }
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > 6 || text.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let mut has_initial = false;
+    for token in &tokens {
+        let initial = token.ends_with('.') && token.chars().count() <= 5;
+        let first = token.chars().next().unwrap_or(' ');
+        let second = token.chars().nth(1).unwrap_or(' ');
+        let elided = first.is_lowercase() && matches!(second, '\'' | '’');
+        if !(initial || first.is_uppercase() || is_particle(token) || elided) {
+            return false;
+        }
+        has_initial |= initial;
+    }
+    has_initial
+}
+
 /// `x- y` (a word broken at a line end) closed up, for classifying a
 /// fragment; the text itself is left as printed.
 fn close_word_breaks(text: &str) -> String {
@@ -2463,10 +2750,14 @@ fn is_name_part(part: &str) -> bool {
     }
     let mut has_initial = false;
     let mut names = 0usize;
-    for token in &tokens {
-        if initial_token_re().is_match(token) {
+    for (position, token) in tokens.iter().enumerate() {
+        // A lowercase initial opens a name whose accented capital was lost
+        // (`c. Öztürk`); later it is an abbreviated particle (`A. v. Niekerk`,
+        // `O. v. d. Heide`).
+        let lowercase_initial = is_lowercase_initial(token);
+        if initial_token_re().is_match(token) || (lowercase_initial && position == 0) {
             has_initial = true;
-        } else if is_particle(token) || cap_word_re().is_match(token) {
+        } else if lowercase_initial || is_particle(token) || cap_word_re().is_match(token) {
             names += 1;
         } else {
             return false;
@@ -2560,6 +2851,23 @@ fn comma_style(masked: &str) -> Option<CommaSplit> {
         return None;
     }
     let range = parts[k].clone();
+    // IEEE: when a quoted title follows a comma and everything between the
+    // last recognised name and the quote still reads as names (`A. v.
+    // Niekerk`, `M. d'Aspremont`), the title starts at the quote.
+    if let Some((quote, _)) = find_quoted(masked)
+        && quote.start > range.start
+        && masked[..quote.start].trim_end().ends_with(',')
+    {
+        let lead = masked[range.start..quote.start]
+            .trim_end()
+            .trim_end_matches(',');
+        if comma_parts(lead)
+            .into_iter()
+            .all(|r| loose_name_part(&lead[r]))
+        {
+            return None;
+        }
+    }
     let part = &masked[range.clone()];
     let stripped = part.trim_start();
     let first_char = stripped.chars().next()?;
@@ -2733,19 +3041,73 @@ fn trailing_year_re() -> &'static Regex {
     })
 }
 
-/// `title` without a trailing `, 2025` that repeats the entry's year (the
-/// year sentence of `Title, 2025. Model card` absorbed into the title).
+/// A parenthesised year closing an unquoted title (`unsrt`-like
+/// `Authors, Title (2026). arXiv:...`). Group 1 is the year.
+fn trailing_paren_year_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s*\(((?:19|20)\d{2})[a-z]?\)\.?$").expect("valid regex"))
+}
+
+/// `arXiv preprint` after an unquoted title (`... work? arXiv preprint
+/// arXiv:2507.11891`): the title ends before it.
+fn arxiv_preprint_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)[,.]?\s+arxiv\s+preprint\b").expect("valid regex"))
+}
+
+/// A ditto dash standing for the previous entry's authors (`——, “Title,”`),
+/// with the punctuation and space after it.
+fn ditto_authors_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(?:[—–]+|-{2,}|_{2,})\s*[,.:]?\s+").expect("valid regex"))
+}
+
+/// A regulation or standard opening an entry without authors: `Regulation
+/// (EU) 2017/745 on medical devices`, `Directive (EU) 2016/680`, `ISO/IEC
+/// 27001:2013 ...`. The whole leading clause is the title.
+fn legal_title_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:(?:Council |Commission )?(?:Regulation|Directive|Decision)\s+\((?:EU|EC|EEC|Euratom)\)\s+(?:No\.?\s+)?\d+/\d+|(?:ISO/IEC|ISO|IEC)\s+\d+(?:[-:]\d+)*\s+\p{Lu})",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A leading `volume N of Series` (group 1 is the series) in the text after
+/// a book title.
+fn series_volume_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(?i:vol(?:ume)?\.?)\s*\d+\s+of\s+([^,;]+?)(?:\.\s|[,;]|\.?$)")
+            .expect("valid regex")
+    })
+}
+
+/// A leading `volume N.` sentence without a series (`volume 48. Cambridge
+/// University Press`).
+fn bare_volume_lead_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(?i:vol(?:ume)?\.?)\s*\d+\.\s+").expect("valid regex"))
+}
+
+/// `title` without a trailing `, 2025` or ` (2025)` that repeats the entry's
+/// year (the year sentence of `Title, 2025. Model card` absorbed into the
+/// title).
 fn strip_trailing_year(title: &str, year: Option<u16>) -> &str {
     let Some(year) = year else {
         return title;
     };
-    if let Some(caps) = trailing_year_re().captures(title)
-        && let (Some(whole), Some(digits)) = (caps.get(0), caps.get(1))
-        && digits.as_str().parse::<u16>().ok() == Some(year)
-    {
-        let head = title[..whole.start()].trim_end();
-        if !head.is_empty() {
-            return head;
+    for re in [trailing_year_re(), trailing_paren_year_re()] {
+        if let Some(caps) = re.captures(title)
+            && let (Some(whole), Some(digits)) = (caps.get(0), caps.get(1))
+            && digits.as_str().parse::<u16>().ok() == Some(year)
+        {
+            let head = title[..whole.start()].trim_end();
+            if !head.is_empty() {
+                return head;
+            }
         }
     }
     title
@@ -2814,7 +3176,22 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
     let mut title_limit: Option<usize> = None;
     let mut quoted_title: Option<(Range<usize>, String)> = None;
     let mut titleless_volume: Option<String> = None;
-    if let Some(colon) = lncs_authors_end(&masked) {
+    if let Some(ditto) = ditto_authors_re().find(&masked) {
+        // `——, “Title,” Venue`: the previous entry's authors, not repeated.
+        authors_end = Some(0);
+        title_start = ditto.end();
+        if let Some((q, text)) = &quoted
+            && q.start == title_start
+        {
+            quoted_title = Some((q.clone(), text.clone()));
+        } else if let Some(lead) = leading_year_re().find(&masked[title_start..]) {
+            title_start += lead.end();
+        }
+    } else if legal_title_re().is_match(&masked) {
+        // `Regulation (EU) 2017/745 on medical devices. Official Journal`:
+        // no authors; the leading clause is the title.
+        authors_end = Some(0);
+    } else if let Some(colon) = lncs_authors_end(&masked) {
         // Springer LNCS: `Surname, I., Other, J.: Title. In: Venue (Year)`.
         authors_end = Some(colon);
         let after = masked[colon + 1..].trim_start();
@@ -2917,6 +3294,11 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
             stop = stop.min(limit.saturating_sub(title_start));
         } else if let Some(venue) = comma_venue_re().find(title_masked) {
             stop = stop.min(venue.start());
+        }
+        if let Some(preprint) = arxiv_preprint_re().find(title_masked)
+            && preprint.start() > 0
+        {
+            stop = stop.min(preprint.start());
         }
         let title = strip_wrapping_quotes(body[title_start..title_start + stop].trim());
         let title = strip_bracket_descriptor(title);
@@ -3022,6 +3404,74 @@ fn author_surname(name: &str) -> String {
     pick.trim_matches('.').to_lowercase()
 }
 
+/// Is `token` a block of initials (`EJ`, `J.`, `A.C.`)?
+fn is_initials_block(token: &str) -> bool {
+    token.chars().count() <= 3 && token.chars().all(|c| c.is_uppercase() || c == '.')
+}
+
+/// Whole-name key of a printed first-author name without a comma: all its
+/// tokens, lower case, minus leading initials (`E. J.`) and trailing
+/// initials blocks (`EJ`): `Tchetgen Tchetgen EJ` gives `tchetgen
+/// tchetgen`, `Omar El Malki` gives `omar el malki`, `Alibaba Cloud Qwen
+/// Team` gives `alibaba cloud qwen team`. `None` for a single token or a
+/// `Surname, Given` name, whose surname ([`author_surname`]) is already
+/// the whole part before the comma.
+fn author_full_key(name: &str) -> Option<String> {
+    if name.contains(',') {
+        return None;
+    }
+    let tokens: Vec<&str> = name
+        .split_whitespace()
+        .filter(|t| !is_name_suffix(t))
+        .collect();
+    let start = tokens
+        .iter()
+        .position(|t| !t.contains('.'))
+        .unwrap_or(tokens.len());
+    let mut end = tokens.len();
+    while end > start && is_initials_block(tokens[end - 1]) {
+        end -= 1;
+    }
+    let kept = &tokens[start..end];
+    (kept.len() >= 2).then(|| kept.join(" ").trim_matches('.').to_lowercase())
+}
+
+/// Entry indices among `candidates` that the letter `suffix` (`2020b`)
+/// picks: the n-th of several same-year entries, else all of them.
+fn pick_by_suffix(mut candidates: Vec<u32>, suffix: &str) -> Vec<u32> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    if candidates.len() > 1
+        && let Some(letter) = suffix.chars().next()
+    {
+        let pos = u32::from(letter).saturating_sub(u32::from('a'));
+        let pos = usize::try_from(pos).unwrap_or(0);
+        if let Some(&idx) = candidates.get(pos) {
+            return vec![idx];
+        }
+    }
+    candidates
+}
+
+/// Byte offset in `text` of its whitespace-separated token number `k`
+/// (`text.len()` when it has fewer tokens).
+fn token_offset(text: &str, k: usize) -> usize {
+    let mut count = 0usize;
+    let mut in_token = false;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            in_token = false;
+        } else if !in_token {
+            if count == k {
+                return i;
+            }
+            count += 1;
+            in_token = true;
+        }
+    }
+    text.len()
+}
+
 impl RefIndex {
     /// Tables over `refs`; `extents` (the lists in document order, see
     /// [`list_extents`]) give every numeric namespace its end.
@@ -3054,11 +3504,20 @@ impl RefIndex {
                         .and_then(|caps| caps.get(1))
                         .map(|m| m.as_str().to_lowercase())
                 });
-            if let Some(surname) = surname
-                && let Some(year) = entry.year
-                && !surname.is_empty()
-            {
-                by_author_year.push((surname, year, entry.index));
+            let full = entry
+                .authors
+                .first()
+                .and_then(|name| author_full_key(name.as_str()));
+            if let Some(year) = entry.year {
+                let mut keys: Vec<String> = Vec::with_capacity(2);
+                for key in [surname, full].into_iter().flatten() {
+                    if !key.is_empty() && !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+                for key in keys {
+                    by_author_year.push((key, year, entry.index));
+                }
             }
         }
         // Pair every namespace with the list it was segmented from: the
@@ -3128,35 +3587,92 @@ impl RefIndex {
         targets
     }
 
+    /// Entries of `year` whose first-author key equals `needle` (lower
+    /// case) or, with `tail`, ends with it as a whole word (`de moura` for
+    /// `moura`).
+    fn lookup(&self, needle: &str, year: u16, tail: bool) -> Vec<u32> {
+        let ending = format!(" {needle}");
+        self.by_author_year
+            .iter()
+            .filter(|(key, y, _)| {
+                *y == year && (*key == needle || (tail && key.ends_with(&ending)))
+            })
+            .map(|(_, _, idx)| *idx)
+            .collect()
+    }
+
     /// Entries whose first author surname and year match. A suffix letter
     /// (`2020b`) picks the n-th of several same-year entries.
     fn resolve_author_year(&self, surname: &str, year: u16, suffix: &str) -> Vec<u32> {
-        let needle = surname.to_lowercase();
-        let tail = format!(" {needle}");
-        let mut candidates: Vec<u32> = self
-            .by_author_year
-            .iter()
-            .filter(|(s, y, _)| *y == year && (*s == needle || s.ends_with(&tail)))
-            .map(|(_, _, idx)| *idx)
-            .collect();
-        candidates.sort_unstable();
-        candidates.dedup();
-        if candidates.len() > 1
-            && let Some(letter) = suffix.chars().next()
-        {
-            let pos = u32::from(letter).saturating_sub(u32::from('a'));
-            let pos = usize::try_from(pos).unwrap_or(0);
-            if let Some(&idx) = candidates.get(pos) {
-                return vec![idx];
+        pick_by_suffix(self.lookup(&surname.to_lowercase(), year, true), suffix)
+    }
+
+    /// Entries cited by the marker name `name` (the first author as
+    /// printed, one or more tokens: `Smith`, `Tchetgen Tchetgen`, `Alibaba
+    /// Cloud Qwen Team`, `de Moura`) and `year`/`suffix`, with the number
+    /// of leading tokens of `name` that are not part of the name (`As` in
+    /// `As Alexander et al. 2015`).
+    ///
+    /// The whole name and then ever shorter endings of it are looked up
+    /// exactly against the first-author keys (the surname and the whole
+    /// name of every entry), then the same again allowing a key that ends
+    /// with the name (`omar el malki` for `El Malki`), and last the first
+    /// token alone.
+    fn resolve_name(&self, name: &str, year: u16, suffix: &str) -> (Vec<u32>, usize) {
+        let tokens: Vec<&str> = name.split_whitespace().collect();
+        for tail in [false, true] {
+            for dropped in 0..tokens.len() {
+                let needle = tokens[dropped..].join(" ").to_lowercase();
+                let found = self.lookup(&needle, year, tail);
+                if !found.is_empty() {
+                    return (pick_by_suffix(found, suffix), dropped);
+                }
             }
         }
-        candidates
+        if tokens.len() > 1
+            && let Some(first) = tokens.first()
+        {
+            let found = self.resolve_author_year(first, year, suffix);
+            if !found.is_empty() {
+                return (found, 0);
+            }
+        }
+        (Vec::new(), 0)
     }
-}
 
-/// Surname to look up for a marker name such as `Smith et al.` or `Lee and Kim`.
-fn marker_surname(name: &str) -> &str {
-    name.split_whitespace().next().unwrap_or("")
+    /// Entries cited by the first author `name` with every year and letter
+    /// of the run `years` ([`MARKER_YEARS`]: `2023a,b`, `2022, 2023a`,
+    /// `2025c,b,a, 2024`), in order without repeats, and the leading
+    /// tokens of `name` dropped by the first resolved year (see
+    /// [`RefIndex::resolve_name`]).
+    fn resolve_years(&self, name: &str, years: &str) -> (Vec<u32>, usize) {
+        let mut targets: Vec<u32> = Vec::new();
+        let mut dropped: Option<usize> = None;
+        let mut current: Option<u16> = None;
+        for caps in year_item_re().captures_iter(years) {
+            let (year, suffix) = if let Some(y) = caps.get(1) {
+                let Ok(value) = y.as_str().parse::<u16>() else {
+                    continue;
+                };
+                current = Some(value);
+                (value, caps.get(2).map_or("", |m| m.as_str()))
+            } else if let (Some(value), Some(letter)) = (current, caps.get(3)) {
+                (value, letter.as_str())
+            } else {
+                continue;
+            };
+            let (found, skip) = self.resolve_name(name, year, suffix);
+            if !found.is_empty() && dropped.is_none() {
+                dropped = Some(skip);
+            }
+            for idx in found {
+                if !targets.contains(&idx) {
+                    targets.push(idx);
+                }
+            }
+        }
+        (targets, dropped.unwrap_or(0))
+    }
 }
 
 /// Byte offset in `page.text` where the heading line `first_line` starts;
@@ -3211,10 +3727,62 @@ fn glued_to_word(text: &str, start: usize, end: usize) -> bool {
     single || short_caps || dashed
 }
 
+/// The numbers cited by the items of a numeric group (`1, 3–5`), or
+/// `None` when any item is `0`, a backwards or overlong range, or above
+/// `max_number`, or when no item is a number.
+fn cited_numbers(inner: &str, max_number: u32) -> Option<Vec<u32>> {
+    let mut numbers: Vec<u32> = Vec::new();
+    for item in inner.split([',', ';']) {
+        let Some(item_caps) = numeric_item_re().captures(item) else {
+            continue;
+        };
+        let Some(lo) = item_caps
+            .get(1)
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let hi = item_caps
+            .get(2)
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+            .unwrap_or(lo);
+        if lo == 0 || hi < lo || hi - lo > MAX_RANGE_SPAN || hi > max_number {
+            return None;
+        }
+        numbers.extend(lo..=hi);
+    }
+    (!numbers.is_empty()).then_some(numbers)
+}
+
+/// Is the bracket group at `start..end` a line of its own next to another
+/// bare `[n]` line (blank lines between them do not count)? That is the
+/// label column of a reference list that the layout pass emitted apart
+/// from its entries (arXiv:2509.12458 sets `[1]` ... `[14]` above the
+/// `REFERENCES` heading), not a citation.
+fn in_label_column(text: &str, start: usize, end: usize) -> bool {
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
+    if !text[line_start..start].trim().is_empty() || !text[end..line_end].trim().is_empty() {
+        return false;
+    }
+    let previous = text[..line_start]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty());
+    let next = text[line_end..]
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty());
+    previous.is_some_and(|l| bare_label_re().is_match(l))
+        || next.is_some_and(|l| bare_label_re().is_match(l))
+}
+
 /// Numeric markers in `text[window]`, with byte ranges into `text`. A
 /// group is rejected when any item is `0` or above the largest printed
-/// number (`[0, 1]` is an interval), or when it is glued to a symbol
-/// ([`glued_to_word`]). A note after the numbers (`[22, Theorem 4]`) is
+/// number (`[0, 1]` is an interval), when it is glued to a symbol
+/// ([`glued_to_word`]), or when it sits in a detached label column
+/// ([`in_label_column`]). A note after the numbers (`[22, Theorem 4]`) is
 /// kept in the marker text but cites nothing. `ends` is
 /// [`RefIndex::space_ends`] for the page: it picks the namespace each
 /// marker resolves in first.
@@ -3231,34 +3799,12 @@ fn numeric_markers(
         };
         let start = window.start + whole.start();
         let end = window.start + whole.end();
-        if glued_to_word(text, start, end) {
+        if glued_to_word(text, start, end) || in_label_column(text, start, end) {
             continue;
         }
-        let mut numbers: Vec<u32> = Vec::new();
-        let mut plausible = true;
-        for item in inner.as_str().split([',', ';']) {
-            let Some(item_caps) = numeric_item_re().captures(item) else {
-                continue;
-            };
-            let Some(lo) = item_caps
-                .get(1)
-                .and_then(|m| m.as_str().parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let hi = item_caps
-                .get(2)
-                .and_then(|m| m.as_str().parse::<u32>().ok())
-                .unwrap_or(lo);
-            if lo == 0 || hi < lo || hi - lo > MAX_RANGE_SPAN || hi > index.max_number {
-                plausible = false;
-                break;
-            }
-            numbers.extend(lo..=hi);
-        }
-        if !plausible || numbers.is_empty() {
+        let Some(numbers) = cited_numbers(inner.as_str(), index.max_number) else {
             continue;
-        }
+        };
         let space = home_space(ends, start);
         let targets = index.targets_for(&numbers, space);
         if targets.is_empty() {
@@ -3267,6 +3813,121 @@ fn numeric_markers(
         out.push(Found {
             range: start..end,
             text: whole.as_str().to_string(),
+            targets,
+            numbers,
+            space,
+        });
+    }
+    out
+}
+
+/// ASCII form of a superscript digit or range sign (`⁵` to `5`, `⁻` and
+/// `–` to `-`); other characters are kept.
+fn superscript_ascii(c: char) -> char {
+    match c {
+        '⁰' => '0',
+        '¹' => '1',
+        '²' => '2',
+        '³' => '3',
+        '⁴' => '4',
+        '⁵' => '5',
+        '⁶' => '6',
+        '⁷' => '7',
+        '⁸' => '8',
+        '⁹' => '9',
+        '⁻' | '–' => '-',
+        other => other,
+    }
+}
+
+/// Words that follow an affiliation or footnote mark at a line start
+/// (`¹Department of Chemistry`), where a superscript is no citation.
+const AFFILIATION_WORDS: &[&str] = &[
+    "Department",
+    "Dept",
+    "University",
+    "Institute",
+    "School",
+    "Faculty",
+    "Laboratory",
+    "College",
+    "Center",
+    "Centre",
+    "Division",
+    "Corresponding",
+    "Email",
+    "E",
+    "Present",
+    "These",
+    "Electronic",
+];
+
+/// Is the superscript run at `start..end` attached like a citation? At a
+/// line start the run attaches to the word that follows it (`³⁸Prein`),
+/// unless that word opens an affiliation or footnote
+/// ([`AFFILIATION_WORDS`]);
+/// elsewhere it follows sentence punctuation or a closing bracket or
+/// quote (`literature.⁵`) or a word of at least three letters
+/// (`Initiative⁵⁻⁷`, `data⁸,⁹`) and is not followed by a letter or digit.
+/// A power after a digit or a short symbol or unit (`10⁵`, `R²`, `km²`) is
+/// not a citation.
+fn superscript_attached(text: &str, start: usize, end: usize) -> bool {
+    let next = text[end..].chars().next();
+    let previous = text[..start].chars().next_back();
+    let Some(previous) = previous.filter(|&c| c != '\n') else {
+        let word: String = text[end..]
+            .chars()
+            .take_while(|c| c.is_alphabetic())
+            .collect();
+        return !word.is_empty() && !AFFILIATION_WORDS.contains(&word.as_str());
+    };
+    if next.is_some_and(char::is_alphanumeric) {
+        return false;
+    }
+    if matches!(
+        previous,
+        '.' | ',' | ';' | ':' | ')' | ']' | '’' | '”' | '"' | '\''
+    ) {
+        return true;
+    }
+    previous.is_alphabetic()
+        && text[..start]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphabetic())
+            .count()
+            >= 3
+}
+
+/// Superscript numeric markers in `text[window]` (`literature.⁵`,
+/// `Initiative⁵⁻⁷`, `data⁸,⁹`), resolved like bracket groups in the same
+/// numeric namespaces. Only called for a numbered list, so a footnote
+/// mark in an author-year document is never a citation.
+fn superscript_markers(
+    text: &str,
+    window: &Range<usize>,
+    index: &RefIndex,
+    ends: &[Option<usize>],
+) -> Vec<Found> {
+    let mut out: Vec<Found> = Vec::new();
+    for found in superscript_marker_re().find_iter(&text[window.clone()]) {
+        let start = window.start + found.start();
+        let end = window.start + found.end();
+        if !superscript_attached(text, start, end) {
+            continue;
+        }
+        let ascii: String = found.as_str().chars().map(superscript_ascii).collect();
+        let Some(numbers) = cited_numbers(&ascii, index.max_number) else {
+            continue;
+        };
+        let space = home_space(ends, start);
+        let targets = index.targets_for(&numbers, space);
+        if targets.is_empty() {
+            continue;
+        }
+        out.push(Found {
+            range: start..end,
+            text: found.as_str().to_string(),
             targets,
             numbers,
             space,
@@ -3324,25 +3985,41 @@ fn merge_adjacent(text: &str, found: Vec<Found>, index: &RefIndex) -> Vec<Found>
     merged
 }
 
-/// Author-year markers in `text[window]`, with byte ranges into `text`.
+/// Byte offset where a marker whose name group `name` starts at
+/// `name_start` begins when `dropped` leading tokens of the name are not
+/// part of it (see [`RefIndex::resolve_name`]); `whole_start` (the start
+/// of the match, initials included) when none are dropped.
+fn marker_start(whole_start: usize, name_start: usize, name: &str, dropped: usize) -> usize {
+    if dropped == 0 {
+        whole_start
+    } else {
+        name_start + token_offset(name, dropped)
+    }
+}
+
+/// Author-year markers in `text[window]`, with byte ranges into `text`:
+/// narrative `Name (2020)` forms (with locators and year lists,
+/// `Politis and Romano (1994, Theorem 3.1)`), parentheticals of one or
+/// more clauses separated by `;` or by a comma after a year (`(Rubin 1976,
+/// Robins et al. 1994, Qin et al. 2008)`), and bare `Name et al. 2020`
+/// citations that resolve to an entry. A parenthetical is one marker whose
+/// targets are the union over its clauses; it is kept without targets
+/// only when a clause has the strict `Name, 2020` form ([`clause_re`]).
 fn author_year_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> Vec<Found> {
     let slice = &text[window.clone()];
     let mut out: Vec<Found> = Vec::new();
     for caps in narrative_marker_re().captures_iter(slice) {
-        let (Some(whole), Some(name), Some(year)) = (caps.get(0), caps.get(1), caps.get(2)) else {
+        let (Some(whole), Some(name), Some(years)) = (caps.get(0), caps.get(1), caps.get(2)) else {
             continue;
         };
-        let Ok(year_value) = year.as_str().parse::<u16>() else {
-            continue;
-        };
-        let suffix = caps.get(3).map_or("", |m| m.as_str());
-        let targets = index.resolve_author_year(marker_surname(name.as_str()), year_value, suffix);
+        let (targets, dropped) = index.resolve_years(name.as_str(), years.as_str());
         if targets.is_empty() {
             continue;
         }
+        let begin = marker_start(whole.start(), name.start(), name.as_str(), dropped);
         out.push(Found {
-            range: window.start + whole.start()..window.start + whole.end(),
-            text: whole.as_str().to_string(),
+            range: window.start + begin..window.start + whole.end(),
+            text: slice[begin..whole.end()].to_string(),
             targets,
             numbers: Vec::new(),
             space: 0,
@@ -3359,32 +4036,53 @@ fn author_year_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> V
         }
         let inner = &slice[found.start() + 1..found.end() - 1];
         let mut targets: Vec<u32> = Vec::new();
-        let mut clauses = 0usize;
-        for clause in inner.split(';') {
-            let Some(caps) = clause_re().captures(clause) else {
+        for caps in clause_scan_re().captures_iter(inner) {
+            let (Some(name), Some(years)) = (caps.get(1), caps.get(2)) else {
                 continue;
             };
-            let (Some(name), Some(year)) = (caps.get(1), caps.get(2)) else {
-                continue;
-            };
-            let Ok(year_value) = year.as_str().parse::<u16>() else {
-                continue;
-            };
-            clauses += 1;
-            let suffix = caps.get(3).map_or("", |m| m.as_str());
-            let surname = marker_surname(name.as_str());
-            for idx in index.resolve_author_year(surname, year_value, suffix) {
+            let (resolved, _) = index.resolve_years(name.as_str(), years.as_str());
+            for idx in resolved {
                 if !targets.contains(&idx) {
                     targets.push(idx);
                 }
             }
         }
-        if clauses == 0 {
+        let strict = inner.split(';').any(|clause| clause_re().is_match(clause));
+        if targets.is_empty() && !strict {
             continue;
         }
         out.push(Found {
             range: start..end,
             text: found.as_str().to_string(),
+            targets,
+            numbers: Vec::new(),
+            space: 0,
+        });
+    }
+    for caps in bare_et_al_re().captures_iter(slice) {
+        let (Some(whole), Some(name), Some(year)) = (caps.get(0), caps.get(1), caps.get(2)) else {
+            continue;
+        };
+        let Ok(year_value) = year.as_str().parse::<u16>() else {
+            continue;
+        };
+        let suffix = caps.get(3).map_or("", |m| m.as_str());
+        let (targets, dropped) = index.resolve_name(name.as_str(), year_value, suffix);
+        if targets.is_empty() {
+            continue;
+        }
+        let begin = marker_start(whole.start(), name.start(), name.as_str(), dropped);
+        let start = window.start + begin;
+        let end = window.start + whole.end();
+        let overlaps = out
+            .iter()
+            .any(|f| f.range.start < end && start < f.range.end);
+        if overlaps {
+            continue;
+        }
+        out.push(Found {
+            range: start..end,
+            text: slice[begin..whole.end()].to_string(),
             targets,
             numbers: Vec::new(),
             space: 0,
@@ -3467,17 +4165,99 @@ fn page_scan_windows(page: &PageText, extents: &[ListExtent]) -> Vec<Range<usize
     windows
 }
 
+/// Longest tail of a page (and head of the next page), in bytes, over
+/// which a bracket group left open at a page end is carried.
+const MAX_CARRY: usize = 400;
+
+/// A `(` or `[` group left open at the end of `page`: its byte offset in
+/// `page.text` and the character that closes it, when the last scan window
+/// reaches the end of the page, the opener lies within [`MAX_CARRY`] bytes
+/// of it and nothing after the opener closes a group.
+fn open_group_at_end(page: &PageText, windows: &[Range<usize>]) -> Option<(usize, char)> {
+    let last = windows.last()?;
+    if last.end != page.text.len() {
+        return None;
+    }
+    let slice = &page.text[last.clone()];
+    let pos = slice.rfind(['(', '['])?;
+    let rest = &slice[pos..];
+    if rest.len() > MAX_CARRY || rest.contains([')', ']']) {
+        return None;
+    }
+    let close = if rest.starts_with('(') { ')' } else { ']' };
+    Some((last.start + pos, close))
+}
+
+/// Byte length of the head of `next` that closes a group carried over
+/// from the page before: up to and including the first `close` within
+/// [`MAX_CARRY`] bytes, when the page's first scan window starts at its top
+/// and no other group opens before the `close`.
+fn carried_head(next: &PageText, windows: &[Range<usize>], close: char) -> Option<usize> {
+    let first = windows.first()?;
+    if first.start != 0 {
+        return None;
+    }
+    let at = next.text[first.clone()].find(close)?;
+    if at > MAX_CARRY || next.text[..at].contains(['(', '[']) {
+        return None;
+    }
+    Some(at + close.len_utf8())
+}
+
+/// Every marker in the `windows` of `text`, sorted by position; adjacent
+/// numeric groups are merged ([`merge_adjacent`]). A numbered list gets
+/// bracket groups and, on a page where no bracket group cites anything,
+/// superscript runs ([`superscript_markers`]); an author-year list gets
+/// [`author_year_markers`].
+fn scan_windows(
+    text: &str,
+    windows: &[Range<usize>],
+    index: &RefIndex,
+    ends: &[Option<usize>],
+) -> Vec<Found> {
+    let mut found: Vec<Found> = Vec::new();
+    if index.numbered {
+        let mut numeric: Vec<Found> = Vec::new();
+        for window in windows {
+            numeric.extend(numeric_markers(text, window, index, ends));
+        }
+        if numeric.is_empty() {
+            for window in windows {
+                found.extend(superscript_markers(text, window, index, ends));
+            }
+        }
+        found.extend(numeric);
+    } else {
+        for window in windows {
+            found.extend(author_year_markers(text, window, index));
+        }
+    }
+    found.sort_by_key(|f| f.range.start);
+    if index.numbered {
+        merge_adjacent(text, found, index)
+    } else {
+        found
+    }
+}
+
 /// In-text citation markers on every page outside the reference lists,
 /// resolved against `refs`.
 ///
-/// Numeric lists get `[1]`, `[2, 3]`, `[4–6]` and `[22, Theorem 4]` markers
-/// (superscript digits are not attempted); adjacent groups `[17], [18]` and
-/// `[3]–[5]` become one marker. A group that cites `0` or a number above the
-/// list, or that is glued to a symbol (`W[1]-hard`, `x[2]`), is not a
-/// marker. Author-year lists get `(Smith, 2020)`, `(Smith et al., 2020; Lee
-/// and Kim, 2019)` and `Smith (2020)`. Pages before the first list, the part
-/// of a list's first page above its heading and the pages after a list's
-/// end (an appendix) are searched. Numbered lists that restart at `[1]`
+/// Numeric lists get `[1]`, `[2, 3]`, `[4–6]` and `[22, Theorem 4]`
+/// markers, and superscript runs (`literature.⁵`, `Initiative⁵⁻⁷`,
+/// `data⁸,⁹`) on pages without bracket markers; adjacent groups `[17],
+/// [18]` and `[3]–[5]` become one marker. A group that cites `0` or a
+/// number above the list, that is glued to a symbol (`W[1]-hard`, `x[2]`)
+/// or that belongs to a detached label column is not a marker.
+/// Author-year lists get `(Smith, 2020)`, `(Smith et al., 2020; Lee and
+/// Kim, 2019)`, `(Rubin 1976, Robins et al. 1994)`, `Smith (2020)`,
+/// `Politis and Romano (1994, Theorem 3.1)` and bare `Duan et al 2020`,
+/// with multi-token, particle and organisation names, year lists and
+/// letter lists. A group left open at a page end (`(Gui and` / `Toubia
+/// 2023)`, `[6, 7,` / `41]`) is read across the page break and reported on
+/// the page where it starts. Pages before the first list, the part of a
+/// list's first page above its heading and the pages after a list's end
+/// (an appendix) are searched. Numbered lists that restart at `[1]`
 /// (`References` and `References for the Appendices`) keep separate
 /// numberings: a marker before the first list's end resolves in the first
 /// list, a marker after it (in the appendix that the later list serves)
@@ -3490,23 +4270,48 @@ pub fn find_citation_markers(pages: &[PageText], refs: &[ReferenceEntry]) -> Vec
     let sections = find_reference_sections(pages);
     let extents = list_extents(pages, &sections);
     let index = RefIndex::build(refs, &extents);
+    let page_windows: Vec<Vec<Range<usize>>> = pages
+        .iter()
+        .map(|page| page_scan_windows(page, &extents))
+        .collect();
     let mut markers: Vec<CitationMarker> = Vec::new();
-    for page in pages {
+    // Bytes at the top of the current page already read as the end of a
+    // group carried over from the page before.
+    let mut carried_cut: Option<usize> = None;
+    for (pos, page) in pages.iter().enumerate() {
         let ends = index.space_ends(page);
-        let mut found: Vec<Found> = Vec::new();
-        for window in page_scan_windows(page, &extents) {
-            if index.numbered {
-                found.extend(numeric_markers(&page.text, &window, &index, &ends));
-            } else {
-                found.extend(author_year_markers(&page.text, &window, &index));
+        let mut windows = page_windows[pos].clone();
+        if let Some(cut) = carried_cut.take() {
+            windows = subtract_range(&windows, 0, cut);
+        }
+        let mut found = scan_windows(&page.text, &windows, &index, &ends);
+        if let Some((open, close)) = open_group_at_end(page, &windows)
+            && let (Some(next), Some(next_windows)) =
+                (pages.get(pos + 1), page_windows.get(pos + 1))
+            && let Some(head) = carried_head(next, next_windows, close)
+        {
+            let tail = &page.text[open..];
+            let head_text = &next.text[..head];
+            let combined = format!("{tail}\n{head_text}");
+            let shifted: Vec<Option<usize>> = ends
+                .iter()
+                .map(|end| end.map(|e| e.saturating_sub(open)))
+                .collect();
+            let whole: Range<usize> = 0..combined.len();
+            let carried: Vec<Found> =
+                scan_windows(&combined, std::slice::from_ref(&whole), &index, &shifted)
+                    .into_iter()
+                    .filter(|f| f.range.start < tail.len())
+                    .collect();
+            if !carried.is_empty() {
+                found.retain(|f| f.range.start < open);
+                for mut f in carried {
+                    f.range = open + f.range.start..page.text.len();
+                    found.push(f);
+                }
+                carried_cut = Some(head);
             }
         }
-        found.sort_by_key(|f| f.range.start);
-        let found = if index.numbered {
-            merge_adjacent(&page.text, found, &index)
-        } else {
-            found
-        };
         let mut byte_cursor = 0usize;
         let mut char_cursor = 0usize;
         for f in found {
@@ -6734,6 +7539,929 @@ mod tests {
             let entry = parsed("[4] Mistral AI. Mistral ocr, 2025.", Some("[4]"));
             assert_eq!(entry.title.as_deref(), Some("Mistral ocr"));
             assert_eq!(entry.year, Some(2025));
+        }
+    }
+
+    /// Loop 8 marker recall (docs/analysis/markers-loop8-2026-09-28.md):
+    /// comma-separated clauses, multi-token names, page-break groups,
+    /// superscripts and detached label columns.
+    mod loop8_marker_tests {
+        use super::super::{
+            RefIndex, author_full_key, author_year_markers, extract_citations,
+            find_citation_markers, superscript_attached,
+        };
+        use super::{bare_line, line_at, page_of};
+        use crate::schema::{PageText, ReferenceEntry};
+
+        /// An entry with the author strings as the parser gives them.
+        fn entry(index: u32, authors: &[&str], year: u16, raw: &str) -> ReferenceEntry {
+            ReferenceEntry {
+                index,
+                raw: raw.to_string(),
+                authors: authors.iter().map(|a| (*a).to_string()).collect(),
+                year: Some(year),
+                page: 9,
+                ..ReferenceEntry::default()
+            }
+        }
+
+        /// `[1]` ... `[n]` entries.
+        fn numbered_refs(n: u32) -> Vec<ReferenceEntry> {
+            (1..=n)
+                .map(|k| ReferenceEntry {
+                    index: k,
+                    label: Some(format!("[{k}]")),
+                    raw: format!("[{k}] A. Author. Title {k}. Venue, 2020."),
+                    year: Some(2020),
+                    page: 9,
+                    ..ReferenceEntry::default()
+                })
+                .collect()
+        }
+
+        /// A page whose text is `text` (no lines needed for marker search).
+        fn text_page(number: u32, text: &str) -> PageText {
+            let mut page = PageText::new(number, 612.0, 792.0, 0);
+            page.text = text.to_string();
+            page
+        }
+
+        /// Author-year markers in `text` as (marker text, targets).
+        fn found_in(text: &str, index: &RefIndex) -> Vec<(String, Vec<u32>)> {
+            let mut found = author_year_markers(text, &(0..text.len()), index);
+            found.sort_by_key(|f| f.range.start);
+            found.into_iter().map(|f| (f.text, f.targets)).collect()
+        }
+
+        fn one(text: &str, targets: &[u32]) -> Vec<(String, Vec<u32>)> {
+            vec![(text.to_string(), targets.to_vec())]
+        }
+
+        /// arXiv:2602.16061, 2504.10389, 2508.02208, 2401.15719: clauses
+        /// split on a comma after a year; letter lists, year lists and
+        /// locators resolve every year and letter.
+        #[test]
+        fn comma_clauses_year_lists_letter_lists_and_locators() {
+            let refs = vec![
+                entry(
+                    1,
+                    &["Rubin DB"],
+                    1976,
+                    "Rubin DB (1976) Inference and missing data.",
+                ),
+                entry(
+                    2,
+                    &["Robins JM", "Rotnitzky A"],
+                    1994,
+                    "Robins JM, Rotnitzky A, Zhao LP (1994) Estimation.",
+                ),
+                entry(
+                    3,
+                    &["Qin J", "Shao J"],
+                    2008,
+                    "Qin J, Shao J, Zhang B (2008) Efficient imputation.",
+                ),
+                entry(
+                    4,
+                    &["Banerjee S", "Gkatzelis V"],
+                    2022,
+                    "Banerjee S, Gkatzelis V, Gorokh A, Jin B (2022) Online Nash.",
+                ),
+                entry(
+                    5,
+                    &["Banerjee S", "Gkatzelis V"],
+                    2023,
+                    "Banerjee S, Gkatzelis V, Hossain S (2023a) Proportionally fair.",
+                ),
+                entry(
+                    6,
+                    &["Banerjee S", "Hssaine C"],
+                    2023,
+                    "Banerjee S, Hssaine C, Sinclair SR (2023b) Online fair allocation.",
+                ),
+                entry(
+                    7,
+                    &["Barman S", "Khan A"],
+                    2022,
+                    "Barman S, Khan A, Maiti A (2022) Universal and tight.",
+                ),
+                entry(
+                    8,
+                    &["Politis DN", "Romano JP"],
+                    1994,
+                    "Politis DN, Romano JP (1994) Large sample confidence regions.",
+                ),
+                entry(9, &["OpenAI"], 2024, "OpenAI. 2024. GPT-4o."),
+                entry(10, &["OpenAI"], 2025, "OpenAI. 2025a. Introducing GPT-4.1."),
+                entry(11, &["OpenAI"], 2025, "OpenAI. 2025b. Introducing o4-mini."),
+                entry(12, &["OpenAI"], 2025, "OpenAI. 2025c. OpenAI o3."),
+                entry(
+                    13,
+                    &["Doan TT"],
+                    2021,
+                    "Doan TT (2021) Finite-time analysis.",
+                ),
+                entry(
+                    14,
+                    &["Doan TT"],
+                    2022,
+                    "Doan TT (2022) Nonlinear two-time-scale.",
+                ),
+            ];
+            let index = RefIndex::build(&refs, &[]);
+
+            let text = "(Rubin 1976, Robins et al. 1994, Qin et al. 2008)";
+            assert_eq!(found_in(text, &index), one(text, &[1, 2, 3]));
+            // Layout debris between clauses does not stop the scan.
+            let text = "(Rubin 1976, Robins et al. 1994,\n⊥⊥\nQin et al. 2008)";
+            assert_eq!(found_in(text, &index), one(text, &[1, 2, 3]));
+            // A letter list stays with its author.
+            let text = "(Banerjee et al. 2023a,b, Barman et al. 2022)";
+            assert_eq!(found_in(text, &index), one(text, &[5, 6, 7]));
+            // A year list: every year of the author resolves.
+            let text = "(Jin\nand Ma 2022, Banerjee et al. 2022, 2023a)";
+            assert_eq!(found_in(text, &index), one(text, &[4, 5]));
+            let text = "(Gupta\net al. 2019, Doan 2021, 2022)";
+            assert_eq!(found_in(text, &index), one(text, &[13, 14]));
+            // Letters in any order, then a further year.
+            let text = "(OpenAI 2025c,b,a, 2024)";
+            assert_eq!(found_in(text, &index), one(text, &[12, 11, 10, 9]));
+            // A narrative citation with a locator.
+            let text = "Politis and Romano (1994, Theorem 3.1)";
+            assert_eq!(found_in(text, &index), one(text, &[8]));
+            let text = "as in Doan (2021, 2022).";
+            assert_eq!(found_in(text, &index), one("Doan (2021, 2022)", &[13, 14]));
+
+            // A parenthetical without a resolvable clause is a marker only in
+            // the strict `Name, 2020` form.
+            assert!(found_in("(Received March 2020)", &index).is_empty());
+            assert_eq!(found_in("(Smith, 2020)", &index), one("(Smith, 2020)", &[]));
+        }
+
+        /// arXiv:2508.02208, 2602.16061, 2401.15719, 2603.05575, 2603.12824,
+        /// 2601.12491: multi-token, particle and organisation first authors
+        /// match the whole first-author name, exact matches first.
+        #[test]
+        fn multi_token_particle_and_organisation_names() {
+            let refs = vec![
+                entry(
+                    1,
+                    &["Alibaba Cloud Qwen Team"],
+                    2025,
+                    "Alibaba Cloud Qwen Team. 2025a. Qwen3-30B-A3B.",
+                ),
+                entry(
+                    2,
+                    &["Alibaba Cloud Qwen Team"],
+                    2025,
+                    "Alibaba Cloud Qwen Team. 2025b. QwQ-32B.",
+                ),
+                entry(
+                    3,
+                    &["Qwen Team, A. C."],
+                    2024,
+                    "Qwen Team, A. C. 2024. Qwen2.5-72B-Instruct.",
+                ),
+                entry(
+                    4,
+                    &["Qwen Team, A. C."],
+                    2025,
+                    "Qwen Team, A. C. 2025. Qwen3-235B-A22B.",
+                ),
+                entry(5, &["Nomic AI"], 2024, "Nomic AI. 2024. multimodal-7b."),
+                entry(
+                    6,
+                    &[],
+                    2021,
+                    "de Moura, L.; and Ullrich, S. 2021. The Lean 4 Theorem Prover.",
+                ),
+                entry(
+                    7,
+                    &["Van Roy B"],
+                    2006,
+                    "Van Roy B (2006) Performance loss bounds.",
+                ),
+                entry(
+                    8,
+                    &["De Vito, E.", "Rosasco, L."],
+                    2005,
+                    "De Vito, E., Rosasco, L., and Caponnetto, A. (2005). Model selection.",
+                ),
+                entry(
+                    9,
+                    &["Tchetgen Tchetgen EJ"],
+                    2010,
+                    "Tchetgen Tchetgen EJ (2010) Doubly robust estimation.",
+                ),
+                entry(
+                    10,
+                    &["Omar El Malki", "Manoel Horta Ribeiro"],
+                    2023,
+                    "Omar El Malki and Manoel Horta Ribeiro. 2023. Bonsai.",
+                ),
+                entry(
+                    11,
+                    &["Tsitsiklis J"],
+                    1996,
+                    "Tsitsiklis J, Van Roy B (1996) Analysis of temporal-difference learning.",
+                ),
+                entry(
+                    12,
+                    &["Caponnetto, A.", "De Vito, E."],
+                    2007,
+                    "Caponnetto, A. and De Vito, E. (2007). Optimal rates.",
+                ),
+                entry(
+                    13,
+                    &["Miao W"],
+                    2016,
+                    "Miao W, Tchetgen Tchetgen EJ (2016) On varieties.",
+                ),
+            ];
+            let index = RefIndex::build(&refs, &[]);
+
+            let text = "(Alibaba Cloud Qwen Team 2025a)";
+            assert_eq!(found_in(text, &index), one(text, &[1]));
+            // `qwen team` matches its own entry exactly, not the Alibaba
+            // entries that end with it.
+            let text = "(Qwen Team 2025)";
+            assert_eq!(found_in(text, &index), one(text, &[4]));
+            let text = "(Qwen Team\n2024, 2025; Alibaba Cloud Qwen Team 2025b)";
+            assert_eq!(found_in(text, &index), one(text, &[3, 4, 2]));
+            let text = "(Nomic AI 2024)";
+            assert_eq!(found_in(text, &index), one(text, &[5]));
+            let text = "(de Moura and Ullrich 2021; x)";
+            assert_eq!(found_in(text, &index), one(text, &[6]));
+            let text = "(De Vito et al. 2005)";
+            assert_eq!(found_in(text, &index), one(text, &[8]));
+            let text = "(El Malki et al., 2023)";
+            assert_eq!(found_in(text, &index), one(text, &[10]));
+            let text = "(Tsitsiklis and Van Roy\n1996)";
+            assert_eq!(found_in(text, &index), one(text, &[11]));
+            let text = "(Caponnetto and De Vito, 2007)";
+            assert_eq!(found_in(text, &index), one(text, &[12]));
+            let text = "(Miao and Tchetgen Tchetgen\n2016)";
+            assert_eq!(found_in(text, &index), one(text, &[13]));
+            let text = "Tchetgen Tchetgen (2010)";
+            assert_eq!(found_in(text, &index), one(text, &[9]));
+            // A capitalised word before the name is not part of the marker.
+            assert_eq!(
+                found_in("In Van Roy (2006) the bound", &index),
+                one("Van Roy (2006)", &[7])
+            );
+
+            assert_eq!(
+                author_full_key("Tchetgen Tchetgen EJ").as_deref(),
+                Some("tchetgen tchetgen")
+            );
+            assert_eq!(
+                author_full_key("Alibaba Cloud Qwen Team").as_deref(),
+                Some("alibaba cloud qwen team")
+            );
+            assert_eq!(author_full_key("E. J. Van Roy").as_deref(), Some("van roy"));
+            assert_eq!(author_full_key("Qwen Team, A. C."), None);
+            assert_eq!(author_full_key("Rubin DB"), None);
+        }
+
+        /// arXiv:2508.02208: three or more authors before the year.
+        #[test]
+        fn three_or_more_authors() {
+            let refs = vec![
+                entry(
+                    1,
+                    &["Nipkow, T.", "Paulson, L. C.", "Wenzel, M."],
+                    2002,
+                    "Nipkow, T.; Paulson, L. C.; and Wenzel, M. 2002. Isabelle/HOL.",
+                ),
+                entry(
+                    2,
+                    &["Zheng, K.", "Han, J. M.", "Polu, S."],
+                    2022,
+                    "Zheng, K.; Han, J. M.; and Polu, S. 2022. MiniF2F.",
+                ),
+            ];
+            let index = RefIndex::build(&refs, &[]);
+            let text = "(Nipkow, Paulson, and Wenzel 2002)";
+            assert_eq!(found_in(text, &index), one(text, &[1]));
+            let text = "(Zheng, Han,\nand Polu 2022; Nipkow,\nPaulson, and Wenzel 2002)";
+            assert_eq!(found_in(text, &index), one(text, &[2, 1]));
+            let text = "Zheng, Han, and Polu (2022)";
+            assert_eq!(found_in(text, &index), one(text, &[2]));
+        }
+
+        /// arXiv:2410.17124, 2501.17300, 2509.17930: `et al` without a
+        /// period, and `et al.` citations without parentheses that resolve.
+        #[test]
+        fn et_al_without_period_and_bare_citations() {
+            let refs = vec![
+                entry(
+                    1,
+                    &["Duan, J."],
+                    2020,
+                    "Duan, J. et al. (2020). Primary study.",
+                ),
+                entry(2, &["Liu, X."], 2020, "Liu, X. et al. (2020). Deep study."),
+                entry(
+                    3,
+                    &["Alexander, J."],
+                    2015,
+                    "Alexander, J. et al. (2015). Epistemic.",
+                ),
+                entry(
+                    4,
+                    &["Barrault, L."],
+                    2023,
+                    "Barrault, L. et al. (2023). SeamlessM4T.",
+                ),
+            ];
+            let index = RefIndex::build(&refs, &[]);
+            assert_eq!(
+                found_in("Good\nDuan et al 2020\nGood", &index),
+                one("Duan et al 2020", &[1])
+            );
+            assert_eq!(
+                found_in("Liu et al (2020) show", &index),
+                one("Liu et al (2020)", &[2])
+            );
+            assert_eq!(
+                found_in("As Alexander et al. 2015 put it", &index),
+                one("Alexander et al. 2015", &[3])
+            );
+            assert_eq!(
+                found_in("text-to-\nBarrault et al., 2023). See", &index),
+                one("Barrault et al., 2023", &[4])
+            );
+            assert!(found_in("Nobody et al 2020 is unknown", &index).is_empty());
+        }
+
+        /// arXiv:2602.16061, 2503.00030 (`(Gui and` / `Toubia 2023)`) and
+        /// 2510.26824 (`[6, 7, …` / `41]`): a group left open at a page end
+        /// is read across the break and reported where it starts.
+        #[test]
+        fn groups_open_at_a_page_end_continue_on_the_next_page() {
+            let refs = vec![
+                entry(
+                    1,
+                    &["Horton JJ"],
+                    2023,
+                    "Horton JJ (2023) Large language models.",
+                ),
+                entry(
+                    2,
+                    &["Goli A", "Singh A"],
+                    2024,
+                    "Goli A, Singh A (2024) Frontiers.",
+                ),
+                entry(
+                    3,
+                    &["Brand J", "Israeli A"],
+                    2024,
+                    "Brand J, Israeli A, Ngwe D (2024) Using LLMs.",
+                ),
+                entry(
+                    4,
+                    &["Gui G", "Toubia O"],
+                    2023,
+                    "Gui G, Toubia O (2023) The challenge.",
+                ),
+                entry(
+                    5,
+                    &["Li P", "Castelo N"],
+                    2024,
+                    "Li P, Castelo N (2024) Frontiers.",
+                ),
+            ];
+            let pages = vec![
+                text_page(1, "Prior work (Horton 2023, Goli and Singh 2024, Brand"),
+                text_page(2, "et al. 2024) shows. Later (Gui and"),
+                text_page(3, "Toubia 2023, Li et al. 2024) too."),
+            ];
+            let markers = find_citation_markers(&pages, &refs);
+            let got: Vec<(u32, u32, &str, Vec<u32>)> = markers
+                .iter()
+                .map(|m| (m.page, m.offset, m.text.as_str(), m.targets.clone()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    (
+                        1,
+                        11,
+                        "(Horton 2023, Goli and Singh 2024, Brand\net al. 2024)",
+                        vec![1, 2, 3]
+                    ),
+                    (2, 26, "(Gui and\nToubia 2023, Li et al. 2024)", vec![4, 5]),
+                ]
+            );
+
+            let refs = numbered_refs(10);
+            let pages = vec![
+                text_page(1, "as shown by [6, 7, 8,"),
+                text_page(2, "9, 10] and [2]."),
+            ];
+            let markers = find_citation_markers(&pages, &refs);
+            let got: Vec<(u32, u32, &str, Vec<u32>)> = markers
+                .iter()
+                .map(|m| (m.page, m.offset, m.text.as_str(), m.targets.clone()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    (1, 12, "[6, 7, 8,\n9, 10]", vec![6, 7, 8, 9, 10]),
+                    (2, 11, "[2]", vec![2]),
+                ]
+            );
+        }
+
+        /// arXiv:2510.26824 (RSC): superscript runs attached to a word cite
+        /// the numbered list; powers, units, affiliation marks and pages
+        /// with bracket markers are left alone, and an author-year document
+        /// has no superscript citations.
+        #[test]
+        fn superscript_runs_cite_a_numbered_list() {
+            let mut refs = numbered_refs(11);
+            for entry in &mut refs {
+                let number = entry.index;
+                entry.label = Some(format!("{number}."));
+            }
+            let body = text_page(
+                1,
+                "¹Department of Chemistry\nMaterials discovery underpins the literature.⁵ \
+                 Initiatives such as the Materials Genome Initiative⁵⁻⁷ and\nChemRxiv¹⁰,¹¹, with \
+                 data⁸,⁹ in km² and 10⁵ units.\n³Prein showed it.",
+            );
+            let bracketed = text_page(2, "The SI cites [2] beside word⁴.");
+            let markers = find_citation_markers(&[body, bracketed], &refs);
+            let got: Vec<(u32, &str, Vec<u32>)> = markers
+                .iter()
+                .map(|m| (m.page, m.text.as_str(), m.targets.clone()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    (1, "⁵", vec![5]),
+                    (1, "⁵⁻⁷", vec![5, 6, 7]),
+                    (1, "¹⁰,¹¹", vec![10, 11]),
+                    (1, "⁸,⁹", vec![8, 9]),
+                    (1, "³", vec![3]),
+                    (2, "[2]", vec![2]),
+                ]
+            );
+
+            assert!(superscript_attached("literature.⁵ x", 11, 14));
+            assert!(!superscript_attached("R² value", 1, 3));
+
+            let refs = vec![entry(1, &["Smith, A."], 2020, "Smith, A. (2020). Title.")];
+            let page = text_page(1, "a footnote mark here¹ and Smith (2020).");
+            let markers = find_citation_markers(&[page], &refs);
+            let texts: Vec<&str> = markers.iter().map(|m| m.text.as_str()).collect();
+            assert_eq!(texts, vec!["Smith (2020)"]);
+        }
+
+        /// arXiv:2509.12458 (IEEE): the label column is detached; `[1]` and
+        /// `[2]` sit above `REFERENCES`, and the first label of each column
+        /// block (`[3]`, `[5]`) is at a page top where it repeats like a
+        /// running header. Labels come from the printed `[n]` on each entry's
+        /// row, the entry after a page-top label (`P. De Petris`) is not
+        /// merged into the one before, and the label lines are no markers.
+        #[test]
+        fn detached_labels_are_read_from_their_rows() {
+            let body = page_of(
+                1,
+                vec![line_at(
+                    "UAVs [1] enable inspection [3], [4] and mapping [6].",
+                    0,
+                    72.0,
+                    400.0,
+                )],
+            );
+            let list = page_of(
+                2,
+                vec![
+                    line_at("[1]", 0, 50.0, 600.0),
+                    line_at("[2]", 0, 50.0, 570.0),
+                    line_at("REFERENCES", 1, 120.0, 620.0),
+                    line_at(
+                        "M. Mozaffari, X. Lin, and S. Hayes, “Toward 6g with connected sky:",
+                        1,
+                        66.0,
+                        600.0,
+                    ),
+                    line_at(
+                        "Uavs and beyond,” IEEE Communications Magazine, vol. 59, no. 12,",
+                        1,
+                        66.0,
+                        590.0,
+                    ),
+                    line_at("pp. 74–80, 2021.", 1, 66.0, 580.0),
+                    line_at(
+                        "B. Rinner, C. Bettstetter, H. Hellwagner, and S. Weiss, “Multidrone",
+                        1,
+                        66.0,
+                        570.0,
+                    ),
+                    line_at(
+                        "systems: More than the sum of the parts,” Computer, vol. 54, no. 5,",
+                        1,
+                        66.0,
+                        560.0,
+                    ),
+                    line_at("pp. 34–43, 2021.", 1, 66.0, 550.0),
+                    line_at("[3]", 2, 310.0, 740.0),
+                    line_at("[4]", 2, 310.0, 710.0),
+                    line_at(
+                        "P. De Petris, H. Nguyen, M. Dharmadhikari, et al., “Rmf-owl: A",
+                        3,
+                        326.0,
+                        740.0,
+                    ),
+                    line_at(
+                        "collision-tolerant flying robot for autonomous subterranean exploration,”",
+                        3,
+                        326.0,
+                        730.0,
+                    ),
+                    line_at("in Proc. ICUAS, IEEE, 2022, pp. 536–543.", 3, 326.0, 720.0),
+                    line_at(
+                        "Z. Xu, L. Wu, M. Gerke, R. Wang, and H. Yang, “Skeletal camera",
+                        3,
+                        326.0,
+                        710.0,
+                    ),
+                    line_at(
+                        "network embedded structure-from-motion,” ISPRS, vol. 121, pp. 113–127, 2016.",
+                        3,
+                        326.0,
+                        700.0,
+                    ),
+                ],
+            );
+            let next = page_of(
+                3,
+                vec![
+                    line_at("[5]", 0, 50.0, 740.0),
+                    line_at("[6]", 0, 50.0, 720.0),
+                    line_at(
+                        "T. Schenk, “Introduction to photogrammetry,” The Ohio State University,",
+                        1,
+                        66.0,
+                        740.0,
+                    ),
+                    line_at("Columbus, Tech. Rep., 2005.", 1, 66.0, 730.0),
+                    line_at(
+                        "L. Kovanič, B. Topitzer, and M. Blištanová, “Review of photogrammetric",
+                        1,
+                        66.0,
+                        720.0,
+                    ),
+                    line_at(
+                        "and lidar applications of uav,” Applied Sciences, vol. 13, p. 6732, 2023.",
+                        1,
+                        66.0,
+                        710.0,
+                    ),
+                ],
+            );
+            let (refs, markers) = extract_citations(&[body, list, next]);
+
+            let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+            assert_eq!(labels, vec!["[1]", "[2]", "[3]", "[4]", "[5]", "[6]"]);
+            assert!(refs[0].raw.starts_with("M. Mozaffari"));
+            assert_eq!(
+                refs[1].raw,
+                "B. Rinner, C. Bettstetter, H. Hellwagner, and S. Weiss, “Multidrone systems: \
+                 More than the sum of the parts,” Computer, vol. 54, no. 5, pp. 34–43, 2021."
+            );
+            assert!(refs[2].raw.starts_with("P. De Petris"));
+            assert!(refs[3].raw.starts_with("Z. Xu"));
+            assert!(refs[4].raw.starts_with("T. Schenk"));
+            assert!(refs[5].raw.starts_with("L. Kovanič"));
+
+            let got: Vec<(u32, &str, Vec<u32>)> = markers
+                .iter()
+                .map(|m| (m.page, m.text.as_str(), m.targets.clone()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    (1, "[1]", vec![1]),
+                    (1, "[3], [4]", vec![3, 4]),
+                    (1, "[6]", vec![6]),
+                ]
+            );
+        }
+
+        /// Without positions, labels set above the heading still number the
+        /// entries before the first label of the list.
+        #[test]
+        fn labels_above_the_heading_prefix_the_detached_labels() {
+            let page = page_of(
+                1,
+                vec![
+                    bare_line("[1]"),
+                    bare_line("[2]"),
+                    bare_line("References"),
+                    bare_line("A. Author, “First title,” Journal One, vol. 1, pp. 1–2, 2020."),
+                    bare_line("B. Writer, “Second title,” Journal Two, vol. 2, pp. 3–4, 2021."),
+                    bare_line("[3]"),
+                    bare_line("[4]"),
+                    bare_line("[5]"),
+                    bare_line("C. Third, “Third title,” Journal Three, vol. 3, pp. 5–6, 2022."),
+                    bare_line("D. Fourth, “Fourth title,” Journal Four, vol. 4, pp. 7–8, 2023."),
+                    bare_line("E. Fifth, “Fifth title,” Journal Five, vol. 5, pp. 9–10, 2024."),
+                ],
+            );
+            let (refs, _) = extract_citations(&[page]);
+            let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+            assert_eq!(labels, vec!["[1]", "[2]", "[3]", "[4]", "[5]"]);
+            assert!(refs[2].raw.starts_with("C. Third"));
+        }
+    }
+
+    mod loop9_title_tests {
+        use super::parsed;
+
+        /// IEEE author lists with abbreviated particles (`A. v. Niekerk`,
+        /// `O. v. d. Heide`, `E. d. Weerdt`) run to the quoted title
+        /// (arxiv 2608.28714).
+        #[test]
+        fn ieee_particles_stay_in_the_author_list() {
+            let entry = parsed(
+                "[44] S. Schauman, A. v. Niekerk, O. Norbeck, H. Rydén, E. Avventi, and S. \
+                 Skare, “An exploration of motion-sampling interactions in 3D MRI for \
+                 neuroimaging,” Magnetic resonance in medicine, 2026, pMID: 41204061.",
+                Some("[44]"),
+            );
+            assert_eq!(
+                entry.authors,
+                vec![
+                    "S. Schauman",
+                    "A. v. Niekerk",
+                    "O. Norbeck",
+                    "H. Rydén",
+                    "E. Avventi",
+                    "S. Skare"
+                ]
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("An exploration of motion-sampling interactions in 3D MRI for neuroimaging")
+            );
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Magnetic resonance in medicine")
+            );
+            assert_eq!(entry.year, Some(2026));
+
+            let entry = parsed(
+                "[70] J. E. Vranic, N. M. Cross, Y. Wang, D. S. Hippe, E. d. Weerdt, and M. \
+                 Mossa-Basha, “Compressed sensing-sensitivity encoding (cs-SENSE) accelerated \
+                 brain imaging: Reduced scan time without reduced image quality,” AJNR. \
+                 American journal of neuroradiology, 2019, pMID: 30523142.",
+                Some("[70]"),
+            );
+            assert_eq!(entry.authors.len(), 6);
+            assert_eq!(entry.authors[4], "E. d. Weerdt");
+            assert_eq!(
+                entry.title.as_deref(),
+                Some(
+                    "Compressed sensing-sensitivity encoding (cs-SENSE) accelerated brain \
+                     imaging: Reduced scan time without reduced image quality"
+                )
+            );
+
+            let entry = parsed(
+                "[192] H. Liu, E. Versteeg, M. Fuderer, O. v. d. Heide, M. B. Schilder, C. A. \
+                 T. v. d. Berg, and A. Sbrizzi, “Time-efficient, high-resolution 3t \
+                 whole-brain relaxometry using cartesian 3D MR spin tomography in time-domain \
+                 (MR-stat) with cerebrospinal fluid suppression,” Magnetic resonance in \
+                 medicine, 2025, pMID: 39607873.",
+                Some("[192]"),
+            );
+            assert_eq!(entry.authors.len(), 7);
+            assert_eq!(entry.authors[3], "O. v. d. Heide");
+            assert_eq!(entry.authors[5], "C. A. T. v. d. Berg");
+            assert!(
+                entry
+                    .title
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with("Time-efficient, high-resolution 3t")),
+                "{:?}",
+                entry.title
+            );
+        }
+
+        /// A lowercase initial whose accented capital was lost (`c. Öztürk`)
+        /// and accents extracted as combining marks (`Martı́`, `Ramı́rez`) do
+        /// not end the author list (arxiv 2608.28714).
+        #[test]
+        fn ieee_accented_names_stay_in_the_author_list() {
+            let entry = parsed(
+                "[13] A. Güngör, S. U. Dar, c. Öztürk, Y. Korkmaz, H. A. Bedel, G. Elmas, M. \
+                 Ozbey, and T. Çukur, “Adaptive diffusion priors for accelerated MRI \
+                 reconstruction,” Medical image analysis,",
+                Some("[13]"),
+            );
+            assert_eq!(entry.authors.len(), 8);
+            assert_eq!(entry.authors[2], "c. Öztürk");
+            assert_eq!(entry.authors[7], "T. Çukur");
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Adaptive diffusion priors for accelerated MRI reconstruction")
+            );
+            assert_eq!(entry.venue.as_deref(), Some("Medical image analysis"));
+
+            let entry = parsed(
+                "[199] T. Sanchez, V. Zalevskyi, A. Mihailov, G. Mart\u{131}\u{301} Juan, E. \
+                 Eixarch, A. Jakab, V. Dunet, M. Koob, G. Auzias, and M. Bach Cuadra, \
+                 “Automatic quality control in multi-centric fetal brain MRI super-resolution \
+                 reconstruction,” Perinatal, Preterm and Paediatric Image Analysis, 2026.",
+                Some("[199]"),
+            );
+            assert_eq!(entry.authors.len(), 10);
+            assert_eq!(entry.authors[3], "G. Mart\u{131}\u{301} Juan");
+            assert_eq!(
+                entry.title.as_deref(),
+                Some(
+                    "Automatic quality control in multi-centric fetal brain MRI \
+                     super-resolution reconstruction"
+                )
+            );
+
+            let entry = parsed(
+                "[296] S. Verclytte, G. Beaugrard, D. Nickel, V. Muñoz-Ram\u{131}\u{301}rez, L. \
+                 Norberciak, M. Boissel, V. Chaton, and A. Kwiatkowski, “Deep \
+                 learning–accelerated 3d FLAIR enables reliable MS lesion detection,” \
+                 American Journal of Neuroradiology, vol. 47, pp. 1560–1568, 2026.",
+                Some("[296]"),
+            );
+            assert_eq!(entry.authors.len(), 8);
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Deep learning–accelerated 3d FLAIR enables reliable MS lesion detection")
+            );
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("American Journal of Neuroradiology")
+            );
+            assert_eq!(entry.volume.as_deref(), Some("47"));
+            assert_eq!(entry.pages.as_deref(), Some("1560–1568"));
+        }
+
+        /// A name the strict name test does not know (`M. d'Aspremont`)
+        /// still belongs to the authors when a quoted title follows.
+        #[test]
+        fn quoted_title_after_loose_names_starts_at_the_quote() {
+            let entry = parsed(
+                "[5] A. Smith, M. d'Aspremont, and B. Jones, “Sparse principal component \
+                 analysis,” SIAM Review, vol. 49, no. 3, pp. 434–448, 2007.",
+                Some("[5]"),
+            );
+            assert_eq!(
+                entry.authors,
+                vec!["A. Smith", "M. d'Aspremont", "B. Jones"]
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Sparse principal component analysis")
+            );
+            assert_eq!(entry.venue.as_deref(), Some("SIAM Review"));
+        }
+
+        /// `unsrt`-like `Authors, Title (year).` and a title followed by
+        /// `arXiv preprint arXiv:...` (arxiv 2603.04447, 2602.16061,
+        /// 2410.19245).
+        #[test]
+        fn trailing_year_and_arxiv_preprint_leave_the_title() {
+            let entry = parsed(
+                "[22] S. Qin, K. Xu, S. Liao, A paradox concerning the numerical simulation of \
+                 Navier-Stokes turbulence (2026). arXiv:2510.11220. URL \
+                 https://arxiv.org/abs/2510.11220",
+                Some("[22]"),
+            );
+            assert_eq!(entry.authors, vec!["S. Qin", "K. Xu", "S. Liao"]);
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("A paradox concerning the numerical simulation of Navier-Stokes turbulence")
+            );
+            assert_eq!(entry.year, Some(2026));
+            assert_eq!(entry.arxiv_id.as_deref(), Some("2510.11220"));
+
+            let entry = parsed(
+                "Li S, Wang C, Wang J (2025) Choosing the better bandit algorithm under data \
+                 sharing: When do a/b experiments work? arXiv preprint arXiv:2507.11891 .",
+                None,
+            );
+            assert_eq!(entry.authors, vec!["Li S", "Wang C", "Wang J"]);
+            assert_eq!(
+                entry.title.as_deref(),
+                Some(
+                    "Choosing the better bandit algorithm under data sharing: When do a/b \
+                     experiments work?"
+                )
+            );
+            assert_eq!(entry.arxiv_id.as_deref(), Some("2507.11891"));
+            assert_eq!(entry.year, Some(2025));
+
+            let entry = parsed(
+                "[24] Raymond Li, Loubna Ben Allal, Yangtian Zi, Niklas Muennighoff, Denis \
+                 Kocetkov, Chenghao Mou, Marc Marone, Christopher Akiki, Jia Li, Jenny Chim, et \
+                 al. 2023. Starcoder: may the source be with you! arXiv preprint \
+                 arXiv:2305.06161 (2023).",
+                Some("[24]"),
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Starcoder: may the source be with you!")
+            );
+            assert_eq!(entry.arxiv_id.as_deref(), Some("2305.06161"));
+        }
+
+        /// A book title keeps its own words; `volume N of Series` names the
+        /// series as the venue (arxiv 2603.05575).
+        #[test]
+        fn book_series_goes_to_the_venue() {
+            let entry = parsed(
+                "Engl, H. W., Hanke, M., and Neubauer, A. (1996). Regularization of Inverse \
+                 Problems, volume 375 of Mathematics and Its Applications. Kluwer Academic \
+                 Publishers, Dordrecht.",
+                None,
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Regularization of Inverse Problems")
+            );
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Mathematics and Its Applications")
+            );
+            assert_eq!(entry.volume.as_deref(), Some("375"));
+            assert_eq!(entry.year, Some(1996));
+
+            let entry = parsed(
+                "Wainwright, M. J. (2019). High-Dimensional Statistics: A Non-Asymptotic \
+                 Viewpoint, volume 48. Cambridge University Press.",
+                None,
+            );
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("High-Dimensional Statistics: A Non-Asymptotic Viewpoint")
+            );
+            assert_eq!(entry.venue.as_deref(), Some("Cambridge University Press"));
+            assert_eq!(entry.volume.as_deref(), Some("48"));
+        }
+
+        /// A ditto dash stands for the previous authors; the quoted title
+        /// follows it (arxiv 2608.28714, 2512.10223).
+        #[test]
+        fn ditto_dash_entry_keeps_its_quoted_title() {
+            let entry = parsed(
+                "[52] ——, “Regulation (EU) 2017/745 on medical devices (Medical Device \
+                 Regulation),” Official Journal of the European Union, L 117, 5 May 2017, 2017.",
+                Some("[52]"),
+            );
+            assert!(entry.authors.is_empty());
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Regulation (EU) 2017/745 on medical devices (Medical Device Regulation)")
+            );
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Official Journal of the European Union")
+            );
+            assert_eq!(entry.year, Some(2017));
+
+            let entry = parsed(
+                "[18] ——, “Segmented GRAND: Complexity reduction through sub-pattern \
+                 combination,” IEEE Trans. Commun., vol. 73, no. 8, pp. 5607–5620, 2025.",
+                Some("[18]"),
+            );
+            assert!(entry.authors.is_empty());
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Segmented GRAND: Complexity reduction through sub-pattern combination")
+            );
+            assert_eq!(entry.volume.as_deref(), Some("73"));
+        }
+
+        /// A regulation without authors: the leading clause is the title
+        /// (the unquoted form of the 2608.28714 entry).
+        #[test]
+        fn regulation_without_authors_titles_the_leading_clause() {
+            let entry = parsed(
+                "Regulation (EU) 2017/745 on medical devices (Medical Device Regulation). \
+                 Official Journal of the European Union, L 117, 5 May 2017.",
+                None,
+            );
+            assert!(entry.authors.is_empty());
+            assert_eq!(
+                entry.title.as_deref(),
+                Some("Regulation (EU) 2017/745 on medical devices (Medical Device Regulation)")
+            );
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Official Journal of the European Union")
+            );
         }
     }
 }
