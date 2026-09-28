@@ -73,6 +73,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use pdfium_render::prelude::{
     PdfDocument, PdfDocumentMetadataTagType, PdfMatrix, PdfPageImageObject, PdfPageObject,
@@ -82,7 +83,7 @@ use pdfium_render::prelude::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
-use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest};
+use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest, sha256_hex};
 
 /// The `pdfium` binary release the native CI leg pins. `pdfium` has no
 /// runtime version call (`pdfium-render`'s `version()` only echoes the
@@ -106,6 +107,9 @@ fn version_string() -> String {
 
 /// The `pdfium` extractor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Upper bound on distinct image bytes retained by one session (256 MiB).
+const FIGURE_BYTES_CAP: usize = 256 * 1024 * 1024;
+
 pub struct PdfiumBackend {
     /// Directory holding `libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`.
     /// `None` tries `$PDFIUM_DYNAMIC_LIB_PATH` (a directory or the file
@@ -151,12 +155,38 @@ impl Extractor for PdfiumBackend {
         let page_count = u32::from(doc.pages().len());
         let info = read_info(&doc);
         let mut pages: Vec<Result<PageText, String>> = Vec::new();
-        let mut figure_bytes: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
+        // Image streams are retained once per distinct content (a PDF often
+        // reuses one XObject on many pages) and only up to
+        // `FIGURE_BYTES_CAP` in total; beyond that the figure record keeps
+        // its geometry and hash but no bytes, and the page says so.
+        let mut blobs: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
+        let mut figure_keys: HashMap<(u32, u32), String> = HashMap::new();
+        let mut retained: usize = 0;
         for page in 1..=page_count {
             match extract_numbered(&doc, page) {
-                Ok(extracted) => {
+                Ok(mut extracted) => {
                     for (figure_index, data) in extracted.figures {
-                        figure_bytes.insert((page, figure_index), data);
+                        let key = sha256_hex(&data);
+                        if let Some(figure) = extracted
+                            .page
+                            .figures
+                            .iter_mut()
+                            .find(|f| f.index == figure_index)
+                        {
+                            figure.sha256 = Some(key.clone());
+                        }
+                        if blobs.contains_key(&key) {
+                            figure_keys.insert((page, figure_index), key);
+                        } else if retained + data.len() <= FIGURE_BYTES_CAP {
+                            retained += data.len();
+                            blobs.insert(key.clone(), Arc::new(data));
+                            figure_keys.insert((page, figure_index), key);
+                        } else {
+                            extracted.page.warnings.push(format!(
+                                "figure {figure_index}: bytes not retained (cap of {} MiB reached)",
+                                FIGURE_BYTES_CAP / (1024 * 1024)
+                            ));
+                        }
                     }
                     pages.push(Ok(extracted.page));
                 }
@@ -167,7 +197,8 @@ impl Extractor for PdfiumBackend {
             page_count,
             info,
             pages,
-            figure_bytes,
+            blobs,
+            figure_keys,
         }))
     }
 }
@@ -288,7 +319,10 @@ struct PdfiumSession {
     /// of the failure that page hit.
     pages: Vec<Result<PageText, String>>,
     /// Raw image bytes keyed by `(page, figure index)`, handed out once.
-    figure_bytes: HashMap<(u32, u32), Vec<u8>>,
+    /// Distinct image streams by SHA-256, shared by every figure that uses them.
+    blobs: HashMap<String, Arc<Vec<u8>>>,
+    /// Figure (page, index) -> key into `blobs`.
+    figure_keys: HashMap<(u32, u32), String>,
 }
 
 impl DocumentSession for PdfiumSession {
@@ -317,7 +351,9 @@ impl DocumentSession for PdfiumSession {
     }
 
     fn take_figure_bytes(&mut self, page: u32, index: u32) -> Option<Vec<u8>> {
-        self.figure_bytes.remove(&(page, index))
+        let key = self.figure_keys.remove(&(page, index))?;
+        let blob = self.blobs.get(&key)?;
+        Some(blob.as_ref().clone())
     }
 }
 
