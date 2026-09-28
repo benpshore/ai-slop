@@ -46,6 +46,9 @@ const ACCENT_RISE: f32 = 1.5;
 /// Lowest an accent glyph sits below the baseline of its letter (multiple of
 /// the size); absorbs rounding in the accent's placement.
 const ACCENT_DIP: f32 = 0.1;
+/// How far below its letter's baseline a below-base mark (cedilla, ogonek)
+/// may sit, in multiples of the font size.
+const ACCENT_DIP_BELOW: f32 = 0.6;
 /// Horizontal slack when matching an accent's centre to the glyph span under
 /// it (multiple of the size); bridges kerning between two spans of one word.
 const ACCENT_SLACK: f32 = 0.1;
@@ -325,6 +328,11 @@ fn baseline_window(builds: &[LineBuild], low: f32, high: f32) -> (usize, usize) 
     (start, end.max(start))
 }
 
+/// Marks that hang below the letter (cedilla, ogonek) rather than above it.
+fn is_below_mark(marks: &str) -> bool {
+    !marks.is_empty() && marks.chars().all(|c| matches!(c, '\u{0327}' | '\u{0328}'))
+}
+
 /// The line an accent glyph with `bbox` sits over: its baseline at most
 /// `ACCENT_RISE` sizes below the accent's (or `ACCENT_DIP` above it) and one
 /// of its glyph spans under the accent's centre; the nearest baseline wins.
@@ -334,16 +342,18 @@ fn find_base_line(
     bbox: BBox,
     size: f32,
     largest: f32,
+    below: bool,
 ) -> Option<(usize, usize)> {
     let cx = centre_x(bbox);
+    let dip = if below { ACCENT_DIP_BELOW } else { ACCENT_DIP };
     let low = bbox.y0 - ACCENT_RISE * largest;
-    let high = bbox.y0 + ACCENT_DIP * largest;
+    let high = bbox.y0 + dip * largest;
     let (start, end) = baseline_window(builds, low, high);
     let mut best: Option<(usize, usize, f32)> = None;
     for (offset, line) in builds[start..end].iter().enumerate() {
         let reference = size.max(line.size);
         let rise = bbox.y0 - line.baseline;
-        if !(-ACCENT_DIP * reference..=ACCENT_RISE * reference).contains(&rise) {
+        if !(-dip * reference..=ACCENT_RISE * reference).contains(&rise) {
             continue;
         }
         let Some(m) = base_member(&line.spans, cx, ACCENT_SLACK * reference) else {
@@ -501,7 +511,9 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
     let mut unattached: usize = 0;
     for (i, bbox, marks) in accents {
         let size = span_size(&spans[i], fallback);
-        if let Some((k, base)) = find_base_line(&builds[..glyph_lines], bbox, size, largest) {
+        let below = is_below_mark(&marks);
+        if let Some((k, base)) = find_base_line(&builds[..glyph_lines], bbox, size, largest, below)
+        {
             let line = &mut builds[k];
             line.bbox = union(line.bbox, bbox);
             line.accents.push(Accent {
@@ -1182,5 +1194,17 @@ mod tests {
         let first = page.clone();
         lines_in_backend_order(&mut page);
         assert_eq!(page, first);
+    }
+    #[test]
+    fn cedilla_below_the_baseline_composes() {
+        // "Das" then a cedilla glyph under the s, sitting 0.4 sizes below
+        // the baseline (OT1 puts it well under the letter).
+        let spans = vec![
+            span("Das", 100.0, 700.0, 118.0, 710.0, 0),
+            span("\u{00B8}", 113.0, 696.0, 117.0, 699.0, 1),
+        ];
+        let lines = group_lines(&spans);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].text, "Da\u{015F}");
     }
 }
