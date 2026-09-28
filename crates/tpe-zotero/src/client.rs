@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::fmt;
+use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -353,7 +354,7 @@ pub fn encode_component(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
             out.push(char::from(byte));
         } else {
-            out.push_str(&format!("%{byte:02X}"));
+            let _ = write!(out, "%{byte:02X}");
         }
     }
     out

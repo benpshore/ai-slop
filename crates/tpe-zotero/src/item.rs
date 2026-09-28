@@ -253,7 +253,7 @@ pub fn record_from_fields(
     let pmid = field(&extra, "pmid")
         .filter(|v| v.chars().all(|c| c.is_ascii_digit()))
         .map(str::to_string);
-    let pmcid = field(&extra, "pmcid").and_then(normalize_pmcid);
+    let pmc_id = field(&extra, "pmcid").and_then(normalize_pmcid);
     let venue = venue_fields(item_type)
         .iter()
         .find_map(|name| field(fields, name))
@@ -271,7 +271,7 @@ pub fn record_from_fields(
         doi,
         arxiv_id,
         pmid,
-        pmcid,
+        pmcid: pmc_id,
         url: field(fields, "url").map(str::to_string),
         abstract_text: field(fields, "abstractNote").map(str::to_string),
         source: SOURCE.to_string(),
