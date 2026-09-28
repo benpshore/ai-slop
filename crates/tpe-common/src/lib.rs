@@ -47,7 +47,11 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
         };
         s = s[prefix.len()..].trim();
     }
-    let s = s.trim_end_matches(['.', ',', ';', ')']);
+    let s = s.trim_end_matches(['.', ',', ';']);
+    // A trailing ')' is punctuation only when it is unbalanced; DOIs such as
+    // 10.1002/(SICI)1097-0258(19980815)17:15<1741::AID-SIM868>3.0.CO;2-8 end
+    // in a legitimate ')'-bearing suffix and must be kept intact.
+    let s = trim_unbalanced_paren(s);
     let rest = s.strip_prefix("10.")?;
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if !(4..=9).contains(&digits) || rest.as_bytes().get(digits) != Some(&b'/') {
@@ -58,6 +62,20 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
         return None;
     }
     Some(s.to_ascii_lowercase())
+}
+
+/// Drop trailing `)` characters that have no matching `(` in `s`.
+fn trim_unbalanced_paren(mut s: &str) -> &str {
+    while let Some(stripped) = s.strip_suffix(')') {
+        let opens = s.matches('(').count();
+        let closes = s.matches(')').count();
+        if closes > opens {
+            s = stripped;
+        } else {
+            break;
+        }
+    }
+    s
 }
 
 /// Normalise an arXiv identifier: strip `arXiv:` and any `vN` suffix.
