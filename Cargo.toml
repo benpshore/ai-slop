@@ -36,8 +36,8 @@ docling = ["dep:docling-pdf", "dep:docling-core", "pdfium"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
-docling-core = { version = "1.69", optional = true }
-docling-pdf = { version = "1.69", optional = true }
+docling-core = { version = "=1.69.2", optional = true }
+docling-pdf = { version = "=1.69.2", optional = true }
 flate2 = "1"
 hex = "0.4"
 lopdf = "0.45"

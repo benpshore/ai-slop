@@ -2100,9 +2100,9 @@ dependencies = [
 
 [[package]]
 name = "docling-asr"
-version = "1.70.1"
+version = "1.69.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0990813ea4fcbc8be4ee2eee29ce5d75d734704a14ea11272d8354dccc96c21b"
+checksum = "1c161b3674ae00aa74076b96e41b6a1ec82c0fbd95dcbab9e9b65a7dddf58728"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -2113,9 +2113,9 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "1.70.1"
+version = "1.69.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8975bbfad3052a814e8a47046fef4bb6b2ecd43418ebddb642dfc359ae9b6a5b"
+checksum = "d5cb745538bcdccbd71a6aab23870fb019b76aa8c12e2b2e0f776eccf89743dd"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -2123,9 +2123,9 @@ dependencies = [
 
 [[package]]
 name = "docling-onnx"
-version = "1.70.1"
+version = "1.69.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55c74770e45caafdfd7cc93a2b5fa9bd19b610e8018f501a49f15e7ee2731d1e"
+checksum = "d582d6ba220477f0878113379dc5f4fab1f4fbd2f7111cfbbf78f9508ec170ad"
 dependencies = [
  "docling-core",
  "ort",
@@ -2133,9 +2133,9 @@ dependencies = [
 
 [[package]]
 name = "docling-pdf"
-version = "1.70.1"
+version = "1.69.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b51443a453cdb2e15456a0d189b72c3417a529ea48ea99ffb385658ad281b4f"
+checksum = "8adac50848aebe6b473661c01b5304271aefc399ca63da7fd3d478c6431fca48"
 dependencies = [
  "docling-core",
  "docling-onnx",
