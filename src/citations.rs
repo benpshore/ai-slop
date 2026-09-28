@@ -917,14 +917,53 @@ fn author_year_label(raw: &str) -> Option<String> {
     Some(format!("{surname}{year}"))
 }
 
-/// Does `raw` carry the evidence every reference has: a year, a DOI, an
-/// `arXiv` id or a URL?
+/// Any year from 1500 to 2099, bare or parenthesised (older works such as
+/// `(1843)` or `1687` count as reference evidence too).
+fn evidence_year_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?:^|[^\d–\-—])((?:1[5-9]|20)\d{2})[a-z]?(?:[^\d–\-—]|$)")
+            .expect("valid regex")
+    })
+}
+
+/// The date marker of an undated or unpublished entry, in parentheses or
+/// after a comma: `(n.d.)`, `(no date)`, `(forthcoming)`, `, in press`,
+/// `(under review)`, `(to appear)`.
+fn undated_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:\(|,)\s*(?:n\.\s?d\b\.?|(?:no date|forthcoming|in press|under review|to appear)\b)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Does `raw` carry the evidence every reference has: a year (1500–2099),
+/// an undated marker, a DOI, an `arXiv` id or a URL?
 fn has_reference_evidence(raw: &str) -> bool {
-    year_paren_re().is_match(raw)
-        || year_bare_re().is_match(raw)
+    evidence_year_re().is_match(raw)
+        || undated_marker_re().is_match(raw)
         || doi_start_re().is_match(raw)
         || arxiv_re().is_match(raw)
         || url_re().is_match(raw)
+}
+
+/// Longest prefix of an entry searched for the year or date marker that
+/// follows its first author.
+const AUTHOR_YEAR_START_CHARS: usize = 160;
+
+/// Does `raw` open like an author-year entry: `Surname, F.` or
+/// `Surname AB` followed (within its first line's length) by a year or an
+/// undated marker? Such an entry is never folded or dropped.
+fn is_author_year_start(raw: &str) -> bool {
+    let head: String = raw.chars().take(AUTHOR_YEAR_START_CHARS).collect();
+    let Some(author) = author_start_re().find(&head) else {
+        return false;
+    };
+    let rest = &head[author.end()..];
+    evidence_year_re().is_match(rest) || undated_marker_re().is_match(rest)
 }
 
 /// Fold entries without any reference evidence into the entry before them
@@ -934,7 +973,7 @@ fn has_reference_evidence(raw: &str) -> bool {
 fn apply_evidence_guard(entries: Vec<ReferenceEntry>, context: &str) -> Vec<ReferenceEntry> {
     let evidence: Vec<bool> = entries
         .iter()
-        .map(|e| has_reference_evidence(&e.raw))
+        .map(|e| has_reference_evidence(&e.raw) || is_author_year_start(&e.raw))
         .collect();
     let Some(last_ok) = evidence.iter().rposition(|&ok| ok) else {
         return entries;
@@ -3391,6 +3430,55 @@ mod tests {
         assert_eq!(refs[1].label.as_deref(), Some("Moradi2020"));
         assert_eq!(refs[1].volume.as_deref(), Some("29"));
         assert_eq!(refs[1].pages.as_deref(), Some("432–443"));
+    }
+
+    /// An undated final entry (`(n.d.)`) carries no year, DOI or URL but is
+    /// a real reference: it is kept, not dropped as trailing furniture.
+    #[test]
+    fn undated_final_entry_is_kept() {
+        let refs = refs_from_lines(&[
+            "Adams, R. (2019). A first title. Journal of Tests, 4(2), 10–20.",
+            "Brown, K. (in press). A second title. Journal of Tests.",
+            "Smith, J. (n.d.). Title of an undated report. Example Institute.",
+        ]);
+        assert_eq!(refs.len(), 3);
+        assert!(refs[1].raw.starts_with("Brown, K. (in press)."));
+        assert!(refs[2].raw.starts_with("Smith, J. (n.d.)."));
+        assert_eq!(refs[2].index, 3);
+    }
+
+    /// A pre-1900 entry (`(1843)`) in the middle of the list is its own
+    /// entry, not a continuation of the one before it.
+    #[test]
+    fn pre_1900_entry_stays_separate() {
+        let refs = refs_from_lines(&[
+            "Babbage, C. (1999). A modern edition. Journal of Tests, 4(2), 10–20.",
+            "Lovelace, A. (1843). Notes on the analytical engine. Scientific Memoirs, 3, 666–731.",
+            "Turing, A. M. (1950). Computing machinery and intelligence. Mind, 59(236), 433–460.",
+        ]);
+        assert_eq!(refs.len(), 3);
+        assert!(refs[0].raw.ends_with("10–20."));
+        assert!(refs[1].raw.starts_with("Lovelace, A. (1843)."));
+        assert!(refs[1].raw.ends_with("666–731."));
+        assert!(refs[2].raw.starts_with("Turing, A. M. (1950)."));
+    }
+
+    #[test]
+    fn undated_and_old_entries_are_evidence() {
+        assert!(has_reference_evidence("Smith, J. (n.d.). Title."));
+        assert!(has_reference_evidence("Smith, J. (No date). Title."));
+        assert!(has_reference_evidence("Smith, J. (forthcoming). Title."));
+        assert!(has_reference_evidence("Smith, J., in press. Title."));
+        assert!(has_reference_evidence("Smith, J. (under review). Title."));
+        assert!(has_reference_evidence("Smith, J. (to appear). Title."));
+        assert!(has_reference_evidence("Newton, I. 1687. Principia."));
+        assert!(!has_reference_evidence(
+            "Series A, containing papers of a mathematical or physical character, 209(441-458):415–446."
+        ));
+        assert!(is_author_year_start("Smith, J. (n.d.). Title."));
+        assert!(!is_author_year_start(
+            "Series A, containing papers of a mathematical"
+        ));
     }
 
     /// Table cells after the last reference sit at the entry-start x level

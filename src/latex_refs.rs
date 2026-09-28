@@ -181,6 +181,18 @@ fn year_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?:19|20)[0-9]{2}").expect("valid regex"))
 }
 
+/// An ISO-style date (`2020-05-01`, `2020-05`, `2021/03/15`, `2021/03`);
+/// group 1 is the year.
+fn iso_date_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?:^|[^0-9])((?:19|20)[0-9]{2})(?:-(?:0[1-9]|1[0-2])(?:-[0-3][0-9])?|/(?:0[1-9]|1[0-2])(?:/[0-3][0-9])?)(?:[^0-9]|$)",
+        )
+        .expect("valid regex")
+    })
+}
+
 /// Opening of an italic group: `{\em`, `{\it`, `{\itshape`, `\emph{`, `\textit{`.
 fn italic_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -866,12 +878,12 @@ fn after_comma_field(before: &str, after: &str) -> bool {
 /// Candidates are standalone `19xx`/`20xx` numbers. Page and volume numbers
 /// (range ends, `volume:pages`, after `pp.`/`pages`) are skipped. The first
 /// parenthesised candidate wins, else the last comma field (`, 2021.`), else
-/// the first remaining candidate; when every candidate looks like a page
-/// number the first one is used (a `date` such as `2020-05-01`).
+/// the first remaining candidate. When every candidate looks like a page
+/// number, only an ISO-style date (`2020-05-01`, `2021/03`) gives the year;
+/// otherwise there is none (`pp. 1907–1921` is not a year).
 fn first_year(text: &str) -> Option<u16> {
     let masked = year_mask_re().replace_all(text, " ");
     let masked: &str = &masked;
-    let mut first_any: Option<&str> = None;
     let mut first_plain: Option<&str> = None;
     let mut first_paren: Option<&str> = None;
     let mut last_comma: Option<&str> = None;
@@ -887,9 +899,6 @@ fn first_year(text: &str) -> Option<u16> {
             continue;
         }
         let year = m.as_str();
-        if first_any.is_none() {
-            first_any = Some(year);
-        }
         if page_like_before(before) || page_like_after(after) {
             continue;
         }
@@ -906,7 +915,12 @@ fn first_year(text: &str) -> Option<u16> {
     first_paren
         .or(last_comma)
         .or(first_plain)
-        .or(first_any)
+        .or_else(|| {
+            iso_date_re()
+                .captures(masked)
+                .and_then(|caps| caps.get(1))
+                .map(|m| &masked[m.range()])
+        })
         .and_then(|year| year.parse::<u16>().ok())
 }
 
@@ -2959,7 +2973,7 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
 
     #[test]
     fn first_year_skips_page_and_volume_numbers() {
-        let cases: [(&str, Option<u16>); 12] = [
+        let cases: [(&str, Option<u16>); 17] = [
             (
                 "T. B. Brown, and D. Amodei. Language models are few-shot learners. In H. \
                  Larochelle et al., editors, Advances in Neural Information Processing \
@@ -2993,6 +3007,11 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
                 Some(2020),
             ),
             ("2020-05-01", Some(2020)),
+            ("2020-05", Some(2020)),
+            ("2021/03/15", Some(2021)),
+            ("date = {2021/03}", Some(2021)),
+            ("pp. 1907–1921", None),
+            ("Journal of Tests, 12:1907–1921.", None),
             ("1998", Some(1998)),
             (
                 "Report 19201, see https://example.org/2019/x and arXiv:2001.01234.",

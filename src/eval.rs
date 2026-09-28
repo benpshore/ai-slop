@@ -214,6 +214,10 @@ pub struct Summary {
     /// Correct paper authors over extracted paper authors.
     #[serde(default)]
     pub paper_author_precision: f32,
+    /// Papers whose extracted DOI is correct over papers whose source states
+    /// a DOI.
+    #[serde(default)]
+    pub paper_doi_accuracy: f32,
 }
 
 /// One evaluation run over the corpus.
@@ -1264,6 +1268,8 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
     let titled: Vec<bool> = ok.iter().filter_map(|p| p.paper_title_correct).collect();
     let titles_right = titled.iter().filter(|correct| **correct).count() as u64;
     let authors_right = sum(|p| p.authors_correct);
+    let doi_checked: Vec<bool> = ok.iter().filter_map(|p| p.paper_doi_correct).collect();
+    let dois_right = doi_checked.iter().filter(|correct| **correct).count() as u64;
 
     Summary {
         papers: papers.len() as u32,
@@ -1290,6 +1296,7 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         paper_title_accuracy: ratio(titles_right, titled.len() as u64),
         paper_author_recall: ratio(authors_right, sum(|p| p.authors_truth)),
         paper_author_precision: ratio(authors_right, sum(|p| p.authors_extracted)),
+        paper_doi_accuracy: ratio(dois_right, doi_checked.len() as u64),
     }
 }
 
@@ -1385,6 +1392,11 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     let _ = writeln!(
         out,
+        "| Paper DOI accuracy (of papers whose source states a DOI) | {} |",
+        pct(s.paper_doi_accuracy)
+    );
+    let _ = writeln!(
+        out,
         "| Marker resolution (precision-like, resolved/extracted) | {} |",
         pct(s.marker_resolution_rate)
     );
@@ -1428,18 +1440,19 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     out.push_str(
         "| id | status | pages | refs truth/extracted/matched | count exact | ext/truth | \
          doi c/t/printed | year c/t | markers resolved/extracted | truth cites | \
-         marker recall | align | ms/chunk | warnings | title ✓/✗ | authors c/t |\n",
+         marker recall | align | ms/chunk | warnings | title ✓/✗ | authors c/t | \
+         paper doi ✓/✗/n/a |\n",
     );
     out.push_str(
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | \
-         --- | --- |\n",
+         --- | --- | --- |\n",
     );
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
         let _ = writeln!(
             out,
             "| {} | {} | {} | {}/{}/{} | {} | {:.2} | {}/{}/{} | {}/{} | {}/{} | {} | {} | {} | \
-             {:.1} | {} | {} | {}/{} |",
+             {:.1} | {} | {} | {}/{} | {} |",
             cell(&p.id),
             cell(&p.status),
             p.pages,
@@ -1463,6 +1476,7 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             check_cell(p.paper_title_correct),
             p.authors_correct,
             p.authors_truth,
+            check_cell(p.paper_doi_correct),
         );
     }
 
@@ -2652,7 +2666,7 @@ mod tests {
             .collect();
         assert_eq!(table.len(), 4, "{table:?}");
         let columns = table[0].matches('|').count();
-        assert_eq!(columns, 17);
+        assert_eq!(columns, 18);
         for row in &table {
             assert_eq!(row.matches('|').count(), columns, "{row}");
         }
@@ -2799,7 +2813,7 @@ mod tests {
         p2.authors_correct = 1;
         let p3 = paper_with("p3", 1.0);
         let md = render_markdown(&build_report("lopdf", "h", vec![p1, p2, p3]));
-        assert!(md.contains("| warnings | title ✓/✗ | authors c/t |\n"));
+        assert!(md.contains("| warnings | title ✓/✗ | authors c/t | paper doi ✓/✗/n/a |\n"));
         assert!(md.contains("| Paper title accuracy | 50.0% |"));
         assert!(md.contains("| Paper author recall | 66.7% |"));
         assert!(md.contains("| Paper author precision | 66.7% |"));
@@ -2809,8 +2823,58 @@ mod tests {
                 .unwrap_or_default()
                 .to_string()
         };
-        assert!(row("p1").ends_with("| 0 | ✓ | 3/4 |"), "{}", row("p1"));
-        assert!(row("p2").ends_with("| 0 | ✗ | 1/2 |"), "{}", row("p2"));
-        assert!(row("p3").ends_with("| 0 | n/a | 0/0 |"), "{}", row("p3"));
+        assert!(
+            row("p1").ends_with("| 0 | ✓ | 3/4 | n/a |"),
+            "{}",
+            row("p1")
+        );
+        assert!(
+            row("p2").ends_with("| 0 | ✗ | 1/2 | n/a |"),
+            "{}",
+            row("p2")
+        );
+        assert!(
+            row("p3").ends_with("| 0 | n/a | 0/0 | n/a |"),
+            "{}",
+            row("p3")
+        );
+    }
+
+    #[test]
+    fn summarize_and_render_paper_doi_accuracy() {
+        let mut p1 = paper_with("p1", 1.0);
+        p1.paper_doi_correct = Some(true);
+        let mut p2 = paper_with("p2", 1.0);
+        p2.paper_doi_correct = Some(true);
+        let mut p3 = paper_with("p3", 1.0);
+        p3.paper_doi_correct = Some(false);
+        // No DOI in the source: outside the denominator.
+        let p4 = paper_with("p4", 1.0);
+        // Failed papers are excluded even when their DOI check is set.
+        let mut failed = failed_paper("p5", "boom");
+        failed.paper_doi_correct = Some(false);
+        let papers = vec![p1, p2, p3, p4, failed];
+
+        let s = summarize(&papers);
+        assert!(
+            close(s.paper_doi_accuracy, 2.0 / 3.0),
+            "{}",
+            s.paper_doi_accuracy
+        );
+        assert!(close(summarize(&[]).paper_doi_accuracy, 0.0));
+
+        let md = render_markdown(&build_report("lopdf", "h", papers));
+        assert!(
+            md.contains("| Paper DOI accuracy (of papers whose source states a DOI) | 66.7% |")
+        );
+        let row = |id: &str| -> String {
+            md.lines()
+                .find(|l| l.starts_with(&format!("| {id} |")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(row("p1").ends_with("| ✓ |"), "{}", row("p1"));
+        assert!(row("p3").ends_with("| ✗ |"), "{}", row("p3"));
+        assert!(row("p4").ends_with("| n/a |"), "{}", row("p4"));
     }
 }
