@@ -861,6 +861,7 @@ fn print_summary(report: &CorpusReport) {
     println!("title_accuracy: {:.3}", s.title_accuracy);
     println!("marker_resolution_rate: {:.3}", s.marker_resolution_rate);
     println!("marker_recall: {:.3}", s.marker_recall);
+    println!("marker_command_ratio: {:.3}", s.marker_command_ratio);
     match s.mean_body_alignment {
         Some(alignment) => println!("mean_body_alignment: {alignment:.3}"),
         None => println!("mean_body_alignment: -"),

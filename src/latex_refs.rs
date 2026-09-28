@@ -69,6 +69,53 @@ const CITE_COMMANDS: &[&str] = &[
     "Textcite",
     "Autocite",
     "Smartcite",
+    "Parencites",
+    "Textcites",
+    "Autocites",
+    "Smartcites",
+    "Footcites",
+    "smartcites",
+    "supercites",
+    "footcitetexts",
+    "fullcites",
+    "footfullcites",
+];
+
+/// Commands that start with `cite` but are not citations (styles, hooks and
+/// fonts of `natbib`, `cite` and `biblatex`); never counted.
+const NOT_CITE_COMMANDS: &[&str] = &[
+    "citestyle",
+    "citetext",
+    "citeindextrue",
+    "citeindexfalse",
+    "citeindextype",
+    "citeform",
+    "citeleft",
+    "citeright",
+    "citemid",
+    "citepunct",
+    "citedash",
+    "citenamefont",
+    "citenumfont",
+    "citesetup",
+    "citereset",
+    "citeresetfalse",
+    "citeresettrue",
+    "citetrackerfalse",
+    "citetrackertrue",
+];
+
+/// Cite commands that print only an author, year, title, date or URL, never
+/// a marker that links to an entry.
+const AUTHOR_YEAR_ONLY_COMMANDS: &[&str] = &[
+    "citeauthor",
+    "citefullauthor",
+    "citeyear",
+    "citeyearpar",
+    "citetitle",
+    "citedate",
+    "citeurl",
+    "citename",
 ];
 
 /// Where a truth reference came from.
@@ -109,6 +156,11 @@ pub struct TruthCitations {
     pub nocite_keys: Vec<String>,
     /// `\nocite{*}` was present.
     pub nocite_all: bool,
+    /// Commands among `cite_commands` that print only an author, year,
+    /// title, date or URL (`\citeauthor`, `\citeyear`, ...); their keys are
+    /// still in `cited_keys`.
+    #[serde(default)]
+    pub cite_only_author_year: u32,
 }
 
 /// Paper-level metadata as the author's source states it.
@@ -129,7 +181,7 @@ pub struct TruthPaper {
 pub struct GroundTruth {
     pub references: Vec<TruthReference>,
     pub citations: TruthCitations,
-    /// `bbl`, `bib-cited` or `bib-all`.
+    /// `bbl`, `bbl+bib`, `bib-cited` or `bib-all`.
     pub method: String,
     /// Detexed body for alignment diagnostics; may be empty.
     pub body_text: String,
@@ -882,7 +934,8 @@ fn after_comma_field(before: &str, after: &str) -> bool {
 /// number, only an ISO-style date (`2020-05-01`, `2021/03`) gives the year;
 /// otherwise there is none (`pp. 1907–1921` is not a year).
 fn first_year(text: &str) -> Option<u16> {
-    let masked = year_mask_re().replace_all(text, " ");
+    let unescaped = unescape_underscores(text);
+    let masked = year_mask_re().replace_all(&unescaped, " ");
     let masked: &str = &masked;
     let mut first_plain: Option<&str> = None;
     let mut first_paren: Option<&str> = None;
@@ -935,15 +988,23 @@ fn tidy_doi(raw: &str) -> Option<String> {
     }
 }
 
+/// `{\_}` and `\_` as a plain `_`, so an escaped underscore inside a DOI
+/// (`10.1002/{\_}x`) neither ends the DOI match nor leaves braces in it.
+fn unescape_underscores(raw: &str) -> String {
+    raw.replace("{\\_}", "_").replace("\\_", "_")
+}
+
 /// First DOI (`10.xxxx/...`) in raw or detexed text.
 fn find_doi(raw: &str) -> Option<String> {
-    doi_re().find(raw).and_then(|m| tidy_doi(m.as_str()))
+    let unescaped = unescape_underscores(raw);
+    doi_re().find(&unescaped).and_then(|m| tidy_doi(m.as_str()))
 }
 
 /// DOI from a `doi.org` URL only.
 fn doi_from_url(url: &str) -> Option<String> {
+    let unescaped = unescape_underscores(url);
     doi_url_re()
-        .captures(url)
+        .captures(&unescaped)
         .and_then(|caps| caps.get(1))
         .and_then(|m| tidy_doi(m.as_str()))
 }
@@ -1630,7 +1691,31 @@ struct CiteCommand {
     span: Range<usize>,
     /// It was `\nocite`.
     nocite: bool,
+    /// It prints only an author, year, title, date or URL.
+    author_year_only: bool,
     keys: Vec<String>,
+}
+
+/// Whether `\name` is a citation command: a known one, or any other name
+/// starting with `cite` / `Cite` (the `multibib` commands `\citeapp`,
+/// `\citemain`, `\citeA`, ...) that is not a style or font hook.
+fn is_cite_command(name: &str) -> bool {
+    if CITE_COMMANDS.contains(&name) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("cite") && !NOT_CITE_COMMANDS.contains(&lower.as_str())
+}
+
+/// Whether `\name` prints no linkable marker (`\citeauthor`, `\citeyear`, ...).
+fn is_author_year_only(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    AUTHOR_YEAR_ONLY_COMMANDS.contains(&lower.as_str())
+}
+
+/// A plausible citation key: no whitespace, backslash or braces.
+fn is_plain_key(key: &str) -> bool {
+    !key.contains(|c: char| c.is_whitespace() || matches!(c, '\\' | '{' | '}'))
 }
 
 /// All `\cite`-family and `\nocite` commands with their key lists.
@@ -1640,9 +1725,10 @@ fn scan_cites(clean: &str) -> Vec<CiteCommand> {
         let Some(whole) = caps.get(0) else { continue };
         let name = &caps[1];
         let nocite = name == "nocite";
-        if !nocite && !CITE_COMMANDS.contains(&name) {
+        if !nocite && !is_cite_command(name) {
             continue;
         }
+        let known = nocite || CITE_COMMANDS.contains(&name);
         let mut i = skip_ws(clean, whole.end());
         for _ in 0..2 {
             if clean.as_bytes().get(i) != Some(&b'[') {
@@ -1656,15 +1742,26 @@ fn scan_cites(clean: &str) -> Vec<CiteCommand> {
         let Some((inner, past_group)) = brace_group(clean, i) else {
             continue;
         };
-        let keys: Vec<String> = clean[inner]
+        let raw_keys: Vec<&str> = clean[inner]
             .split(',')
             .map(str::trim)
-            .filter(|k| !k.is_empty() && !k.contains('#'))
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !known && !raw_keys.iter().all(|k| is_plain_key(k)) {
+            continue;
+        }
+        let keys: Vec<String> = raw_keys
+            .into_iter()
+            .filter(|k| !k.contains('#'))
             .map(str::to_owned)
             .collect();
+        if keys.is_empty() {
+            continue;
+        }
         found.push(CiteCommand {
             span: whole.start()..past_group,
             nocite,
+            author_year_only: !nocite && is_author_year_only(name),
             keys,
         });
     }
@@ -1675,10 +1772,14 @@ fn scan_cites(clean: &str) -> Vec<CiteCommand> {
 ///
 /// Recognises `\cite`, `\citep`, `\citet`, `\citealp`, `\citealt`,
 /// `\citeauthor`, `\citeyear`, `\citeyearpar`, `\citenum`, `\parencite`,
-/// `\textcite`, `\autocite`, `\footcite` and friends, with `*` and up to two
-/// `[...]` arguments before `{keys}`; `\nocite{keys}` and `\nocite{*}`.
-/// Commented text is ignored. Keys are trimmed and split on `,`. Only the
-/// first key group of multi-group commands (`\cites{a}{b}`) is read.
+/// `\textcite`, `\autocite`, `\footcite` and friends, and any other command
+/// named `cite...` (`multibib`'s `\citeapp`, `\citeA`, ...) whose keys look
+/// like keys, with `*` and up to two `[...]` arguments before `{keys}`;
+/// `\nocite{keys}` and `\nocite{*}`. Commented text is ignored, and so are
+/// commands with no key (macro definitions such as `\cite{#1}`). Keys are
+/// trimmed and split on `,`. Only the first key group of multi-group
+/// commands (`\cites{a}{b}`) is read. Author- or year-only commands are
+/// counted in `cite_commands` and also in `cite_only_author_year`.
 pub fn parse_cites(tex: &str) -> TruthCitations {
     let clean = strip_comments(tex);
     let mut cites = TruthCitations::default();
@@ -1691,6 +1792,9 @@ pub fn parse_cites(tex: &str) -> TruthCitations {
             cites.nocite_keys.extend(listed);
         } else {
             cites.cite_commands += 1;
+            if cmd.author_year_only {
+                cites.cite_only_author_year += 1;
+            }
             cites.cited_keys.extend(cmd.keys);
         }
     }
@@ -2469,6 +2573,56 @@ fn dedupe_keys(entries: Vec<TruthReference>) -> Vec<TruthReference> {
         .collect()
 }
 
+/// Every entry of the `.bib` files.
+fn read_bib_entries(files: &LatexFiles) -> Result<Vec<TruthReference>, TruthError> {
+    let mut entries = Vec::new();
+    for path in &files.bib {
+        entries.extend(parse_bib(&read_lossy(path)?));
+    }
+    Ok(entries)
+}
+
+/// Lower-cased cited and `\nocite`d keys.
+fn wanted_keys(citations: &TruthCitations) -> BTreeSet<String> {
+    citations
+        .cited_keys
+        .iter()
+        .chain(&citations.nocite_keys)
+        .map(|k| k.to_ascii_lowercase())
+        .collect()
+}
+
+/// Whether a `.bbl` set misses a whole bibliography: the source declares
+/// extra bibliographies with `multibib`'s `\newcites`, or the `.bbl` keys
+/// cover fewer than half of the distinct cited keys. Keys missing from a
+/// complete `.bbl` are otherwise left out, because the shipped `.bbl` is what
+/// the PDF was built from (such a key prints as `[?]` with no entry).
+fn bbl_is_partial(merged: &str, wanted: &BTreeSet<String>, bbl: &[TruthReference]) -> bool {
+    if wanted.is_empty() {
+        return false;
+    }
+    let have: BTreeSet<String> = bbl.iter().map(|r| r.key.to_ascii_lowercase()).collect();
+    let covered = wanted.iter().filter(|k| have.contains(*k)).count();
+    merged.contains("\\newcites") || covered * 2 < wanted.len()
+}
+
+/// `.bib` entries for wanted keys that no `.bbl` entry has.
+fn missing_from_bbl(
+    entries: Vec<TruthReference>,
+    wanted: &BTreeSet<String>,
+    bbl: &[TruthReference],
+) -> Vec<TruthReference> {
+    let have: BTreeSet<String> = bbl.iter().map(|r| r.key.to_ascii_lowercase()).collect();
+    let extra: Vec<TruthReference> = entries
+        .into_iter()
+        .filter(|entry| {
+            let key = entry.key.to_ascii_lowercase();
+            wanted.contains(&key) && !have.contains(&key)
+        })
+        .collect();
+    dedupe_keys(extra)
+}
+
 /// Ground truth for one paper's source tree.
 ///
 /// The main file is the first `.tex` containing `\begin{document}`
@@ -2477,7 +2631,10 @@ fn dedupe_keys(entries: Vec<TruthReference>) -> Vec<TruthReference> {
 /// bibliography is, in order of preference: all `.bbl` files (method `bbl`),
 /// a `thebibliography` environment inline in the source (also `bbl`), or the
 /// `.bib` files filtered to cited and `\nocite`d keys (`bib-cited`), or every
-/// `.bib` entry when `\nocite{*}` is present (`bib-all`).
+/// `.bib` entry when `\nocite{*}` is present (`bib-all`). When `.bbl` files
+/// exist but miss a whole bibliography (`multibib` shipping only `app.bbl`,
+/// see `bbl_is_partial`), the `.bib` entries of cited keys that no `.bbl`
+/// has are appended after the `.bbl` entries (method `bbl+bib`).
 /// [`TruthError::NoBibliography`] when none of these yields an entry.
 pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
     let mut main: Option<(PathBuf, String)> = None;
@@ -2499,11 +2656,13 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
     let citations = parse_cites(&merged);
     let body = body_text(&merged);
     let paper = paper_truth(&merged);
+    let wanted = wanted_keys(&citations);
 
     let mut references = Vec::new();
     for path in &files.bbl {
         references.extend(parse_bbl(&read_lossy(path)?));
     }
+    let from_bbl_files = !references.is_empty();
     let inline = if references.is_empty() {
         merged.find("\\begin{thebibliography}")
     } else {
@@ -2513,10 +2672,7 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
         references = parse_bbl(&merged[start..]);
     }
     let method = if references.is_empty() {
-        let mut entries = Vec::new();
-        for path in &files.bib {
-            entries.extend(parse_bib(&read_lossy(path)?));
-        }
+        let entries = read_bib_entries(files)?;
         if entries.is_empty() {
             return Err(TruthError::NoBibliography);
         }
@@ -2524,18 +2680,23 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
             references = dedupe_keys(entries);
             "bib-all"
         } else {
-            let wanted: BTreeSet<String> = citations
-                .cited_keys
-                .iter()
-                .chain(&citations.nocite_keys)
-                .map(|k| k.to_ascii_lowercase())
-                .collect();
             let cited_entries: Vec<TruthReference> = entries
                 .into_iter()
                 .filter(|entry| wanted.contains(&entry.key.to_ascii_lowercase()))
                 .collect();
             references = dedupe_keys(cited_entries);
             "bib-cited"
+        }
+    } else if from_bbl_files
+        && !files.bib.is_empty()
+        && bbl_is_partial(&merged, &wanted, &references)
+    {
+        let extra = missing_from_bbl(read_bib_entries(files)?, &wanted, &references);
+        if extra.is_empty() {
+            "bbl"
+        } else {
+            references.extend(extra);
+            "bbl+bib"
         }
     } else {
         "bbl"
@@ -2686,6 +2847,30 @@ Trailing";
 \section{Intro}
 See \cite{Alpha} and \cite{gamma}.
 \bibliography{refs}
+\end{document}
+";
+
+    const TYPESET_TEX: &str = r"\documentclass{article}
+\begin{document}
+See \cite{aamand2021classifying,alber2004geometric} and \cite{alpha}.
+\bibliography{refs}
+\end{document}
+";
+
+    const MULTIBIB_TEX: &str = r"\documentclass{llncs}
+\usepackage{multibib}
+\newcites{app}{References for the Appendices}
+\newcommand{\citeboth}[1]{\cite{#1}}
+\begin{document}
+Main text \cite{alpha, gamma} and \cite{Alpha}.
+\bibliographystyle{splncs04}
+\bibliography{refs}
+\appendix
+Appendix \citeapp{aamand2021classifying} and \citeapp[p.~3]{alber2004geometric}.
+As \citeauthor{gamma} showed in \citeyear{gamma}.
+\citestyle{plain}\citeindextrue
+\bibliographystyleapp{splncs04}
+\bibliographyapp{refs}
 \end{document}
 ";
 
@@ -3104,6 +3289,7 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
     fn parse_cites_variants() {
         let cites = parse_cites(CITES_TEX);
         assert_eq!(cites.cite_commands, 4);
+        assert_eq!(cites.cite_only_author_year, 1);
         assert_eq!(cites.cited_keys, ["a", "b", "c", "f", "g"]);
         assert!(cites.nocite_all);
         assert_eq!(cites.nocite_keys, ["d", "e"]);
@@ -3161,6 +3347,7 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
             cited.body_text
         );
 
+        fs::write(dir.path().join("main.tex"), TYPESET_TEX).unwrap();
         fs::write(dir.path().join("main.bbl"), BBL).unwrap();
         let typeset_files = files(dir.path(), &["main.tex"], &["main.bbl"], &["refs.bib"]);
         let typeset = ground_truth(&typeset_files).unwrap();
@@ -3184,6 +3371,114 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
         fs::write(dir.path().join("preamble.tex"), "\\usepackage{x}").unwrap();
         let no_main = ground_truth(&files(dir.path(), &["preamble.tex"], &[], &["refs.bib"]));
         assert!(matches!(no_main, Err(TruthError::NoMainTex)));
+    }
+
+    #[test]
+    fn ground_truth_merges_bib_for_multibib_with_partial_bbl() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.tex"), MULTIBIB_TEX).unwrap();
+        fs::write(dir.path().join("app.bbl"), BBL).unwrap();
+        fs::write(dir.path().join("refs.bib"), REFS_BIB).unwrap();
+        let truth = ground_truth(&files(
+            dir.path(),
+            &["main.tex"],
+            &["app.bbl"],
+            &["refs.bib"],
+        ))
+        .unwrap();
+        assert_eq!(truth.method, "bbl+bib");
+        let keys: Vec<&str> = truth.references.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "aamand2021classifying",
+                "alber2004geometric",
+                "fekete1923verteilung",
+                "alpha",
+                "gamma"
+            ]
+        );
+        assert_eq!(truth.references[0].source, TruthSource::Bbl);
+        assert_eq!(truth.references[3].source, TruthSource::Bib);
+        assert_eq!(truth.references[4].year, Some(2003));
+        assert_eq!(truth.citations.cite_commands, 6);
+        assert_eq!(truth.citations.cite_only_author_year, 2);
+        assert_eq!(
+            truth.citations.cited_keys,
+            [
+                "alpha",
+                "gamma",
+                "Alpha",
+                "aamand2021classifying",
+                "alber2004geometric",
+                "gamma",
+                "gamma"
+            ]
+        );
+        assert!(
+            truth.body_text.contains("Appendix and ."),
+            "{}",
+            truth.body_text
+        );
+
+        // Without the `.bib` there is nothing to merge.
+        let bbl_only = ground_truth(&files(dir.path(), &["main.tex"], &["app.bbl"], &[])).unwrap();
+        assert_eq!(bbl_only.method, "bbl");
+        assert_eq!(bbl_only.references.len(), 3);
+    }
+
+    #[test]
+    fn ground_truth_partial_bbl_without_newcites_merges_below_half_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.tex"), MAIN_TEX).unwrap();
+        fs::write(dir.path().join("main.bbl"), BBL).unwrap();
+        fs::write(dir.path().join("refs.bib"), REFS_BIB).unwrap();
+        let truth = ground_truth(&files(
+            dir.path(),
+            &["main.tex"],
+            &["main.bbl"],
+            &["refs.bib"],
+        ))
+        .unwrap();
+        assert_eq!(truth.method, "bbl+bib");
+        assert_eq!(truth.references.len(), 5);
+    }
+
+    #[test]
+    fn parse_cites_generic_cite_commands() {
+        let tex = r"\newcommand{\citemine}[1]{\citep{#1}}
+\def\citeapp#1{x}
+A \citeapp{k1, k2} B \citemain*[see]{k3} C \citeA{k4} D \Parencites{k5}{k6}
+E \citeps{k7} F \citeyearpar{k8} G \Citeauthor{k9} H \citetext{free text}
+I \citestyle{acl} J \citeweird{not a key} K \citenum{k10}";
+        let cites = parse_cites(tex);
+        assert_eq!(
+            cites.cited_keys,
+            ["k1", "k2", "k3", "k4", "k5", "k7", "k8", "k9", "k10"]
+        );
+        assert_eq!(cites.cite_commands, 8);
+        assert_eq!(cites.cite_only_author_year, 2);
+    }
+
+    #[test]
+    fn escaped_underscore_in_doi_is_unescaped() {
+        let bib = r"@article{wiley,
+  title = {Escaped},
+  year = {2019},
+  doi = {10.1002/{\_}sim.8123},
+}
+@article{url, title={U}, url={https://doi.org/10.1002/ab\_cd.2020}, year={2020}}";
+        let refs = parse_bib(bib);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].doi.as_deref(), Some("10.1002/_sim.8123"));
+        assert_eq!(refs[0].year, Some(2019));
+        assert_eq!(refs[1].doi.as_deref(), Some("10.1002/ab_cd.2020"));
+        assert_eq!(refs[1].year, Some(2020));
+        assert_eq!(
+            find_doi(r"\doi{10.1002/{\_}x.2019}").as_deref(),
+            Some("10.1002/_x.2019")
+        );
+        assert_eq!(first_year(r"10.1002/{\_}2019.12, 2018"), Some(2018));
     }
 
     #[test]
