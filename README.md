@@ -4,7 +4,7 @@ A native Rust engine for high-throughput, faithful text mining of academic PDFs,
 
 The eventual application is a compact, accessible, Zed-inspired Rust document workbench: corpus browser, PDF viewer, selectable extracted text, source highlighting, and job controls. The headless engine comes first and remains independently usable.
 
-**Status: early engine, measured baseline, nothing production-ready.** A pure-Rust extraction engine (`tpe`), an evaluation harness and a first measured baseline exist. The baseline is far from the targets below: 70.0% of papers get an exact reference count and p95 is 89 ms per 20-page chunk against a 30 ms target. The PDFium and docling backends build and pass their unit tests in the Native workflow, but they have no measured accuracy yet. The workbench crates are libraries with offline tests. The GUI is a skeleton, the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
+**Status: early engine, measured baseline, nothing production-ready.** A pure-Rust extraction engine (`tpe`), an evaluation harness and a first measured baseline exist. The baseline is far from the accuracy targets below: 70.0% of papers get an exact reference count. Its timing (whole-document eval time on hosted arm64 runners, averaged over nominal 20-page chunks, without durable ledger writes) is a diagnostic and is not comparable with the M1 service-time target. The PDFium and docling backends build and pass their unit tests in the Native workflow, but they have no measured accuracy yet. The workbench crates are libraries with offline tests. The GUI is a skeleton, the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
 
 ## What exists today
 
@@ -24,7 +24,7 @@ Measured baseline (GitHub issue #15, Eval run of 2026-09-28, backend `lopdf`, `d
 | reference recall / precision | 69.3% / 67.1% |
 | DOI / year / title correct | 48.9% / 98.2% / 47.6% |
 | citation-marker recall | 99.6% |
-| time per 20-page chunk, p50 / p95 | 39 ms / 89 ms (target 30 ms) |
+| eval time per nominal 20-page chunk, p50 / p95 (hosted arm64, no ledger write; not the target measurement) | 39 ms / 89 ms |
 
 These are diagnostics from one run on shared CI hardware. They are not the acceptance measurement described below.
 
