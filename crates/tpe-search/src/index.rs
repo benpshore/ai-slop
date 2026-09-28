@@ -15,7 +15,6 @@ use crate::SearchError;
 use crate::chunker::{Chunk, Chunker};
 use crate::embed::Embedder;
 use crate::fusion::{RRF_K, reciprocal_rank_fusion};
-use crate::sha256;
 use crate::store::{FlatStore, VectorStore};
 #[cfg(feature = "usearch")]
 use crate::usearch_store::UsearchStore;
