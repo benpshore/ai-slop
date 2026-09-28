@@ -51,8 +51,8 @@ extraction failed is listed with status `failed:<reason>` and counted in
 
 ## The corpus
 
-`corpus/manifest.json` lists 30 CC-BY 4.0 arXiv papers chosen for diverse
-primary categories (at most four per category): 20 in the `dev` split, used to
+`corpus/manifest.json` lists 70 CC-BY 4.0 arXiv papers chosen for diverse
+primary categories (at most five per category): 60 in the `dev` split, used to
 drive fixes, and 10 in `holdout`, used only to check that fixes generalise.
 Papers are **not** committed; `tpe corpus fetch` downloads the PDF and the
 e-print into a cache directory and verifies SHA-256 digests once they are
@@ -100,3 +100,23 @@ markers of resolved targets, divided by the number of keys the source cites
 so IEEE `[17], [18]` (two groups) and `\cite{a,b}` (one command) score the
 same. The older resolved-markers over cite-commands ratio is still reported
 as `marker_command_ratio`, uncapped, as a diagnostic.
+
+## Measured status (2026-09-28)
+
+Eval run 36470860921 (`lopdf`, `dev` split, 60 papers) and run 36472085645 (`holdout`, 10
+papers), both on `ubuntu-24.04-arm` after PR #32. Full per-metric numbers for both splits are
+in [README.md](../README.md) and GitHub issue #15.
+
+Known gaps: `body_alignment` (0.751 `dev` / 0.787 `holdout`, body only) is far from the
+chunk-level acceptance protocol in [ENGINE.md](ENGINE.md) (the 99% error-free-chunk target is
+in [README.md](../README.md)), and the loop-7 region tagger over-tags prose on
+some papers (loop 8 is fixing this); `marker_recall` does not yet check that a marker resolved
+to the *correct* entry, only that it resolved to one; `ms_per_chunk` p50 (33.8 ms `dev`, 30.3
+ms `holdout`) is at or above the 30 ms target on these hosted runners, and M1 numbers have not
+been measured; the full `docling` pipeline is a routed exception at about 7.7 s/document, and
+`pdfium` is about 5x slower than `lopdf` on the reference-metrics path.
+
+Per-loop taxonomies are in `docs/analysis/`: `eval-2026-09-28-lopdf.md`,
+`eval-2026-09-28-holdout.md`, `reading-order-2026-09-28.md`,
+`citations-loop6-2026-09-28.md`, `reading-order-loop7-2026-09-28.md`,
+`markers-loop8-2026-09-28.md`.

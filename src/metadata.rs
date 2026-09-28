@@ -1256,12 +1256,38 @@ fn last_segment_is_country(text: &str) -> bool {
         .is_some_and(is_country)
 }
 
+/// A run of Unicode superscript/subscript digits, footnote symbols
+/// (`⁰`-`⁹`, `⁻`, `⁺`, `₀`-`₉`, `†`, `‡`, `∗`, `*`, `§`, `¶`) and superscript
+/// Latin letters (`ᵃ`-`ᶻ`), with a `,` consumed only between two such
+/// characters, captured together with the name letter it is attached to
+/// with no space. Deliberately narrower than `\p{Lm}`: that category also
+/// holds spacing modifier letters used in real names (`ˆ`, `ˇ`, `ʻ`, `ʼ`),
+/// which must never be treated as footnote markers.
+fn attached_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(\p{L})(?:[⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺₀₁₂₃₄₅₆₇₈₉†‡∗*§¶ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ]+,)*[⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺₀₁₂₃₄₅₆₇₈₉†‡∗*§¶ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ]+",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Drop a marker matched by [`attached_marker_re`] from `text`, keeping the
+/// name letter it was attached to (`Doe¹⁻³` / `Smith¹,²` / `Lee²∗` /
+/// `Xuan Liu¹,⁶` all become the bare name).
+fn strip_attached_markers(text: &str) -> String {
+    attached_marker_re().replace_all(text, "$1").into_owned()
+}
+
 /// Line text with spans much smaller than the line's dominant size removed
-/// (superscript affiliation markers). Falls back to the plain text when the
-/// spans cannot be located in it.
+/// (superscript affiliation markers), and any superscript/subscript marker
+/// that `text_cleanup` merged as literal Unicode characters onto the end of
+/// a name stripped as well. Falls back to the plain text (with the same
+/// merged-marker stripping applied) when the spans cannot be located in it.
 fn strip_superscripts(page: &PageText, line: &Line) -> String {
     let Some(dominant) = line_size(page, line) else {
-        return line.text.clone();
+        return strip_attached_markers(&line.text);
     };
     let mut out = String::new();
     let mut cursor: usize = 0;
@@ -1274,7 +1300,7 @@ fn strip_superscripts(page: &PageText, line: &Line) -> String {
             continue;
         }
         let Some(rel) = line.text.get(cursor..).and_then(|rest| rest.find(piece)) else {
-            return line.text.clone();
+            return strip_attached_markers(&line.text);
         };
         let start = cursor + rel;
         let end = start + piece.len();
@@ -1286,7 +1312,7 @@ fn strip_superscripts(page: &PageText, line: &Line) -> String {
         cursor = end;
     }
     out.push_str(&line.text[cursor..]);
-    out
+    strip_attached_markers(&out)
 }
 
 fn is_name_suffix(token: &str) -> bool {
@@ -1620,6 +1646,98 @@ mod tests {
         page.lines[1].spans = indices;
         let meta = extract_metadata(&BTreeMap::new(), &[page]);
         assert_eq!(author_names(&meta), vec!["John Smith", "Jane Doe"]);
+    }
+
+    /// Build a page with a single, single-span line at `size` so the span is
+    /// its own line's dominant size (never "small"), matching how
+    /// `text_cleanup` merges a raised digit fragment into its base span as
+    /// literal Unicode superscript/subscript characters with no space.
+    fn single_span_line(text: &str, size: f32) -> (PageText, Line) {
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        page.spans.push(Span {
+            text: text.to_string(),
+            bbox: None,
+            font: None,
+            size: Some(size),
+            seq: 0,
+        });
+        let line = Line {
+            text: text.to_string(),
+            spans: vec![0],
+            ..Line::default()
+        };
+        (page, line)
+    }
+
+    #[test]
+    fn merged_unicode_superscripts_are_stripped_from_author_lines() {
+        let cases: [(&str, &str); 4] = [
+            ("Doe¹⁻³", "Doe"),
+            ("Smith¹,²", "Smith"),
+            ("Lee²∗", "Lee"),
+            ("Xuan Liu¹,⁶", "Xuan Liu"),
+        ];
+        for (text, expected) in cases {
+            let (page, line) = single_span_line(text, 11.0);
+            assert_eq!(strip_superscripts(&page, &line), expected, "input: {text}");
+        }
+    }
+
+    #[test]
+    fn strip_superscripts_still_handles_separate_small_spans() {
+        // Two spans on one line: the name at the dominant size and a
+        // footnote-digit span too small to be part of the name, exactly the
+        // pre-existing (non-merged) case `strip_superscripts` handled before
+        // `text_cleanup` started merging raised digits as Unicode
+        // superscripts. Plain ASCII digits are outside the new merged-marker
+        // character class, so this only passes if the original per-span
+        // size check still runs.
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        page.spans.push(Span {
+            text: "Doe".to_string(),
+            bbox: None,
+            font: None,
+            size: Some(11.0),
+            seq: 0,
+        });
+        page.spans.push(Span {
+            text: "1,2".to_string(),
+            bbox: None,
+            font: None,
+            size: Some(7.0),
+            seq: 1,
+        });
+        let line = Line {
+            text: "Doe1,2".to_string(),
+            spans: vec![0, 1],
+            ..Line::default()
+        };
+        assert_eq!(strip_superscripts(&page, &line), "Doe");
+    }
+
+    #[test]
+    fn merged_unicode_superscripts_are_stripped_through_the_author_line_path() {
+        // Each name's merged marker is inside the single span `page_from`
+        // gives the whole line, exactly as `text_cleanup` leaves it, and the
+        // line goes through the full `page1_authors` chain: `strip_superscripts`,
+        // `ieee_membership_re`, `marker_chars_re`, `split_author_names` and
+        // the person-name check. Before the fix, `⁻` (not in `marker_chars_re`)
+        // left `Doe⁻`, which fails `looks_like_person_name` and drops the
+        // whole line, so this fails without the fix.
+        let page = page_from(&[
+            ("A Title Here", 18.0),
+            (
+                "Jane Doe¹⁻³, John Smith¹,², Mary Lee²∗ and Xuan Liu¹,⁶",
+                11.0,
+            ),
+            ("Abstract", 10.0),
+            ("Text.", 10.0),
+        ]);
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(
+            author_names(&meta),
+            vec!["Jane Doe", "John Smith", "Mary Lee", "Xuan Liu"]
+        );
     }
 
     #[test]
