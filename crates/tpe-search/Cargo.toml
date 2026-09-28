@@ -1,0 +1,33 @@
+[package]
+name = "tpe-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lexical (SQLite FTS5) and semantic (embedding) search over text-processing-engine ledgers"
+
+[[bin]]
+name = "tpe-search"
+path = "src/bin/tpe-search.rs"
+
+[features]
+default = []
+# Approximate nearest-neighbour vector store (C++ via cxx). Off by default; the
+# brute-force `FlatStore` is used otherwise.
+usearch = ["dep:usearch"]
+# ONNX sentence embeddings (BGE-small-en-v1.5) via fastembed. Off by default:
+# fastembed's default features download ONNX Runtime binaries at build time and
+# the model files on first use.
+onnx = ["dep:fastembed"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+fastembed = { version = "7", optional = true }
+rusqlite = { version = "0.40", features = ["bundled"] }
+thiserror = "2"
+usearch = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
