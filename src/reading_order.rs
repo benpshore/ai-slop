@@ -27,6 +27,7 @@
 //! composed the same way once the overlap is confirmed; without a letter
 //! under it the span's text is kept as shown.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use unicode_normalization::UnicodeNormalization;
@@ -479,9 +480,11 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
         let by_x = a.1.x0.total_cmp(&b.1.x0);
         by_x.then(spans[a.0].seq.cmp(&spans[b.0].seq))
     });
-    let mut pieces: Vec<String> = members
+    // Span texts are borrowed; only a piece that gets accent marks or
+    // loses an accent tail is copied.
+    let mut pieces: Vec<Cow<'_, str>> = members
         .iter()
-        .map(|(i, _)| spans[*i].text.clone())
+        .map(|(i, _)| Cow::Borrowed(spans[*i].text.as_str()))
         .collect();
     let mut attached: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
     let mut accents = build.accents;
@@ -496,7 +499,7 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
         if let Some(cut) = accent.cut
             && let Some(h) = members.iter().position(|(i, _)| *i == accent.index)
         {
-            pieces[h].truncate(cut);
+            pieces[h].to_mut().truncate(cut);
         }
     }
     for accent in accents {
@@ -506,18 +509,19 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
             .position(|(i, _)| *i == accent.base)
             .unwrap_or(last);
         let slot = base_char_slot(&pieces[m], members[m].1, centre_x(accent.bbox));
-        insert_marks(&mut pieces[m], slot, &accent.marks);
+        insert_marks(pieces[m].to_mut(), slot, &accent.marks);
         if accent.cut.is_none() {
             attached[m].push(accent.index);
         }
     }
 
-    let mut joined = String::new();
+    let capacity: usize = pieces.iter().map(|piece| piece.len() + 1).sum();
+    let mut joined = String::with_capacity(capacity);
     let mut order: Vec<usize> = Vec::with_capacity(members.len());
     let mut prev_x1: Option<f32> = None;
     for (m, (i, bbox)) in members.iter().enumerate() {
         let span = &spans[*i];
-        let piece = pieces[m].as_str();
+        let piece: &str = &pieces[m];
         if let Some(x1) = prev_x1 {
             let has_space =
                 joined.ends_with(char::is_whitespace) || piece.starts_with(char::is_whitespace);
@@ -530,13 +534,18 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
         order.push(*i);
         order.extend(attached[m].iter().copied());
     }
-    let text: String = if composed {
+    let mut text: String = if composed {
         joined.nfc().collect()
     } else {
         joined
     };
+    // `trim` in place: the line text is built once.
+    let end = text.trim_end().len();
+    text.truncate(end);
+    let start = text.len() - text.trim_start().len();
+    text.drain(..start);
     Line {
-        text: text.trim().to_string(),
+        text,
         bbox: Some(build.bbox),
         column: 0,
         spans: order
@@ -694,11 +703,10 @@ fn widest_row_gap(
     best.map(|(pos, _)| pos)
 }
 
-/// Position in `idx` (sorted top-to-bottom here) at which the widest
+/// Position in `by_top` (sorted top-to-bottom) at which the widest
 /// horizontal whitespace band wider than `min_gap` starts, if any.
-fn row_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> {
-    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
-    widest_row_gap(boxes, idx, min_gap, |_| true)
+fn row_cut(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> Option<usize> {
+    widest_row_gap(boxes, by_top, min_gap, |_| true)
 }
 
 /// Number of margin lines at the top and at the bottom of `idx` (already
@@ -716,17 +724,14 @@ fn margin_runs(boxes: &[BBox], idx: &[usize]) -> (usize, usize) {
     }
     let width = right - left;
     let middle = left.midpoint(right);
-    let margin: Vec<bool> = idx
-        .iter()
-        .map(|&i| {
-            let b = boxes[i];
-            let w = b.x1 - b.x0;
-            let centred = (centre_x(b) - middle).abs() <= GUTTER_OFFSET * width;
-            w > SPANNING_WIDTH * width || (w < GUTTER_WIDTH * width && centred)
-        })
-        .collect();
-    let top_run = margin.iter().take_while(|m| **m).count();
-    let bottom_run = margin.iter().rev().take_while(|m| **m).count();
+    let is_margin = |i: usize| {
+        let b = boxes[i];
+        let w = b.x1 - b.x0;
+        let centred = (centre_x(b) - middle).abs() <= GUTTER_OFFSET * width;
+        w > SPANNING_WIDTH * width || (w < GUTTER_WIDTH * width && centred)
+    };
+    let top_run = idx.iter().take_while(|&&i| is_margin(i)).count();
+    let bottom_run = idx.iter().rev().take_while(|&&i| is_margin(i)).count();
     (top_run, bottom_run)
 }
 
@@ -734,26 +739,39 @@ fn margin_runs(boxes: &[BBox], idx: &[usize]) -> (usize, usize) {
 /// of margin lines alone (see [`margin_runs`]) qualifies: it splits a
 /// title, running header, footer or page number off the top or bottom of
 /// the region and nothing else.
-fn spanning_row_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> {
-    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
-    let (top_run, bottom_run) = margin_runs(boxes, idx);
-    let bottom_start = idx.len() - bottom_run;
-    widest_row_gap(boxes, idx, min_gap, |pos| {
+fn spanning_row_cut(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> Option<usize> {
+    let (top_run, bottom_run) = margin_runs(boxes, by_top);
+    let bottom_start = by_top.len() - bottom_run;
+    widest_row_gap(boxes, by_top, min_gap, |pos| {
         pos <= top_run || pos >= bottom_start
     })
 }
 
 /// Whether a column cut exists once the margin lines at the top and bottom
 /// of the region (see [`margin_runs`]) are left out; at least one must be
-/// left out and at least two lines must remain.
-fn masked_column_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> bool {
-    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
-    let (top_run, bottom_run) = margin_runs(boxes, idx);
-    if top_run + bottom_run == 0 || top_run + bottom_run + 2 > idx.len() {
+/// left out and at least two lines must remain. `by_top` and `by_left` hold
+/// the same indices sorted top-to-bottom and left-to-right; `marks` is all
+/// `false` scratch space with one slot per box, left all `false`.
+fn masked_column_cut(
+    boxes: &[BBox],
+    by_top: &[usize],
+    by_left: &[usize],
+    min_gap: f32,
+    marks: &mut [bool],
+) -> bool {
+    let (top_run, bottom_run) = margin_runs(boxes, by_top);
+    if top_run + bottom_run == 0 || top_run + bottom_run + 2 > by_top.len() {
         return false;
     }
-    let mut inner: Vec<usize> = idx[top_run..idx.len() - bottom_run].to_vec();
-    let cut = column_cut(boxes, &mut inner, min_gap);
+    let kept = &by_top[top_run..by_top.len() - bottom_run];
+    for &i in kept {
+        marks[i] = true;
+    }
+    let inner: Vec<usize> = by_left.iter().copied().filter(|&i| marks[i]).collect();
+    for &i in kept {
+        marks[i] = false;
+    }
+    let cut = column_cut(boxes, &inner, min_gap);
     cut.is_some_and(|at| columns_coexist(boxes, &inner, at))
 }
 
@@ -801,13 +819,13 @@ fn columns_coexist(boxes: &[BBox], idx: &[usize], at: usize) -> bool {
     inside(left) >= COEXIST_LINES && inside(right) >= COEXIST_LINES
 }
 
-/// Position in `idx` (sorted left-to-right here) at which the widest
+/// Position in `by_left` (sorted left-to-right) at which the widest
 /// vertical whitespace band wider than `min_gap` starts, if any.
-fn column_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> {
-    idx.sort_by(|a, b| left_first(&boxes[*a], &boxes[*b]));
-    let mut right = boxes[idx[0]].x1;
+fn column_cut(boxes: &[BBox], by_left: &[usize], min_gap: f32) -> Option<usize> {
+    let &first = by_left.first()?;
+    let mut right = boxes[first].x1;
     let mut best: Option<(usize, f32)> = None;
-    for (pos, &i) in idx.iter().enumerate().skip(1) {
+    for (pos, &i) in by_left.iter().enumerate().skip(1) {
         let gap = boxes[i].x0 - right;
         if gap > min_gap && best.is_none_or(|(_, g)| gap > g) {
             best = Some((pos, gap));
@@ -863,10 +881,8 @@ fn flow(prev: &str, next: &str) -> i32 {
 /// line up across the columns read by columns. Ties keep columns first.
 fn rows_read_first(boxes: &[BBox], texts: &[&str], idx: &[usize], at: usize, split_x: f32) -> bool {
     let (top, bottom) = idx.split_at(at);
-    let (top_left, top_right): (Vec<usize>, Vec<usize>) =
-        top.iter().copied().partition(|&i| boxes[i].x0 < split_x);
-    let (bottom_left, bottom_right): (Vec<usize>, Vec<usize>) =
-        bottom.iter().copied().partition(|&i| boxes[i].x0 < split_x);
+    let is_left = |i: &&usize| boxes[**i].x0 < split_x;
+    let is_right = |i: &&usize| boxes[**i].x0 >= split_x;
     let (
         Some(&left_top_end),
         Some(&right_top_start),
@@ -874,11 +890,11 @@ fn rows_read_first(boxes: &[BBox], texts: &[&str], idx: &[usize], at: usize, spl
         Some(&left_bottom_end),
         Some(&right_bottom_start),
     ) = (
-        top_left.last(),
-        top_right.first(),
-        bottom_left.first(),
-        bottom_left.last(),
-        bottom_right.first(),
+        top.iter().rev().find(is_left),
+        top.iter().find(is_right),
+        bottom.iter().find(is_left),
+        bottom.iter().rev().find(is_left),
+        bottom.iter().find(is_right),
     )
     else {
         return false;
@@ -891,62 +907,89 @@ fn rows_read_first(boxes: &[BBox], texts: &[&str], idx: &[usize], at: usize, spl
     by_rows > by_columns
 }
 
-/// Recursive XY-cut over `boxes`, with `texts` the text of the line of each
-/// box. When a column gap runs through the whole region and the two sides
-/// stand side by side (see [`columns_coexist`]), a row gap that splits
-/// margin lines (see [`margin_runs`]) off its top or bottom is taken before
-/// it; otherwise the widest row gap across the region is taken first only
-/// when the text reads on better by rows than by columns (see
-/// [`rows_read_first`]), so paragraph gaps that happen to line up across
-/// columns do not cut the columns into bands. When such a column gap
-/// appears only once those margin lines are left out, the row gap that
-/// splits them off is taken first. Otherwise split on the widest row gap,
-/// else on the widest column gap, else emit the indices as one leaf block
-/// sorted top-to-bottom.
-fn xy_cut(
-    boxes: &[BBox],
-    texts: &[&str],
-    mut idx: Vec<usize>,
-    depth: u32,
-    params: &CutParams,
-    out: &mut Vec<Vec<usize>>,
-) {
-    if idx.len() > 1 && depth < MAX_DEPTH {
-        let cut = column_cut(boxes, &mut idx, params.column_gap);
-        let has_column = cut.is_some_and(|at| columns_coexist(boxes, &idx, at));
-        let row = if has_column {
-            // `idx` is sorted left-to-right here, so the right side starts
-            // at the box at the cut.
-            let split_x = cut.map(|at| boxes[idx[at]].x0);
-            spanning_row_cut(boxes, &mut idx, params.row_gap).or_else(|| {
-                let x = split_x?;
-                let at = row_cut(boxes, &mut idx, params.row_gap)?;
-                rows_read_first(boxes, texts, &idx, at, x).then_some(at)
-            })
-        } else {
-            let masked = masked_column_cut(boxes, &mut idx, params.column_gap);
-            let margin = if masked {
-                spanning_row_cut(boxes, &mut idx, params.row_gap)
-            } else {
-                None
-            };
-            margin.or_else(|| row_cut(boxes, &mut idx, params.row_gap))
-        };
-        if let Some(at) = row {
-            let lower = idx.split_off(at);
-            xy_cut(boxes, texts, idx, depth + 1, params, out);
-            xy_cut(boxes, texts, lower, depth + 1, params, out);
-            return;
+/// Fixed inputs of one XY-cut run: the line boxes, the text of the line of
+/// each box, the thresholds, all-`false` scratch marks with one slot per
+/// box, and the leaf blocks found so far.
+struct XyCut<'a> {
+    boxes: &'a [BBox],
+    texts: &'a [&'a str],
+    params: &'a CutParams,
+    marks: Vec<bool>,
+    out: Vec<Vec<usize>>,
+}
+
+impl XyCut<'_> {
+    /// The members of `other` (a superset of `cut`) that are in `cut` and
+    /// those that are not, each kept in the order of `other`.
+    fn partition(&mut self, cut: &[usize], other: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        for &i in cut {
+            self.marks[i] = true;
         }
-        if let Some(at) = column_cut(boxes, &mut idx, params.column_gap) {
-            let right = idx.split_off(at);
-            xy_cut(boxes, texts, idx, depth + 1, params, out);
-            xy_cut(boxes, texts, right, depth + 1, params, out);
-            return;
+        let (inside, outside): (Vec<usize>, Vec<usize>) =
+            other.iter().copied().partition(|&i| self.marks[i]);
+        for &i in cut {
+            self.marks[i] = false;
         }
+        (inside, outside)
     }
-    idx.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
-    out.push(idx);
+
+    /// Recursive XY-cut over the lines in `by_top` (sorted top-to-bottom)
+    /// and `by_left` (the same indices sorted left-to-right). When a
+    /// column gap runs through the whole region and the two sides stand
+    /// side by side (see [`columns_coexist`]), a row gap that splits margin
+    /// lines (see [`margin_runs`]) off its top or bottom is taken before
+    /// it; otherwise the widest row gap across the region is taken first
+    /// only when the text reads on better by rows than by columns (see
+    /// [`rows_read_first`]), so paragraph gaps that happen to line up
+    /// across columns do not cut the columns into bands. When such a
+    /// column gap appears only once those margin lines are left out, the
+    /// row gap that splits them off is taken first. Otherwise split on the
+    /// widest row gap, else on the widest column gap, else emit the indices
+    /// as one leaf block sorted top-to-bottom. Both lists are sorted once
+    /// at the root and split with stable partitions, which keeps the order
+    /// a stable re-sort of each region would give: the two sort keys are
+    /// the same pair (`x0`, `y1`), so tied boxes stay in index order.
+    fn run(&mut self, mut by_top: Vec<usize>, mut by_left: Vec<usize>, depth: u32) {
+        if by_top.len() > 1 && depth < MAX_DEPTH {
+            let boxes = self.boxes;
+            let params = self.params;
+            let cut = column_cut(boxes, &by_left, params.column_gap);
+            let has_column = cut.is_some_and(|at| columns_coexist(boxes, &by_left, at));
+            let row = if has_column {
+                // The right side starts at the box at the cut.
+                let split_x = cut.map(|at| boxes[by_left[at]].x0);
+                spanning_row_cut(boxes, &by_top, params.row_gap).or_else(|| {
+                    let x = split_x?;
+                    let at = row_cut(boxes, &by_top, params.row_gap)?;
+                    rows_read_first(boxes, self.texts, &by_top, at, x).then_some(at)
+                })
+            } else {
+                let masked =
+                    masked_column_cut(boxes, &by_top, &by_left, params.column_gap, &mut self.marks);
+                let margin = if masked {
+                    spanning_row_cut(boxes, &by_top, params.row_gap)
+                } else {
+                    None
+                };
+                margin.or_else(|| row_cut(boxes, &by_top, params.row_gap))
+            };
+            if let Some(at) = row {
+                let lower_top = by_top.split_off(at);
+                let (upper_left, lower_left) = self.partition(&by_top, &by_left);
+                self.run(by_top, upper_left, depth + 1);
+                self.run(lower_top, lower_left, depth + 1);
+                return;
+            }
+            if let Some(at) = cut {
+                let right_left = by_left.split_off(at);
+                let (left_top, right_top) = self.partition(&by_left, &by_top);
+                self.run(left_top, by_left, depth + 1);
+                self.run(right_top, right_left, depth + 1);
+                return;
+            }
+        }
+        self.out.push(by_top);
+    }
 }
 
 /// Order lines for reading with a recursive XY-cut over their boxes and set
@@ -994,8 +1037,19 @@ pub fn order_lines(lines: Vec<Line>, page_width: f32) -> Vec<Line> {
     let texts: Vec<&str> = placed.iter().map(|(line, _)| line.text.as_str()).collect();
     let mut blocks: Vec<Vec<usize>> = Vec::new();
     if !boxes.is_empty() {
-        let all: Vec<usize> = (0..boxes.len()).collect();
-        xy_cut(&boxes, &texts, all, 0, &params, &mut blocks);
+        let mut by_top: Vec<usize> = (0..boxes.len()).collect();
+        by_top.sort_by(|a, b| top_first(&boxes[*a], &boxes[*b]));
+        let mut by_left: Vec<usize> = by_top.clone();
+        by_left.sort_by(|a, b| left_first(&boxes[*a], &boxes[*b]));
+        let mut cutter = XyCut {
+            boxes: &boxes,
+            texts: &texts,
+            params: &params,
+            marks: vec![false; boxes.len()],
+            out: Vec::new(),
+        };
+        cutter.run(by_top, by_left, 0);
+        blocks = cutter.out;
     }
 
     let mut slots: Vec<Option<Line>> = placed.into_iter().map(|(l, _)| Some(l)).collect();

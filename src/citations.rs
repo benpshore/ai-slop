@@ -4542,7 +4542,20 @@ pub fn find_citation_markers(pages: &[PageText], refs: &[ReferenceEntry]) -> Vec
         return Vec::new();
     }
     let sections = find_reference_sections(pages);
-    let extents = list_extents(pages, &sections);
+    markers_in_sections(pages, refs, &sections)
+}
+
+/// [`find_citation_markers`] with the reference lists already found by
+/// [`find_reference_sections`].
+fn markers_in_sections(
+    pages: &[PageText],
+    refs: &[ReferenceEntry],
+    sections: &[ReferenceSection],
+) -> Vec<CitationMarker> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let extents = list_extents(pages, sections);
     let index = RefIndex::build(refs, &extents);
     let page_windows: Vec<Vec<Range<usize>>> = pages
         .iter()
@@ -4622,8 +4635,94 @@ pub fn extract_citations(pages: &[PageText]) -> (Vec<ReferenceEntry>, Vec<Citati
             refs.push(entry);
         }
     }
-    let markers = find_citation_markers(pages, &refs);
+    let markers = markers_in_sections(pages, &refs, &sections);
     (refs, markers)
+}
+
+/// Compile every regex this module uses, so the first document does not pay
+/// for it inside its stage timings. Repeated calls are cheap.
+pub fn warm_up() {
+    let accessors: &[fn() -> &'static Regex] = &[
+        heading_re,
+        end_heading_re,
+        caption_re,
+        numeric_row_re,
+        biography_re,
+        entry_start_re,
+        bracket_label_re,
+        bare_number_label_re,
+        bare_number_re,
+        rsc_first_entry_re,
+        dot_label_re,
+        paren_label_re,
+        page_number_re,
+        author_start_re,
+        handle_start_re,
+        lncs_authors_re,
+        surname_re,
+        year_paren_re,
+        year_bare_re,
+        doi_start_re,
+        year_token_re,
+        leading_year_re,
+        initial_token_re,
+        cap_word_re,
+        caps_block_re,
+        and_split_re,
+        et_al_tail_re,
+        et_al_lead_re,
+        year_lead_re,
+        venue_lead_re,
+        comma_venue_re,
+        arxiv_re,
+        url_re,
+        pages_labelled_re,
+        vol_issue_pages_re,
+        vol_colon_pages_re,
+        vol_comma_pages_re,
+        vol_labelled_re,
+        issue_labelled_re,
+        vol_issue_re,
+        vol_before_year_re,
+        dash_range_re,
+        in_venue_re,
+        journal_venue_re,
+        publisher_re,
+        author_sep_re,
+        initials_re,
+        surname_first_re,
+        vancouver_start_re,
+        numeric_marker_re,
+        numeric_item_re,
+        narrative_marker_re,
+        clause_scan_re,
+        bare_et_al_re,
+        year_item_re,
+        superscript_marker_re,
+        parenthetical_re,
+        clause_re,
+        numbered_label_re,
+        bare_label_re,
+        bracket_label_re_first,
+        initials_start_re,
+        evidence_year_re,
+        undated_marker_re,
+        author_year_signature_re,
+        author_list_signature_re,
+        organisation_start_re,
+        no_date_lead_re,
+        trailing_year_re,
+        trailing_paren_year_re,
+        arxiv_preprint_re,
+        ditto_authors_re,
+        legal_title_re,
+        series_volume_re,
+        bare_volume_lead_re,
+        bare_number_lead_re,
+    ];
+    for accessor in accessors {
+        accessor();
+    }
 }
 
 #[cfg(test)]

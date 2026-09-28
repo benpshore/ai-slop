@@ -11,6 +11,13 @@ license = "MIT"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
+# Profiles only take effect here, at the workspace root. No `panic = "abort"`:
+# `tpe extract` and `tpe eval` catch per-document panics with `catch_unwind`.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+# `[profile.bench]` inherits `release` by default, so benchmarks measure what ships.
+
 [package]
 name = "text-processing-engine"
 version = "0.1.0"
@@ -38,7 +45,10 @@ anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 docling-core = { version = "=1.69.2", optional = true }
 docling-pdf = { version = "=1.69.2", optional = true }
-flate2 = "1"
+# zlib-rs inflates faster than the default miniz_oxide. Feature unification
+# switches lopdf's inflate too: flate2 prefers zlib-rs over miniz_oxide when
+# both are enabled and no C zlib is (flate2 1.1 `src/ffi/mod.rs`).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 hex = "0.4"
 lopdf = "0.45"
 # Same major as docling-pdf (0.8) so one pdfium-render instance links libpdfium.
@@ -48,7 +58,9 @@ regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-sha2 = "0.10"
+# 0.11 (already built for lopdf) picks the ARMv8 / x86 SHA extensions at run
+# time by default; 0.10 used them on aarch64 only behind its `asm` feature.
+sha2 = "0.11"
 tar = "0.4"
 thiserror = "2"
 unicode-normalization = "0.1"

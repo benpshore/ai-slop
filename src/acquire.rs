@@ -32,6 +32,25 @@ pub struct Snapshot {
     pub source: SourceObservation,
 }
 
+/// The verified bytes of one file before they are hashed, so the caller can
+/// hash them on another thread (see [`read_verified`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unhashed {
+    pub bytes: Vec<u8>,
+    pub source: SourceObservation,
+}
+
+impl Unhashed {
+    /// Attach the content hash computed from `self.bytes`.
+    pub fn into_snapshot(self, hash: ContentHash) -> Snapshot {
+        Snapshot {
+            bytes: self.bytes,
+            hash,
+            source: self.source,
+        }
+    }
+}
+
 /// Fields of a `stat` call that must not change between the two calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Observed {
@@ -88,6 +107,14 @@ fn observe(meta: &fs::Metadata) -> Observed {
 /// [`AcquireError::ChangedDuringRead`]. `max_bytes` bounds the size accepted
 /// before anything is read.
 pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, AcquireError> {
+    let read = read_verified(path, max_bytes)?;
+    let hash = ContentHash(sha256_hex(&read.bytes));
+    Ok(read.into_snapshot(hash))
+}
+
+/// [`snapshot`] without the hash: read `path` completely with the same
+/// checks, and leave hashing to the caller.
+pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, AcquireError> {
     let before_meta = fs::metadata(path)?;
     if !before_meta.is_file() {
         return Err(AcquireError::NotAFile);
@@ -114,7 +141,6 @@ pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, Acquire
         return Err(AcquireError::ChangedDuringRead);
     }
 
-    let hash = ContentHash(sha256_hex(&bytes));
     let source = SourceObservation {
         path: path.to_string_lossy().into_owned(),
         inode: before.inode,
@@ -122,11 +148,7 @@ pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, Acquire
         mtime_unix: before.mtime_unix,
         size: before.size,
     };
-    Ok(Snapshot {
-        bytes,
-        hash,
-        source,
-    })
+    Ok(Unhashed { bytes, source })
 }
 
 #[cfg(test)]
@@ -152,6 +174,18 @@ mod tests {
             assert!(snap.source.device.is_some());
             assert!(snap.source.mtime_unix.is_some());
         }
+    }
+
+    #[test]
+    fn unhashed_read_matches_snapshot() {
+        let file = NamedTempFile::new().unwrap();
+        fs::write(file.path(), b"%PDF-1.4 same bytes").unwrap();
+
+        let read = read_verified(file.path(), None).unwrap();
+        let snap = snapshot(file.path(), None).unwrap();
+        let hash = ContentHash(sha256_hex(&read.bytes));
+
+        assert_eq!(read.into_snapshot(hash), snap);
     }
 
     #[test]

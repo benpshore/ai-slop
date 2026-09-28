@@ -27,7 +27,7 @@
 //! standalone `Abstract` line itself `heading`). Only lines still tagged
 //! `body` are retagged, except that `furniture` wins over any tag.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -232,8 +232,8 @@ enum Decision {
 /// word of the next body line) are not recorded as words, so a split
 /// `cost-` / `effective` does not attest its own halves.
 struct Vocabulary {
-    words: BTreeSet<String>,
-    compounds: BTreeSet<String>,
+    words: HashSet<String>,
+    compounds: HashSet<String>,
 }
 
 fn page_number_re() -> &'static Regex {
@@ -589,7 +589,7 @@ fn neighbour(w: &PageWork, index: usize, forward: bool) -> Option<usize> {
 }
 
 /// Rule 3: the body line a script fragment at `index` belongs to, if any.
-fn script_target(page: &PageText, w: &PageWork, index: usize) -> Option<usize> {
+fn script_target(page: &PageText, w: &PageWork, geom: &PageGeom, index: usize) -> Option<usize> {
     let line = page.lines.get(index)?;
     let text = line.text.trim();
     if text.is_empty()
@@ -599,7 +599,7 @@ fn script_target(page: &PageText, w: &PageWork, index: usize) -> Option<usize> {
         return None;
     }
     let bbox = norm(line.bbox?);
-    let size = line_size(page, line)?;
+    let size = geom.lines.get(index)?.size?;
     let height = (bbox.y1 - bbox.y0).max(f32::EPSILON);
     let mut best: Option<(usize, f32)> = None;
     let candidates = [neighbour(w, index, true), neighbour(w, index, false)];
@@ -610,7 +610,8 @@ fn script_target(page: &PageText, w: &PageWork, index: usize) -> Option<usize> {
         if other.column != line.column {
             continue;
         }
-        let (Some(ob), Some(other_size)) = (other.bbox.map(norm), line_size(page, other)) else {
+        let other_size = geom.lines.get(cand).and_then(|g| g.size);
+        let (Some(ob), Some(other_size)) = (other.bbox.map(norm), other_size) else {
             continue;
         };
         if size > SCRIPT_RATIO * other_size {
@@ -784,6 +785,104 @@ fn baseline_of(page: &PageText, line: &Line) -> Option<(f32, f32)> {
     })
 }
 
+/// Geometry of one line for rules 3 and 3a: its normalised box, its
+/// dominant size ([`line_size`]) and its baseline with that size
+/// ([`baseline_of`]).
+#[derive(Clone, Copy)]
+struct LineGeom {
+    bbox: Option<BBox>,
+    size: Option<f32>,
+    base: Option<(f32, f32)>,
+}
+
+impl LineGeom {
+    fn of(page: &PageText, line: &Line) -> Self {
+        Self {
+            bbox: line.bbox.map(norm),
+            size: line_size(page, line),
+            base: baseline_of(page, line),
+        }
+    }
+
+    /// Baseline and size bits of a line that can be a base line (it has a
+    /// box and a finite baseline), for telling whether the index changes.
+    fn index_key(&self) -> Option<(u32, u32)> {
+        self.bbox?;
+        let (baseline, size) = self.base?;
+        baseline
+            .is_finite()
+            .then_some((baseline.to_bits(), size.to_bits()))
+    }
+}
+
+/// Per-page cache for rules 3 and 3a, computed once per page and refreshed
+/// for the target line of each merge: the geometry of every line, the
+/// lines that can be a base line as `(baseline, index)` sorted by
+/// baseline, and the largest dominant size among them.
+struct PageGeom {
+    lines: Vec<LineGeom>,
+    by_baseline: Vec<(f32, usize)>,
+    max_size: f32,
+}
+
+impl PageGeom {
+    fn new(page: &PageText) -> Self {
+        let lines: Vec<LineGeom> = page
+            .lines
+            .iter()
+            .map(|line| LineGeom::of(page, line))
+            .collect();
+        let mut geom = Self {
+            lines,
+            by_baseline: Vec::new(),
+            max_size: 0.0,
+        };
+        geom.index();
+        geom
+    }
+
+    fn index(&mut self) {
+        self.by_baseline.clear();
+        self.max_size = 0.0;
+        for (j, g) in self.lines.iter().enumerate() {
+            if g.index_key().is_some()
+                && let Some((baseline, size)) = g.base
+            {
+                self.by_baseline.push((baseline, j));
+                self.max_size = self.max_size.max(size);
+            }
+        }
+        self.by_baseline.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+
+    /// Recompute line `index` after a merge changed it; the baseline index
+    /// is rebuilt only when its baseline or size changed.
+    fn refresh(&mut self, page: &PageText, index: usize) {
+        let (Some(slot), Some(line)) = (self.lines.get_mut(index), page.lines.get(index)) else {
+            return;
+        };
+        let before = slot.index_key();
+        *slot = LineGeom::of(page, line);
+        if slot.index_key() != before {
+            self.index();
+        }
+    }
+
+    /// Indices of the base-line candidates with a baseline in
+    /// `low..=high`, ascending, into `out`.
+    fn window(&self, low: f32, high: f32, out: &mut Vec<usize>) {
+        out.clear();
+        let start = self.by_baseline.partition_point(|(b, _)| *b < low);
+        for &(baseline, j) in &self.by_baseline[start..] {
+            if baseline > high {
+                break;
+            }
+            out.push(j);
+        }
+        out.sort_unstable();
+    }
+}
+
 /// Rule 3a: the body line a detached superscript or subscript fragment at
 /// `index` belongs to, with the fragment's rendered form. Every body line of
 /// the page is a candidate, not only the neighbours in reading order:
@@ -793,24 +892,43 @@ fn baseline_of(page: &PageText, line: &Line) -> Option<(f32, f32)> {
 /// fragment's, reaches the fragment horizontally within
 /// `SUPERSCRIPT_REACH`, and has its baseline at a box-bottom offset in the
 /// raised window (superscript) or, for digits only, just below it
-/// (subscript). The candidate closest to the typical offset wins.
-fn superscript_target(page: &PageText, w: &PageWork, index: usize) -> Option<(usize, String)> {
+/// (subscript). The candidate closest to the typical offset wins (the
+/// lowest line index on a tie). Only lines whose baseline lies within the
+/// offset range at the page's largest size are looked at (`geom`, with
+/// `window` as scratch space); every other line fails the offset test.
+fn superscript_target(
+    page: &PageText,
+    w: &PageWork,
+    geom: &PageGeom,
+    index: usize,
+    window: &mut Vec<usize>,
+) -> Option<(usize, String)> {
     let line = page.lines.get(index)?;
     let raised_form = script_form(&line.text, true);
     let lowered_form = script_form(&line.text, false);
     if raised_form.is_none() && lowered_form.is_none() {
         return None;
     }
-    let bbox = norm(line.bbox?);
-    let size = line_size(page, line)?;
+    let own = geom.lines.get(index)?;
+    let bbox = own.bbox?;
+    let size = own.size?;
+    if !bbox.y0.is_finite() {
+        return None;
+    }
+    // A candidate passes only with `LOWERED_LOW <= (y0 - baseline) / size
+    // <= RAISED_HIGH` and `size <= max_size`; the slack covers rounding.
+    let reach = RAISED_HIGH.abs().max(LOWERED_LOW.abs()) * geom.max_size;
+    let slack = 1e-3 * (bbox.y0.abs() + reach) + 1e-3;
+    geom.window(bbox.y0 - reach - slack, bbox.y0 + reach + slack, window);
     let mut best: Option<(usize, f32, bool)> = None;
-    for (j, other) in page.lines.iter().enumerate() {
+    for &j in &*window {
         if j == index || !w.is_body(j) {
             continue;
         }
-        let (Some(ob), Some((baseline, other_size))) =
-            (other.bbox.map(norm), baseline_of(page, other))
-        else {
+        let Some(other) = geom.lines.get(j) else {
+            continue;
+        };
+        let (Some(ob), Some((baseline, other_size))) = (other.bbox, other.base) else {
             continue;
         };
         if size > (SCRIPT_RATIO + RATIO_SLACK) * other_size {
@@ -935,16 +1053,20 @@ fn merge_script(page: &mut PageText, script: usize, target: usize) {
 fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
     let mut merged: usize = 0;
     let mut superscripts: usize = 0;
+    let mut geom = PageGeom::new(page);
+    let mut window: Vec<usize> = Vec::new();
     for k in 0..page.lines.len() {
         if !w.is_body(k) {
             continue;
         }
-        if let Some((target, form)) = superscript_target(page, w, k) {
+        if let Some((target, form)) = superscript_target(page, w, &geom, k, &mut window) {
             merge_superscript(page, k, target, &form);
+            geom.refresh(page, target);
             w.mark(k, State::Merged);
             superscripts += 1;
-        } else if let Some(target) = script_target(page, w, k) {
+        } else if let Some(target) = script_target(page, w, &geom, k) {
             merge_script(page, k, target);
+            geom.refresh(page, target);
             w.mark(k, State::Merged);
             merged += 1;
         }
@@ -952,14 +1074,37 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
     (merged, superscripts)
 }
 
+/// Append `word` lower-cased to `buf`, as `str::to_lowercase` does (ASCII
+/// in place, anything else through `to_lowercase`).
+fn push_lowercase(buf: &mut String, word: &str) {
+    if word.is_ascii() {
+        let start = buf.len();
+        buf.push_str(word);
+        if let Some(tail) = buf.get_mut(start..) {
+            tail.make_ascii_lowercase();
+        }
+    } else {
+        buf.push_str(&word.to_lowercase());
+    }
+}
+
+/// Insert `key` into `set` unless it is there already (one allocation per
+/// new entry only).
+fn insert_new(set: &mut HashSet<String>, key: &str) {
+    if !set.contains(key) {
+        set.insert(key.to_owned());
+    }
+}
+
 /// Words and hyphenated word pairs of every body line, lower-cased, in
 /// reading order (see [`Vocabulary`] for the halves left out).
 fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
     let mut vocab = Vocabulary {
-        words: BTreeSet::new(),
-        compounds: BTreeSet::new(),
+        words: HashSet::new(),
+        compounds: HashSet::new(),
     };
     let alphabetic = |piece: &str| !piece.is_empty() && piece.chars().all(char::is_alphabetic);
+    let mut buf = String::new();
     let mut after_hyphen = false;
     for (page, w) in pages.iter().zip(work) {
         if !w.eligible {
@@ -971,34 +1116,46 @@ fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
                 continue;
             }
             let ends_hyphen = strip_final_hyphen(&line.text).is_some();
-            let tokens: Vec<&str> = line.text.split_whitespace().collect();
-            let last_token = tokens.len().saturating_sub(1);
-            for (t, token) in tokens.iter().enumerate() {
+            let mut tokens = line.text.split_whitespace().peekable();
+            let mut first_token = true;
+            while let Some(token) = tokens.next() {
+                let last_token = tokens.peek().is_none();
                 let core = token.trim_matches(|c: char| !c.is_alphanumeric());
-                let parts: Vec<&str> = core.split(HYPHENS).collect();
-                let last_part = parts.len().saturating_sub(1);
-                for (i, part) in parts.iter().enumerate() {
-                    let words: Vec<&str> = part
+                let mut parts = core.split(HYPHENS).peekable();
+                let mut first_part = true;
+                let mut prev_part: Option<&str> = None;
+                while let Some(part) = parts.next() {
+                    let last_part = parts.peek().is_none();
+                    let mut words = part
                         .split(|c: char| !c.is_alphabetic())
                         .filter(|word| !word.is_empty())
-                        .collect();
-                    let last_word = words.len().saturating_sub(1);
-                    for (j, word) in words.iter().enumerate() {
-                        let split_head = after_hyphen && t == 0 && i == 0 && j == 0;
-                        let split_tail =
-                            ends_hyphen && t == last_token && i == last_part && j == last_word;
+                        .peekable();
+                    let mut first_word = true;
+                    while let Some(word) = words.next() {
+                        let last_word = words.peek().is_none();
+                        let split_head = after_hyphen && first_token && first_part && first_word;
+                        let split_tail = ends_hyphen && last_token && last_part && last_word;
                         if !split_head && !split_tail {
-                            vocab.words.insert(word.to_lowercase());
+                            buf.clear();
+                            push_lowercase(&mut buf, word);
+                            insert_new(&mut vocab.words, &buf);
                         }
+                        first_word = false;
                     }
-                }
-                for pair in parts.windows(2) {
-                    if alphabetic(pair[0]) && alphabetic(pair[1]) {
-                        let first = pair[0].to_lowercase();
-                        let second = pair[1].to_lowercase();
-                        vocab.compounds.insert(format!("{first}-{second}"));
+                    if let Some(prev) = prev_part
+                        && alphabetic(prev)
+                        && alphabetic(part)
+                    {
+                        buf.clear();
+                        push_lowercase(&mut buf, prev);
+                        buf.push('-');
+                        push_lowercase(&mut buf, part);
+                        insert_new(&mut vocab.compounds, &buf);
                     }
+                    prev_part = Some(part);
+                    first_part = false;
                 }
+                first_token = false;
             }
             after_hyphen = ends_hyphen;
         }
@@ -1448,6 +1605,23 @@ pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
         tag_roles(page, &mut report);
     }
     report
+}
+
+/// Compile every regex this module uses, so the first document does not pay
+/// for it inside its stage timings. Repeated calls are cheap.
+pub fn warm_up() {
+    let accessors: &[fn() -> &'static Regex] = &[
+        page_number_re,
+        roman_re,
+        stamp_re,
+        abstract_re,
+        abstract_heading_re,
+        introduction_re,
+        caption_re,
+    ];
+    for accessor in accessors {
+        accessor();
+    }
 }
 
 #[cfg(test)]
@@ -2400,5 +2574,147 @@ mod tests {
         assert_eq!(report.superscripts_merged, 1);
         assert_eq!(pages[0].text, "NH\u{2083}\nand water");
         assert_eq!(pages[0].lines[0].spans, [0, 1]);
+    }
+
+    /// The scan over every line of the page that `superscript_target`
+    /// replaced, kept as the oracle for its window search.
+    fn naive_target(page: &PageText, w: &PageWork, index: usize) -> Option<(usize, String)> {
+        let line = page.lines.get(index)?;
+        let raised_form = script_form(&line.text, true);
+        let lowered_form = script_form(&line.text, false);
+        if raised_form.is_none() && lowered_form.is_none() {
+            return None;
+        }
+        let bbox = norm(line.bbox?);
+        let size = line_size(page, line)?;
+        let mut best: Option<(usize, f32, bool)> = None;
+        for (j, other) in page.lines.iter().enumerate() {
+            if j == index || !w.is_body(j) {
+                continue;
+            }
+            let (Some(ob), Some((baseline, other_size))) =
+                (other.bbox.map(norm), baseline_of(page, other))
+            else {
+                continue;
+            };
+            if size > (SCRIPT_RATIO + RATIO_SLACK) * other_size {
+                continue;
+            }
+            let gap = (ob.x0 - bbox.x1).max(bbox.x0 - ob.x1).max(0.0);
+            if gap > SUPERSCRIPT_REACH * other_size {
+                continue;
+            }
+            let offset = (bbox.y0 - baseline) / other_size;
+            let (raised, miss) =
+                if raised_form.is_some() && (RAISED_LOW..=RAISED_HIGH).contains(&offset) {
+                    (true, (offset - RAISED_IDEAL).abs())
+                } else if lowered_form.is_some() && (LOWERED_LOW..RAISED_LOW).contains(&offset) {
+                    (false, (offset - LOWERED_IDEAL).abs())
+                } else {
+                    continue;
+                };
+            let score = miss + gap / other_size;
+            if best.is_none_or(|(_, s, _)| score < s) {
+                best = Some((j, score, raised));
+            }
+        }
+        let (target, _, raised) = best?;
+        let form = if raised { raised_form } else { lowered_form };
+        form.map(|f| (target, f))
+    }
+
+    /// `superscript_target` agrees with [`naive_target`] on every line.
+    fn assert_matches_naive(page: &PageText) {
+        let w = prepare(page);
+        assert!(w.eligible);
+        let geom = PageGeom::new(page);
+        let mut window: Vec<usize> = Vec::new();
+        for k in 0..page.lines.len() {
+            assert_eq!(
+                superscript_target(page, &w, &geom, k, &mut window),
+                naive_target(page, &w, k),
+                "line {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_search_matches_a_scan_of_every_line() {
+        let spans = vec![
+            // 0: best base is the 10 pt line; the 20 pt line also reaches it.
+            span_at("5", 85.0, 401.0, 6.0, 0),
+            // 1: reached only by a 20 pt line whose baseline lies outside
+            // the window a 10 pt line would give.
+            span_at("7", 300.0, 401.0, 6.0, 1),
+            // 2: 10 pt lines just inside and just outside both edges.
+            span_at("3", 450.0, 401.0, 6.0, 2),
+            span_at("the literature.", 50.0, 398.0, 10.0, 3),
+            span_at("Big", 50.0, 387.0, 20.0, 4),
+            span_at("Big", 270.0, 387.0, 20.0, 5),
+            // Offsets from fragment 2: 0.89, 0.91, -0.69 and -0.71.
+            span_at("inside high", 400.0, 390.1, 10.0, 6),
+            span_at("outside high", 400.0, 389.9, 10.0, 7),
+            span_at("inside low", 400.0, 405.9, 10.0, 8),
+            span_at("outside low", 400.0, 406.1, 10.0, 9),
+            // A second column with its fragment first in reading order.
+            span_at("12", 380.5, 501.0, 6.0, 10),
+            span_at("in two studies", 320.0, 498.0, 10.0, 11),
+        ];
+        let page = page_with(
+            spans,
+            &[
+                &[0],
+                &[1],
+                &[2],
+                &[3],
+                &[4],
+                &[5],
+                &[6],
+                &[7],
+                &[8],
+                &[9],
+                &[10],
+                &[11],
+            ],
+        );
+        assert_matches_naive(&page);
+        let w = prepare(&page);
+        let geom = PageGeom::new(&page);
+        let mut window: Vec<usize> = Vec::new();
+        let mut target = |k: usize| superscript_target(&page, &w, &geom, k, &mut window);
+        assert_eq!(target(0), Some((3, "\u{2075}".to_string())));
+        assert_eq!(target(1), Some((5, "\u{2077}".to_string())));
+        assert_eq!(target(2), Some((8, "\u{2083}".to_string())));
+        assert_eq!(target(10), Some((11, "\u{00B9}\u{00B2}".to_string())));
+    }
+
+    #[test]
+    fn fragments_far_from_their_base_lines_in_reading_order_merge() {
+        // Both fragments come first in reading order and their base lines
+        // last, with a column of filler lines in between.
+        let mut spans = vec![
+            span_at("7", 125.5, 401.0, 6.0, 0),
+            span_at("12", 385.5, 501.0, 6.0, 1),
+        ];
+        for k in 0..14u16 {
+            let y = 680.0 - 20.0 * f32::from(k);
+            let seq = u32::from(k) + 2;
+            spans.push(span_at("filler text of the body", 50.0, y, 10.0, seq));
+        }
+        spans.push(span_at("the literature.", 50.0, 398.0, 10.0, 16));
+        spans.push(span_at("in two studies", 320.0, 498.0, 10.0, 17));
+        let members: Vec<Vec<u32>> = (0..18u32).map(|i| vec![i]).collect();
+        let lines: Vec<&[u32]> = members.iter().map(Vec::as_slice).collect();
+        let page = page_with(spans, &lines);
+        assert_matches_naive(&page);
+        let mut pages = vec![page];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 2);
+        assert_eq!(report.scripts_merged, 0);
+        assert_eq!(pages[0].lines.len(), 16);
+        assert!(pages[0].text.contains("the literature.\u{2077}"));
+        assert!(pages[0].text.contains("in two studies\u{00B9}\u{00B2}"));
+        assert_eq!(pages[0].lines[14].spans, [16, 0]);
+        assert_eq!(pages[0].lines[15].spans, [17, 1]);
     }
 }
