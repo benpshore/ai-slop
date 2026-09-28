@@ -1,0 +1,42 @@
+[project]
+name = "text-processing-engine"
+dynamic = ["version"]
+description = "text-processing-engine"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Ben Shore" }]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+text-processing-engine = "text_processing_engine:main"
+
+# The version is the git tag (v1.2.3 -> 1.2.3); nothing to bump by hand.
+[build-system]
+requires = ["hatchling>=1.32,<2", "uv-dynamic-versioning>=0.14,<1"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/text_processing_engine"]
+
+[tool.uv-dynamic-versioning]
+fallback-version = "0.0.0"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.14"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]

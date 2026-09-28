@@ -1,0 +1,77 @@
+name: Auto-release
+
+# Every merge to main is a release: once this commit's `ci` check has passed,
+# tag the next minor version and publish a GitHub release with the built
+# wheel and sdist. The version is dynamic (uv-dynamic-versioning reads the
+# tag), so nothing is committed and no PR is needed. Tags aren't covered by
+# the protect-main ruleset. Run by hand (workflow_dispatch) to retry.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: Wait for this commit's ci check
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 75); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs?check_name=ci&per_page=100" \
+              --jq '[.check_runs[] | select(.app.slug == "github-actions")] | sort_by(.started_at) | last | .conclusion // "pending"')
+            case "$state" in
+              success) exit 0 ;;
+              pending) sleep 20 ;;
+              *) echo "::error::ci concluded '$state' on $SHA; not releasing it"; exit 1 ;;
+            esac
+          done
+          echo "::error::timed out waiting for ci on $SHA"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Already released?
+        id: guard
+        run: |
+          if [ -n "$(git tag --points-at HEAD 'v*')" ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        if: steps.guard.outputs.skip != 'true'
+      - name: Tag, test, build
+        if: steps.guard.outputs.skip != 'true'
+        id: tag
+        run: |
+          set -euo pipefail
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+          IFS=. read -r major minor _patch <<<"${latest#v}"
+          version="${major:-0}.$((${minor:-0} + 1)).0"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$version" -m "v$version"
+          uv sync --locked
+          uv run pytest
+          uv audit --locked --preview-features audit-command
+          uv build
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Push tag and publish
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          git push origin "refs/tags/v$VERSION"
+          gh release create "v$VERSION" dist/* --verify-tag --generate-notes

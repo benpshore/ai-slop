@@ -1,0 +1,42 @@
+name: Release
+
+# Publish: push a tag, e.g. `git tag v0.1.1 && git push --tags`.
+# Every merge to main is also released automatically by auto-release.yml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Tag matches computed project version
+        run: test "$(uvx uv-dynamic-versioning)" = "${GITHUB_REF_NAME#v}"
+      - run: uv sync --locked
+      - run: uv run pytest
+      - run: uv audit --locked --preview-features audit-command
+      - run: uv build
+      - name: Tag matches Cargo.toml version
+        run: test "v$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')" = "$GITHUB_REF_NAME"
+      - run: cargo test
+      - name: Build release binary
+        run: |
+          cargo build --release
+          mkdir -p dist
+          cp "target/release/text-processing-engine" "dist/text-processing-engine-$(uname -m)-linux"
+          (cd dist && sha256sum -- * > SHA256SUMS)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*

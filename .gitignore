@@ -1,0 +1,158 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-eggs/
+pip-wheel-metadata/
+
+# ---- Tooling caches ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# ---- Databases & data files (never commit) ----
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.duckdb
+*.duckdb.wal
+*.mdb
+*.accdb
+*.parquet
+*.feather
+*.arrow
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.dump
+*.bak
+
+# ---- Secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+credentials.json
+.netrc
+
+# ---- Logs & scratch ----
+*.log
+logs/
+tmp/
+temp/
+scratch/
+output/
+outputs/
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# ---- Windows / Linux ----
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
+.directory
+
+# ---- Editors & IDEs ----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+.project
+.settings/
+*.sublime-workspace
+
+# ---- R / Jupyter / misc ----
+.Rhistory
+.RData
+.Rproj.user/
+
+# ---- Ruby ----
+vendor/bundle/
+.bundle/cache/
+
+# ---- AI tooling (local-only settings) ----
+.claude/settings.local.json
+.claude/.cc-writes/
+
+# ---- Rust ----
+target/
+**/*.rs.bk
+
+# ---- Swift / Xcode / ObjC ----
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.hmap
+*.ipa
+*.dSYM/
+*.dSYM.zip
+
+# ---- C / C++ / CMake ----
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+*.o
+*.obj
+*.a
+*.dylib
+*.dll
+*.exe
+*.out
+
+# ---- JS / CSS ----
+node_modules/
+.npm/
+.next/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+npm-debug.log*
+
+# ---- Postgres / Docker local state ----
+pgdata/
+postgres-data/
+*.pgdump
+.docker/

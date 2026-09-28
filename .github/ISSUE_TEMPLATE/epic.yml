@@ -1,0 +1,21 @@
+name: Epic
+description: A large body of work broken into sub-issues
+labels: [epic]
+title: "[Epic] "
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What does done look like for the whole epic?
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: >
+        After creating this issue, add child issues with **Create sub-issue**
+        (or `gh issue create` and link them). Progress rolls up automatically.
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
