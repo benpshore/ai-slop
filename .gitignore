@@ -162,3 +162,6 @@ postgres-data/
 .corpus-cache/
 eval-out/
 .claude/settings.local.json
+.models/
+.pdfium/
+eval-native/

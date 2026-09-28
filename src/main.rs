@@ -329,8 +329,8 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
     let start = Instant::now();
     // A panic inside a backend must fail this file only, not the whole batch.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| pipeline::run_job(&job)))
-        .unwrap_or_else(|payload| Err(format!("panic: {}", panic_message(&*payload))))
-        .map_err(|err| err.to_string());
+        .map(|outcome| outcome.map_err(|err| err.to_string()))
+        .unwrap_or_else(|payload| Err(format!("panic: {}", panic_message(&*payload))));
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
@@ -779,6 +779,7 @@ fn print_summary(report: &CorpusReport) {
     println!("year_accuracy: {:.3}", s.year_accuracy);
     println!("title_accuracy: {:.3}", s.title_accuracy);
     println!("marker_resolution_rate: {:.3}", s.marker_resolution_rate);
+    println!("marker_recall: {:.3}", s.marker_recall);
     match s.mean_body_alignment {
         Some(alignment) => println!("mean_body_alignment: {alignment:.3}"),
         None => println!("mean_body_alignment: -"),

@@ -121,15 +121,42 @@ pub fn save_manifest(path: &Path, manifest: &Manifest) -> Result<(), CorpusError
     Ok(())
 }
 
-/// Cache locations for an item: `cache_dir/<id with ':' replaced by '_'>/`
+/// Cache locations for an item: `cache_dir/<cache_dir_name(id)>/`
 /// `paper.pdf`, `source.bin` (the archive as downloaded) and `source/`.
 pub fn cache_paths(cache_dir: &Path, item: &ManifestItem) -> (PathBuf, PathBuf, PathBuf) {
-    let dir = cache_dir.join(item.id.replace(':', "_"));
+    let dir = cache_dir.join(cache_dir_name(&item.id));
     (
         dir.join("paper.pdf"),
         dir.join("source.bin"),
         dir.join("source"),
     )
+}
+
+/// A single safe directory name derived from a manifest id.
+///
+/// Characters outside `[A-Za-z0-9._-]` (including `:`) become `_`, and runs
+/// of `_` collapse to one, so `arxiv:2502.00857` is `arxiv_2502.00857`. An id
+/// that contains `/`, `\` or `..`, or whose cleaned form is empty, `.` or
+/// `..`, is replaced by `id-<first 16 hex digits of its sha256>`. The result
+/// never contains a path separator and never names a parent directory.
+pub fn cache_dir_name(id: &str) -> String {
+    let hashed = || format!("id-{}", &sha256_hex(id.as_bytes())[..16]);
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return hashed();
+    }
+    let mut name = String::with_capacity(id.len());
+    for c in id.chars() {
+        let keep = c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-';
+        let out = if keep { c } else { '_' };
+        if out == '_' && name.ends_with('_') {
+            continue;
+        }
+        name.push(out);
+    }
+    if name.is_empty() || name == "." || name == ".." {
+        return hashed();
+    }
+    name
 }
 
 /// Make sure the PDF and (when the item has one) the source of `item` are in
@@ -611,6 +638,57 @@ mod tests {
         assert_eq!(pdf, Path::new("/cache/arxiv_2502.00857/paper.pdf"));
         assert_eq!(archive, Path::new("/cache/arxiv_2502.00857/source.bin"));
         assert_eq!(source, Path::new("/cache/arxiv_2502.00857/source"));
+    }
+
+    #[test]
+    fn cache_dir_name_replaces_colon_and_collapses_repeats() {
+        assert_eq!(cache_dir_name("arxiv:2502.00857"), "arxiv_2502.00857");
+        assert_eq!(cache_dir_name("a::b  c"), "a_b_c");
+        assert_eq!(cache_dir_name("x_:y"), "x_y");
+    }
+
+    #[test]
+    fn cache_dir_name_hashes_unsafe_ids() {
+        let cache = Path::new("/cache");
+        for id in ["../evil", "/abs", "a/b", "a\\b", "..", ".", ""] {
+            let name = cache_dir_name(id);
+            let expected = format!("id-{}", &sha256_hex(id.as_bytes())[..16]);
+            assert_eq!(name, expected, "{id:?}");
+            assert!(!name.contains('/') && !name.contains('\\'), "{id:?}");
+            let (pdf, archive, source) = cache_paths(cache, &item(id));
+            let dir = cache.join(&name);
+            assert_eq!(pdf, dir.join("paper.pdf"), "{id:?}");
+            assert_eq!(archive, dir.join("source.bin"), "{id:?}");
+            assert_eq!(source, dir.join("source"), "{id:?}");
+            assert!(pdf.starts_with(cache), "{id:?}");
+            assert_eq!(dir.parent(), Some(cache), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn cache_dir_name_never_escapes_cache_dir() {
+        let cache = Path::new("/cache/root");
+        for id in [
+            "arxiv:2502.00857",
+            "../evil",
+            "/abs",
+            "a/b",
+            "ok-id_1.2",
+            "x/../y",
+        ] {
+            let name = cache_dir_name(id);
+            assert!(!name.is_empty() && name != "." && name != "..", "{id:?}");
+            let joined = cache.join(&name);
+            assert!(joined.starts_with(cache), "{id:?}");
+            let components: Vec<Component<'_>> = joined.components().collect();
+            assert!(
+                components
+                    .iter()
+                    .all(|c| !matches!(c, Component::ParentDir)),
+                "{id:?}"
+            );
+            assert_eq!(joined.parent(), Some(cache), "{id:?}");
+        }
     }
 
     #[test]
