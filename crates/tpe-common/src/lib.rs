@@ -23,7 +23,7 @@ pub struct PaperRecord {
     pub abstract_text: Option<String>,
     /// Where this record came from, e.g. `openalex`, `crossref`, `zotero`, `tpe`.
     pub source: String,
-    /// Source-specific identifier (OpenAlex work id, Zotero item key, ...).
+    /// Source-specific identifier (`OpenAlex` work id, Zotero item key, ...).
     pub source_id: Option<String>,
 }
 
@@ -69,7 +69,7 @@ pub fn normalize_arxiv_id(raw: &str) -> Option<String> {
         && base.as_bytes()[4] == b'.'
         && base[..4].chars().all(|c| c.is_ascii_digit())
         && base[5..].chars().all(|c| c.is_ascii_digit());
-    let old_style = base.contains('/') && base.chars().filter(|c| c.is_ascii_digit()).count() == 7;
+    let old_style = base.contains('/') && base.chars().filter(char::is_ascii_digit).count() == 7;
     if new_style || old_style {
         Some(base.to_string())
     } else {
