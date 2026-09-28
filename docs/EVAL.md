@@ -91,3 +91,12 @@ Field accuracies isolate the entry parser from segmentation. Marker
 resolution below the `\cite` count usually means a citation style the marker
 finder does not know yet. Treat `body_alignment` as a smoke test for reading
 order on two-column pages.
+
+## Citation-marker metric
+
+`marker_recall` is the share of cited references recovered: the sum over
+markers of resolved targets, divided by the number of keys the source cites
+(`cited_keys`, duplicates kept), capped at 1. It does not count marker groups,
+so IEEE `[17], [18]` (two groups) and `\cite{a,b}` (one command) score the
+same. The older resolved-markers over cite-commands ratio is still reported
+as `marker_command_ratio`, uncapped, as a diagnostic.

@@ -14,9 +14,11 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::schema::{CitationMarker, Line, PageText, ReferenceEntry};
+use crate::schema::{BBox, CitationMarker, Line, PageText, ReferenceEntry};
 
-/// Where the reference list starts.
+/// Where a reference list starts. A document may hold several lists
+/// (`References` and `References for the Appendices`, say); see
+/// [`find_reference_sections`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReferenceSection {
     /// Page number (as printed by the backend) of the heading line.
@@ -38,6 +40,11 @@ enum Style {
     Paren,
     /// `Smith, A. (2020)` and friends.
     AuthorYear,
+    /// `[12]` printed on a line of its own, apart from the entry it labels
+    /// (the label column of an IEEE list that the layout pass detached).
+    /// The entries segment like author-year ones and take the printed
+    /// numbers as labels.
+    Detached,
 }
 
 /// One line of the reference section with the layout evidence needed for
@@ -45,12 +52,12 @@ enum Style {
 #[derive(Clone, Debug)]
 struct SectionLine {
     page: u32,
+    /// Index of the (first) fragment in the page's `lines`.
+    line: usize,
     column: u32,
     x0: Option<f32>,
     y0: Option<f32>,
     size: Option<f32>,
-    /// Line sits in the top or bottom margin band (or has no bbox).
-    edge: bool,
     text: String,
 }
 
@@ -91,7 +98,7 @@ impl SectionLine {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
-        self.edge = self.edge && other.edge;
+        self.line = self.line.min(other.line);
     }
 }
 
@@ -176,6 +183,17 @@ const MAX_RANGE_SPAN: u32 = 50;
 /// Longest token accepted as the continuation of a DOI or URL broken by a
 /// line wrap.
 const MAX_WRAP_TOKEN: usize = 64;
+/// Share of the page height, from the top, in which a separated top row is
+/// a running header (LNCS sets its running heads about 11.5% down).
+const HEADER_BAND: f32 = 0.15;
+/// Share of the page height, at the top and at the bottom, in which any
+/// line may be a running header, footer or folio.
+const MARGIN_BAND: f32 = 0.08;
+/// Longest line (chars) that counts as a running header or footer.
+const MAX_FURNITURE_CHARS: usize = 80;
+/// Number of content lines after a `References` heading within which a
+/// reference entry must start for the heading to open a list.
+const HEADING_LOOKAHEAD: usize = 3;
 
 /// Prefixes that usually keep their hyphen when a compound is broken at a
 /// line end (`multi- task` → `multi-task`).
@@ -219,11 +237,14 @@ const COMPOUND_HEADS: &[&str] = &[
     "world",
 ];
 
+/// A reference-list heading: `References`, `7. References`, `A Bibliography`,
+/// `Supplementary References`, `References for the Appendices`,
+/// `References and Notes`.
 fn heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"^\s*(?:(?:\d+|[IVX]+)\.?\s*)?(?:References|REFERENCES|Reference List|Bibliography|BIBLIOGRAPHY|Works Cited|WORKS CITED|Literature Cited|LITERATURE CITED)\s*:?\s*$",
+            r"^\s*(?:(?:\d+|[IVX]+)\.?\s*|[A-Z]\.?\s+)?(?:(?:Supplementary|Supplemental|Additional|Appendix|Further|Extended|Online|SUPPLEMENTARY|SUPPLEMENTAL|ADDITIONAL|APPENDIX)\s+)?(?:References|REFERENCES|Reference List|Bibliography|BIBLIOGRAPHY|Works Cited|WORKS CITED|Literature Cited|LITERATURE CITED)(?:\s+(?:for|of|to|and|in|FOR|OF|TO|AND|IN)\s+[\p{L}\s’'\-]{1,40})?\s*:?\s*$",
         )
         .expect("valid regex")
     })
@@ -311,6 +332,31 @@ fn author_start_re() -> &'static Regex {
     })
 }
 
+/// A lowercase handle opening an entry in ACM style, followed by the year
+/// sentence and a title: `nostalgebraist. 2020. Interpreting GPT`. Group 1
+/// is the handle.
+fn handle_start_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(\p{Ll}[\p{L}\d_\-]{2,})\.\s+\(?(?:19|20)\d{2}[a-z]?\)?[.:]\s+\S")
+            .expect("valid regex")
+    })
+}
+
+/// Springer LNCS / `spmpsci` author list closed by a colon:
+/// `Surname, I., Other, J.K.: Title` (`et al.` may close it). Surnames may
+/// carry a particle or a second word; initials may be hyphenated with a
+/// lowercase second part (`C.-i.`).
+fn lncs_authors_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+(?:\s\p{Lu}[\p{L}'’\-]+)*,\s?\p{Lu}\.(?:\s?-?\p{L}\.)*,\s)*(?:(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+(?:\s\p{Lu}[\p{L}'’\-]+)*,\s?\p{Lu}\.(?:\s?-?\p{L}\.)*|et al\.):\s",
+        )
+        .expect("valid regex")
+    })
+}
+
 /// Leading surname of an author-year entry (used for the `Smith2020` label).
 fn surname_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -352,10 +398,12 @@ fn leading_year_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\s*\(?(?:19|20)\d{2}[a-z]?\)?[.,:]?\s+").expect("valid regex"))
 }
 
-/// `A.`, `A.B.`, `J.-M.` or a broken `P.-` before a line-wrapped `Y.`.
+/// `A.`, `A.B.`, `J.-M.`, `C.-i.` (a hyphenated initial whose second part
+/// is lowercase, as in `C.-i. Wang`) or a broken `P.-` before a line-wrapped
+/// `Y.`.
 fn initial_token_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\p{Lu}\.(?:-?\p{Lu}\.)*-?$").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"^\p{Lu}\.(?:-?\p{Lu}\.|-\p{Ll}\.)*-?$").expect("valid regex"))
 }
 
 /// A capitalised word: `Smith`, `O'Brien`, `Ahmadi-Asl`, `IEEE`.
@@ -515,9 +563,12 @@ fn author_sep_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\s*(?:,|;|&|\band\b)\s*").expect("valid regex"))
 }
 
+/// A block of initials (`A.`, `A. B.`, `AB`, `J.-M.`, `C.-i.`).
 fn initials_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\p{Lu}\.?(?:[\s\-]*\p{Lu}\.?)*$").expect("valid regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"^\p{Lu}\.?(?:[\s\-]*\p{Lu}\.?|-\p{Ll}\.)*$").expect("valid regex")
+    })
 }
 
 /// `Smith, A.` / `Smith, John,` / `Lee, J. and`: a surname-first author list.
@@ -541,11 +592,16 @@ fn vancouver_start_re() -> &'static Regex {
     })
 }
 
+/// `[1]`, `[2, 3]`, `[4–6]`, `[22, Theorem 4]`: group 1 holds the numbers,
+/// the optional note after the last number (`, Theorem 4`, `, p. 12`,
+/// `, Sec. 3.1`) is part of the marker text only.
 fn numeric_marker_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[(\s*\d+\s*(?:[–\-—]\s*\d+\s*)?(?:[,;]\s*\d+\s*(?:[–\-—]\s*\d+\s*)?)*)\]")
-            .expect("valid regex")
+        Regex::new(
+            r"\[(\s*\d+\s*(?:[–\-—]\s*\d+\s*)?(?:[,;]\s*\d+\s*(?:[–\-—]\s*\d+\s*)?)*)(?:,\s*(?:Theorem|Lemma|Corollary|Proposition|Definition|Remark|Section|Sec\.|Chapter|Ch\.|Equation|Eq\.|Example|Appendix|Table|Figure|Fig\.|Thm\.|Prop\.|Lem\.|Cor\.|Def\.|pp?\.|pages?)[^\]\[]{0,24})?\]",
+        )
+        .expect("valid regex")
     })
 }
 
@@ -584,22 +640,217 @@ fn numbered_label_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\[?(\d+)[\].)]?$").expect("valid regex"))
 }
 
-/// Find the reference-list heading: the LAST line matching
-/// `^(\d+\.?\s*)?(References|Bibliography|Works Cited|Literature Cited)\s*$`.
-pub fn find_reference_section(pages: &[PageText]) -> Option<ReferenceSection> {
+/// A bare `[n]` label with nothing after it (the label column of an IEEE
+/// list that the layout pass emitted apart from its entries). Group 1 is
+/// the number.
+fn bare_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*\[(\d+)\]\s*$").expect("valid regex"))
+}
+
+/// Printed number of a bare `[n]` line ([`bare_label_re`]).
+fn bare_label_number(text: &str) -> Option<u32> {
+    let caps = bare_label_re().captures(text)?;
+    caps.get(1)?.as_str().parse::<u32>().ok()
+}
+
+/// Shortest run of ascending bare `[n]` lines that numbers a list.
+const DETACHED_RUN: usize = 3;
+
+/// Do at least [`DETACHED_RUN`] bare `[n]` lines with ascending numbers
+/// follow one another in `lines` (other lines may sit between them)? Such
+/// a run is the label column of a numbered list that the layout pass
+/// emitted apart from its entries.
+fn detached_run(lines: &[SectionLine]) -> bool {
+    let mut run = 0usize;
+    let mut previous: Option<u32> = None;
+    for line in lines {
+        let Some(number) = bare_label_number(&line.text) else {
+            continue;
+        };
+        run = if previous.is_some_and(|p| number > p) {
+            run + 1
+        } else {
+            1
+        };
+        if run >= DETACHED_RUN {
+            return true;
+        }
+        previous = Some(number);
+    }
+    false
+}
+
+/// Could `text` be the first line of a reference entry: a numbered label,
+/// a surname-first or initials-first author list, or reference evidence (a
+/// year, DOI, arXiv id or URL)?
+fn opens_entry(text: &str) -> bool {
+    bracket_label_re().is_match(text)
+        || dot_label_re().is_match(text)
+        || paren_label_re().is_match(text)
+        || author_start_re().is_match(text)
+        || initials_start_re().is_match(text)
+        || has_reference_evidence(text)
+}
+
+/// Does a reference entry start within the [`HEADING_LOOKAHEAD`] content
+/// lines after the heading at (`pos`, `first_line`)? Empty, page-number and
+/// accent-only lines are skipped; the next candidate heading (`stop`, as
+/// page position and line index) ends the search. A `References` line in a
+/// table of contents has no entry after it.
+fn list_follows(
+    pages: &[PageText],
+    pos: usize,
+    first_line: usize,
+    stop: Option<(usize, usize)>,
+) -> bool {
+    let mut seen = 0usize;
+    for (p, page) in pages.iter().enumerate().skip(pos) {
+        let skip = if p == pos { first_line + 1 } else { 0 };
+        for (i, line) in page.lines.iter().enumerate().skip(skip) {
+            if stop.is_some_and(|s| (p, i) >= s) {
+                return false;
+            }
+            let text = line.text.trim();
+            if text.is_empty() || is_accent_only(text) || page_number_re().is_match(text) {
+                continue;
+            }
+            if opens_entry(text) {
+                return true;
+            }
+            seen += 1;
+            if seen >= HEADING_LOOKAHEAD {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// Number of content lines after a `[1]` line within which `[2]` and `[3]`
+/// must follow for the line to open a heading-less list.
+const HEADINGLESS_LOOKAHEAD: usize = 12;
+
+/// A list without a heading (`REVTeX` sets `[1] ...` right after the last
+/// section): the last `[1]` line that `[2]` and `[3]` follow, in order,
+/// within [`HEADINGLESS_LOOKAHEAD`] content lines. The section's
+/// `first_line` is the `[1]` line itself and its `heading` is empty.
+fn headingless_section(pages: &[PageText]) -> Option<ReferenceSection> {
     let mut found: Option<ReferenceSection> = None;
-    for page in pages {
+    for (pos, page) in pages.iter().enumerate() {
         for (i, line) in page.lines.iter().enumerate() {
-            if heading_re().is_match(&line.text) {
+            let Some(caps) = bracket_label_re_first().captures(&line.text) else {
+                continue;
+            };
+            if caps.get(1).map(|m| m.as_str()) != Some("1") {
+                continue;
+            }
+            if numbered_run_follows(pages, pos, i) {
                 found = Some(ReferenceSection {
                     first_page: page.page,
                     first_line: i,
-                    heading: line.text.trim().to_string(),
+                    heading: String::new(),
                 });
             }
         }
     }
     found
+}
+
+/// `[n]` at the start of a line followed by text.
+fn bracket_label_re_first() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*\[(\d+)\]\s+\S").expect("valid regex"))
+}
+
+/// Do `[2]` and then `[3]` lines follow the `[1]` line at (`pos`, `line`)
+/// within [`HEADINGLESS_LOOKAHEAD`] content lines?
+fn numbered_run_follows(pages: &[PageText], pos: usize, first_line: usize) -> bool {
+    let mut expected: u32 = 2;
+    let mut seen = 0usize;
+    for (p, page) in pages.iter().enumerate().skip(pos) {
+        let skip = if p == pos { first_line + 1 } else { 0 };
+        for line in page.lines.iter().skip(skip) {
+            let text = line.text.trim();
+            if text.is_empty() || is_accent_only(text) || page_number_re().is_match(text) {
+                continue;
+            }
+            let number = bracket_label_re()
+                .captures(text)
+                .and_then(|caps| caps.get(1))
+                .and_then(|m| m.as_str().parse::<u32>().ok());
+            if number == Some(expected) {
+                expected += 1;
+                if expected > 3 {
+                    return true;
+                }
+            }
+            seen += 1;
+            if seen >= HEADINGLESS_LOOKAHEAD {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// Every reference-list heading in document order: lines matching
+/// [`heading_re`] (`References`, `Bibliography`, `Supplementary References`,
+/// `References for the Appendices`, ...) that a reference entry follows
+/// within a few lines. When no heading qualifies, the last heading line is
+/// taken as printed; without any heading, a `[1] ... [2] ... [3]` run opens
+/// a heading-less list (see [`headingless_section`]).
+pub fn find_reference_sections(pages: &[PageText]) -> Vec<ReferenceSection> {
+    let mut candidates: Vec<(usize, ReferenceSection)> = Vec::new();
+    for (pos, page) in pages.iter().enumerate() {
+        for (i, line) in page.lines.iter().enumerate() {
+            if heading_re().is_match(&line.text) {
+                candidates.push((
+                    pos,
+                    ReferenceSection {
+                        first_page: page.page,
+                        first_line: i,
+                        heading: line.text.trim().to_string(),
+                    },
+                ));
+            }
+        }
+    }
+    let mut sections: Vec<ReferenceSection> = Vec::new();
+    for (k, (pos, section)) in candidates.iter().enumerate() {
+        let stop = candidates.get(k + 1).map(|(p, next)| (*p, next.first_line));
+        if list_follows(pages, *pos, section.first_line, stop) {
+            sections.push(section.clone());
+        }
+    }
+    if sections.is_empty()
+        && let Some((_, last)) = candidates.last()
+    {
+        sections.push(last.clone());
+    }
+    if sections.is_empty()
+        && let Some(section) = headingless_section(pages)
+    {
+        sections.push(section);
+    }
+    sections
+}
+
+/// The main reference list: the first heading of [`find_reference_sections`]
+/// (a `References` line in a table of contents is not one, since no entry
+/// follows it).
+pub fn find_reference_section(pages: &[PageText]) -> Option<ReferenceSection> {
+    find_reference_sections(pages).into_iter().next()
+}
+
+/// `(page number, line index)` of the heading that follows `section`, if
+/// any: where this list must stop.
+fn following_section(pages: &[PageText], section: &ReferenceSection) -> Option<(u32, usize)> {
+    let own = (section.first_page, section.first_line);
+    find_reference_sections(pages)
+        .iter()
+        .map(|s| (s.first_page, s.first_line))
+        .find(|&pos| pos > own)
 }
 
 /// Largest font size among the spans of `line`.
@@ -613,34 +864,146 @@ fn line_size(page: &PageText, line: &Line) -> Option<f32> {
     best
 }
 
-/// Lines of the reference section in reading order, across pages, with page
-/// furniture (page numbers, repeated running headers/footers) removed.
-fn section_lines(pages: &[PageText], section: &ReferenceSection) -> Vec<SectionLine> {
-    let mut lines: Vec<SectionLine> = Vec::new();
+/// Is the box in the top or bottom [`MARGIN_BAND`] of a page `height` tall?
+fn in_margin(b: BBox, height: f32) -> bool {
+    b.y1 > height * (1.0 - MARGIN_BAND) || b.y0 < height * MARGIN_BAND
+}
+
+/// Per line of `page`: does it sit where running headers, footers and
+/// folios go? Any line in the margin bands counts (as does a line without
+/// a bbox), and so does the top-most row of the page when it lies in the
+/// top [`HEADER_BAND`] and is separated from the row below it by at least
+/// its own height (LNCS and IEEE journal running heads sit below the 8%
+/// band but clear of the body).
+fn furniture_flags(page: &PageText) -> Vec<bool> {
+    let height = page.height;
+    let mut flags: Vec<bool> = page
+        .lines
+        .iter()
+        .map(|line| line.bbox.is_none_or(|b| in_margin(b, height)))
+        .collect();
+    let Some(top) = page
+        .lines
+        .iter()
+        .filter_map(|l| l.bbox)
+        .map(|b| b.y1)
+        .max_by(f32::total_cmp)
+    else {
+        return flags;
+    };
+    if top <= height * (1.0 - HEADER_BAND) {
+        return flags;
+    }
+    let on_top_row = |b: BBox| b.y1 >= top - 0.5 * (b.y1 - b.y0);
+    let below = page
+        .lines
+        .iter()
+        .filter_map(|l| l.bbox)
+        .filter(|&b| !on_top_row(b))
+        .map(|b| b.y1)
+        .max_by(f32::total_cmp);
+    for (flag, line) in flags.iter_mut().zip(&page.lines) {
+        if let Some(b) = line.bbox
+            && on_top_row(b)
+        {
+            let gap = below.map_or(f32::INFINITY, |next| b.y0 - next);
+            if gap >= b.y1 - b.y0 {
+                *flag = true;
+            }
+        }
+    }
+    flags
+}
+
+/// Digit-normalised texts ([`digit_key`]) of the running headers and
+/// footers of the document: short furniture-position lines
+/// ([`furniture_flags`]) that repeat on at least two pages (`Page 30 of
+/// 35` and `Page 31 of 35` repeat; two `arXiv:` lines do not).
+fn repeated_furniture(pages: &[PageText]) -> Vec<String> {
+    let mut pages_per_text: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     for page in pages {
+        let flags = furniture_flags(page);
+        for (line, flag) in page.lines.iter().zip(flags) {
+            let text = line.text.trim();
+            if !flag || text.is_empty() || text.chars().count() > MAX_FURNITURE_CHARS {
+                continue;
+            }
+            let seen = pages_per_text.entry(digit_key(text)).or_default();
+            if !seen.contains(&page.page) {
+                seen.push(page.page);
+            }
+        }
+    }
+    pages_per_text
+        .into_iter()
+        .filter(|(_, seen)| seen.len() >= 2)
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// Does `text` end inside a DOI or URL that the next line may continue
+/// (`https://doi.org/10.1016/j.jmp.2013.05.` before a `005` line)?
+fn identifier_open(text: &str) -> bool {
+    let Some(last) = text.split_whitespace().next_back() else {
+        return false;
+    };
+    (doi_start_re().is_match(last) || last.contains("http") || last.starts_with("www."))
+        && last.ends_with(['.', '/', '-', '_'])
+}
+
+/// Lines of the reference list in reading order, from the line after the
+/// heading (or from the `[1]` line of a heading-less list) to `stop` (the
+/// next heading, as page number and line index) or the end of the
+/// document, with page furniture removed: running headers and footers
+/// ([`repeated_furniture`]) and page numbers, except a numeric line that
+/// continues a DOI or URL of the line before it and does not sit in a
+/// margin band.
+fn section_lines(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+) -> Vec<SectionLine> {
+    let repeated = repeated_furniture(pages);
+    let mut lines: Vec<SectionLine> = Vec::new();
+    'pages: for page in pages {
         if page.page < section.first_page {
             continue;
         }
-        let skip = if page.page == section.first_page {
-            section.first_line + 1
-        } else {
+        let skip = if page.page != section.first_page {
             0
+        } else if section.heading.is_empty() {
+            section.first_line
+        } else {
+            section.first_line + 1
         };
-        for line in page.lines.iter().skip(skip) {
+        let flags = furniture_flags(page);
+        for (i, line) in page.lines.iter().enumerate().skip(skip) {
+            if stop.is_some_and(|s| (page.page, i) >= s) {
+                break 'pages;
+            }
             let text = line.text.trim();
-            if is_accent_only(text) {
+            if text.is_empty() || is_accent_only(text) {
                 continue;
             }
-            let edge = line
-                .bbox
-                .is_none_or(|b| b.y1 > page.height * 0.92 || b.y0 < page.height * 0.08);
+            let furniture = flags.get(i).copied().unwrap_or(true);
+            if furniture && repeated.contains(&digit_key(text)) {
+                continue;
+            }
+            if page_number_re().is_match(text) {
+                let margin = line.bbox.is_some_and(|b| in_margin(b, page.height));
+                let continues =
+                    !margin && lines.last().is_some_and(|prev| identifier_open(&prev.text));
+                if !continues {
+                    continue;
+                }
+            }
             let fragment = SectionLine {
                 page: page.page,
+                line: i,
                 column: line.column,
                 x0: line.bbox.map(|b| b.x0),
                 y0: line.bbox.map(|b| b.y0),
                 size: line_size(page, line),
-                edge,
                 text: text.to_string(),
             };
             // Justified columns leave gaps wider than the layout pass joins,
@@ -653,27 +1016,6 @@ fn section_lines(pages: &[PageText], section: &ReferenceSection) -> Vec<SectionL
             }
         }
     }
-    // Texts that repeat near the page edge on several pages are running
-    // headers or footers (`Page 30 of 35` counts as repeating). Only edge
-    // occurrences count: an entry line that happens to land in the margin
-    // band once is a body line elsewhere.
-    let mut pages_per_text: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-    for line in lines.iter().filter(|line| line.edge) {
-        let seen = pages_per_text.entry(digit_key(&line.text)).or_default();
-        if !seen.contains(&line.page) {
-            seen.push(line.page);
-        }
-    }
-    let repeated: Vec<String> = pages_per_text
-        .iter()
-        .filter(|(_, seen)| seen.len() >= 2)
-        .map(|(text, _)| text.clone())
-        .collect();
-    lines.retain(|line| {
-        !(line.text.is_empty()
-            || page_number_re().is_match(&line.text)
-            || (line.edge && repeated.contains(&digit_key(&line.text))))
-    });
     lines
 }
 
@@ -683,7 +1025,7 @@ fn numbered_label(style: Style, text: &str) -> Option<(u32, String)> {
         Style::Bracket => bracket_label_re(),
         Style::Dot => dot_label_re(),
         Style::Paren => paren_label_re(),
-        Style::AuthorYear => return None,
+        Style::AuthorYear | Style::Detached => return None,
     };
     let caps = re.captures(text)?;
     let number: u32 = caps.get(1)?.as_str().parse().ok()?;
@@ -691,15 +1033,22 @@ fn numbered_label(style: Style, text: &str) -> Option<(u32, String)> {
         Style::Bracket => format!("[{number}]"),
         Style::Dot => format!("{number}."),
         Style::Paren => format!("{number})"),
-        Style::AuthorYear => return None,
+        Style::AuthorYear | Style::Detached => return None,
     };
     Some((number, label))
 }
 
 /// Numbering style from the first three lines (the first line may be a
-/// stray fragment or a column artefact).
+/// stray fragment or a column artefact). Bare `[n]` lines are labels the
+/// layout pass detached from their entries: they are no evidence of the
+/// bracket style, but a run of them ([`detached_run`]) numbers the list
+/// ([`Style::Detached`]).
 fn detect_style(lines: &[SectionLine]) -> Style {
-    for line in lines.iter().take(3) {
+    let candidates = lines
+        .iter()
+        .filter(|line| !bare_label_re().is_match(&line.text))
+        .take(3);
+    for line in candidates {
         if bracket_label_re().is_match(&line.text) {
             return Style::Bracket;
         }
@@ -710,7 +1059,144 @@ fn detect_style(lines: &[SectionLine]) -> Style {
             return Style::Paren;
         }
     }
+    if detached_run(lines) {
+        return Style::Detached;
+    }
     Style::AuthorYear
+}
+
+/// Drop the lines of a numbered list that belong to another column: on a
+/// page whose labels start at one or more x levels, a line that starts
+/// left of every label level (by more than [`INDENT_TOLERANCE`]) is body
+/// text or a caption that the layout pass interleaved with the list (a
+/// figure caption and a `5 Conclusion` paragraph set left of an LNCS list
+/// in the right column). Pages without a label keep every line.
+fn drop_foreign_column_lines(lines: Vec<SectionLine>, style: Style) -> Vec<SectionLine> {
+    let mut label_levels: BTreeMap<u32, Vec<f32>> = BTreeMap::new();
+    for line in &lines {
+        if let Some(x0) = line.x0
+            && numbered_label(style, &line.text).is_some()
+        {
+            label_levels.entry(line.page).or_default().push(x0);
+        }
+    }
+    lines
+        .into_iter()
+        .filter(|line| {
+            let (Some(x0), Some(levels)) = (line.x0, label_levels.get(&line.page)) else {
+                return true;
+            };
+            levels.iter().any(|&level| x0 >= level - INDENT_TOLERANCE)
+        })
+        .collect()
+}
+
+/// The lines of one reference list cut at its end, with the numbering
+/// style, the text used for hyphenation decisions and where the list ends.
+struct ListBody {
+    lines: Vec<SectionLine>,
+    style: Style,
+    /// Every section line joined by newlines (before the cut), for
+    /// [`hyphen_break`].
+    context: String,
+    /// `(page number, line index)` of the line that ends the list (an
+    /// appendix heading, a caption, a biography, ...); `None` when the list
+    /// runs to `stop` or to the end of the document.
+    end: Option<(u32, usize)>,
+    /// Printed numbers of the bare `[n]` lines of a [`Style::Detached`]
+    /// list, in reading order and before the cut; empty for other styles.
+    labels: Vec<u32>,
+}
+
+/// Collect, clean and cut the lines of the list that starts at `section`
+/// and stops before `stop`.
+fn list_body(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+) -> ListBody {
+    let mut lines = section_lines(pages, section, stop);
+    let style = detect_style(&lines);
+    // Labels the layout pass detached from their entries carry no text;
+    // a detached list keeps their numbers (with their positions) to label
+    // the entries with.
+    let mut detached: Vec<(u32, usize, u32)> = Vec::new();
+    match style {
+        Style::AuthorYear => {
+            lines.retain(|line| !bare_label_re().is_match(&line.text));
+        }
+        Style::Detached => {
+            for line in &lines {
+                if let Some(number) = bare_label_number(&line.text) {
+                    detached.push((line.page, line.line, number));
+                }
+            }
+            lines.retain(|line| !bare_label_re().is_match(&line.text));
+        }
+        Style::Bracket | Style::Dot | Style::Paren => {
+            lines = drop_foreign_column_lines(lines, style);
+        }
+    }
+    let median = median_size(&lines);
+    let context: String = lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<&str>>()
+        .join("\n");
+    // The list ends at the first end heading. Everything after it (an
+    // appendix, tables, biographies) is set at the entry-start x and must
+    // not feed the indent-level statistics of the list itself.
+    let cut = lines
+        .iter()
+        .position(|line| is_end_heading(line, style, median));
+    let end = cut.map(|k| (lines[k].page, lines[k].line));
+    if let Some(k) = cut {
+        lines.truncate(k);
+    }
+    let labels: Vec<u32> = detached
+        .into_iter()
+        .filter(|&(page, line, _)| end.is_none_or(|e| (page, line) < e))
+        .map(|(_, _, number)| number)
+        .collect();
+    ListBody {
+        lines,
+        style,
+        context,
+        end,
+        labels,
+    }
+}
+
+/// Label the entries of a list whose `[n]` labels arrived on lines of
+/// their own: the k-th printed label goes to the k-th entry in reading
+/// order; entries beyond the last label continue the sequence.
+fn assign_detached_labels(entries: &mut [ReferenceEntry], labels: &[u32]) {
+    let mut next: u32 = 1;
+    for (k, entry) in entries.iter_mut().enumerate() {
+        let number = labels.get(k).copied().unwrap_or(next);
+        entry.label = Some(format!("[{number}]"));
+        next = number.saturating_add(1);
+    }
+}
+
+/// Segment the list that starts at `section` and stops before `stop`.
+fn segment_list(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+) -> Vec<ReferenceEntry> {
+    let body = list_body(pages, section, stop);
+    match body.style {
+        Style::AuthorYear => segment_author_year(&body.lines, &body.context),
+        Style::Detached => {
+            let mut entries = segment_author_year(&body.lines, &body.context);
+            assign_detached_labels(&mut entries, &body.labels);
+            entries
+        }
+        Style::Bracket | Style::Dot | Style::Paren => {
+            segment_numbered(&body.lines, body.style, &body.context)
+        }
+    }
 }
 
 fn median_size(lines: &[SectionLine]) -> Option<f32> {
@@ -746,27 +1232,8 @@ fn is_end_heading(line: &SectionLine, style: Style, median: Option<f32>) -> bool
 /// Split the reference section into entries. `raw`, `label`, `index` and
 /// `page` are filled; call [`parse_entry`] for the parsed fields.
 pub fn segment_entries(pages: &[PageText], section: &ReferenceSection) -> Vec<ReferenceEntry> {
-    let lines = section_lines(pages, section);
-    let style = detect_style(&lines);
-    let median = median_size(&lines);
-    let context: String = lines
-        .iter()
-        .map(|l| l.text.as_str())
-        .collect::<Vec<&str>>()
-        .join("\n");
-    // The list ends at the first end heading. Everything after it (an
-    // appendix, tables, biographies) is set at the entry-start x and must
-    // not feed the indent-level statistics of the list itself.
-    let end = lines
-        .iter()
-        .position(|line| is_end_heading(line, style, median))
-        .unwrap_or(lines.len());
-    let lines = &lines[..end];
-    if style == Style::AuthorYear {
-        segment_author_year(lines, &context)
-    } else {
-        segment_numbered(lines, style, &context)
-    }
+    let stop = following_section(pages, section);
+    segment_list(pages, section, stop)
 }
 
 fn push_entry(entries: &mut Vec<ReferenceEntry>, label: Option<String>, text: &str, page: u32) {
@@ -827,6 +1294,15 @@ fn hyphen_break(previous: &str, next: &str, context: &str) -> HyphenJoin {
     let second = word_head(next);
     if first.is_empty() {
         return HyphenJoin::Separate;
+    }
+    // A hyphen inside a URL or DOI is part of the identifier
+    // (`https://doi.org/10.1214/14-` + `sts504`).
+    let last_token = head_text.split_whitespace().next_back().unwrap_or("");
+    if last_token.contains("http")
+        || last_token.starts_with("www.")
+        || doi_start_re().is_match(last_token)
+    {
+        return HyphenJoin::Keep;
     }
     if !next.starts_with(|c: char| c.is_lowercase()) {
         return HyphenJoin::Keep;
@@ -982,9 +1458,47 @@ fn ends_like_entry(text: &str) -> bool {
         .is_some_and(|c| matches!(c, '.' | ')' | ']' | '}') || c.is_ascii_digit())
 }
 
+/// Does `text` end like a whole entry, not like a wrapped author list: as
+/// [`ends_like_entry`], but a final period must close a word, not an
+/// initial or abbreviation (`... S. H. H.` is a wrapped list).
+fn ends_like_whole_entry(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    if !ends_like_entry(trimmed) {
+        return false;
+    }
+    trimmed
+        .strip_suffix('.')
+        .is_none_or(|head| !period_is_abbreviation(trimmed, head.len()))
+}
+
+/// Start of an initials-first author list: `M. Mozaffari,`, `D. Floreano
+/// and`, `S. A. H. Mohsan,`, `D. Giordan et al.`, `J.-M. Doe &`.
+fn initials_start_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:\p{Lu}\.(?:-\p{L}\.)*\s?)+(?:(?:van|von|de|der|den|del|di|da|la|le|du)\s+)*\p{Lu}[\p{L}'’\-]+\s*(?:,|\band\b|&|\bet\s+al\b|$)",
+        )
+        .expect("valid regex")
+    })
+}
+
 fn author_year_label(raw: &str) -> Option<String> {
-    let surname = surname_re().captures(raw)?.get(1)?.as_str();
-    let surname: String = surname.split_whitespace().collect::<Vec<&str>>().join(" ");
+    let surname: String =
+        if let Some(found) = surname_re().captures(raw).and_then(|caps| caps.get(1)) {
+            found
+                .as_str()
+                .split_whitespace()
+                .collect::<Vec<&str>>()
+                .join(" ")
+        } else {
+            // A lowercase handle (`gwern. 2020.`) labels as `gwern2020`.
+            handle_start_re()
+                .captures(raw)?
+                .get(1)?
+                .as_str()
+                .to_string()
+        };
     let year = year_paren_re()
         .captures(raw)
         .or_else(|| year_bare_re().captures(raw))
@@ -1074,16 +1588,27 @@ fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEnt
     let mut entries: Vec<ReferenceEntry> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let can_start = entry_start_re().is_match(&line.text);
+        // A lowercase handle (`nostalgebraist. 2020. Title`) opens an entry
+        // when the entry before it is complete.
+        let handle = handle_start_re().is_match(&line.text)
+            && entries
+                .last()
+                .is_some_and(|e| e.raw.trim_end().ends_with('.'));
         let starts = if entries.is_empty() {
             true
         } else {
             match layout[i] {
-                Some(true) => can_start,
+                Some(true) => can_start || handle,
                 Some(false) => false,
                 None => {
-                    can_start
-                        && author_start_re().is_match(&line.text)
-                        && entries.last().is_some_and(|e| ends_like_entry(&e.raw))
+                    handle
+                        || (can_start
+                            && author_start_re().is_match(&line.text)
+                            && entries.last().is_some_and(|e| ends_like_entry(&e.raw)))
+                        || (initials_start_re().is_match(&line.text)
+                            && entries
+                                .last()
+                                .is_some_and(|e| ends_like_whole_entry(&e.raw)))
                 }
             }
         };
@@ -1136,6 +1661,18 @@ fn wrapped_id_token(token: &str, allow_no_digit: bool) -> bool {
     !year_token_re().is_match(core) && !core.to_ascii_lowercase().starts_with("http")
 }
 
+/// A page number printed after a DOI's closing period by hyperref's
+/// `backref` (`039. 4`, `3639. 2, 3, 8`): digits only, no leading zero,
+/// fewer than four digits. A wrapped piece of the DOI itself (`005`,
+/// `00045`, `112670`, `2023.2`) is not one.
+fn is_back_reference(token: &str) -> bool {
+    let core = token.trim_end_matches(['.', ',', ';', ')']);
+    !core.is_empty()
+        && core.chars().all(|c| c.is_ascii_digit())
+        && !core.starts_with('0')
+        && core.chars().count() < 4
+}
+
 /// End of the identifier that starts at `start` and reaches `end` so far,
 /// extended across the single spaces that line wraps leave inside it. A
 /// piece is joined when the identifier so far ends in a separator, when the
@@ -1165,6 +1702,11 @@ fn extend_across_wraps(
         }
         let consumed = &text[start..end];
         if consumed.ends_with([',', ';']) {
+            break;
+        }
+        // `doi: 10.1016/j.jcp.2017.08.039. 4`: a back-reference page list
+        // after the DOI's closing period, not a wrapped piece of it.
+        if consumed.ends_with('.') && is_back_reference(token) {
             break;
         }
         let joinable = lenient
@@ -1282,9 +1824,13 @@ fn word_before(text: &str, end: usize) -> &str {
 
 /// Is the period at byte `dot` the end of an initial or an abbreviation
 /// (`A.`, `Jr.`, `St.`, `al.`, `vs.`, `pp.`) rather than a sentence end? `4o.` and
-/// `4.3.` are sentence ends: a lone digit is not an initial.
+/// `4.3.` are sentence ends: a lone digit is not an initial. Neither is the
+/// `t` of `Shouldn’t.`: a letter after an apostrophe belongs to its word.
 fn period_is_abbreviation(text: &str, dot: usize) -> bool {
     let word = word_before(text, dot);
+    if text[..dot - word.len()].ends_with(['’', '\'']) {
+        return false;
+    }
     let mut chars = word.chars();
     let single_letter =
         matches!((chars.next(), chars.next()), (Some(c), None) if c.is_alphabetic());
@@ -1601,9 +2147,12 @@ fn parse_numbers(rest: &str) -> (Option<String>, Option<String>, Option<String>)
         }
     }
     // Elsevier / SIAM: `35 (1992) 61–70`, `20 (2) (1963) 130–141`,
-    // `22 (2022), pp. 35–76` — the year digits are already blanked.
+    // `22 (2022), pp. 35–76` — the year digits are already blanked. The end
+    // of a page range before the year (`pp. 41–49 (2025)`) is not a volume.
     if volume.is_none()
         && let Some(caps) = vol_before_year_re().captures(rest)
+        && let Some(vol) = caps.get(1)
+        && !rest[..vol.start()].trim_end().ends_with(['–', '-', '—'])
     {
         volume = caps.get(1).map(|m| m.as_str().to_string());
         if issue.is_none() {
@@ -1888,6 +2437,30 @@ fn strip_wrapping_quotes(title: &str) -> &str {
     trimmed
 }
 
+/// `title` without a trailing bracketed descriptor: APA `[Doctoral
+/// dissertation, University of Oxford]`, `[Pyro Tutorial]`, `[Online]`. The
+/// descriptor must contain a lowercase letter (`[MASK]` is a token in a
+/// title) and leave some title before it.
+fn strip_bracket_descriptor(title: &str) -> &str {
+    let trimmed = title.trim_end();
+    if let Some(head) = trimmed.strip_suffix(']')
+        && let Some(open) = head.rfind('[')
+        && open > 0
+        && head.len() - open <= 80
+        && head[open..].chars().any(char::is_lowercase)
+    {
+        return head[..open].trim_end();
+    }
+    trimmed
+}
+
+/// Byte offset of the colon that closes a Springer LNCS author list
+/// (`Surname, I., Other, J.: Title`), if the body opens with one.
+fn lncs_authors_end(text: &str) -> Option<usize> {
+    let found = lncs_authors_re().find(text)?;
+    text[..found.end()].rfind(':')
+}
+
 /// Body of the entry without the printed label.
 fn strip_label(entry: &ReferenceEntry) -> &str {
     let raw = entry.raw.trim();
@@ -1938,7 +2511,12 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
     let mut title_start: usize = 0;
     let mut title_limit: Option<usize> = None;
     let mut quoted_title: Option<(Range<usize>, String)> = None;
-    if let Some(split) = comma_style(&masked) {
+    if let Some(colon) = lncs_authors_end(&masked) {
+        // Springer LNCS: `Surname, I., Other, J.: Title. In: Venue (Year)`.
+        authors_end = Some(colon);
+        let after = masked[colon + 1..].trim_start();
+        title_start = masked.len() - after.len();
+    } else if let Some(split) = comma_style(&masked) {
         authors_end = Some(split.authors_end);
         title_start = split.title_start;
         title_limit = Some(split.title_end);
@@ -2002,6 +2580,10 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         .is_some_and(char::is_uppercase)
     {
         entry.authors = split_authors(author_segment);
+    } else if let Some(caps) = handle_start_re().captures(&body)
+        && let Some(handle) = caps.get(1)
+    {
+        entry.authors = vec![handle.as_str().to_string()];
     }
 
     let rest_start: usize = if let Some((range, text)) = quoted_title {
@@ -2016,6 +2598,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
             stop = stop.min(venue.start());
         }
         let title = strip_wrapping_quotes(body[title_start..title_start + stop].trim());
+        let title = strip_bracket_descriptor(title);
         if !title.is_empty() && title.chars().count() <= 500 {
             entry.title = Some(title.to_string());
         }
@@ -2044,14 +2627,54 @@ fn mask_year(text: &str, year: Option<&(Range<usize>, u16)>) -> String {
     }
 }
 
+/// The numeric namespace of one reference list: its printed numbers and
+/// where the list ends, so that a marker past that end (in an appendix)
+/// resolves in the next list first.
+struct NumberSpace {
+    /// Page of the list's first numbered entry, used to pair the namespace
+    /// with its [`ListExtent`].
+    first_page: u32,
+    /// `(page number, line index)` of the line that ends the list; `None`
+    /// when it runs to the end of the document or its extent is unknown.
+    end: Option<(u32, usize)>,
+    /// Printed number -> entry index (the first entry wins when a number
+    /// repeats within one list).
+    by_number: BTreeMap<u32, u32>,
+}
+
 /// Lookup tables for resolving markers to `ReferenceEntry::index`.
 struct RefIndex {
     /// The list is numbered (`[n]`, `n.`, `n)`); markers are numeric.
     numbered: bool,
-    /// Printed number -> entry index.
-    by_number: BTreeMap<u32, u32>,
+    /// One numeric namespace per list in document order: a list whose
+    /// numbers restart (`References for the Appendices` starting again at
+    /// `[1]`) opens a new one; a list that continues the numbering shares
+    /// the namespace of the list before it.
+    spaces: Vec<NumberSpace>,
+    /// Largest printed number of any list; a marker citing more is not a
+    /// citation.
+    max_number: u32,
     /// (first-author surname, lower case; year; entry index).
     by_author_year: Vec<(String, u16, u32)>,
+}
+
+/// Printed number of a numbered entry's label (`[12]`, `12.`, `12)`).
+fn printed_number(entry: &ReferenceEntry) -> Option<u32> {
+    let label = entry.label.as_deref()?;
+    let caps = numbered_label_re().captures(label)?;
+    caps.get(1)?.as_str().parse::<u32>().ok()
+}
+
+/// The namespace a marker at byte `offset` of a page resolves in first,
+/// given [`RefIndex::space_ends`] for that page: the list after the last
+/// list whose end the marker has passed (a marker in the appendix after
+/// the main bibliography cites the appendix list), else the first list.
+fn home_space(ends: &[Option<usize>], offset: usize) -> usize {
+    let passed = ends
+        .iter()
+        .take_while(|end| matches!(**end, Some(e) if offset >= e))
+        .count();
+    passed.min(ends.len().saturating_sub(1))
 }
 
 /// Surname of a printed author name: the part before a comma, else the last
@@ -2078,15 +2701,26 @@ fn author_surname(name: &str) -> String {
 }
 
 impl RefIndex {
-    fn build(refs: &[ReferenceEntry]) -> Self {
-        let mut by_number: BTreeMap<u32, u32> = BTreeMap::new();
+    /// Tables over `refs`; `extents` (the lists in document order, see
+    /// [`list_extents`]) give every numeric namespace its end.
+    fn build(refs: &[ReferenceEntry], extents: &[ListExtent]) -> Self {
+        let mut spaces: Vec<NumberSpace> = Vec::new();
+        let mut last_number: Option<u32> = None;
         let mut by_author_year: Vec<(String, u16, u32)> = Vec::new();
         for entry in refs {
-            if let Some(label) = entry.label.as_deref()
-                && let Some(caps) = numbered_label_re().captures(label)
-                && let Some(number) = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok())
-            {
-                by_number.entry(number).or_insert(entry.index);
+            if let Some(number) = printed_number(entry) {
+                let restart = last_number.is_some_and(|previous| number <= previous);
+                if spaces.is_empty() || restart {
+                    spaces.push(NumberSpace {
+                        first_page: entry.page,
+                        end: None,
+                        by_number: BTreeMap::new(),
+                    });
+                }
+                if let Some(space) = spaces.last_mut() {
+                    space.by_number.entry(number).or_insert(entry.index);
+                }
+                last_number = Some(number);
             }
             let surname = entry
                 .authors
@@ -2105,11 +2739,71 @@ impl RefIndex {
                 by_author_year.push((surname, year, entry.index));
             }
         }
+        // Pair every namespace with the list it was segmented from: the
+        // last list that starts on or before the namespace's first page,
+        // never one already taken by an earlier namespace.
+        let mut taken: Option<usize> = None;
+        for space in &mut spaces {
+            let by_page = extents
+                .iter()
+                .rposition(|extent| extent.start.0 <= space.first_page)
+                .unwrap_or(0);
+            let extent_index = taken.map_or(by_page, |t| by_page.max(t + 1));
+            space.end = extents.get(extent_index).and_then(|extent| extent.end);
+            taken = Some(extent_index);
+        }
+        let max_number = spaces
+            .iter()
+            .filter_map(|space| space.by_number.keys().next_back().copied())
+            .max()
+            .unwrap_or(0);
         Self {
-            numbered: !by_number.is_empty(),
-            by_number,
+            numbered: !spaces.is_empty(),
+            spaces,
+            max_number,
             by_author_year,
         }
+    }
+
+    /// Per numeric namespace: the byte offset of `page.text` from which a
+    /// marker lies past that list's end (`Some(0)` when the list ended on
+    /// an earlier page), or `None` when the list has not ended by this
+    /// page. See [`home_space`].
+    fn space_ends(&self, page: &PageText) -> Vec<Option<usize>> {
+        self.spaces
+            .iter()
+            .map(|space| match space.end {
+                Some((end_page, _)) if page.page > end_page => Some(0),
+                Some((end_page, end_line)) if page.page == end_page => {
+                    Some(heading_byte_offset(page, end_line))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Entry indices of the printed `numbers`, in order, without repeats.
+    /// Each number is looked up in the namespace `home` first and then in
+    /// the other lists in document order.
+    fn targets_for(&self, numbers: &[u32], home: usize) -> Vec<u32> {
+        let mut targets: Vec<u32> = Vec::new();
+        for number in numbers {
+            let found = self
+                .spaces
+                .get(home)
+                .and_then(|space| space.by_number.get(number))
+                .or_else(|| {
+                    self.spaces
+                        .iter()
+                        .find_map(|space| space.by_number.get(number))
+                });
+            if let Some(&idx) = found
+                && !targets.contains(&idx)
+            {
+                targets.push(idx);
+            }
+        }
+        targets
     }
 
     /// Entries whose first author surname and year match. A suffix letter
@@ -2165,46 +2859,154 @@ fn heading_byte_offset(page: &PageText, first_line: usize) -> usize {
     page.text.len()
 }
 
-type Found = (Range<usize>, String, Vec<u32>);
+/// A marker found on a page: its byte range in `PageText::text`, its text,
+/// the resolved entry indices and, for a numeric marker, the printed
+/// numbers it cites and the namespace ([`home_space`]) they resolve in
+/// first.
+struct Found {
+    range: Range<usize>,
+    text: String,
+    targets: Vec<u32>,
+    numbers: Vec<u32>,
+    space: usize,
+}
 
-fn numeric_markers(text: &str, index: &RefIndex) -> Vec<Found> {
+/// Is the bracket group at `start..end` part of a symbol rather than a
+/// citation: `W[1]-hard`, `x[2]`, `FPT[1]`, `NP[3]` (a single letter or a
+/// token of up to three capitals right before `[`, or `-` and a letter right
+/// after `]`)? `PEPNet[43]` and `BERT[12]` are citations glued to a word.
+fn glued_to_word(text: &str, start: usize, end: usize) -> bool {
+    let before = word_before(text, start);
+    if before.is_empty() {
+        return false;
+    }
+    let mut chars = before.chars();
+    let single = chars.next().is_some_and(char::is_alphabetic) && chars.next().is_none();
+    let short_caps = before.chars().count() <= 3 && before.chars().all(char::is_uppercase);
+    let dashed = text[end..]
+        .strip_prefix('-')
+        .is_some_and(|rest| rest.starts_with(char::is_alphabetic));
+    single || short_caps || dashed
+}
+
+/// Numeric markers in `text[window]`, with byte ranges into `text`. A
+/// group is rejected when any item is `0` or above the largest printed
+/// number (`[0, 1]` is an interval), or when it is glued to a symbol
+/// ([`glued_to_word`]). A note after the numbers (`[22, Theorem 4]`) is
+/// kept in the marker text but cites nothing. `ends` is
+/// [`RefIndex::space_ends`] for the page: it picks the namespace each
+/// marker resolves in first.
+fn numeric_markers(
+    text: &str,
+    window: &Range<usize>,
+    index: &RefIndex,
+    ends: &[Option<usize>],
+) -> Vec<Found> {
     let mut out: Vec<Found> = Vec::new();
-    for found in numeric_marker_re().find_iter(text) {
-        let inner = &text[found.start() + 1..found.end() - 1];
-        let mut targets: Vec<u32> = Vec::new();
-        for item in inner.split([',', ';']) {
-            let Some(caps) = numeric_item_re().captures(item) else {
+    for caps in numeric_marker_re().captures_iter(&text[window.clone()]) {
+        let (Some(whole), Some(inner)) = (caps.get(0), caps.get(1)) else {
+            continue;
+        };
+        let start = window.start + whole.start();
+        let end = window.start + whole.end();
+        if glued_to_word(text, start, end) {
+            continue;
+        }
+        let mut numbers: Vec<u32> = Vec::new();
+        let mut plausible = true;
+        for item in inner.as_str().split([',', ';']) {
+            let Some(item_caps) = numeric_item_re().captures(item) else {
                 continue;
             };
-            let Some(lo) = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()) else {
+            let Some(lo) = item_caps
+                .get(1)
+                .and_then(|m| m.as_str().parse::<u32>().ok())
+            else {
                 continue;
             };
-            let hi = caps
+            let hi = item_caps
                 .get(2)
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(lo);
-            if hi < lo || hi - lo > MAX_RANGE_SPAN {
-                continue;
+            if lo == 0 || hi < lo || hi - lo > MAX_RANGE_SPAN || hi > index.max_number {
+                plausible = false;
+                break;
             }
-            for number in lo..=hi {
-                if let Some(&idx) = index.by_number.get(&number)
-                    && !targets.contains(&idx)
-                {
-                    targets.push(idx);
-                }
-            }
+            numbers.extend(lo..=hi);
         }
+        if !plausible || numbers.is_empty() {
+            continue;
+        }
+        let space = home_space(ends, start);
+        let targets = index.targets_for(&numbers, space);
         if targets.is_empty() {
             continue;
         }
-        out.push((found.range(), found.as_str().to_string(), targets));
+        out.push(Found {
+            range: start..end,
+            text: whole.as_str().to_string(),
+            targets,
+            numbers,
+            space,
+        });
     }
     out
 }
 
-fn author_year_markers(text: &str, index: &RefIndex) -> Vec<Found> {
+/// Numbers cited by two numeric groups joined by `gap`: `[17], [18]` cites
+/// both lists, `[3]–[5]` (IEEE `cite` package) the closed range between two
+/// single numbers. `None` when the groups are separate markers.
+fn adjacent_numbers(gap: &str, a: &Found, b: &Found) -> Option<Vec<u32>> {
+    let trimmed = gap.trim();
+    if trimmed == "," {
+        let mut numbers = a.numbers.clone();
+        for &n in &b.numbers {
+            if !numbers.contains(&n) {
+                numbers.push(n);
+            }
+        }
+        return Some(numbers);
+    }
+    if matches!(trimmed, "–" | "—" | "-")
+        && let (&[lo], &[hi]) = (a.numbers.as_slice(), b.numbers.as_slice())
+        && hi > lo
+        && hi - lo <= MAX_RANGE_SPAN
+    {
+        return Some((lo..=hi).collect());
+    }
+    None
+}
+
+/// Merge adjacent numeric groups printed one bracket per number
+/// (`[17], [18]`, `[3]–[5]`) into one marker whose targets are the union.
+/// `found` must be sorted by position.
+fn merge_adjacent(text: &str, found: Vec<Found>, index: &RefIndex) -> Vec<Found> {
+    let mut merged: Vec<Found> = Vec::with_capacity(found.len());
+    for next in found {
+        if let Some(last) = merged.last_mut()
+            && last.range.end <= next.range.start
+            && let Some(numbers) =
+                adjacent_numbers(&text[last.range.end..next.range.start], last, &next)
+        {
+            let targets = index.targets_for(&numbers, last.space);
+            if !targets.is_empty() {
+                last.range.end = next.range.end;
+                last.text = text[last.range.clone()].to_string();
+                last.targets = targets;
+                last.numbers = numbers;
+                continue;
+            }
+        }
+        merged.push(next);
+    }
+    merged
+}
+
+/// Author-year markers in `text[window]`, with byte ranges into `text`.
+fn author_year_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> Vec<Found> {
+    let slice = &text[window.clone()];
     let mut out: Vec<Found> = Vec::new();
-    for caps in narrative_marker_re().captures_iter(text) {
+    for caps in narrative_marker_re().captures_iter(slice) {
         let (Some(whole), Some(name), Some(year)) = (caps.get(0), caps.get(1), caps.get(2)) else {
             continue;
         };
@@ -2216,16 +3018,24 @@ fn author_year_markers(text: &str, index: &RefIndex) -> Vec<Found> {
         if targets.is_empty() {
             continue;
         }
-        out.push((whole.range(), whole.as_str().to_string(), targets));
+        out.push(Found {
+            range: window.start + whole.start()..window.start + whole.end(),
+            text: whole.as_str().to_string(),
+            targets,
+            numbers: Vec::new(),
+            space: 0,
+        });
     }
-    for found in parenthetical_re().find_iter(text) {
+    for found in parenthetical_re().find_iter(slice) {
+        let start = window.start + found.start();
+        let end = window.start + found.end();
         let overlaps = out
             .iter()
-            .any(|(range, _, _)| range.start < found.end() && found.start() < range.end);
+            .any(|f| f.range.start < end && start < f.range.end);
         if overlaps {
             continue;
         }
-        let inner = &text[found.start() + 1..found.end() - 1];
+        let inner = &slice[found.start() + 1..found.end() - 1];
         let mut targets: Vec<u32> = Vec::new();
         let mut clauses = 0usize;
         for clause in inner.split(';') {
@@ -2250,67 +3060,166 @@ fn author_year_markers(text: &str, index: &RefIndex) -> Vec<Found> {
         if clauses == 0 {
             continue;
         }
-        out.push((found.range(), found.as_str().to_string(), targets));
+        out.push(Found {
+            range: start..end,
+            text: found.as_str().to_string(),
+            targets,
+            numbers: Vec::new(),
+            space: 0,
+        });
     }
     out
 }
 
-/// In-text citation markers on the body pages, resolved against `refs`.
+/// Where a reference list sits in the document: from its heading line
+/// (`start`, as page number and line index) to the line that ends it
+/// (`end`), or to the end of the document when `end` is `None`.
+struct ListExtent {
+    start: (u32, usize),
+    end: Option<(u32, usize)>,
+}
+
+/// The extent of every list in `sections` (see [`ListExtent`]).
+fn list_extents(pages: &[PageText], sections: &[ReferenceSection]) -> Vec<ListExtent> {
+    sections
+        .iter()
+        .enumerate()
+        .map(|(k, section)| {
+            let stop = sections
+                .get(k + 1)
+                .map(|next| (next.first_page, next.first_line));
+            let body = list_body(pages, section, stop);
+            ListExtent {
+                start: (section.first_page, section.first_line),
+                end: body.end.or(stop),
+            }
+        })
+        .collect()
+}
+
+/// `windows` with the bytes `cut_start..cut_end` removed.
+fn subtract_range(windows: &[Range<usize>], cut_start: usize, cut_end: usize) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::with_capacity(windows.len() + 1);
+    for window in windows {
+        if window.end <= cut_start || window.start >= cut_end {
+            out.push(window.clone());
+            continue;
+        }
+        if window.start < cut_start {
+            out.push(window.start..cut_start);
+        }
+        if cut_end < window.end {
+            out.push(cut_end..window.end);
+        }
+    }
+    out
+}
+
+/// Byte ranges of `page.text` outside every reference list: the whole page
+/// when no list touches it, the part above the heading, the part after the
+/// line that ends a list (an appendix after the bibliography is scanned).
+fn page_scan_windows(page: &PageText, extents: &[ListExtent]) -> Vec<Range<usize>> {
+    let mut windows: Vec<Range<usize>> = Vec::with_capacity(2);
+    windows.push(0..page.text.len());
+    for extent in extents {
+        let (start_page, start_line) = extent.start;
+        if page.page < start_page {
+            continue;
+        }
+        let cut_start = if page.page == start_page {
+            heading_byte_offset(page, start_line)
+        } else {
+            0
+        };
+        let cut_end = match extent.end {
+            Some((end_page, _)) if page.page > end_page => 0,
+            Some((end_page, end_line)) if page.page == end_page => {
+                heading_byte_offset(page, end_line)
+            }
+            _ => page.text.len(),
+        };
+        if cut_start < cut_end {
+            windows = subtract_range(&windows, cut_start, cut_end);
+        }
+    }
+    windows
+}
+
+/// In-text citation markers on every page outside the reference lists,
+/// resolved against `refs`.
 ///
-/// Numeric lists get `[1]`, `[2, 3]`, `[4–6]` markers (superscript digits are
-/// not attempted); author-year lists get `(Smith, 2020)`,
-/// `(Smith et al., 2020; Lee and Kim, 2019)` and `Smith (2020)`. Only the
-/// pages before the reference section, plus the part of the section's first
-/// page above the heading, are searched. `offset` is a char offset into
-/// `PageText::text`.
+/// Numeric lists get `[1]`, `[2, 3]`, `[4–6]` and `[22, Theorem 4]` markers
+/// (superscript digits are not attempted); adjacent groups `[17], [18]` and
+/// `[3]–[5]` become one marker. A group that cites `0` or a number above the
+/// list, or that is glued to a symbol (`W[1]-hard`, `x[2]`), is not a
+/// marker. Author-year lists get `(Smith, 2020)`, `(Smith et al., 2020; Lee
+/// and Kim, 2019)` and `Smith (2020)`. Pages before the first list, the part
+/// of a list's first page above its heading and the pages after a list's
+/// end (an appendix) are searched. Numbered lists that restart at `[1]`
+/// (`References` and `References for the Appendices`) keep separate
+/// numberings: a marker before the first list's end resolves in the first
+/// list, a marker after it (in the appendix that the later list serves)
+/// in the later list first, each falling back to the other lists. `offset`
+/// is a char offset into `PageText::text`.
 pub fn find_citation_markers(pages: &[PageText], refs: &[ReferenceEntry]) -> Vec<CitationMarker> {
     if refs.is_empty() {
         return Vec::new();
     }
-    let index = RefIndex::build(refs);
-    let section = find_reference_section(pages);
+    let sections = find_reference_sections(pages);
+    let extents = list_extents(pages, &sections);
+    let index = RefIndex::build(refs, &extents);
     let mut markers: Vec<CitationMarker> = Vec::new();
     for page in pages {
-        let scan_len = match &section {
-            Some(s) if page.page > s.first_page => continue,
-            Some(s) if page.page == s.first_page => heading_byte_offset(page, s.first_line),
-            _ => page.text.len(),
-        };
-        let text = &page.text[..scan_len];
-        let mut found = if index.numbered {
-            numeric_markers(text, &index)
+        let ends = index.space_ends(page);
+        let mut found: Vec<Found> = Vec::new();
+        for window in page_scan_windows(page, &extents) {
+            if index.numbered {
+                found.extend(numeric_markers(&page.text, &window, &index, &ends));
+            } else {
+                found.extend(author_year_markers(&page.text, &window, &index));
+            }
+        }
+        found.sort_by_key(|f| f.range.start);
+        let found = if index.numbered {
+            merge_adjacent(&page.text, found, &index)
         } else {
-            author_year_markers(text, &index)
+            found
         };
-        found.sort_by_key(|(range, _, _)| range.start);
         let mut byte_cursor = 0usize;
         let mut char_cursor = 0usize;
-        for (range, marker_text, targets) in found {
-            if range.start < byte_cursor {
+        for f in found {
+            if f.range.start < byte_cursor {
                 continue;
             }
-            char_cursor += page.text[byte_cursor..range.start].chars().count();
-            byte_cursor = range.start;
+            char_cursor += page.text[byte_cursor..f.range.start].chars().count();
+            byte_cursor = f.range.start;
             markers.push(CitationMarker {
                 page: page.page,
                 offset: u32::try_from(char_cursor).unwrap_or(u32::MAX),
-                text: marker_text,
-                targets,
+                text: f.text,
+                targets: f.targets,
             });
         }
     }
     markers
 }
 
-/// Convenience: find the section, segment and parse every entry, then find
-/// the markers. No reference section gives two empty vectors.
+/// Convenience: find every reference list, segment and parse the entries
+/// of each in document order (indices continue across lists), then find
+/// the markers against the union. No reference list gives two empty
+/// vectors.
 pub fn extract_citations(pages: &[PageText]) -> (Vec<ReferenceEntry>, Vec<CitationMarker>) {
-    let Some(section) = find_reference_section(pages) else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut refs = segment_entries(pages, &section);
-    for entry in &mut refs {
-        parse_entry(entry);
+    let sections = find_reference_sections(pages);
+    let mut refs: Vec<ReferenceEntry> = Vec::new();
+    for (k, section) in sections.iter().enumerate() {
+        let stop = sections
+            .get(k + 1)
+            .map(|next| (next.first_page, next.first_line));
+        for mut entry in segment_list(pages, section, stop) {
+            entry.index = u32::try_from(refs.len() + 1).unwrap_or(u32::MAX);
+            parse_entry(&mut entry);
+            refs.push(entry);
+        }
     }
     let markers = find_citation_markers(pages, &refs);
     (refs, markers)
@@ -2319,7 +3228,6 @@ pub fn extract_citations(pages: &[PageText]) -> (Vec<ReferenceEntry>, Vec<Citati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::BBox;
 
     /// A line at `x0` in `column`, `y` points up the page, 10 pt tall.
     fn line_at(text: &str, column: u32, x0: f32, y: f32) -> Line {
@@ -2423,8 +3331,10 @@ mod tests {
         assert!(markers.is_empty());
     }
 
+    /// A `References` line in a table of contents has no entry after it and
+    /// is not a list heading.
     #[test]
-    fn last_heading_wins() {
+    fn table_of_contents_heading_is_skipped() {
         let toc = column_page(1, &["Contents", "1 Introduction", "References"]);
         let body = column_page(
             5,
@@ -2868,7 +3778,7 @@ mod tests {
             parsed("Smith, A. (2020b). Second. Venue.", None),
         ];
         refs[1].index = 2;
-        let index = RefIndex::build(&refs);
+        let index = RefIndex::build(&refs, &[]);
         assert_eq!(index.resolve_author_year("Smith", 2020, "b"), vec![2]);
         assert_eq!(index.resolve_author_year("Smith", 2020, ""), vec![1, 2]);
         assert!(index.resolve_author_year("Jones", 2020, "").is_empty());
@@ -3605,11 +4515,11 @@ mod tests {
     fn section_end_markers() {
         let line = |text: &str| SectionLine {
             page: 1,
+            line: 0,
             column: 0,
             x0: Some(72.0),
             y0: Some(700.0),
             size: Some(10.0),
-            edge: false,
             text: text.to_string(),
         };
         let ends = |text: &str| is_end_heading(&line(text), Style::Bracket, Some(10.0));
@@ -4018,5 +4928,798 @@ mod tests {
         );
         assert_eq!(refs[1].doi.as_deref(), Some("10.1371/journal.pone.0151670"));
         assert_eq!(refs[1].label.as_deref(), Some("Hawkins2016"));
+    }
+
+    /// Heading forms that open a list, and lines that do not.
+    #[test]
+    fn heading_variants() {
+        for text in [
+            "References",
+            "7. References",
+            "A Bibliography",
+            "REFERENCES",
+            "Supplementary References",
+            "References for the Appendices",
+            "References and Notes",
+            "References:",
+        ] {
+            assert!(heading_re().is_match(text), "{text}");
+        }
+        for text in [
+            "Notes and references",
+            "The references are listed below.",
+            "References [1] and [2] agree.",
+        ] {
+            assert!(!heading_re().is_match(text), "{text}");
+        }
+    }
+
+    /// A paper with two lists (multibib: `References` on page 2 and
+    /// `References for the Appendices` on page 3, numbered on from the
+    /// first): both are segmented, indices continue, markers on any page
+    /// resolve against the union, and the appendix between the lists is
+    /// scanned for markers too.
+    #[test]
+    fn multiple_reference_lists_are_concatenated() {
+        let body = column_page(1, &["Prior work [1] and [44] and [2, 3]."]);
+        let first = column_page(
+            2,
+            &[
+                "References",
+                "[1] A. Author. First. Venue, 2020.",
+                "[2] B. Author. Second. Venue, 2021.",
+                "[3] C. Author. Third. Venue, 2022.",
+                "Appendix A",
+                "The appendix cites [2].",
+            ],
+        );
+        let second = column_page(
+            3,
+            &[
+                "References for the Appendices",
+                "43. Kim, S., Park, J.: Counting trees in planar graphs. Discrete Mathematics 23(1), 11–24 (1989)",
+                "44. Lee, H.: Fast matching. In: FOCS ’80. pp. 17–27 (1980)",
+            ],
+        );
+        let pages = vec![body.clone(), first.clone(), second];
+        let sections = find_reference_sections(&pages);
+        let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(
+            headings,
+            vec!["References", "References for the Appendices"]
+        );
+        assert_eq!(
+            find_reference_section(&pages).map(|s| s.first_page),
+            Some(2)
+        );
+
+        let (refs, markers) = extract_citations(&pages);
+        assert_eq!(refs.len(), 5);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]", "43.", "44."]);
+        let indices: Vec<u32> = refs.iter().map(|r| r.index).collect();
+        assert_eq!(indices, vec![1, 2, 3, 4, 5]);
+        assert_eq!(refs[2].raw, "[3] C. Author. Third. Venue, 2022.");
+        assert_eq!(refs[3].page, 3);
+        assert_eq!(
+            refs[3].title.as_deref(),
+            Some("Counting trees in planar graphs")
+        );
+        assert_eq!(refs[3].authors, vec!["Kim, S.", "Park, J."]);
+        assert_eq!(refs[4].year, Some(1980));
+        assert_eq!(refs[4].pages.as_deref(), Some("17–27"));
+        assert_eq!(refs[4].volume, None);
+
+        let texts: Vec<(u32, &str)> = markers.iter().map(|m| (m.page, m.text.as_str())).collect();
+        assert_eq!(
+            texts,
+            vec![(1, "[1]"), (1, "[44]"), (1, "[2, 3]"), (2, "[2]")]
+        );
+        assert_eq!(markers[0].targets, vec![1]);
+        assert_eq!(markers[1].targets, vec![5]);
+        assert_eq!(markers[2].targets, vec![2, 3]);
+        assert_eq!(markers[3].targets, vec![2]);
+        assert_marker_offsets(&body, &markers);
+        assert_marker_offsets(&first, &markers);
+    }
+
+    /// Two numbered lists that both start at `[1]` (`References` and
+    /// `References for the Appendices`) keep their own numbering: a marker
+    /// before the first list's end cites the first list; a marker after
+    /// that end (in the appendix the second list serves) cites the second
+    /// list first and falls back to the first for a number the second does
+    /// not print.
+    #[test]
+    fn restarted_numbering_resolves_by_position() {
+        let body = column_page(1, &["Main text cites [1] and [2, 3]."]);
+        let first = column_page(
+            2,
+            &[
+                "References",
+                "[1] A. Author. First. Venue, 2020.",
+                "[2] B. Author. Second. Venue, 2021.",
+                "[3] C. Author. Third. Venue, 2022.",
+                "Appendix A",
+                "The appendix cites [1] and [3].",
+            ],
+        );
+        let appendix = column_page(3, &["Appendix B proves the bound of [2]."]);
+        let second = column_page(
+            4,
+            &[
+                "References for the Appendices",
+                "[1] D. Author. Fourth. Venue, 2023.",
+                "[2] E. Author. Fifth. Venue, 2024.",
+            ],
+        );
+        let pages = vec![body.clone(), first.clone(), appendix.clone(), second];
+        let (refs, markers) = extract_citations(&pages);
+        assert_eq!(refs.len(), 5);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]", "[1]", "[2]"]);
+        let indices: Vec<u32> = refs.iter().map(|r| r.index).collect();
+        assert_eq!(indices, vec![1, 2, 3, 4, 5]);
+
+        let sections = find_reference_sections(&pages);
+        let index = RefIndex::build(&refs, &list_extents(&pages, &sections));
+        assert!(index.numbered);
+        assert_eq!(index.spaces.len(), 2);
+        assert_eq!(index.spaces[0].end, Some((2, 4)));
+        assert_eq!(index.max_number, 3);
+        assert_eq!(index.targets_for(&[1, 3], 0), vec![1, 3]);
+        assert_eq!(index.targets_for(&[1, 3], 1), vec![4, 3]);
+        assert_eq!(home_space(&[None, None], 0), 0);
+        assert_eq!(home_space(&[Some(10), None], 9), 0);
+        assert_eq!(home_space(&[Some(10), None], 10), 1);
+        assert_eq!(home_space(&[Some(0), None], 5), 1);
+
+        let texts: Vec<(u32, &str)> = markers.iter().map(|m| (m.page, m.text.as_str())).collect();
+        assert_eq!(
+            texts,
+            vec![
+                (1, "[1]"),
+                (1, "[2, 3]"),
+                (2, "[1]"),
+                (2, "[3]"),
+                (3, "[2]")
+            ]
+        );
+        let targets: Vec<Vec<u32>> = markers.iter().map(|m| m.targets.clone()).collect();
+        assert_eq!(
+            targets,
+            vec![vec![1], vec![2, 3], vec![4], vec![3], vec![5]]
+        );
+        assert_marker_offsets(&body, &markers);
+        assert_marker_offsets(&first, &markers);
+        assert_marker_offsets(&appendix, &markers);
+    }
+
+    /// The label column of an IEEE list emitted apart from its entries
+    /// (arXiv:2509.12458): bare `[1]`, `[2]`, `[3]` lines number the list,
+    /// so the entries take the printed labels, the index is numbered and
+    /// body markers resolve.
+    #[test]
+    fn detached_labels_number_the_list() {
+        let body = column_page(1, &["Prior work [2] builds on [1]."]);
+        let list = page_of(
+            2,
+            vec![
+                bare_line("References"),
+                bare_line("[1]"),
+                bare_line("[2]"),
+                bare_line("[3]"),
+                bare_line("A. Author, “First title,” Journal One, vol. 1, pp. 1–2, 2020."),
+                bare_line("B. Writer, “Second title,” Journal Two, vol. 2, pp. 3–4, 2021."),
+                bare_line("C. Third, “Third title,” Journal Three, vol. 3, pp. 5–6, 2022."),
+            ],
+        );
+        let (refs, markers) = extract_citations(&[body.clone(), list]);
+        assert_eq!(refs.len(), 3);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]"]);
+        assert!(refs.iter().all(|r| !r.raw.contains('[')));
+        assert!(refs[1].raw.starts_with("B. Writer"));
+        assert_eq!(refs[1].title.as_deref(), Some("Second title"));
+        assert_eq!(refs[2].year, Some(2022));
+
+        let index = RefIndex::build(&refs, &[]);
+        assert!(index.numbered);
+        assert_eq!(index.max_number, 3);
+
+        let texts: Vec<(u32, &str)> = markers.iter().map(|m| (m.page, m.text.as_str())).collect();
+        assert_eq!(texts, vec![(1, "[2]"), (1, "[1]")]);
+        assert_eq!(markers[0].targets, vec![2]);
+        assert_eq!(markers[1].targets, vec![1]);
+        assert_marker_offsets(&body, &markers);
+
+        // Two bare labels are not a run; the list stays author-year.
+        let two = [
+            bare_line("[4]"),
+            bare_line("[5]"),
+            bare_line("A. Author, “First title,” Journal One, vol. 1, pp. 1–2, 2020."),
+        ];
+        let lines: Vec<SectionLine> = two
+            .iter()
+            .enumerate()
+            .map(|(i, l)| SectionLine {
+                page: 1,
+                line: i,
+                column: 0,
+                x0: None,
+                y0: None,
+                size: None,
+                text: l.text.clone(),
+            })
+            .collect();
+        assert!(!detached_run(&lines));
+        assert_eq!(detect_style(&lines), Style::AuthorYear);
+        assert_eq!(bare_label_number("[12]"), Some(12));
+        assert_eq!(bare_label_number("[12] text"), None);
+
+        // Entries beyond the printed labels continue the sequence.
+        let mut entries = vec![
+            parsed("A. Author, “First title,” 2020.", None),
+            parsed("B. Writer, “Second title,” 2021.", None),
+            parsed("C. Third, “Third title,” 2022.", None),
+        ];
+        assign_detached_labels(&mut entries, &[7, 8]);
+        let labels: Vec<&str> = entries.iter().filter_map(|e| e.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[7]", "[8]", "[9]"]);
+    }
+
+    /// `REVTeX` sets the list right after the last appendix without a
+    /// heading: a `[1]` line that `[2]` and `[3]` follow opens it.
+    #[test]
+    fn headingless_numbered_list_is_found() {
+        let body = column_page(1, &["Text citing [1] and [2]."]);
+        let list = column_page(
+            2,
+            &[
+                "Appendix B: Upper bound system",
+                "The bound follows from Eq. (B.1).",
+                "[1] U. Author, A first title, Journal of Things 75, 126001 (2012).",
+                "[2] N. Writer, A second title, Vol. 212 (Springer, 2023).",
+                "[3] R. Third, A third title, Phys. Rev. Lett. 98, 080602 (2007).",
+            ],
+        );
+        let sections = find_reference_sections(&[body.clone(), list.clone()]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].first_page, 2);
+        assert_eq!(sections[0].first_line, 2);
+        assert_eq!(sections[0].heading, "");
+
+        let (refs, markers) = extract_citations(&[body.clone(), list]);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(
+            refs[0].raw,
+            "[1] U. Author, A first title, Journal of Things 75, 126001 (2012)."
+        );
+        assert_eq!(refs[2].year, Some(2007));
+        let texts: Vec<&str> = markers.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, vec!["[1]", "[2]"]);
+        assert!(markers.iter().all(|m| m.page == 1));
+        assert_marker_offsets(&body, &markers);
+    }
+
+    /// hyperref `backref` prints the citing pages after the DOI: `039. 4`
+    /// and `3639. 2, 3, 8` are not wrapped pieces of the DOI, while `005`,
+    /// `00045` and `112670` still are (arXiv:2603.21379, 2108.04588 forms).
+    /// A numeric line that continues a DOI is not a page number, and a
+    /// hyphen inside a URL survives the line join.
+    #[test]
+    fn doi_back_references_are_not_joined() {
+        assert_eq!(
+            doi_of("doi: 10.1016/j.jcp.2017.08.039. 4").as_deref(),
+            Some("10.1016/j.jcp.2017.08.039")
+        );
+        assert_eq!(
+            doi_of("doi: 10.1002/cnm.3639. 2, 3, 8, 11, 18").as_deref(),
+            Some("10.1002/cnm.3639")
+        );
+        assert_eq!(
+            doi_of("doi: 10.1016/ j.finel.2010.01.007. 3").as_deref(),
+            Some("10.1016/j.finel.2010.01.007")
+        );
+        assert_eq!(
+            doi_of("https://doi.org/10.1016/j.jmp.2013.05. 005").as_deref(),
+            Some("10.1016/j.jmp.2013.05.005")
+        );
+        assert_eq!(
+            doi_of("https://doi.org/10.1109/SC.2018. 00045.").as_deref(),
+            Some("10.1109/SC.2018.00045")
+        );
+        assert_eq!(
+            doi_of("doi:10.1016/j.jbiomech.2025. 112670.").as_deref(),
+            Some("10.1016/j.jbiomech.2025.112670")
+        );
+        assert!(is_back_reference("4"));
+        assert!(is_back_reference("11,"));
+        assert!(!is_back_reference("005"));
+        assert!(!is_back_reference("112670"));
+        assert!(!is_back_reference("2023.2"));
+        assert_eq!(
+            hyphen_break("https://doi.org/10.1214/14-", "sts504", ""),
+            HyphenJoin::Keep
+        );
+
+        let page = column_page(
+            4,
+            &[
+                "References",
+                "Doe, J. (2013). A model of choice. Journal of Mathematical Psychology, 57(1), 1–2. https://doi.org/10.1016/j.jmp.2013.05.",
+                "005",
+                "Roe, K. (2014). Another model. Statistical Science, 29(1), 3–4. https://doi.org/10.1214/14-",
+                "sts504",
+            ],
+        );
+        let (refs, _) = extract_citations(&[page]);
+        assert_eq!(refs.len(), 2);
+        assert!(refs[0].raw.ends_with("j.jmp.2013.05. 005"));
+        assert_eq!(refs[0].doi.as_deref(), Some("10.1016/j.jmp.2013.05.005"));
+        assert_eq!(
+            refs[0].url.as_deref(),
+            Some("https://doi.org/10.1016/j.jmp.2013.05.005")
+        );
+        assert!(refs[1].raw.ends_with("10.1214/14-sts504"));
+        assert_eq!(refs[1].doi.as_deref(), Some("10.1214/14-sts504"));
+    }
+
+    /// Springer LNCS / `spmpsci` (arXiv:2508.19485): `Surname, I., Other,
+    /// J.K.: Title. Venue vol(issue), pages (year)`; the colon ends the
+    /// author list and the title runs to the next sentence end. The end of
+    /// a page range before the year is not a volume.
+    #[test]
+    fn springer_lncs_colon_author_lists() {
+        let entry = parsed(
+            "1. Badawi, D., Pan, H., Cetin, S.C., Enis Çetin, A.: Computationally efficient \
+             spatio-temporal dynamic texture recognition for volatile organic compound (voc) \
+             leakage detection in industrial plants. IEEE Journal of Selected Topics in Signal \
+             Processing 14(4), 676–687 (2020). DOI 10.1109/JSTSP.2020.2976555",
+            Some("1."),
+        );
+        assert_eq!(
+            entry.authors,
+            vec!["Badawi, D.", "Pan, H.", "Cetin, S.C.", "Enis Çetin, A."]
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Computationally efficient spatio-temporal dynamic texture recognition for \
+                 volatile organic compound (voc) leakage detection in industrial plants"
+            )
+        );
+        assert_eq!(
+            entry.venue.as_deref(),
+            Some("IEEE Journal of Selected Topics in Signal Processing")
+        );
+        assert_eq!(entry.volume.as_deref(), Some("14"));
+        assert_eq!(entry.issue.as_deref(), Some("4"));
+        assert_eq!(entry.pages.as_deref(), Some("676–687"));
+        assert_eq!(entry.year, Some(2020));
+        assert_eq!(entry.doi.as_deref(), Some("10.1109/JSTSP.2020.2976555"));
+
+        let entry = parsed(
+            "2. Bekuzarov, M., Bermudez, A., Lee, J.Y., Li, H.: Xmem++: Production-level video \
+             segmentation from few annotated frames. In: Proceedings of the IEEE/CVF \
+             International Conference on Computer Vision (ICCV), pp. 635–644 (2023)",
+            Some("2."),
+        );
+        assert_eq!(
+            entry.authors,
+            vec!["Bekuzarov, M.", "Bermudez, A.", "Lee, J.Y.", "Li, H."]
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Xmem++: Production-level video segmentation from few annotated frames")
+        );
+        assert_eq!(
+            entry.venue.as_deref(),
+            Some("Proceedings of the IEEE/CVF International Conference on Computer Vision")
+        );
+        assert_eq!(entry.pages.as_deref(), Some("635–644"));
+        assert_eq!(entry.volume, None);
+        assert_eq!(entry.year, Some(2023));
+
+        assert_eq!(lncs_authors_end("Doe, J. K.: Title"), Some(10));
+        assert_eq!(lncs_authors_end("Doe, J. K., et al.: Title"), Some(18));
+        assert_eq!(lncs_authors_end("Doe, J. (2020). Title: subtitle"), None);
+        assert_eq!(
+            lncs_authors_end("D. Goldberg, D. Nichols, Title: subtitle"),
+            None
+        );
+    }
+
+    /// The layout pass can interleave the lines of a list set in the right
+    /// column with a caption and a section of body text set in the left
+    /// column (arXiv:2508.19485, page 13). Lines that start left of every
+    /// label on the page belong to the other column.
+    #[test]
+    fn foreign_column_lines_are_dropped_from_numbered_lists() {
+        let rows: Vec<(&str, f32)> = vec![
+            ("References", 301.4),
+            (
+                "Fig. 11: Performance-Efficiency Diagram. Blue and red",
+                42.1,
+            ),
+            (
+                "1. Badawi, D., Pan, H., Cetin, S.C., Enis Çetin, A.: Computationally",
+                301.4,
+            ),
+            (
+                "points represent results on our two datasets, SimGas and",
+                42.1,
+            ),
+            (
+                "efficient spatio-temporal dynamic texture recognition for volatile",
+                312.8,
+            ),
+            (
+                "IGS-Few, while green points are the average accuracy across",
+                42.1,
+            ),
+            (
+                "organic compound (voc) leakage detection in industrial plants.",
+                312.8,
+            ),
+            ("both datasets.", 42.1),
+            (
+                "IEEE Journal of Selected Topics in Signal Processing 14(4), 676–",
+                312.8,
+            ),
+            ("687 (2020). DOI 10.1109/JSTSP.2020.2976555", 312.8),
+            (
+                "2. Bekuzarov, M., Bermudez, A., Lee, J.Y., Li, H.: Xmem++:",
+                301.4,
+            ),
+            ("5 Conclusion", 42.1),
+            (
+                "Production-level video segmentation from few annotated frames.",
+                312.8,
+            ),
+            (
+                "In this paper, we presented JVLGS, a novel framework de-",
+                42.1,
+            ),
+            (
+                "In: Proceedings of the IEEE/CVF International Conference on",
+                312.8,
+            ),
+            ("Computer Vision (ICCV), pp. 635–644 (2023)", 312.8),
+        ];
+        let lines: Vec<Line> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (text, x0))| line_at(text, 0, *x0, 740.0 - 14.0 * i as f32))
+            .collect();
+        let page = page_of(13, lines);
+        let (refs, _) = extract_citations(&[page]);
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs[0].raw.starts_with("1. Badawi, D., Pan, H."));
+        assert!(
+            refs[0]
+                .raw
+                .contains("recognition for volatile organic compound (voc) leakage detection in industrial plants. IEEE Journal")
+        );
+        assert_eq!(refs[0].pages.as_deref(), Some("676–687"));
+        assert_eq!(refs[0].doi.as_deref(), Some("10.1109/JSTSP.2020.2976555"));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("Xmem++: Production-level video segmentation from few annotated frames")
+        );
+        assert_eq!(refs[1].year, Some(2023));
+        assert!(refs.iter().all(|r| {
+            !r.raw.contains("Conclusion")
+                && !r.raw.contains("Fig. 11")
+                && !r.raw.contains("SimGas")
+                && !r.raw.contains("JVLGS")
+        }));
+    }
+
+    /// IEEE lists whose `[n]` labels the layout pass emits as their own
+    /// column (arXiv:2509.12458): the bare labels are dropped and the
+    /// initials-first name pattern (`M. Mozaffari,`, `D. Giordan et al.,`)
+    /// starts an entry after a complete one. `... H. H.` at a line end is a
+    /// wrapped author list, not an entry end.
+    #[test]
+    fn detached_label_column_and_initials_first_starts() {
+        let page = page_of(
+            1,
+            vec![
+                bare_line("[1]"),
+                bare_line("[2]"),
+                bare_line("[3]"),
+                bare_line("REFERENCES"),
+                bare_line("M. Mozaffari, X. Lin, and S. Hayes, “Toward 6g with connected sky:"),
+                bare_line("Uavs and beyond,” IEEE Communications Magazine, vol. 59, no. 12,"),
+                bare_line("pp. 74–80, 2021."),
+                bare_line("B. Rinner, C. Bettstetter, H. Hellwagner, and S. Weiss, “Multidrone"),
+                bare_line("systems: More than the sum of the parts,” Computer, vol. 54, no. 5,"),
+                bare_line("pp. 34–43, 2021."),
+                bare_line("[4]"),
+                bare_line("[5]"),
+                bare_line("M. Gordan, Z. Ismail, K. Ghaedi, Z. Ibrahim, H. Hashim, H. H."),
+                bare_line("Ghayeb, and M. Talebkhah, “A brief overview and future perspective"),
+                bare_line("of unmanned aerial systems for in-service structural health monitor-"),
+                bare_line("ing,” Engineering Advances, vol. 1, no. 1, pp. 9–15, 2021."),
+                bare_line("D. Giordan et al., “The use of uavs for engineering geology applica-"),
+                bare_line("tions,” Bulletin of Engineering Geology and the Environment, vol. 79,"),
+                bare_line("pp. 3437–3481, 2020."),
+            ],
+        );
+        let (refs, _) = extract_citations(&[page]);
+
+        assert_eq!(refs.len(), 4);
+        assert!(refs.iter().all(|r| !r.raw.contains('[')));
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("Toward 6g with connected sky: Uavs and beyond")
+        );
+        assert_eq!(refs[0].authors, vec!["M. Mozaffari", "X. Lin", "S. Hayes"]);
+        assert_eq!(
+            refs[0].venue.as_deref(),
+            Some("IEEE Communications Magazine")
+        );
+        assert_eq!(refs[0].volume.as_deref(), Some("59"));
+        assert_eq!(refs[0].issue.as_deref(), Some("12"));
+        assert_eq!(refs[0].pages.as_deref(), Some("74–80"));
+        assert!(refs[1].raw.starts_with("B. Rinner, C. Bettstetter"));
+        assert!(refs[2].raw.starts_with("M. Gordan, Z. Ismail"));
+        assert_eq!(refs[2].authors.len(), 7);
+        assert_eq!(refs[2].authors[5], "H. H. Ghayeb");
+        assert_eq!(
+            refs[2].title.as_deref(),
+            Some(
+                "A brief overview and future perspective of unmanned aerial systems for \
+                 in-service structural health monitoring"
+            )
+        );
+        assert!(refs[3].raw.starts_with("D. Giordan et al., “The use"));
+        assert_eq!(
+            refs[3].title.as_deref(),
+            Some("The use of uavs for engineering geology applications")
+        );
+        assert_eq!(refs[3].pages.as_deref(), Some("3437–3481"));
+        assert_eq!(refs[3].year, Some(2020));
+
+        assert!(ends_like_whole_entry("pp. 74–80, 2021."));
+        assert!(ends_like_whole_entry("Venue (2020)"));
+        assert!(!ends_like_whole_entry("Z. Ibrahim, H. Hashim, H. H."));
+        assert!(!ends_like_whole_entry("H. Hashim, and"));
+    }
+
+    /// Hyphenated initials with a lowercase second part are initials
+    /// (`X.-m. Wu` in Elsevier style, arXiv:2305.13843 [152]; `C.-i. Wang`
+    /// in IEEE style); `shouldn’t.` is a sentence end, not an initial; an
+    /// APA bracketed descriptor is not part of the title.
+    #[test]
+    fn lowercase_hyphenated_initials_apostrophes_and_descriptors() {
+        let entry = parsed(
+            "[152] M. Wang, Y. Lin, G. Lin, K. Yang, X.-m. Wu, M2GRL: A Multi-task Multi-view \
+             Graph Representation Learning Framework for Web-scale Recommender Systems, in: \
+             Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery \
+             & Data Mining, 2020, pp. 2349–2358. doi: 10.1145/3394486.3403284.",
+            Some("[152]"),
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "M2GRL: A Multi-task Multi-view Graph Representation Learning Framework for \
+                 Web-scale Recommender Systems"
+            )
+        );
+        assert_eq!(
+            entry.authors,
+            vec!["M. Wang", "Y. Lin", "G. Lin", "K. Yang", "X.-m. Wu"]
+        );
+        assert_eq!(
+            entry.venue.as_deref(),
+            Some(
+                "Proceedings of the 26th ACM SIGKDD International Conference on Knowledge \
+                 Discovery & Data Mining"
+            )
+        );
+        assert_eq!(entry.pages.as_deref(), Some("2349–2358"));
+        assert_eq!(entry.year, Some(2020));
+        assert_eq!(entry.doi.as_deref(), Some("10.1145/3394486.3403284"));
+
+        let entry = parsed(
+            "[31] C.-i. Wang, J.-y. Hung, and Y.-H. Yang, “Tonet: Tone-octave network for \
+             singing melody extraction from polyphonic music,” in ICASSP 2022, pp. 1–5.",
+            Some("[31]"),
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Tonet: Tone-octave network for singing melody extraction from polyphonic music")
+        );
+        assert_eq!(
+            entry.authors,
+            vec!["C.-i. Wang", "J.-y. Hung", "Y.-H. Yang"]
+        );
+        assert_eq!(entry.pages.as_deref(), Some("1–5"));
+        assert_eq!(entry.year, Some(2022));
+        assert!(is_initials("C.-i."));
+        assert!(is_initials("J.-M."));
+        assert!(!is_initials("Smith"));
+        assert!(!is_initials("Ab"));
+
+        let entry = parsed(
+            "A. Author and B. Writer. Graphs when they shouldn’t. Proceedings of the Conference \
+             on Things, 2021.",
+            None,
+        );
+        assert_eq!(entry.title.as_deref(), Some("Graphs when they shouldn’t"));
+        assert_eq!(entry.authors, vec!["A. Author", "B. Writer"]);
+        assert!(!period_is_abbreviation("they don't. Next", 10));
+        assert!(period_is_abbreviation("by A. Smith", 4));
+
+        let entry = parsed(
+            "Doe, J. (2019). Learning to design [Doctoral dissertation, University of \
+             Somewhere]. ProQuest Dissertations Publishing.",
+            None,
+        );
+        assert_eq!(entry.title.as_deref(), Some("Learning to design"));
+        assert_eq!(entry.authors, vec!["Doe, J."]);
+        assert_eq!(entry.year, Some(2019));
+        assert_eq!(
+            strip_bracket_descriptor("Notes on memory [Pyro Tutorial]"),
+            "Notes on memory"
+        );
+        assert_eq!(strip_bracket_descriptor("Beyond [MASK]"), "Beyond [MASK]");
+        assert_eq!(
+            strip_bracket_descriptor("[analysis code]"),
+            "[analysis code]"
+        );
+    }
+
+    /// A lowercase handle followed by the year sentence (`gwern. 2020.`)
+    /// opens an entry when the entry before it is complete, with the layout
+    /// saying entry start; it gets a `gwern2020` label and the handle as
+    /// its author.
+    #[test]
+    fn lowercase_handle_starts_an_entry() {
+        let rows: Vec<(&str, f32)> = vec![
+            (
+                "Smith, J. and Doe, A. (2021). A study of things. Journal of Stuff,",
+                72.0,
+            ),
+            ("5(1), 107–135.", 86.0),
+            ("gwern. 2020. The scaling hypothesis. Blog", 72.0),
+            ("post. Retrieved 2024-01-01.", 86.0),
+            ("Zhang, Q. (2022). Another study. Venue.", 72.0),
+        ];
+        let mut lines: Vec<Line> = vec![line_at("References", 0, 72.0, 754.0)];
+        for (i, (text, x0)) in rows.iter().enumerate() {
+            lines.push(line_at(text, 0, *x0, 740.0 - 14.0 * i as f32));
+        }
+        let page = page_of(7, lines);
+        let (refs, _) = extract_citations(&[page]);
+
+        assert_eq!(refs.len(), 3);
+        assert_eq!(
+            refs[1].raw,
+            "gwern. 2020. The scaling hypothesis. Blog post. Retrieved 2024-01-01."
+        );
+        assert_eq!(refs[1].label.as_deref(), Some("gwern2020"));
+        assert_eq!(refs[1].title.as_deref(), Some("The scaling hypothesis"));
+        assert_eq!(refs[1].authors, vec!["gwern"]);
+        assert_eq!(refs[1].year, Some(2020));
+        assert!(refs[2].raw.starts_with("Zhang, Q. (2022)."));
+        assert!(handle_start_re().is_match("nostalgebraist. 2020. Interpreting GPT"));
+        assert!(!handle_start_re().is_match("et al. 2020. Title"));
+        assert!(!handle_start_re().is_match("preprint, 2020."));
+    }
+
+    /// LNCS-style running heads sit about 11.5% down the page, outside the
+    /// old 8% band, alternating between the authors (even pages) and the
+    /// title (odd pages), with the folio on the same row. They repeat on
+    /// two or more pages of the document and are dropped from the list.
+    #[test]
+    fn running_headers_in_the_top_band_are_furniture() {
+        let header_page = |number: u32, header: &[(&str, f32)], body: &[&str]| {
+            let mut lines: Vec<Line> = header
+                .iter()
+                .map(|(text, x0)| line_at(text, 0, *x0, 692.0))
+                .collect();
+            for (i, text) in body.iter().enumerate() {
+                lines.push(line_at(text, 0, 72.0, 660.0 - 14.0 * i as f32));
+            }
+            page_of(number, lines)
+        };
+        let title = [("Balanced Partitions of Things", 200.0), ("15", 500.0)];
+        let authors = [("16", 72.0), ("A. Author and B. Writer", 150.0)];
+        let pages = vec![
+            header_page(
+                15,
+                &title,
+                &["Some body text about partitions.", "More body text."],
+            ),
+            header_page(16, &authors, &["The body continues here.", "And here."]),
+            header_page(
+                17,
+                &title,
+                &[
+                    "References",
+                    "[1] C. Person. First title. Venue, 2020.",
+                    "[2] D. Person. Second title with a long",
+                ],
+            ),
+            header_page(
+                18,
+                &authors,
+                &["tail. Venue, 2021.", "[3] E. Person. Third. Venue, 2022."],
+            ),
+        ];
+        let flags = furniture_flags(&pages[2]);
+        assert_eq!(&flags[..2], &[true, true]);
+        assert!(flags[2..].iter().all(|&f| !f));
+        let repeated = repeated_furniture(&pages);
+        assert!(repeated.contains(&"A. Author and B. Writer".to_string()));
+        assert!(repeated.contains(&"Balanced Partitions of Things".to_string()));
+
+        let (refs, _) = extract_citations(&pages);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].raw, "[1] C. Person. First title. Venue, 2020.");
+        assert_eq!(
+            refs[1].raw,
+            "[2] D. Person. Second title with a long tail. Venue, 2021."
+        );
+        assert_eq!(refs[2].page, 18);
+        assert!(refs.iter().all(|r| {
+            !r.raw.contains("A. Author and B. Writer") && !r.raw.contains("Balanced Partitions")
+        }));
+    }
+
+    /// Markers after the list (an appendix) are scanned; math intervals
+    /// (`[0, 1]`), symbols (`W[1]-hard`, `x[2]`) and numbers above the list
+    /// (`[9]`, `[17]`) are not markers; `[2, Theorem 4]` cites 2; adjacent
+    /// groups `[1], [2]` and `[3]–[5]` become one marker each; a citation
+    /// glued to a word (`BERT[3]`) still counts.
+    #[test]
+    fn markers_after_the_list_with_guards() {
+        let body = column_page(
+            1,
+            &[
+                "Prior work [1], [2] and [3]–[5] is W[1]-hard on x[2] over [0, 1]; see [2, Theorem 4], [9] and BERT[3].",
+            ],
+        );
+        let refs_page = column_page(
+            2,
+            &[
+                "References",
+                "[1] A. Author. First. Venue, 2020.",
+                "[2] B. Author. Second. Venue, 2021.",
+                "[3] C. Author. Third. Venue, 2022.",
+                "[4] D. Author. Fourth. Venue, 2023.",
+                "[5] E. Author. Fifth. Venue, 2024.",
+                "Appendix A",
+                "The appendix cites [4] and [17].",
+            ],
+        );
+        let (refs, markers) = extract_citations(&[body.clone(), refs_page.clone()]);
+        assert_eq!(refs.len(), 5);
+        let texts: Vec<(u32, &str)> = markers.iter().map(|m| (m.page, m.text.as_str())).collect();
+        assert_eq!(
+            texts,
+            vec![
+                (1, "[1], [2]"),
+                (1, "[3]–[5]"),
+                (1, "[2, Theorem 4]"),
+                (1, "[3]"),
+                (2, "[4]"),
+            ]
+        );
+        let targets: Vec<Vec<u32>> = markers.iter().map(|m| m.targets.clone()).collect();
+        assert_eq!(
+            targets,
+            vec![vec![1, 2], vec![3, 4, 5], vec![2], vec![3], vec![4]]
+        );
+        assert_marker_offsets(&body, &markers);
+        assert_marker_offsets(&refs_page, &markers);
+
+        assert!(glued_to_word("W[1]-hard", 1, 4));
+        assert!(glued_to_word("FPT[1] ", 3, 6));
+        assert!(!glued_to_word("PEPNet[43], MoME[44]", 6, 10));
+        assert!(!glued_to_word("see [1]", 4, 7));
     }
 }
