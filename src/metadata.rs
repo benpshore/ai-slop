@@ -97,7 +97,7 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         info: info.clone(),
         ..Metadata::default()
     };
-    let page1: Option<&PageText> = pages.first();
+    let first_page: Option<&PageText> = pages.first();
 
     // Title.
     if let Some(title) = info
@@ -110,10 +110,10 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
     }
     let mut title_lines: Vec<usize> = Vec::new();
     if meta.title.is_none()
-        && let Some(page) = page1
+        && let Some(page) = first_page
         && let Some((indices, text)) = title_block(page)
     {
-        set_title(&mut meta, &text, "page1:largest-font");
+        set_title(&mut meta, &text, "first_page:largest-font");
         title_lines = indices;
     }
 
@@ -132,14 +132,14 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         }
     }
     if meta.authors.is_empty()
-        && let Some(page) = page1
+        && let Some(page) = first_page
         && let Some(&last_title_line) = title_lines.last()
     {
         let names = page1_authors(page, last_title_line + 1);
         if !names.is_empty() {
             meta.authors = names.into_iter().map(named_author).collect();
             meta.provenance
-                .insert("authors".to_string(), "page1:authors".to_string());
+                .insert("authors".to_string(), "first_page:authors".to_string());
         }
     }
 
@@ -153,12 +153,12 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         }
     }
     if meta.doi.is_none()
-        && let Some(page) = page1
+        && let Some(page) = first_page
         && let Some(doi) = first_in_lines(page, find_doi)
     {
         meta.doi = Some(doi);
         meta.provenance
-            .insert("doi".to_string(), "page1:doi".to_string());
+            .insert("doi".to_string(), "first_page:doi".to_string());
     }
 
     // arXiv id: Info values first, then page 1.
@@ -171,12 +171,12 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         }
     }
     if meta.arxiv_id.is_none()
-        && let Some(page) = page1
+        && let Some(page) = first_page
         && let Some(id) = first_in_lines(page, find_arxiv_id)
     {
         meta.arxiv_id = Some(id);
         meta.provenance
-            .insert("arxiv_id".to_string(), "page1:arxiv".to_string());
+            .insert("arxiv_id".to_string(), "first_page:arxiv".to_string());
     }
 
     // Venue from Subject when it is not merely a copy of the title.
@@ -207,21 +207,23 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         }
     }
     if meta.keywords.is_empty()
-        && let Some(page) = page1
+        && let Some(page) = first_page
         && let Some(list) = page1_keywords(page)
     {
         meta.keywords = list;
         meta.provenance
-            .insert("keywords".to_string(), "page1:keywords".to_string());
+            .insert("keywords".to_string(), "first_page:keywords".to_string());
     }
 
     // Abstract.
-    if let Some(page) = page1
+    if let Some(page) = first_page
         && let Some(text) = page1_abstract(page)
     {
         meta.abstract_text = Some(text);
-        meta.provenance
-            .insert("abstract_text".to_string(), "page1:abstract".to_string());
+        meta.provenance.insert(
+            "abstract_text".to_string(),
+            "first_page:abstract".to_string(),
+        );
     }
 
     // Year: arXiv id, DOI, Info dates, page 1.
@@ -231,10 +233,10 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         set_year(&mut meta, year, "doi");
     } else if let Some((key, year)) = info_year(info) {
         set_year(&mut meta, year, &format!("info:{key}"));
-    } else if let Some(page) = page1
+    } else if let Some(page) = first_page
         && let Some(year) = page1_year(page)
     {
-        set_year(&mut meta, year, "page1:year");
+        set_year(&mut meta, year, "first_page:year");
     }
 
     meta
@@ -355,7 +357,7 @@ fn find_doi(text: &str) -> Option<String> {
     let found = doi_re().find(text)?;
     let trimmed = found
         .as_str()
-        .trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ')' | ']' | ':' | '}'));
+        .trim_end_matches(['.', ',', ';', ')', ']', ':', '}']);
     if trimmed.len() < 8 {
         return None;
     }
@@ -823,20 +825,20 @@ mod tests {
         ]);
         let meta = extract_metadata(&info, &[page]);
         assert_eq!(meta.title.as_deref(), Some("Attention Is All You Need"));
-        assert_eq!(meta.provenance["title"], "page1:largest-font");
+        assert_eq!(meta.provenance["title"], "first_page:largest-font");
         assert_eq!(
             author_names(&meta),
             vec!["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"]
         );
-        assert_eq!(meta.provenance["authors"], "page1:authors");
+        assert_eq!(meta.provenance["authors"], "first_page:authors");
         assert_eq!(meta.doi.as_deref(), Some("10.1000/xyz123"));
-        assert_eq!(meta.provenance["doi"], "page1:doi");
+        assert_eq!(meta.provenance["doi"], "first_page:doi");
         let expected_abstract = "The dominant sequence transduction models are based on complex \
                                  recurrent networks. We propose a new architecture.";
         assert_eq!(meta.abstract_text.as_deref(), Some(expected_abstract));
-        assert_eq!(meta.provenance["abstract_text"], "page1:abstract");
+        assert_eq!(meta.provenance["abstract_text"], "first_page:abstract");
         assert_eq!(meta.year, Some(2017));
-        assert_eq!(meta.provenance["year"], "page1:year");
+        assert_eq!(meta.provenance["year"], "first_page:year");
         assert_eq!(meta.venue, None);
         assert_eq!(meta.arxiv_id, None);
         assert_eq!(meta.info["Title"], "Microsoft Word - draft.docx");
@@ -853,7 +855,7 @@ mod tests {
         ]);
         let meta = extract_metadata(&BTreeMap::new(), &[page]);
         assert_eq!(meta.arxiv_id.as_deref(), Some("2001.01234v2"));
-        assert_eq!(meta.provenance["arxiv_id"], "page1:arxiv");
+        assert_eq!(meta.provenance["arxiv_id"], "first_page:arxiv");
         assert_eq!(meta.year, Some(2020));
         assert_eq!(meta.provenance["year"], "arxiv_id");
         assert_eq!(meta.title.as_deref(), Some("A Study of Things"));
@@ -948,7 +950,7 @@ mod tests {
         ]);
         let meta = extract_metadata(&BTreeMap::new(), &[page]);
         assert_eq!(meta.keywords, vec!["graphs", "networks", "learning"]);
-        assert_eq!(meta.provenance["keywords"], "page1:keywords");
+        assert_eq!(meta.provenance["keywords"], "first_page:keywords");
         assert_eq!(meta.abstract_text.as_deref(), Some("Short."));
     }
 

@@ -354,9 +354,9 @@ fn section_lines(pages: &[PageText], section: &ReferenceSection) -> Vec<SectionL
         .map(|(text, _)| (*text).to_string())
         .collect();
     lines.retain(|line| {
-        !line.text.is_empty()
-            && !page_number_re().is_match(&line.text)
-            && !(line.edge && repeated.iter().any(|t| t == &line.text))
+        !(line.text.is_empty()
+            || page_number_re().is_match(&line.text)
+            || (line.edge && repeated.iter().any(|t| t == &line.text)))
     });
     lines
 }
@@ -574,7 +574,7 @@ fn mask_ranges(text: &str, ranges: &[Range<usize>]) -> String {
 }
 
 fn trim_trailing_punct(text: &str) -> &str {
-    text.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ')' | ']' | ':' | '}' | '\''))
+    text.trim_end_matches(['.', ',', ';', ')', ']', ':', '}', '\''])
 }
 
 /// First DOI with its byte range in `text`.
@@ -629,7 +629,7 @@ fn find_quoted(text: &str) -> Option<(Range<usize>, String)> {
     let close = inner_start + close_rel;
     let close_len = text[close..].chars().next().map_or(1, char::len_utf8);
     let inner = text[inner_start..close].trim();
-    let inner = inner.trim_end_matches(|c| matches!(c, ',' | '.' | ';'));
+    let inner = inner.trim_end_matches([',', '.', ';']);
     let inner = inner.trim();
     if inner.is_empty() {
         return None;
@@ -664,7 +664,7 @@ fn period_is_abbreviation(text: &str, dot: usize) -> bool {
 /// closes an initial or abbreviation.
 fn is_author_only(segment: &str) -> bool {
     let trimmed = segment.trim_end();
-    let trimmed = trimmed.trim_end_matches(|c| matches!(c, '.' | ',' | '(' | ' '));
+    let trimmed = trimmed.trim_end_matches(['.', ',', '(', ' ']);
     if trimmed.is_empty() || !trimmed.chars().next().is_some_and(char::is_uppercase) {
         return false;
     }
@@ -784,7 +784,7 @@ fn trim_author_period(text: &str) -> &str {
 /// Jane Doe`. Initial groups are re-attached to the preceding surname.
 fn split_authors(segment: &str) -> Vec<String> {
     let cleaned = segment.trim();
-    let cleaned = cleaned.trim_end_matches(|c| matches!(c, ',' | ';' | ':' | '(' | ' '));
+    let cleaned = cleaned.trim_end_matches([',', ';', ':', '(', ' ']);
     // Vancouver style (`Smith AB, Jones C.`) has no initial periods: a trailing
     // period is always the sentence end.
     let cleaned = if vancouver_start_re().is_match(cleaned) {
@@ -833,7 +833,7 @@ fn dash_range(first: &str, last: Option<&str>) -> String {
 fn clean_venue(text: &str) -> Option<String> {
     let trimmed = text
         .trim()
-        .trim_matches(|c| matches!(c, ',' | ';' | ':' | ' '));
+        .trim_matches([',', ';', ':', ' ']);
     let trimmed = if trimmed.matches('.').count() == 1 {
         trimmed.trim_end_matches('.')
     } else {
@@ -1015,7 +1015,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         if after.starts_with(|c: char| c.is_ascii_lowercase()) {
             after = &after[1..];
         }
-        after = after.trim_start_matches(|c: char| matches!(c, ')' | '.' | ',' | ':' | ' '));
+        after = after.trim_start_matches([')', '.', ',', ':', ' ']);
         title_start = masked.len() - after.len();
     } else if let Some((range, text)) = &quoted
         && year.as_ref().is_none_or(|(y, _)| y.start > range.start)
@@ -1075,7 +1075,7 @@ fn mask_year(text: &str, year: Option<&(Range<usize>, u16)>) -> String {
     if let Some((range, _)) = year
         && range.end <= text.len()
     {
-        mask_ranges(text, &[range.clone()])
+        mask_ranges(text, std::slice::from_ref(range))
     } else {
         text.to_string()
     }

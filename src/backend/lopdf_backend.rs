@@ -796,7 +796,7 @@ impl<'a> Interpreter<'a> {
         let text = self.decode(font, bytes);
         let advance = self.advance(font, bytes);
         let base_font = font.base_font.clone();
-        self.emit(text, advance, base_font);
+        self.emit(&text, advance, base_font);
     }
 
     fn show_array(&mut self, operands: &[Object], contexts: &[Context<'a>]) {
@@ -878,7 +878,7 @@ impl<'a> Interpreter<'a> {
         total * self.state.hscale
     }
 
-    fn emit(&mut self, text: String, advance: f32, base_font: Option<String>) {
+    fn emit(&mut self, text: &str, advance: f32, base_font: Option<String>) {
         let full = self.tm.then(self.state.ctm);
         let rise = self.state.rise;
         let size = self.state.size;
@@ -1298,7 +1298,9 @@ mod tests {
     #[test]
     fn malformed_bytes_are_rejected() {
         let backend = LopdfBackend::default();
-        let err = backend.open(b"not a pdf at all", None).unwrap_err();
+        let Err(err) = backend.open(b"not a pdf at all", None) else {
+            panic!("expected Malformed for non-PDF bytes");
+        };
         assert!(matches!(err, BackendError::Malformed(_)), "{err}");
     }
 }
