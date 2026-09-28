@@ -2327,7 +2327,8 @@ fn period_is_abbreviation(text: &str, dot: usize) -> bool {
 /// or more letters (`Slayer: Spike layer error reassignment in time`, `On
 /// general minimax theorems`) or five or more capitalised words without a
 /// comma (`Structured State Space Model Dynamics and ...`) do; names,
-/// particles, `and` and `et al` do not.
+/// surname particles of any length (`della`, [`is_surname_particle`]),
+/// `and` and `et al` do not.
 fn reads_as_title(segment: &str) -> bool {
     let text = segment.trim();
     if text.contains(':') {
@@ -2353,7 +2354,51 @@ fn reads_as_title(segment: &str) -> bool {
             && core.starts_with(char::is_lowercase)
             && core != "others"
             && !is_particle(core)
+            && !is_surname_particle(core)
     })
+}
+
+/// A lowercase surname particle of any length (`della Porta`, `van der
+/// Berg`, `bin Salman`): part of a name, never a title word.
+fn is_surname_particle(token: &str) -> bool {
+    matches!(
+        token,
+        "della"
+            | "delle"
+            | "dalla"
+            | "degli"
+            | "van"
+            | "von"
+            | "der"
+            | "den"
+            | "de"
+            | "la"
+            | "los"
+            | "las"
+            | "du"
+            | "des"
+            | "ter"
+            | "ten"
+            | "da"
+            | "di"
+            | "do"
+            | "dos"
+            | "das"
+            | "del"
+            | "dela"
+            | "le"
+            | "lo"
+            | "bin"
+            | "ibn"
+            | "al"
+            | "el"
+            | "af"
+            | "av"
+            | "zu"
+            | "zur"
+            | "y"
+            | "e"
+    )
 }
 
 /// True when `segment` reads as an author list only: every `. ` inside it
@@ -2521,15 +2566,37 @@ fn volume_digits_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\d\s*[,(:]|\d[–\-]\d").expect("valid regex"))
 }
 
+/// Venue words inside a clause after a `? ` / `! ` (`Journal of Artificial
+/// Intelligence`): the clause names the venue, not a subtitle.
+fn clause_venue_word_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:Journal|Proceedings|Conference|Transactions|Review|Letters|Annals|Advances|Workshop|Symposium|Press|(?i:arxiv|preprint|vol|pp))\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Does `clause` read as a venue name rather than a subtitle? It holds a
+/// venue word ([`clause_venue_word_re`]) and does not open with an article
+/// (`A Systematic Review` is a subtitle).
+fn clause_names_venue(clause: &str) -> bool {
+    let first = clause.split_whitespace().next().unwrap_or("");
+    !matches!(first, "A" | "An") && clause_venue_word_re().is_match(clause)
+}
+
 /// Does a title end at a `? ` or `! ` that `after` follows (venue words
 /// right after it are handled by [`title_end`])? It ends before a journal
 /// with its volume (`preferences? Marketing Science 43(4):709–722.`) and
 /// before a short or venue-like sentence. It goes on
 /// before a lowercase word (`negotiate? negotiationarena platform`) and
-/// before a subtitle of three or more words that is followed by a venue or
-/// a masked identifier (`Search? Investigating Large Language Models as
-/// Re-Ranking Agents. In Proceedings`, `Tests? An Empirical Study.
-/// arXiv:2602.00409`).
+/// before a subtitle of three or more words that is followed by a venue
+/// (`Search? Investigating Large Language Models as Re-Ranking Agents. In
+/// Proceedings`) or by a masked identifier (`Tests? An Empirical Study.
+/// arXiv:2602.00409`). A masked identifier alone is not enough: a clause
+/// with venue words (`Work? Journal of Artificial Intelligence. https://…`)
+/// or followed by a volume is the venue, and the title ends.
 fn question_ends_title(after: &str) -> bool {
     if after.trim_start().starts_with(char::is_lowercase) {
         return false;
@@ -2550,7 +2617,14 @@ fn question_ends_title(after: &str) -> bool {
     }
     // An identifier masked to spaces (`Study. arXiv:2602.00409`) follows.
     let masked_identifier = following.starts_with("  ");
-    !masked_identifier || subtitle.chars().any(|c| c.is_ascii_digit())
+    if !masked_identifier || subtitle.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // A volume after the identifier (`… (2021), 12(3).`) marks the clause
+    // as the venue; a bare year (`arXiv:2602.00409 (2026).`) does not.
+    let tail = following.trim_start();
+    let tail = &tail[..sentence_end(tail).unwrap_or(tail.len())];
+    clause_names_venue(subtitle) || volume_digits_re().is_match(tail)
 }
 
 fn is_et_al(part: &str) -> bool {
@@ -2627,11 +2701,49 @@ fn split_authors(segment: &str) -> Vec<String> {
             names[0].push_str(part);
             continue;
         }
+        // Surname-first names without a separator (`Rossi, M. della Porta,
+        // A.`): the leading initials close the previous name and the rest
+        // opens the next one.
+        if surname_first
+            && names.last().is_some_and(|last| !last.contains(','))
+            && let Some((initials, rest)) = split_leading_initials(part)
+        {
+            if let Some(last) = names.last_mut() {
+                last.push_str(", ");
+                last.push_str(initials);
+            }
+            names.push(rest.to_string());
+            continue;
+        }
         if looks_like_name(part) {
             names.push(part.to_string());
         }
     }
     names
+}
+
+/// `M. della Porta` → (`M.`, `della Porta`): a leading block of initials
+/// with periods, then a surname that starts with a capital or a surname
+/// particle. `None` when either piece is missing.
+fn split_leading_initials(part: &str) -> Option<(&str, &str)> {
+    let mut end = 0usize;
+    let mut rest = part;
+    loop {
+        let trimmed = rest.trim_start();
+        let token = trimmed.split_whitespace().next()?;
+        if !token.ends_with('.') || !is_initials(token) {
+            break;
+        }
+        end = part.len() - trimmed.len() + token.len();
+        rest = &trimmed[token.len()..];
+    }
+    let rest = rest.trim();
+    let first = rest.split_whitespace().next()?;
+    let surname = first.starts_with(char::is_uppercase) || is_surname_particle(first);
+    if end == 0 || !surname || is_initials(rest) || !looks_like_name(rest) {
+        return None;
+    }
+    Some((part[..end].trim(), rest))
 }
 
 fn dash_range(first: &str, last: Option<&str>) -> String {
@@ -6946,6 +7058,90 @@ mod tests {
                 goli.title.as_deref(),
                 Some("Frontiers: Can large language models capture human preferences")
             );
+        }
+
+        /// A masked identifier after a clause is no evidence of a subtitle
+        /// when the clause names a venue (`Journal of …`) or a year or
+        /// volume follows the identifier; a subtitle followed by venue words
+        /// or only a masked identifier still belongs to the title.
+        #[test]
+        fn question_mark_before_a_venue_clause() {
+            let work = parsed(
+                "[16] Andre Hora and Romain Robbes. 2026. Does It Work? Journal of \
+                 Artificial Intelligence. https://example.org/papers/does-it-work",
+                Some("[16]"),
+            );
+            assert_eq!(work.title.as_deref(), Some("Does It Work"));
+            assert_eq!(
+                work.venue.as_deref(),
+                Some("Journal of Artificial Intelligence")
+            );
+
+            let tdd = parsed(
+                "[2] Toufique Ahmed, Martin Hirzel, Rangeet Pan, Avraham Shinnar, and \
+                 Saurabh Sinha. 2024. TDD-Bench Verified: Can LLMs Generate Tests for Issues \
+                 Before They Get Resolved? A Study of Coding Agents. arXiv preprint \
+                 arXiv:2412.02883 (2024).",
+                Some("[2]"),
+            );
+            assert_eq!(
+                tdd.title.as_deref(),
+                Some(
+                    "TDD-Bench Verified: Can LLMs Generate Tests for Issues Before They Get \
+                     Resolved? A Study of Coding Agents"
+                )
+            );
+
+            // The clause and what follows the masked identifier decide.
+            let masked = "Journal of Artificial Intelligence.                 ";
+            assert!(question_ends_title(masked));
+            assert!(question_ends_title(
+                "Deep Widget Models.                  (2021), 12(3)."
+            ));
+            assert!(!question_ends_title(
+                "A Systematic Review.                  [cs.SE]"
+            ));
+            assert!(!question_ends_title(
+                "An Empirical Study.                  [cs.SE]"
+            ));
+            // A bare year after the identifier is no venue evidence.
+            let dated = parsed(
+                "[16] Andre Hora and Romain Robbes. 2026. Are Coding Agents Generating \
+                 Over-Mocked Tests? An Empirical Study. arXiv:2602.00409 (2026).",
+                Some("[16]"),
+            );
+            assert_eq!(
+                dated.title.as_deref(),
+                Some("Are Coding Agents Generating Over-Mocked Tests? An Empirical Study")
+            );
+        }
+
+        /// A lowercase surname particle of four or more letters (`della`)
+        /// in a surname-first list is a name part, not a title word.
+        #[test]
+        fn long_surname_particles_stay_in_the_author_list() {
+            let rossi = parsed(
+                "Rossi, M. della Porta, A. (2020). Deep Learning. Journal of Widgets, 3(1), \
+                 1–10.",
+                None,
+            );
+            assert_eq!(rossi.authors, vec!["Rossi, M.", "della Porta, A."]);
+            assert_eq!(rossi.title.as_deref(), Some("Deep Learning"));
+            assert_eq!(rossi.year, Some(2020));
+
+            let joined = parsed(
+                "Rossi, M. and della Porta, A. (2020). Deep Learning. Journal of Widgets.",
+                None,
+            );
+            assert_eq!(joined.authors, vec!["Rossi, M.", "della Porta, A."]);
+            assert_eq!(joined.title.as_deref(), Some("Deep Learning"));
+
+            assert!(!reads_as_title("della Porta, A"));
+            assert!(!reads_as_title("and van der Berg, K"));
+            assert!(reads_as_title(
+                "Slayer: Spike layer error reassignment in time"
+            ));
+            assert!(reads_as_title("On general minimax theorems"));
         }
 
         /// A part marker after the title sentence stays in the title, so

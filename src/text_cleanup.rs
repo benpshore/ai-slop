@@ -116,9 +116,19 @@ const HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{00AD}'];
 /// Opening punctuation allowed before a hyphenated word.
 const OPENERS: [char; 7] = ['(', '[', '{', '"', '\'', '\u{201C}', '\u{2018}'];
 /// Shortest word half that counts as attested on its own when deciding to
-/// keep a line-end hyphen between two words (`cost-` + `effective`); shorter
-/// halves (`with-` + `out`, `in-` + `formation`) never keep it by this rule.
-const MIN_ATTESTED_HALF: usize = 4;
+/// keep a line-end hyphen between two words (`cost-` + `effective`,
+/// `web-` + `based`); shorter halves (`in-` + `formation`) never keep it by
+/// this rule.
+const MIN_ATTESTED_HALF: usize = 3;
+/// Short halves that commonly form one word with the other half: word
+/// endings (`with-` + `out`, `learn-` + `ing`) and word beginnings (`con-` +
+/// `tent`, `out-` + `put`). On either side of the hyphen they never count
+/// as attested for the keep rule.
+const AMBIGUOUS_HALVES: &[&str] = &[
+    "out", "ing", "ers", "est", "ion", "ity", "ful", "ess", "ant", "ent", "ure", "age", "ive",
+    "ous", "ise", "ize", "ism", "ist", "ate", "ify", "ary", "ory", "ial", "ual", "pre", "pro",
+    "con", "com", "dis", "mis", "sub", "non", "per", "for", "ver", "sur", "int",
+];
 /// Left halves that form real compounds (`self-supervised`,
 /// `cross-domain`): a line-end hyphen after one is kept unless the joined
 /// word is attested.
@@ -1054,7 +1064,8 @@ fn printed_compound(left: &str, right: &str) -> bool {
 ///    letters → join (`pre-` + `serving`);
 /// 5. the printed halves mark a compound (see `printed_compound`) → keep;
 /// 6. both halves are attested words of at least `MIN_ATTESTED_HALF`
-///    letters → keep (`cost-` + `effective`, `Dual-` + `domain`);
+///    letters, neither an `AMBIGUOUS_HALVES` entry → keep (`cost-` +
+///    `effective`, `web-` + `based`, `Dual-` + `domain`);
 /// 7. otherwise join (`algo-` + `rithm`).
 pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -> HyphenPolicy {
     let lower_left = left.to_lowercase();
@@ -1079,7 +1090,11 @@ pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -
         return HyphenPolicy::Keep;
     }
     let word = |half: &str| half.chars().count() >= MIN_ATTESTED_HALF && attested(half);
-    if word(&lower_left) && word(&lower_right) {
+    if word(&lower_left)
+        && word(&lower_right)
+        && !AMBIGUOUS_HALVES.contains(&lower_left.as_str())
+        && !AMBIGUOUS_HALVES.contains(&lower_right.as_str())
+    {
         HyphenPolicy::Keep
     } else {
         HyphenPolicy::Join
@@ -1771,8 +1786,13 @@ mod tests {
             policy("noise", "regularized", &["noise", "regularized"]),
             Keep
         );
-        // `out` is shorter than `MIN_ATTESTED_HALF`.
+        // A three-letter half counts when it is not an ambiguous one.
+        assert_eq!(policy("web", "based", &["web", "based"]), Keep);
+        // `out` is an ambiguous short half: `without` unseen still joins.
         assert_eq!(policy("with", "out", &["with", "out"]), Join);
+        assert_eq!(policy("con", "tent", &["con", "tent"]), Join);
+        assert_eq!(policy("out", "put", &["out", "put"]), Join);
+        assert_eq!(policy("in", "formation", &["in", "formation"]), Join);
         assert_eq!(policy("cost", "effective", &["cost"]), Join);
         assert_eq!(policy("opti", "mization", &[]), Join);
         assert_eq!(policy("algo", "rithm", &[]), Join);
