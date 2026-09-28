@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Version of the record shapes and of the `SQLite` schema.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Version of the record shapes and of the `SQLite` schema. Bumped to 2 when
+/// `Line::role` was added: older ledgers deserialise every line as `body`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Pages per scheduling chunk (the "20-page chunk" of the product target).
 pub const CHUNK_PAGES: u32 = 20;
@@ -50,6 +51,9 @@ pub struct Span {
 }
 
 /// A line assembled by `reading_order` from spans on one page.
+///
+/// `Default` is implemented by hand (not derived) so that `Line::default()`
+/// has the role `body`, the same value serde uses for a missing field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Line {
     pub text: String,
@@ -58,6 +62,32 @@ pub struct Line {
     pub column: u32,
     /// Indices into `PageText::spans` in reading order.
     pub spans: Vec<u32>,
+    /// What the line is, as tagged after reading order. One of `body`
+    /// (running text, the default), `heading`, `caption`, `figure` (text
+    /// inside a figure), `table` (table cells), `algorithm`, `toc` (table of
+    /// contents), `front` (page-1 title, authors and affiliations before the
+    /// abstract) or `furniture` (running heads, page numbers, stamps; these
+    /// lines are not in `PageText::text`). Tags never remove text by
+    /// themselves.
+    #[serde(default = "default_line_role")]
+    pub role: String,
+}
+
+/// The role of an untagged [`Line`]: `body`.
+pub fn default_line_role() -> String {
+    "body".to_string()
+}
+
+impl Default for Line {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            bbox: None,
+            column: 0,
+            spans: Vec::new(),
+            role: default_line_role(),
+        }
+    }
 }
 
 /// An image or drawing region on a page. Pixel data never lives in text
@@ -336,5 +366,19 @@ mod tests {
         let job: Job = serde_json::from_str(json).unwrap();
         assert_eq!(job.figures_dir, None);
         assert_eq!(job.backend, "lopdf");
+    }
+
+    #[test]
+    fn line_without_role_is_body() {
+        let json = r#"{"text":"a","bbox":null,"column":0,"spans":[0]}"#;
+        let line: Line = serde_json::from_str(json).unwrap();
+        assert_eq!(line.role, "body");
+        assert_eq!(Line::default().role, "body");
+        let tagged = Line {
+            role: "caption".to_string(),
+            ..Line::default()
+        };
+        let back: Line = serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
+        assert_eq!(back, tagged);
     }
 }

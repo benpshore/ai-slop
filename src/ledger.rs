@@ -1103,6 +1103,7 @@ mod tests {
             bbox: Some(bbox),
             column,
             spans,
+            role: crate::schema::default_line_role(),
         }
     }
 

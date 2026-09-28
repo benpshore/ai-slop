@@ -17,6 +17,13 @@
 //! separators cannot be recovered) is left untouched. Lines after the last
 //! one found in `text` are treated as furniture removed by an earlier run,
 //! which keeps the pass idempotent.
+//!
+//! The pass also sets `Line::role` (it only tags; `text` keeps every line
+//! that is not furniture): removed lines become `furniture`, table-of-contents
+//! lines with dot leaders `toc`, lines opening with `Figure N:`-style labels
+//! `caption`, and on page 1 the lines before the abstract `front` (the
+//! standalone `Abstract` line itself `heading`). Only lines still tagged
+//! `body` are retagged, except that `furniture` wins over any tag.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -28,6 +35,28 @@ use crate::schema::{BBox, Line, PageText};
 /// Share of the page height at the top and at the bottom that holds
 /// running headers, footers and page numbers.
 const EDGE_BAND: f32 = 0.08;
+/// Wider edge band for running heads set further from the edge (LNCS-style
+/// classes put them 11-14 % down). A line in this band but outside
+/// `EDGE_BAND` needs the stronger repetition evidence of [`strongly_repeated`].
+const EDGE_BAND_WIDE: f32 = 0.15;
+/// Pages of one parity (recto or verso) a running head must repeat on.
+const PARITY_MIN_PAGES: usize = 3;
+/// Share of the document's pages, as `numerator / denominator` (40 %), a
+/// running head must repeat on regardless of parity, and never fewer than
+/// `PARITY_MIN_PAGES` pages.
+const SHARE_NUMERATOR: usize = 2;
+const SHARE_DENOMINATOR: usize = 5;
+/// The abstract must start within this many non-furniture lines of page 1
+/// for the front-matter rule to use it.
+const FRONT_MAX_LINES: usize = 60;
+/// Dot-leader runs a table-of-contents line has at least.
+const TOC_MIN_LEADERS: usize = 4;
+const ROLE_BODY: &str = "body";
+const ROLE_FURNITURE: &str = "furniture";
+const ROLE_TOC: &str = "toc";
+const ROLE_CAPTION: &str = "caption";
+const ROLE_FRONT: &str = "front";
+const ROLE_HEADING: &str = "heading";
 /// A repeated edge line counts as furniture only up to this multiple of the
 /// document's median span size (a display title is not a running head).
 const HEADER_SIZE_SLACK: f32 = 1.1;
@@ -64,6 +93,10 @@ const COMPOUND_PREFIXES: [&str; 25] = [
 pub struct CleanupReport {
     /// Edge lines whose digit-normalised text repeats on two or more pages.
     pub running_lines: usize,
+    /// Lines in the wider edge band (outside the 8 % band) whose
+    /// digit-normalised text repeats on three or more pages of one parity or
+    /// on at least 40 % (and three or more) of the pages.
+    pub running_lines_wide: usize,
     /// Edge lines that are only a page number.
     pub page_numbers: usize,
     /// `arXiv` margin stamps on page 1.
@@ -76,6 +109,16 @@ pub struct CleanupReport {
     pub hyphens_kept: usize,
     /// Pages left untouched because `text` does not match `lines`.
     pub pages_skipped: usize,
+    /// Lines newly tagged `furniture` (removed from `text`).
+    pub role_furniture: usize,
+    /// Lines newly tagged `toc`.
+    pub role_toc: usize,
+    /// Lines newly tagged `caption`.
+    pub role_caption: usize,
+    /// Page-1 lines newly tagged `front`.
+    pub role_front: usize,
+    /// Lines newly tagged `heading` (the standalone `Abstract` line).
+    pub role_heading: usize,
 }
 
 /// Role of a line during the pass.
@@ -152,6 +195,36 @@ fn stamp_re() -> &'static Regex {
     })
 }
 
+fn abstract_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)^a\s?b\s?s\s?t\s?r\s?a\s?c\s?t\b").expect("valid regex"))
+}
+
+fn abstract_heading_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^a\s?b\s?s\s?t\s?r\s?a\s?c\s?t\s*[.:\x{2014}\x{2013}-]?$")
+            .expect("valid regex")
+    })
+}
+
+fn introduction_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^(?:(?:\d+|[ivx]+)\.?\s*)?introduction\s*$").expect("valid regex")
+    })
+}
+
+fn caption_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:Figure|FIGURE|Fig\.|FIG\.|Table|TABLE|Algorithm|ALGORITHM|Listing|LISTING)\s*(?:[A-Z]?\d+(?:\.\d+)*|[IVXL]+)\s*[.:|]",
+        )
+        .expect("valid regex")
+    })
+}
+
 fn norm(b: BBox) -> BBox {
     BBox {
         x0: b.x0.min(b.x1),
@@ -203,9 +276,9 @@ fn median_span_size(pages: &[PageText]) -> Option<f32> {
     Some(sizes[sizes.len() / 2])
 }
 
-/// True when the line's box centre lies in the top or bottom `EDGE_BAND`
+/// True when the line's box centre lies in the top or bottom `band` share
 /// of an unrotated page.
-fn in_edge_band(page: &PageText, line: &Line) -> bool {
+fn in_edge_band(page: &PageText, line: &Line, band: f32) -> bool {
     if page.rotation != 0 || !page.height.is_finite() || page.height <= 0.0 {
         return false;
     }
@@ -213,7 +286,19 @@ fn in_edge_band(page: &PageText, line: &Line) -> bool {
         return false;
     };
     let centre = b.y0.midpoint(b.y1);
-    centre >= page.height * (1.0 - EDGE_BAND) || centre <= page.height * EDGE_BAND
+    centre >= page.height * (1.0 - band) || centre <= page.height * band
+}
+
+/// Rule 1 evidence for a line in the wide edge band: its key repeats on
+/// `PARITY_MIN_PAGES` pages of one parity (running heads alternate between
+/// recto and verso), or on at least 40 % of the document's `total` pages and
+/// never fewer than `PARITY_MIN_PAGES`.
+fn strongly_repeated(pages_seen: &BTreeSet<u32>, total: usize) -> bool {
+    let odd = pages_seen.iter().filter(|n| **n % 2 == 1).count();
+    let even = pages_seen.len() - odd;
+    let share = pages_seen.len() >= PARITY_MIN_PAGES
+        && pages_seen.len() * SHARE_DENOMINATOR >= total * SHARE_NUMERATOR;
+    odd >= PARITY_MIN_PAGES || even >= PARITY_MIN_PAGES || share
 }
 
 /// Text with every run of ASCII digits replaced by `#` and whitespace
@@ -338,21 +423,26 @@ fn mark_stamps(pages: &[PageText], work: &mut [PageWork], report: &mut CleanupRe
     }
 }
 
-/// Rule 1: page numbers and running headers/footers in the edge bands.
+/// Rule 1: page numbers and running headers/footers in the edge bands. A
+/// line in the 8 % band goes when its digit-normalised text repeats on two
+/// or more pages; a line further in, up to 15 %, only when the repetition is
+/// strong (see [`strongly_repeated`]).
 fn mark_furniture(pages: &[PageText], work: &mut [PageWork], report: &mut CleanupReport) {
     let body_size = median_span_size(pages);
     let mut seen: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
-    let mut candidates: Vec<(usize, usize, String)> = Vec::new();
+    // (page index, line index, key, inside the narrow band)
+    let mut candidates: Vec<(usize, usize, String, bool)> = Vec::new();
     let mut numbers: Vec<(usize, usize)> = Vec::new();
     for (p, (page, w)) in pages.iter().zip(work.iter()).enumerate() {
         if !w.eligible {
             continue;
         }
         for (k, line) in page.lines.iter().enumerate() {
-            if !w.is_body(k) || !in_edge_band(page, line) {
+            if !w.is_body(k) || !in_edge_band(page, line, EDGE_BAND_WIDE) {
                 continue;
             }
-            if is_page_number(&line.text) {
+            let narrow = in_edge_band(page, line, EDGE_BAND);
+            if narrow && is_page_number(&line.text) {
                 numbers.push((p, k));
                 continue;
             }
@@ -366,18 +456,28 @@ fn mark_furniture(pages: &[PageText], work: &mut [PageWork], report: &mut Cleanu
             };
             if small {
                 seen.entry(key.clone()).or_default().insert(page.page);
-                candidates.push((p, k, key));
+                candidates.push((p, k, key, narrow));
             }
         }
     }
-    for (p, k, key) in candidates {
-        let repeated = seen
-            .get(&key)
-            .is_some_and(|pages_seen| pages_seen.len() >= 2);
+    let total = pages.len();
+    for (p, k, key, narrow) in candidates {
+        let Some(pages_seen) = seen.get(&key) else {
+            continue;
+        };
+        let repeated = if narrow {
+            pages_seen.len() >= 2
+        } else {
+            strongly_repeated(pages_seen, total)
+        };
         if repeated && let Some(w) = work.get_mut(p) {
             w.mark(k, State::Furniture);
             w.removed += 1;
-            report.running_lines += 1;
+            if narrow {
+                report.running_lines += 1;
+            } else {
+                report.running_lines_wide += 1;
+            }
         }
     }
     for (p, k) in numbers {
@@ -811,13 +911,125 @@ fn rebuild(page: &mut PageText, w: &PageWork) {
     page.text = text;
 }
 
+/// Set `line.role` to `role` when the line is still `body` (or untagged), or
+/// when `role` is `furniture`. True when the role changed.
+fn tag(line: &mut Line, role: &str) -> bool {
+    if line.role == role {
+        return false;
+    }
+    let untagged = line.role.is_empty() || line.role == ROLE_BODY;
+    if untagged || role == ROLE_FURNITURE {
+        line.role = role.to_string();
+        true
+    } else {
+        false
+    }
+}
+
+/// Tag every line of `page` whose state is `Furniture` (before `rebuild`
+/// moves them), counting the new tags.
+fn tag_furniture(page: &mut PageText, w: &PageWork, report: &mut CleanupReport) {
+    for (k, line) in page.lines.iter_mut().enumerate() {
+        if w.state.get(k) == Some(&State::Furniture) && tag(line, ROLE_FURNITURE) {
+            report.role_furniture += 1;
+        }
+    }
+}
+
+/// A table-of-contents entry: at least `TOC_MIN_LEADERS` dot-leader runs
+/// (` .`, `..` or `…`) and a page number at the end.
+fn is_toc(text: &str) -> bool {
+    let text = text.trim();
+    if !text.chars().next_back().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let leaders =
+        text.matches(" .").count() + text.matches("..").count() + text.matches('\u{2026}').count();
+    leaders >= TOC_MIN_LEADERS
+}
+
+/// A caption's first line: `Figure`, `Fig.`, `Table`, `Algorithm` or
+/// `Listing`, a number (`3`, `S1`, `A1`, `2.1`, `IV`) and then `.`, `:` or
+/// `|`.
+fn is_caption(text: &str) -> bool {
+    caption_re().is_match(text.trim())
+}
+
+/// Page-1 front matter: the non-furniture lines before the abstract when it
+/// starts within `FRONT_MAX_LINES` lines (a standalone `Abstract` line is
+/// tagged `heading`), else those before an `Introduction` heading.
+fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
+    let order: Vec<usize> = page
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.role != ROLE_FURNITURE)
+        .map(|(k, _)| k)
+        .collect();
+    let text_of = |k: usize| page.lines.get(k).map_or("", |line| line.text.trim());
+    let abstract_at = order
+        .iter()
+        .take(FRONT_MAX_LINES)
+        .position(|k| abstract_re().is_match(text_of(*k)));
+    let (end, heading) = if let Some(pos) = abstract_at {
+        let standalone = order
+            .get(pos)
+            .copied()
+            .filter(|k| abstract_heading_re().is_match(text_of(*k)));
+        (pos, standalone)
+    } else if let Some(pos) = order
+        .iter()
+        .position(|k| introduction_re().is_match(text_of(*k)))
+    {
+        (pos, None)
+    } else {
+        return;
+    };
+    for k in order.iter().take(end) {
+        if let Some(line) = page.lines.get_mut(*k)
+            && tag(line, ROLE_FRONT)
+        {
+            report.role_front += 1;
+        }
+    }
+    if let Some(k) = heading
+        && let Some(line) = page.lines.get_mut(k)
+        && tag(line, ROLE_HEADING)
+    {
+        report.role_heading += 1;
+    }
+}
+
+/// Text-based roles on the final lines: `toc`, `caption`, and page-1
+/// `front`/`heading`. Never changes `text`.
+fn tag_roles(page: &mut PageText, report: &mut CleanupReport) {
+    for line in &mut page.lines {
+        if line.role == ROLE_FURNITURE {
+            continue;
+        }
+        if is_toc(&line.text) {
+            if tag(line, ROLE_TOC) {
+                report.role_toc += 1;
+            }
+        } else if is_caption(&line.text) && tag(line, ROLE_CAPTION) {
+            report.role_caption += 1;
+        }
+    }
+    if page.page == 1 {
+        tag_front(page, report);
+    }
+}
+
 /// Clean the ordered text of a whole document in place: rule 4 (`arXiv`
 /// stamp on page 1), rule 1 (page numbers and running headers/footers in
-/// the top or bottom 8 % of the page), rule 3 (sub/superscript fragments
+/// the top or bottom 8 % of the page, or up to 15 % for strongly repeated
+/// running heads), rule 3 (sub/superscript fragments
 /// merged into their base line) and rule 2 (line-end hyphenation within a
-/// column and across a page break), in that order. Requires `lines` and
-/// `text` from `reading_order`; never touches `spans`. See the module
-/// documentation for how removed lines are kept.
+/// column and across a page break), in that order; then tags line roles
+/// (`furniture`, `toc`, `caption`, page-1 `front` and `heading`) without
+/// changing `text`. Requires `lines` and `text` from `reading_order`; never
+/// touches `spans`. See the module documentation for how removed lines are
+/// kept.
 pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
     let mut report = CleanupReport::default();
     let mut work: Vec<PageWork> = pages.iter().map(prepare).collect();
@@ -836,6 +1048,9 @@ pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
     let vocab = vocabulary(pages, &work);
     join_hyphens(pages, &mut work, &vocab, &mut report);
     for (page, w) in pages.iter_mut().zip(&work) {
+        if w.eligible {
+            tag_furniture(page, w, &mut report);
+        }
         if !w.changed {
             continue;
         }
@@ -847,6 +1062,9 @@ pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
                 page.warnings.push(msg);
             }
         }
+    }
+    for page in pages.iter_mut() {
+        tag_roles(page, &mut report);
     }
     report
 }
@@ -889,6 +1107,7 @@ mod tests {
                 bbox: span.bbox,
                 column: *column,
                 spans: vec![seq],
+                role: ROLE_BODY.to_string(),
             });
             page.spans.push(span);
         }
@@ -952,6 +1171,9 @@ mod tests {
             assert_eq!(page.lines.len(), 4, "furniture stays in lines");
             assert_eq!(page.lines[2].text, format!("Journal of Testing, vol. {n}"));
             assert_eq!(page.lines[3].text, n.to_string());
+            assert_eq!(page.lines[0].role, "body");
+            assert_eq!(page.lines[2].role, "furniture");
+            assert_eq!(page.lines[3].role, "furniture");
             assert!(page.warnings.contains(&"furniture removed: 2".to_string()));
             assert_eq!(page.spans, spans_before[i], "spans are evidence");
         }
@@ -1202,12 +1424,14 @@ mod tests {
                 bbox: page.spans[2].bbox,
                 column: 0,
                 spans: vec![2],
+                role: ROLE_BODY.to_string(),
             },
             Line {
                 text: "the class G (A) of graphs".to_string(),
                 bbox: Some(base_box),
                 column: 0,
                 spans: vec![0, 1],
+                role: ROLE_BODY.to_string(),
             },
         ];
         page.text = joined(&page.lines);
@@ -1301,5 +1525,200 @@ mod tests {
         assert_eq!(report.pages_skipped, 1);
         assert_eq!(report.page_numbers, 0);
         assert_eq!(pages[0].text, "something else");
+    }
+
+    fn roles(page: &PageText) -> Vec<&str> {
+        page.lines.iter().map(|l| l.role.as_str()).collect()
+    }
+
+    /// Six pages whose running heads sit at 690 pt (inside the 15 % band,
+    /// outside the 8 % one): recto pages carry the title with the page number
+    /// in it, verso pages the authors; `extra` adds a line at the same height
+    /// on pages 2 and 4 only.
+    fn recto_verso_pages(extra: bool) -> Vec<PageText> {
+        (1..=6)
+            .map(|n| {
+                let head = if n % 2 == 1 {
+                    format!("Individual Rationality in Constrained Hedonic Games {n}")
+                } else {
+                    "Ann Author and Bob Writer".to_string()
+                };
+                let body = format!("Body text of page {n}.");
+                let mut rows: Vec<(&str, f32, f32, u32)> = vec![
+                    (head.as_str(), 60.0, 690.0, 0),
+                    (body.as_str(), 60.0, 600.0, 1),
+                ];
+                if extra && (n == 2 || n == 4) {
+                    rows.push(("A short repeated label", 300.0, 690.0, 2));
+                }
+                page_of(n, &rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alternating_running_heads_in_the_wide_band_are_furniture() {
+        let mut pages = recto_verso_pages(true);
+        let report = clean_document(&mut pages);
+        assert_eq!(report.running_lines_wide, 6);
+        assert_eq!(report.running_lines, 0);
+        for (i, page) in pages.iter().enumerate() {
+            let n = i + 1;
+            if n == 2 || n == 4 {
+                assert_eq!(
+                    page.text,
+                    format!("Body text of page {n}.\nA short repeated label"),
+                    "a wide-band line on two pages stays"
+                );
+            } else {
+                assert_eq!(page.text, format!("Body text of page {n}."));
+            }
+            assert_eq!(
+                page.lines.last().map(|l| l.role.as_str()),
+                Some("furniture")
+            );
+        }
+        let once = pages.clone();
+        assert_eq!(clean_document(&mut pages), CleanupReport::default());
+        assert_eq!(pages, once);
+    }
+
+    #[test]
+    fn strong_repetition_rule() {
+        fn pages(list: &[u32]) -> BTreeSet<u32> {
+            list.iter().copied().collect()
+        }
+        assert!(strongly_repeated(&pages(&[1, 3, 5]), 20));
+        assert!(strongly_repeated(&pages(&[2, 4, 6]), 20));
+        assert!(!strongly_repeated(&pages(&[1, 2, 3]), 20));
+        assert!(strongly_repeated(&pages(&[1, 2, 3]), 7));
+        assert!(!strongly_repeated(&pages(&[1, 2]), 2));
+    }
+
+    #[test]
+    fn dot_leader_lines_are_toc() {
+        let mut pages = vec![
+            page_of(1, &[("Body text on page one", 60.0, 600.0, 0)]),
+            page_of(
+                2,
+                &[
+                    ("Contents", 60.0, 600.0, 0),
+                    ("1 Introduction . . . . . . . . . 3", 60.0, 588.0, 0),
+                    (
+                        "1.1 Research Backgrounds of Multi-Agent Decision-Making . . . . . . . 4",
+                        60.0,
+                        576.0,
+                        0,
+                    ),
+                    ("2 Methods ........ 12", 60.0, 564.0, 0),
+                    ("Values of x . y . z are 5", 60.0, 552.0, 0),
+                ],
+            ),
+        ];
+        let before = pages[1].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_toc, 3);
+        assert_eq!(roles(&pages[1]), ["body", "toc", "toc", "toc", "body"]);
+        assert_eq!(pages[1].text, before, "tags never remove text");
+    }
+
+    #[test]
+    fn page_one_lines_before_the_abstract_are_front_matter() {
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("A Study of Things", 60.0, 700.0, 0),
+                ("Ann Author, Bob Writer", 60.0, 680.0, 0),
+                ("University of Somewhere", 60.0, 668.0, 0),
+                ("Abstract", 60.0, 640.0, 0),
+                ("We study things.", 60.0, 628.0, 0),
+                ("1 Introduction", 60.0, 600.0, 0),
+                ("Things matter.", 60.0, 588.0, 0),
+            ],
+        )];
+        let before = pages[0].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_front, 3);
+        assert_eq!(report.role_heading, 1);
+        assert_eq!(
+            roles(&pages[0]),
+            ["front", "front", "front", "heading", "body", "body", "body"]
+        );
+        assert_eq!(pages[0].text, before);
+
+        let mut run_in = vec![page_of(
+            1,
+            &[
+                ("Abstractive Summaries Revisited", 60.0, 700.0, 0),
+                ("Ann Author", 60.0, 680.0, 0),
+                ("Abstract\u{2014}We revisit summaries.", 60.0, 640.0, 0),
+            ],
+        )];
+        clean_document(&mut run_in);
+        assert_eq!(roles(&run_in[0]), ["front", "front", "body"]);
+    }
+
+    #[test]
+    fn without_an_abstract_front_matter_ends_at_the_introduction() {
+        let mut pages = vec![
+            page_of(
+                1,
+                &[
+                    ("A Study of Things", 60.0, 700.0, 0),
+                    ("Ann Author", 60.0, 680.0, 0),
+                    ("I. INTRODUCTION", 60.0, 640.0, 0),
+                    ("Things matter.", 60.0, 628.0, 0),
+                ],
+            ),
+            page_of(2, &[("Ann Author", 60.0, 600.0, 0)]),
+        ];
+        let before = pages[0].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_front, 2);
+        assert_eq!(report.role_heading, 0);
+        assert_eq!(roles(&pages[0]), ["front", "front", "body", "body"]);
+        assert_eq!(roles(&pages[1]), ["body"], "only page 1 has front matter");
+        assert_eq!(pages[0].text, before);
+    }
+
+    #[test]
+    fn caption_labels_are_tagged() {
+        let mut pages = vec![
+            page_of(1, &[("Body text on page one", 60.0, 600.0, 0)]),
+            page_of(
+                2,
+                &[
+                    ("Figure 1: Overview of the system.", 60.0, 600.0, 0),
+                    ("Fig. 2. Results on the test set.", 60.0, 588.0, 0),
+                    ("Table S1 | Data sources.", 60.0, 576.0, 0),
+                    ("Algorithm 3: Greedy search", 60.0, 564.0, 0),
+                    ("TABLE IV. Error rates", 60.0, 552.0, 0),
+                    ("Figure 3 shows the results.", 60.0, 540.0, 0),
+                    ("Tables are listed below.", 60.0, 528.0, 0),
+                ],
+            ),
+        ];
+        let before = pages[1].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_caption, 5);
+        assert_eq!(
+            roles(&pages[1]),
+            [
+                "caption", "caption", "caption", "caption", "caption", "body", "body"
+            ]
+        );
+        assert_eq!(pages[1].text, before);
+    }
+
+    #[test]
+    fn existing_tags_survive_and_furniture_wins() {
+        let mut line = Line {
+            role: "figure".to_string(),
+            ..Line::default()
+        };
+        assert!(!tag(&mut line, ROLE_CAPTION));
+        assert_eq!(line.role, "figure");
+        assert!(tag(&mut line, ROLE_FURNITURE));
+        assert_eq!(line.role, "furniture");
     }
 }

@@ -21,6 +21,7 @@ use crate::backend::{self, BackendError, DocumentSession, Extractor};
 use crate::citations;
 use crate::metadata;
 use crate::reading_order;
+use crate::regions;
 use crate::schema::{
     BackendIdentity, CHUNK_PAGES, ChunkResult, Document, ExtractionResult, Job, PageText,
     SCHEMA_VERSION, StageTimings, Status, config_digest, sha256_hex,
@@ -160,8 +161,10 @@ fn collect_figures(
 /// is kept ([`reading_order::lines_in_backend_order`]). Either way the
 /// document then goes through [`text_cleanup::clean_document`] (running
 /// heads, page numbers, the `arXiv` stamp, script fragments and line-end
-/// hyphens leave the text; spans are untouched), timed as part of
-/// `order_ms`. Figure bytes are handled as described in the module docs.
+/// hyphens leave the text; spans are untouched) and
+/// [`regions::tag_regions`] (figure text, table cells and algorithm blocks
+/// next to their captions get a line role; the text is unchanged), both
+/// timed as part of `order_ms`. Figure bytes are handled as described in the module docs.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
@@ -235,6 +238,7 @@ pub fn run_job_with(
         }
     }
     text_cleanup::clean_document(&mut pages);
+    regions::tag_regions(&mut pages);
     timings.order_ms = elapsed_ms(order_start);
 
     let chunks = chunk_results(&pages, timings.parse_ms + timings.order_ms);

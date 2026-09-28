@@ -43,5 +43,6 @@ pub mod ledger;
 pub mod metadata;
 pub mod pipeline;
 pub mod reading_order;
+pub mod regions;
 pub mod schema;
 pub mod text_cleanup;

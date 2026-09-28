@@ -1817,6 +1817,7 @@ pub fn parse_cites(tex: &str) -> TruthCitations {
 /// Detexed body of a document for alignment diagnostics.
 ///
 /// Takes the text between `\begin{document}` and `\end{document}`, removes
+/// the front matter (see [`remove_front_matter`]; the abstract is kept),
 /// citation commands, floats and display environments (figure, table,
 /// tabular, algorithm, equation, align, listings, verbatim, ...) and `\[...\]`,
 /// turns `\section{X}` (and chapter, subsection, paragraph) into a paragraph
@@ -1826,7 +1827,8 @@ pub fn body_text(main_tex: &str) -> String {
     let clean = strip_comments(main_tex);
     let macros = collect_macros(&clean);
     let body = document_body(&clean);
-    let body = remove_cites(body);
+    let body = remove_front_matter(body);
+    let body = remove_cites(&body);
     let body = remove_environments(&body);
     let body = remove_display_math(&body);
     let body = replace_headings(&body);
@@ -1849,6 +1851,166 @@ fn document_body(clean: &str) -> &str {
         .find("\\end{document}")
         .map_or(clean.len(), |pos| start + pos);
     &clean[start..stop]
+}
+
+/// Front-matter commands removed from the document body with their
+/// arguments, as `(name, brace arguments)`: title, author and affiliation
+/// blocks (plain, `elsarticle`, `acmart`, ICML, IEEE, LNCS), notes,
+/// emails, identifiers, keywords, dates, running heads and `\maketitle`. Any `[...]` optional
+/// arguments before the first brace argument go with them.
+const FRONT_MATTER_COMMANDS: &[(&str, usize)] = &[
+    ("title", 1),
+    ("subtitle", 1),
+    ("shorttitle", 1),
+    ("titlenote", 1),
+    ("subtitlenote", 1),
+    ("author", 1),
+    ("affiliation", 1),
+    ("affiliations", 1),
+    ("affil", 1),
+    ("address", 1),
+    ("institute", 1),
+    ("institution", 1),
+    ("email", 1),
+    ("ead", 1),
+    ("thanks", 1),
+    ("authornote", 1),
+    ("authornotemark", 0),
+    ("tnotetext", 1),
+    ("tnoteref", 1),
+    ("cortext", 1),
+    ("corref", 1),
+    ("fntext", 1),
+    ("fnref", 1),
+    ("icmltitle", 1),
+    ("icmltitlerunning", 1),
+    ("icmlauthor", 2),
+    ("icmlaffiliation", 2),
+    ("icmlcorrespondingauthor", 2),
+    ("icmlkeywords", 1),
+    ("icmlsetsymbol", 2),
+    ("printAffiliationsAndNotice", 1),
+    ("keywords", 1),
+    ("IEEEauthorblockN", 1),
+    ("IEEEauthorblockA", 1),
+    ("IEEEpeerreviewmaketitle", 0),
+    ("orcid", 1),
+    ("orcidlink", 1),
+    ("date", 1),
+    ("ccsdesc", 1),
+    ("maketitle", 0),
+    ("titlerunning", 1),
+    ("authorrunning", 1),
+    ("markboth", 2),
+];
+
+/// Front-matter environments removed whole: keyword lists, author lists,
+/// ACM classification XML, highlights and teaser figures.
+fn is_front_matter_env(name: &str) -> bool {
+    matches!(
+        name.trim_end_matches('*'),
+        "keyword"
+            | "keywords"
+            | "IEEEkeywords"
+            | "icmlauthorlist"
+            | "CCSXML"
+            | "highlights"
+            | "graphicalabstract"
+            | "teaserfigure"
+    )
+}
+
+/// `\begin{abstract}` or `\abstract`: where the abstract starts.
+fn abstract_start_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\\(?:begin\s*\{abstract\}|abstract\b)").expect("valid regex"))
+}
+
+/// Index after the spaces and the one line end that follow `end`, when the
+/// text between the previous line end and `start` is blank (the removed
+/// text filled its lines); `end` otherwise. Removing a whole line this way
+/// leaves no blank line behind to split a paragraph.
+fn past_removed_line(body: &str, start: usize, end: usize) -> usize {
+    let line_start = body[..start].rfind('\n').map_or(0, |pos| pos + 1);
+    if !body[line_start..start].trim().is_empty() {
+        return end;
+    }
+    let mut i = end;
+    while matches!(char_at(body, i), Some(' ' | '\t' | '\r')) {
+        i += 1;
+    }
+    if char_at(body, i) == Some('\n') {
+        i + 1
+    } else {
+        end
+    }
+}
+
+/// The document body without its front matter; the abstract stays.
+///
+/// Environments: [`is_front_matter_env`] ones are removed whole; a
+/// `frontmatter` or `titlepage` environment loses everything before its
+/// abstract (see [`abstract_start_re`]), or all of it when it has none.
+/// Then every [`FRONT_MATTER_COMMANDS`] command is removed with its
+/// arguments. A removal that fills its lines also takes the line end.
+fn remove_front_matter(body: &str) -> String {
+    let body = remove_front_environments(body);
+    remove_front_commands(&body)
+}
+
+fn remove_front_environments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut last = 0;
+    for caps in begin_re().captures_iter(body) {
+        let Some(whole) = caps.get(0) else { continue };
+        if whole.start() < last {
+            continue;
+        }
+        let name = &caps[1];
+        let bare = name.trim_end_matches('*');
+        if is_front_matter_env(bare) {
+            let end = environment_end(body, name, whole.end());
+            out.push_str(&body[last..whole.start()]);
+            last = past_removed_line(body, whole.start(), end);
+        } else if bare == "frontmatter" || bare == "titlepage" {
+            let end = environment_end(body, name, whole.end());
+            out.push_str(&body[last..whole.start()]);
+            last = abstract_start_re()
+                .find(&body[whole.end()..end])
+                .map_or(end, |m| whole.end() + m.start());
+        }
+    }
+    out.push_str(&body[last..]);
+    out
+}
+
+fn remove_front_commands(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut last = 0;
+    for caps in command_re().captures_iter(body) {
+        let Some(whole) = caps.get(0) else { continue };
+        if whole.start() < last || body[..whole.start()].ends_with('\\') {
+            continue;
+        }
+        let name = &caps[1];
+        let Some(&(_, args)) = FRONT_MATTER_COMMANDS.iter().find(|entry| entry.0 == name) else {
+            continue;
+        };
+        let mut i = whole.end();
+        if args > 0 {
+            i = skip_optional(body, i);
+            for _ in 0..args {
+                let Some((_, past_group)) = brace_group(body, skip_ws(body, i)) else {
+                    break;
+                };
+                i = past_group;
+            }
+        }
+        out.push_str(&body[last..whole.start()]);
+        last = past_removed_line(body, whole.start(), i);
+    }
+    out.push_str(&body[last..]);
+    out
 }
 
 fn remove_cites(body: &str) -> String {
@@ -3717,6 +3879,251 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
         assert!(!out.contains("sec:intro"), "{out}");
     }
 
+    const ELSARTICLE_TEX: &str = r"\documentclass{elsarticle}
+\begin{document}
+\begin{frontmatter}
+\title{A Survey Title}
+\author[1]{Weiqiang Jin\corref{cor1}}
+\ead{jin@example.edu}
+\cortext[cor1]{Corresponding authors: Jin.}
+\affiliation[1]{organization={School of Engineering, Example University},
+            addressline={Harbour}, city={Xian}, postcode={710049}, country={China}}
+\address{Old Style Address}
+\tnotetext[t1]{Title note text.}
+\fntext[fn1]{Footnote text.}
+\begin{abstract}
+With the rapid development of agents.
+\end{abstract}
+\begin{keyword}
+multiagent \sep cooperation
+\end{keyword}
+\end{frontmatter}
+\section{Introduction}
+Body text here.
+\end{document}
+";
+
+    /// `elsarticle` commands outside a `frontmatter` environment.
+    const ELSARTICLE_LOOSE_TEX: &str = r"\begin{document}
+\title{Loose Title}
+\author[a]{Jane Roe\fnref{f1}}
+\affiliation[a]{organization={Loose Institute}, city={Paris}, country={France}}
+\ead[url]{www.example.org}
+\fntext[f1]{Loose footnote.}
+\cortext[c1]{Corresponding author: Roe.}
+\tnotetext[t1]{Loose title note.}
+\address{Loose Street 1, Lyon}
+\markboth{Roe: Loose Running Head}{Journal Running Head}
+\titlerunning{Loose Short Title}
+\authorrunning{J. Roe}
+\begin{abstract}
+Loose abstract words.
+\end{abstract}
+\section{Method}
+Loose body words.
+\end{document}
+";
+
+    const ICML_TEX: &str = r"\documentclass{article}
+\begin{document}
+\twocolumn[
+\icmltitle{Scaling Widgets}
+\icmlsetsymbol{equal}{*}
+\begin{icmlauthorlist}
+\icmlauthor{Ada Lovelace}{equal,uni}
+\icmlauthor{Alan Turing}{uni}
+\end{icmlauthorlist}
+\icmlaffiliation{uni}{Department of Computing, Example University, London, UK}
+\icmlcorrespondingauthor{Ada Lovelace}{ada@example.org}
+\icmlkeywords{Machine Learning, ICML}
+\vskip 0.3in
+]
+\printAffiliationsAndNotice{\icmlEqualContribution}
+\begin{abstract}
+Widgets scale well.
+\end{abstract}
+\section{Introduction}
+We scale widgets.
+\end{document}
+";
+
+    const ACM_TEX: &str = r"\documentclass{acmart}
+\begin{document}
+\title{DesignAsCode: Bridging Editability}
+\thanks{This arXiv version extends the paper.}
+\author{Ziyuan Liu}
+\authornote{Work done during an internship.}
+\orcid{0000-0001-2345-6789}
+\affiliation{\institution{Peking University}\city{Beijing}\country{China}}
+\email{liu@example.edu}
+\begin{abstract}
+Graphic design generation demands balance.
+\end{abstract}
+\begin{CCSXML}
+<ccs2012><concept_desc>Computing methodologies</concept_desc></ccs2012>
+\end{CCSXML}
+\ccsdesc[500]{Computing methodologies~Computer vision}
+\keywords{graphic layout, posters}
+\date{\today}
+\maketitle
+\section{Introduction}
+Designers edit layers.
+\end{document}
+";
+
+    const IEEE_TEX: &str = r"\documentclass{IEEEtran}
+\begin{document}
+\title{Fast Radios}
+\author{\IEEEauthorblockN{Grace Hopper}
+\IEEEauthorblockA{Navy Lab, Arlington, USA \\ grace@example.mil}}
+\maketitle
+\begin{abstract}
+Radios are fast.
+\end{abstract}
+\begin{IEEEkeywords}
+radio, speed
+\end{IEEEkeywords}
+\section{Introduction}
+We build radios.
+\end{document}
+";
+
+    const TITLEPAGE_TEX: &str = r"\begin{document}
+\begin{titlepage}
+\centering
+{\Large Raw Title Words}\\
+Raw Author Name
+\begin{abstract}
+Titlepage abstract words.
+\end{abstract}
+\end{titlepage}
+\section{Start}
+Titlepage body words.
+\end{document}
+";
+
+    const TITLEPAGE_NO_ABSTRACT_TEX: &str = r"\begin{document}
+\begin{titlepage}
+No Abstract Title
+\end{titlepage}
+Plain body words.
+\end{document}
+";
+
+    fn assert_absent(out: &str, noise: &[&str]) {
+        for word in noise {
+            assert!(!out.contains(word), "{word:?} in {out}");
+        }
+    }
+
+    #[test]
+    fn body_text_drops_elsarticle_front_matter() {
+        let out = body_text(ELSARTICLE_TEX);
+        assert_eq!(
+            out,
+            "With the rapid development of agents.\n\nIntroduction\n\nBody text here."
+        );
+        let loose = body_text(ELSARTICLE_LOOSE_TEX);
+        assert!(loose.contains("Loose abstract words."), "{loose}");
+        assert!(loose.contains("Method"), "{loose}");
+        assert!(loose.contains("Loose body words."), "{loose}");
+        assert_absent(
+            &loose,
+            &[
+                "Loose Title",
+                "Jane",
+                "organization",
+                "Institute",
+                "Paris",
+                "example.org",
+                "footnote",
+                "Corresponding",
+                "title note",
+                "Lyon",
+                "Running Head",
+                "Short Title",
+                "J. Roe",
+            ],
+        );
+    }
+
+    #[test]
+    fn body_text_keeps_only_the_abstract_of_a_titlepage() {
+        let out = body_text(TITLEPAGE_TEX);
+        assert!(out.starts_with("Titlepage abstract words."), "{out}");
+        assert!(out.contains("Titlepage body words."), "{out}");
+        assert_absent(&out, &["Raw Title", "Raw Author"]);
+        let bare = body_text(TITLEPAGE_NO_ABSTRACT_TEX);
+        assert_eq!(bare, "Plain body words.");
+    }
+
+    #[test]
+    fn body_text_drops_icml_front_matter() {
+        let out = body_text(ICML_TEX);
+        assert!(out.starts_with("Widgets scale well."), "{out}");
+        assert!(out.contains("Introduction"), "{out}");
+        assert!(out.contains("We scale widgets."), "{out}");
+        assert_absent(
+            &out,
+            &[
+                "Scaling Widgets",
+                "Ada",
+                "Turing",
+                "Example University",
+                "example.org",
+                "Machine Learning",
+                "0.3in",
+                "[",
+                "]",
+            ],
+        );
+    }
+
+    #[test]
+    fn body_text_drops_acm_front_matter() {
+        let out = body_text(ACM_TEX);
+        assert!(
+            out.starts_with("Graphic design generation demands balance."),
+            "{out}"
+        );
+        assert!(out.contains("Introduction"), "{out}");
+        assert!(out.contains("Designers edit layers."), "{out}");
+        assert_absent(
+            &out,
+            &[
+                "DesignAsCode",
+                "arXiv version",
+                "Ziyuan",
+                "internship",
+                "0000-0001",
+                "Peking",
+                "Beijing",
+                "example.edu",
+                "ccs2012",
+                "Computing methodologies",
+                "posters",
+                "today",
+            ],
+        );
+    }
+
+    #[test]
+    fn body_text_drops_ieee_front_matter() {
+        let out = body_text(IEEE_TEX);
+        assert!(out.starts_with("Radios are fast."), "{out}");
+        assert!(out.contains("We build radios."), "{out}");
+        assert_absent(
+            &out,
+            &[
+                "Fast Radios",
+                "Grace",
+                "Navy",
+                "example.mil",
+                "radio, speed",
+            ],
+        );
+    }
+
     #[test]
     fn resolve_inputs_inlines_relative_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -3967,7 +4374,7 @@ We study things, see doi:10.9999/not.this.one.
 \end{document}
 ";
 
-    const IEEE_TEX: &str = r"\documentclass[conference]{IEEEtran}
+    const IEEE_FRONT_TEX: &str = r"\documentclass[conference]{IEEEtran}
 \begin{document}
 \title{Robust Sensing with\\ Sparse Arrays}
 \author{\IEEEauthorblockN{Alice M. Smith\IEEEauthorrefmark{1}, Bob Jones\IEEEauthorrefmark{2}}
@@ -3983,7 +4390,7 @@ Abstract text.
 \section{Introduction}
 ";
 
-    const ACM_TEX: &str = r"\documentclass[sigconf]{acmart}
+    const ACM_FRONT_TEX: &str = r"\documentclass[sigconf]{acmart}
 \acmDOI{10.1145/3580305.3599999}
 \begin{document}
 \title{H-FedSN: Personalized Sparse Networks for Hierarchical Federated Learning}
@@ -4008,7 +4415,7 @@ Abstract text.
 \section{Introduction}
 ";
 
-    const ELSARTICLE_TEX: &str = r"\documentclass[preprint,12pt]{elsarticle}
+    const ELSARTICLE_FRONT_TEX: &str = r"\documentclass[preprint,12pt]{elsarticle}
 \begin{document}
 \begin{frontmatter}
 \title{Graph Neural Networks for Traffic Forecasting\tnoteref{t1}}
@@ -4028,7 +4435,7 @@ Abstract text.
 \section{Introduction}
 ";
 
-    const ICML_TEX: &str = r"\documentclass{article}
+    const ICML_FRONT_TEX: &str = r"\documentclass{article}
 \usepackage{icml2024}
 \icmltitlerunning{Scaling Sparse Autoencoders}
 \begin{document}
@@ -4078,7 +4485,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_ieeetran_author_blocks() {
-        let paper = paper_truth(IEEE_TEX);
+        let paper = paper_truth(IEEE_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("Robust Sensing with Sparse Arrays")
@@ -4092,7 +4499,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_acm_author_and_affiliation() {
-        let paper = paper_truth(ACM_TEX);
+        let paper = paper_truth(ACM_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("H-FedSN: Personalized Sparse Networks for Hierarchical Federated Learning")
@@ -4103,7 +4510,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_elsarticle_frontmatter() {
-        let paper = paper_truth(ELSARTICLE_TEX);
+        let paper = paper_truth(ELSARTICLE_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("Graph Neural Networks for Traffic Forecasting")
@@ -4117,7 +4524,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_icml_author_list() {
-        let paper = paper_truth(ICML_TEX);
+        let paper = paper_truth(ICML_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("Scaling Sparse Autoencoders to Many Features")
