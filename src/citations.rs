@@ -831,9 +831,7 @@ fn dash_range(first: &str, last: Option<&str>) -> String {
 /// Venue text cleaned of surrounding punctuation; `None` when it is not a
 /// plausible venue (empty, numeric, an access note, ...).
 fn clean_venue(text: &str) -> Option<String> {
-    let trimmed = text
-        .trim()
-        .trim_matches([',', ';', ':', ' ']);
+    let trimmed = text.trim().trim_matches([',', ';', ':', ' ']);
     let trimmed = if trimmed.matches('.').count() == 1 {
         trimmed.trim_end_matches('.')
     } else {
