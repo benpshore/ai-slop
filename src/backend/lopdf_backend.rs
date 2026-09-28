@@ -831,7 +831,9 @@ impl<'a> Interpreter<'a> {
     fn decode_with(&mut self, font: &LoadedFont<'_>, enc: &Encoding<'_>, bytes: &[u8]) -> String {
         let label = &font.label;
         let Ok(mut text) = Document::decode_text(enc, bytes) else {
-            self.warn(format!("font {label}: undecodable string; U+FFFD substituted"));
+            self.warn(format!(
+                "font {label}: undecodable string; U+FFFD substituted"
+            ));
             return replacement_text(font.composite, bytes);
         };
         if font.one_to_one {
@@ -839,10 +841,14 @@ impl<'a> Interpreter<'a> {
             if decoded < bytes.len() {
                 let dropped = bytes.len() - decoded;
                 text.extend(std::iter::repeat_n('\u{FFFD}', dropped));
-                self.warn(format!("font {label}: {dropped} unmapped byte(s); U+FFFD used"));
+                self.warn(format!(
+                    "font {label}: {dropped} unmapped byte(s); U+FFFD used"
+                ));
             }
         } else if text.contains('\u{FFFD}') {
-            self.warn(format!("font {label}: unmapped code(s); U+FFFD substituted"));
+            self.warn(format!(
+                "font {label}: unmapped code(s); U+FFFD substituted"
+            ));
         }
         text
     }
@@ -922,7 +928,9 @@ impl<'a> Interpreter<'a> {
         }
         if depth >= self.max_depth {
             let limit = self.max_depth;
-            self.warn(format!("XObject {label}: nesting deeper than {limit}; skipped"));
+            self.warn(format!(
+                "XObject {label}: nesting deeper than {limit}; skipped"
+            ));
             return;
         }
         let content_bytes = match stream.get_plain_content() {
@@ -1281,7 +1289,10 @@ mod tests {
             }
             other => panic!("expected PageRange, got {other:?}"),
         }
-        assert!(matches!(session.page_text(0), Err(BackendError::PageRange { .. })));
+        assert!(matches!(
+            session.page_text(0),
+            Err(BackendError::PageRange { .. })
+        ));
     }
 
     #[test]

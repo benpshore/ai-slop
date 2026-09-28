@@ -489,7 +489,10 @@ fn indent_says_start(lines: &[SectionLine], i: usize) -> Option<bool> {
     let line = &lines[i];
     let x0 = line.x0?;
     let same_block = |other: &SectionLine| other.page == line.page && other.column == line.column;
-    let prev = i.checked_sub(1).map(|p| &lines[p]).filter(|p| same_block(p));
+    let prev = i
+        .checked_sub(1)
+        .map(|p| &lines[p])
+        .filter(|p| same_block(p));
     let next = lines.get(i + 1).filter(|n| same_block(n));
     if let Some(px) = prev.and_then(|p| p.x0) {
         if x0 < px - INDENT_TOLERANCE {
@@ -581,7 +584,10 @@ fn find_doi(text: &str) -> Option<(Range<usize>, String)> {
     if trimmed.len() < 8 {
         return None;
     }
-    Some((found.start()..found.start() + trimmed.len(), trimmed.to_string()))
+    Some((
+        found.start()..found.start() + trimmed.len(),
+        trimmed.to_string(),
+    ))
 }
 
 /// First arXiv identifier (after `arXiv:` or `abs/`) with its byte range.
@@ -596,7 +602,10 @@ fn find_arxiv(text: &str) -> Option<(Range<usize>, String)> {
 fn find_url(text: &str) -> Option<(Range<usize>, String)> {
     let found = url_re().find(text)?;
     let trimmed = trim_trailing_punct(found.as_str());
-    Some((found.start()..found.start() + trimmed.len(), trimmed.to_string()))
+    Some((
+        found.start()..found.start() + trimmed.len(),
+        trimmed.to_string(),
+    ))
 }
 
 /// Year in `text`: a parenthesised `(2020)` first, else the first bare
@@ -762,7 +771,9 @@ fn looks_like_name(part: &str) -> bool {
 /// Drop a trailing sentence period but keep the period of a final initial.
 fn trim_author_period(text: &str) -> &str {
     let trimmed = text.trim_end();
-    if let Some(head) = trimmed.strip_suffix('.') && !period_is_abbreviation(trimmed, head.len()) {
+    if let Some(head) = trimmed.strip_suffix('.')
+        && !period_is_abbreviation(trimmed, head.len())
+    {
         return head.trim_end();
     }
     trimmed
@@ -1027,7 +1038,11 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         return;
     };
     let author_segment = &body[..end];
-    if author_segment.chars().next().is_some_and(char::is_uppercase) {
+    if author_segment
+        .chars()
+        .next()
+        .is_some_and(char::is_uppercase)
+    {
         entry.authors = split_authors(author_segment);
     }
 
@@ -1057,7 +1072,9 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
 
 /// `text` with the year digits blanked so they are not read as a volume.
 fn mask_year(text: &str, year: Option<&(Range<usize>, u16)>) -> String {
-    if let Some((range, _)) = year && range.end <= text.len() {
+    if let Some((range, _)) = year
+        && range.end <= text.len()
+    {
         mask_ranges(text, &[range.clone()])
     } else {
         text.to_string()
@@ -1207,7 +1224,9 @@ fn numeric_markers(text: &str, index: &RefIndex) -> Vec<Found> {
                 continue;
             }
             for number in lo..=hi {
-                if let Some(&idx) = index.by_number.get(&number) && !targets.contains(&idx) {
+                if let Some(&idx) = index.by_number.get(&number)
+                    && !targets.contains(&idx)
+                {
                     targets.push(idx);
                 }
             }
@@ -1400,11 +1419,9 @@ mod tests {
                 marker.text.chars().count(),
             );
             assert_eq!(
-                got,
-                marker.text,
+                got, marker.text,
                 "offset {} on page {}",
-                marker.offset,
-                page.page
+                marker.offset, page.page
             );
         }
     }
@@ -1628,7 +1645,8 @@ mod tests {
                 "Appendix text that is not a reference.",
             ],
         );
-        page.lines.insert(1, line_at("Running header", 0, 72.0, 780.0));
+        page.lines
+            .insert(1, line_at("Running header", 0, 72.0, 780.0));
         page.text = page
             .lines
             .iter()
@@ -1637,14 +1655,11 @@ mod tests {
             .join("\n");
         let mut other = column_page(
             2,
-            &[
-                "More body text.",
-                "3. Numbers",
-                "3) Paren",
-                "Nothing else.",
-            ],
+            &["More body text.", "3. Numbers", "3) Paren", "Nothing else."],
         );
-        other.lines.insert(0, line_at("Running header", 0, 72.0, 780.0));
+        other
+            .lines
+            .insert(0, line_at("Running header", 0, 72.0, 780.0));
         let pages = vec![page, other];
         let section = find_reference_section(&pages).expect("section");
         let refs = segment_entries(&pages, &section);
@@ -1705,7 +1720,9 @@ mod tests {
         assert_eq!(entry.title.as_deref(), Some("Attention is all you need"));
         assert_eq!(
             entry.venue.as_deref(),
-            Some("Proceedings of the 31st International Conference on Neural Information Processing Systems")
+            Some(
+                "Proceedings of the 31st International Conference on Neural Information Processing Systems"
+            )
         );
         assert_eq!(entry.pages.as_deref(), Some("5998–6008"));
         assert_eq!(entry.year, Some(2017));

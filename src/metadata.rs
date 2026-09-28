@@ -127,7 +127,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         let names = split_author_names(author);
         if !names.is_empty() {
             meta.authors = names.into_iter().map(named_author).collect();
-            meta.provenance.insert("authors".to_string(), "info:Author".to_string());
+            meta.provenance
+                .insert("authors".to_string(), "info:Author".to_string());
         }
     }
     if meta.authors.is_empty()
@@ -137,7 +138,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         let names = page1_authors(page, last_title_line + 1);
         if !names.is_empty() {
             meta.authors = names.into_iter().map(named_author).collect();
-            meta.provenance.insert("authors".to_string(), "page1:authors".to_string());
+            meta.provenance
+                .insert("authors".to_string(), "page1:authors".to_string());
         }
     }
 
@@ -145,7 +147,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
     for (key, value) in info {
         if let Some(doi) = find_doi(value) {
             meta.doi = Some(doi);
-            meta.provenance.insert("doi".to_string(), format!("info:{key}"));
+            meta.provenance
+                .insert("doi".to_string(), format!("info:{key}"));
             break;
         }
     }
@@ -154,14 +157,16 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         && let Some(doi) = first_in_lines(page, find_doi)
     {
         meta.doi = Some(doi);
-        meta.provenance.insert("doi".to_string(), "page1:doi".to_string());
+        meta.provenance
+            .insert("doi".to_string(), "page1:doi".to_string());
     }
 
     // arXiv id: Info values first, then page 1.
     for (key, value) in info {
         if let Some(id) = find_arxiv_id(value) {
             meta.arxiv_id = Some(id);
-            meta.provenance.insert("arxiv_id".to_string(), format!("info:{key}"));
+            meta.provenance
+                .insert("arxiv_id".to_string(), format!("info:{key}"));
             break;
         }
     }
@@ -170,7 +175,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         && let Some(id) = first_in_lines(page, find_arxiv_id)
     {
         meta.arxiv_id = Some(id);
-        meta.provenance.insert("arxiv_id".to_string(), "page1:arxiv".to_string());
+        meta.provenance
+            .insert("arxiv_id".to_string(), "page1:arxiv".to_string());
     }
 
     // Venue from Subject when it is not merely a copy of the title.
@@ -178,14 +184,16 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         .get("Subject")
         .map(String::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty()) {
+        .filter(|s| !s.is_empty())
+    {
         let same_as_title = meta
             .title
             .as_deref()
             .is_some_and(|t| t.eq_ignore_ascii_case(subject));
         if !same_as_title && find_doi(subject).is_none() && find_arxiv_id(subject).is_none() {
             meta.venue = Some(subject.to_string());
-            meta.provenance.insert("venue".to_string(), "info:Subject".to_string());
+            meta.provenance
+                .insert("venue".to_string(), "info:Subject".to_string());
         }
     }
 
@@ -194,7 +202,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         let list = split_keywords(keywords);
         if !list.is_empty() {
             meta.keywords = list;
-            meta.provenance.insert("keywords".to_string(), "info:Keywords".to_string());
+            meta.provenance
+                .insert("keywords".to_string(), "info:Keywords".to_string());
         }
     }
     if meta.keywords.is_empty()
@@ -202,7 +211,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         && let Some(list) = page1_keywords(page)
     {
         meta.keywords = list;
-        meta.provenance.insert("keywords".to_string(), "page1:keywords".to_string());
+        meta.provenance
+            .insert("keywords".to_string(), "page1:keywords".to_string());
     }
 
     // Abstract.
@@ -210,7 +220,8 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         && let Some(text) = page1_abstract(page)
     {
         meta.abstract_text = Some(text);
-        meta.provenance.insert("abstract_text".to_string(), "page1:abstract".to_string());
+        meta.provenance
+            .insert("abstract_text".to_string(), "page1:abstract".to_string());
     }
 
     // Year: arXiv id, DOI, Info dates, page 1.
@@ -255,12 +266,14 @@ fn set_title(meta: &mut Metadata, title: &str, source: &str) {
         return;
     }
     meta.title = Some(cleaned);
-    meta.provenance.insert("title".to_string(), source.to_string());
+    meta.provenance
+        .insert("title".to_string(), source.to_string());
 }
 
 fn set_year(meta: &mut Metadata, year: u16, source: &str) {
     meta.year = Some(year);
-    meta.provenance.insert("year".to_string(), source.to_string());
+    meta.provenance
+        .insert("year".to_string(), source.to_string());
 }
 
 fn named_author(name: String) -> Author {
@@ -795,8 +808,14 @@ mod tests {
             ("Ashish Vaswani1, Noam Shazeer2 and Niki Parmar1", 11.0),
             ("1Google Brain 2Google Research", 9.0),
             ("Abstract", 10.0),
-            ("The dominant sequence transduction models are based on", 10.0),
-            ("complex recurrent networks. We propose a new architecture.", 10.0),
+            (
+                "The dominant sequence transduction models are based on",
+                10.0,
+            ),
+            (
+                "complex recurrent networks. We propose a new architecture.",
+                10.0,
+            ),
             ("1 Introduction", 12.0),
             ("Recurrent neural networks have been established as", 10.0),
             ("© 2017 Copyright held by the owner/author(s).", 8.0),
