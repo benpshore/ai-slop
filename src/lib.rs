@@ -6,6 +6,7 @@
 //! - `acquire`: immutable snapshot + content hash of an input file.
 //! - `backend`: extractor trait plus the pure-Rust `lopdf` backend.
 //! - `reading_order`: positioned spans -> ordered lines and page text.
+//! - `text_cleanup`: running heads, page numbers, stamps, scripts and hyphens out of the text.
 //! - `metadata`: title/authors/DOI/arXiv/year from the Info dict and page 1.
 //! - `citations`: reference-list segmentation, entry parsing, in-text markers.
 //! - `ledger`: `SQLite` schema and idempotent writer.
@@ -43,3 +44,4 @@ pub mod metadata;
 pub mod pipeline;
 pub mod reading_order;
 pub mod schema;
+pub mod text_cleanup;

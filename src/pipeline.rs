@@ -25,6 +25,7 @@ use crate::schema::{
     BackendIdentity, CHUNK_PAGES, ChunkResult, Document, ExtractionResult, Job, PageText,
     SCHEMA_VERSION, StageTimings, Status, config_digest, sha256_hex,
 };
+use crate::text_cleanup;
 
 /// Failure of a whole job. Per-page backend failures are not errors: they
 /// become warnings and a `Partial` status instead.
@@ -156,8 +157,11 @@ fn collect_figures(
 ///
 /// Spans are ordered geometrically ([`reading_order::order_page`]) unless the
 /// backend declares `provides_reading_order`, in which case its `seq` order
-/// is kept ([`reading_order::lines_in_backend_order`]). Figure bytes are
-/// handled as described in the module docs.
+/// is kept ([`reading_order::lines_in_backend_order`]). Either way the
+/// document then goes through [`text_cleanup::clean_document`] (running
+/// heads, page numbers, the `arXiv` stamp, script fragments and line-end
+/// hyphens leave the text; spans are untouched), timed as part of
+/// `order_ms`. Figure bytes are handled as described in the module docs.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
@@ -230,6 +234,7 @@ pub fn run_job_with(
             reading_order::order_page(page);
         }
     }
+    text_cleanup::clean_document(&mut pages);
     timings.order_ms = elapsed_ms(order_start);
 
     let chunks = chunk_results(&pages, timings.parse_ms + timings.order_ms);

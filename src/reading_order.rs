@@ -16,6 +16,14 @@
 //! spacing accent is composed onto the letter under it as the combining
 //! mark it stands for (`Verdu` + acute over the `u` reads `Verdú`). That
 //! is a rendering of what the page shows, not a repair of it.
+//!
+//! `pdfTeX` mostly does not show the accent on its own: when no kern
+//! precedes it the accent closes the string of the text before it, and the
+//! letter opens the next string after a kern back under the accent
+//! (`[(H\177)500(older)]TJ` sets `Hölder`). Such a span ends in an accent
+//! glyph and the span under that glyph's tail holds the letter, which is
+//! composed the same way once the overlap is confirmed; without a letter
+//! under it the span's text is kept as shown.
 
 use std::cmp::Ordering;
 
@@ -61,11 +69,16 @@ struct CutParams {
 
 /// An accent glyph attached to a line: its span index and box, the span
 /// index of the glyph it sits over, and the combining marks it stands for.
+/// `cut` is `Some(offset)` when the accent glyphs are the tail of the text
+/// of span `index` from that byte offset on (the span itself is a glyph
+/// member of the line and `bbox` is the estimated box of its tail), `None`
+/// when the span shows nothing but the accent.
 struct Accent {
     index: usize,
     bbox: BBox,
     base: usize,
     marks: String,
+    cut: Option<usize>,
 }
 
 /// A line under construction while spans are grouped.
@@ -252,6 +265,47 @@ fn accent_marks(text: &str) -> Option<String> {
     Some(marks)
 }
 
+/// The byte offset at which the trailing spacing accent glyphs of `text`
+/// begin, with the combining marks they stand for; `None` when `text` does
+/// not end in a spacing accent or shows nothing else. A combining mark at
+/// the end already belongs to the letter before it and is not a tail.
+fn trailing_accent(text: &str) -> Option<(usize, String)> {
+    let mut cut = text.len();
+    let mut marks: Vec<char> = Vec::new();
+    for (at, ch) in text.char_indices().rev() {
+        if is_combining(ch) {
+            break;
+        }
+        let Some(mark) = combining_accent(ch) else {
+            break;
+        };
+        marks.push(mark);
+        cut = at;
+    }
+    if marks.is_empty() || text[..cut].trim().is_empty() {
+        return None;
+    }
+    marks.reverse();
+    Some((cut, marks.into_iter().collect()))
+}
+
+/// Estimated box of the tail of `text` from byte `cut` on, taking the
+/// characters of the span (combining marks not counted) to share `b` evenly.
+fn tail_box(text: &str, cut: usize, b: BBox) -> BBox {
+    let count = text.chars().filter(|ch| !is_combining(*ch)).count();
+    let tail = text[cut..].chars().filter(|ch| !is_combining(*ch)).count();
+    if count == 0 || tail >= count {
+        return b;
+    }
+    let share = (b.x1 - b.x0) * tail as f32 / count as f32;
+    BBox {
+        x0: b.x1 - share,
+        y0: b.y0,
+        x1: b.x1,
+        y1: b.y1,
+    }
+}
+
 /// Horizontal centre of a box.
 fn centre_x(b: BBox) -> f32 {
     b.x0.midpoint(b.x1)
@@ -259,11 +313,17 @@ fn centre_x(b: BBox) -> f32 {
 
 /// Position in `members` of the glyph span an accent centred at `cx` sits
 /// over: the span whose x range, widened by `slack`, contains `cx`; the
-/// nearer range when two do.
-fn base_member(members: &[(usize, BBox)], cx: f32, slack: f32) -> Option<usize> {
+/// nearer range when two do. The span with index `skip` (the one whose
+/// tail the accent is) is never chosen.
+fn base_member(
+    members: &[(usize, BBox)],
+    cx: f32,
+    slack: f32,
+    skip: Option<usize>,
+) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
-    for (m, (_, b)) in members.iter().enumerate() {
-        if !(b.x0 - slack..=b.x1 + slack).contains(&cx) {
+    for (m, (i, b)) in members.iter().enumerate() {
+        if skip == Some(*i) || !(b.x0 - slack..=b.x1 + slack).contains(&cx) {
             continue;
         }
         let distance = (b.x0 - cx).max(cx - b.x1).max(0.0);
@@ -356,7 +416,7 @@ fn find_base_line(
         if !(-dip * reference..=ACCENT_RISE * reference).contains(&rise) {
             continue;
         }
-        let Some(m) = base_member(&line.spans, cx, ACCENT_SLACK * reference) else {
+        let Some(m) = base_member(&line.spans, cx, ACCENT_SLACK * reference, None) else {
             continue;
         };
         let distance = rise.abs();
@@ -390,8 +450,10 @@ fn find_same_baseline(builds: &[LineBuild], bbox: BBox, size: f32, largest: f32)
 /// one space where the horizontal gap exceeds `SPACE_GAP` times the size and
 /// neither neighbour already has a boundary space. Each accent of the line
 /// is listed right after the glyph span it sits over and its combining marks
-/// are composed onto the character under it, after which the line text is
-/// put in NFC; a line without accents keeps its text exactly as joined.
+/// are composed onto the character under it (an accent that is the tail of
+/// a glyph span is cut off that span's text instead), after which the line
+/// text is put in NFC; a line without accents keeps its text exactly as
+/// joined.
 fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
     let mut members = build.spans;
     members.sort_by(|a, b| {
@@ -409,6 +471,15 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
         by_x.then(spans[a.index].seq.cmp(&spans[b.index].seq))
     });
     let composed = !accents.is_empty();
+    // Tails are cut before any mark is inserted, so the byte offsets of
+    // `cut` still refer to the text as the span shows it.
+    for accent in &accents {
+        if let Some(cut) = accent.cut
+            && let Some(h) = members.iter().position(|(i, _)| *i == accent.index)
+        {
+            pieces[h].truncate(cut);
+        }
+    }
     for accent in accents {
         let last = members.len().saturating_sub(1);
         let m = members
@@ -417,7 +488,9 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
             .unwrap_or(last);
         let slot = base_char_slot(&pieces[m], members[m].1, centre_x(accent.bbox));
         insert_marks(&mut pieces[m], slot, &accent.marks);
-        attached[m].push(accent.index);
+        if accent.cut.is_none() {
+            attached[m].push(accent.index);
+        }
     }
 
     let mut joined = String::new();
@@ -459,8 +532,10 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
 /// skipped. Every returned line has a box, `column == 0`, its span indices
 /// in visual order and its text joined as described in `finish_line`. An
 /// accent-only span joins the line of the glyph it sits over (see the
-/// module documentation); over no glyph it is an ordinary span. The lines
-/// are sorted top-to-bottom.
+/// module documentation); over no glyph it is an ordinary span. A span
+/// ending in an accent glyph has that accent composed onto the letter of
+/// the overlapping span under it, if there is one. The lines are sorted
+/// top-to-bottom.
 pub fn group_lines(spans: &[Span]) -> Vec<Line> {
     group_lines_counted(spans).0
 }
@@ -481,17 +556,22 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
 
     let mut builds: Vec<LineBuild> = Vec::new();
     let mut accents: Vec<(usize, BBox, String)> = Vec::new();
+    // Spans ending in an accent glyph: span index, its line, the byte
+    // offset of the tail and its marks.
+    let mut tails: Vec<(usize, usize, usize, String)> = Vec::new();
     for (i, bbox) in &candidates {
-        if let Some(marks) = accent_marks(&spans[*i].text) {
+        let text = &spans[*i].text;
+        if let Some(marks) = accent_marks(text) {
             accents.push((*i, *bbox, marks));
             continue;
         }
         let size = span_size(&spans[*i], fallback);
-        if let Some(k) = find_line(&builds, *bbox, size, largest) {
+        let k = if let Some(k) = find_line(&builds, *bbox, size, largest) {
             let line = &mut builds[k];
             line.bbox = union(line.bbox, *bbox);
             line.size = line.size.max(size);
             line.spans.push((*i, *bbox));
+            k
         } else {
             builds.push(LineBuild {
                 baseline: bbox.y0,
@@ -499,6 +579,31 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
                 bbox: *bbox,
                 spans: vec![(*i, *bbox)],
                 accents: Vec::new(),
+            });
+            builds.len() - 1
+        };
+        if let Some((cut, marks)) = trailing_accent(text) {
+            tails.push((*i, k, cut, marks));
+        }
+    }
+
+    // The letter under a trailing accent was kerned back under it, so its
+    // span overlaps the tail of the accent's span: no slack, and the
+    // accent's own span is never the base. Without such a span the text
+    // stays as shown.
+    for (i, k, cut, marks) in tails {
+        let line = &mut builds[k];
+        let Some(host) = line.spans.iter().find_map(|(j, b)| (*j == i).then_some(*b)) else {
+            continue;
+        };
+        let bbox = tail_box(&spans[i].text, cut, host);
+        if let Some(m) = base_member(&line.spans, centre_x(bbox), 0.0, Some(i)) {
+            line.accents.push(Accent {
+                index: i,
+                bbox,
+                base: line.spans[m].0,
+                marks,
+                cut: Some(cut),
             });
         }
     }
@@ -521,6 +626,7 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
                 bbox,
                 base,
                 marks,
+                cut: None,
             });
         } else if let Some(k) = find_same_baseline(&builds[..glyph_lines], bbox, size, largest) {
             let line = &mut builds[k];
@@ -813,6 +919,16 @@ mod tests {
             bbox: Some(BBox { x0, y0, x1, y1 }),
             font: None,
             size: Some(10.0),
+            seq,
+        }
+    }
+
+    fn sized(text: &str, x0: f32, y0: f32, x1: f32, y1: f32, size: f32, seq: u32) -> Span {
+        Span {
+            text: text.to_string(),
+            bbox: Some(BBox { x0, y0, x1, y1 }),
+            font: None,
+            size: Some(size),
             seq,
         }
     }
@@ -1165,10 +1281,79 @@ mod tests {
             (0, span("Verd", 100.0, 700.0, 121.0, 710.0, 0).bbox.unwrap()),
             (1, span("u,", 121.5, 700.0, 131.0, 710.0, 1).bbox.unwrap()),
         ];
-        assert_eq!(base_member(&members, 124.0, 1.0), Some(1));
-        assert_eq!(base_member(&members, 121.3, 1.0), Some(1));
-        assert_eq!(base_member(&members, 110.0, 1.0), Some(0));
-        assert_eq!(base_member(&members, 140.0, 1.0), None);
+        assert_eq!(base_member(&members, 124.0, 1.0, None), Some(1));
+        assert_eq!(base_member(&members, 121.3, 1.0, None), Some(1));
+        assert_eq!(base_member(&members, 110.0, 1.0, None), Some(0));
+        assert_eq!(base_member(&members, 140.0, 1.0, None), None);
+        assert_eq!(base_member(&members, 124.0, 1.0, Some(1)), None);
+        assert_eq!(base_member(&members, 121.3, 1.0, Some(1)), Some(0));
+
+        assert_eq!(trailing_accent("H\u{A8}"), Some((1, "\u{308}".to_string())));
+        assert_eq!(
+            trailing_accent("(R\u{A8}"),
+            Some((2, "\u{308}".to_string()))
+        );
+        assert_eq!(
+            trailing_accent("Gonz\u{B4}"),
+            Some((4, "\u{301}".to_string()))
+        );
+        assert_eq!(trailing_accent("\u{B4}"), None);
+        assert_eq!(trailing_accent("  \u{B4}"), None);
+        assert_eq!(trailing_accent("older"), None);
+        assert_eq!(trailing_accent("q\u{303}"), None);
+        assert_eq!(trailing_accent("\u{B4}a"), None);
+
+        let tail = tail_box("H\u{A8}", 1, b);
+        assert!(approx(tail.x0, 115.0) && approx(tail.x1, 130.0));
+        let tail = tail_box("Gonz\u{B4}", 4, b);
+        assert!(approx(tail.x0, 124.0) && approx(tail.x1, 130.0));
+        assert_eq!(tail_box("\u{B4}", 0, b), b);
+    }
+
+    #[test]
+    fn accent_closing_a_string_composes_onto_the_letter_kerned_back_under_it() {
+        // arXiv:2603.21379, cmr10 (OT1) at 9.9626 pt, one TJ array:
+        // `[(.)-474(Th)28(us,)-346(the)-343(H\177)500(older)-343(inequalit)...]`.
+        // The dieresis (OT1 code 127, 0.5 em) closes the string that holds
+        // the H (0.75 em): pen 239.1146 -> 251.5679 on baseline 143.645. The
+        // kern of 500 moves the pen 4.9813 pt back, so `older` starts at
+        // 246.5866, its `o` (0.5 em) exactly under the accent. Same font,
+        // same size, no Td, no rise; boxes as the backend sets them
+        // (baseline - 0.2 size .. baseline + 0.8 size).
+        let size = 9.9626;
+        let (y0, y1) = (141.6525, 151.6151);
+        let mut page = page_with(vec![
+            sized("H\u{A8}", 239.1146, y0, 251.5679, y1, size, 0),
+            sized("older", 246.5866, y0, 268.2005, y1, size, 1),
+            sized("inequalit", 271.6176, y0, 309.2533, y1, size, 2),
+        ]);
+        order_page(&mut page);
+        assert_eq!(texts(&page), ["H\u{F6}lder inequalit"]);
+        assert_eq!(page.text, "H\u{F6}lder inequalit");
+        assert_eq!(page.lines[0].spans, vec![0, 1, 2]);
+        assert!(page.warnings.is_empty());
+
+        // arXiv:2401.15719, cmr10 at 10.9091 pt: `(\050R\177)500(ollin)`;
+        // widths 0.3889 + 0.7361 + 0.5 em, then `ollin` kerned back 0.5 em.
+        let lines = group_lines(&[
+            sized("(R\u{A8}", 100.0, 700.0, 117.727, 710.0, 10.9091, 0),
+            sized("ollin", 112.273, 700.0, 132.88, 710.0, 10.9091, 1),
+            sized("2018)", 137.2, 700.0, 160.0, 710.0, 10.9091, 2),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "(R\u{F6}llin 2018)");
+        assert_eq!(lines[0].spans, vec![0, 1, 2]);
+
+        // arXiv:2602.02748: a font whose acute glyph is a minus sign. The
+        // next string starts where the accent ends, nothing is under it,
+        // so the text is kept as shown.
+        let lines = group_lines(&[
+            sized("d\u{B4}", 100.0, 700.0, 110.0, 710.0, 10.0, 0),
+            sized("1q", 110.0, 700.0, 120.0, 710.0, 10.0, 1),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "d\u{B4}1q");
+        assert_eq!(lines[0].spans, vec![0, 1]);
     }
 
     #[test]

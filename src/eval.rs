@@ -8,7 +8,11 @@
 //! matched pairs only (so segmentation recall is not counted twice), in-text
 //! marker resolution and marker recall (resolved marker targets against the
 //! keys the source's `\cite` commands cite), and a word-alignment diagnostic
-//! of the body text order. These are diagnostics on real papers, not the
+//! of the body text order. The alignment is reported twice: over body text
+//! only (extracted text before the reference section with citation markers,
+//! caption paragraphs and math-heavy lines removed, against the truth body
+//! with math-heavy lines removed) and raw (all page text against the truth
+//! body). These are diagnostics on real papers, not the
 //! human-checked acceptance protocol.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -163,9 +167,29 @@ pub struct PaperEval {
     pub marker_command_ratio: Option<f32>,
     /// Sum of resolved targets over all markers (same as `resolved_targets`).
     pub marker_targets: u32,
-    /// [`word_alignment`] of the extracted page text against the detexed
-    /// body; `None` when the truth has no body text.
+    /// [`word_alignment`] of the extracted body text against the detexed
+    /// body, both prepared by `alignment_texts`: the extracted side is the
+    /// page text before the reference section with citation markers, caption
+    /// paragraphs and math-heavy lines removed, the truth side has math-heavy
+    /// lines removed. `None` when the truth has no body text.
     pub body_alignment: Option<f32>,
+    /// [`word_alignment`] of all extracted page text (pages joined by `\n`)
+    /// against the unfiltered detexed body; the pre-loop-5 metric. `None`
+    /// when the truth has no body text.
+    #[serde(default)]
+    pub body_alignment_raw: Option<f32>,
+    /// Extracted-side word tokens in the `body_alignment` comparison (after
+    /// sampling to at most [`MAX_ALIGN_TOKENS`], so not a raw word total).
+    #[serde(default)]
+    pub body_words_extracted: u32,
+    /// Truth-side word tokens in the `body_alignment` comparison (after
+    /// sampling to at most [`MAX_ALIGN_TOKENS`]).
+    #[serde(default)]
+    pub body_words_truth: u32,
+    /// Longest common subsequence of the two token sequences behind
+    /// `body_alignment`: words matched in order.
+    #[serde(default)]
+    pub body_words_matched: u32,
     /// Sum of all stage timings.
     pub ms_total: f64,
     pub ms_per_chunk: f64,
@@ -226,7 +250,20 @@ pub struct Summary {
     /// (the old, uncapped marker count ratio).
     #[serde(default)]
     pub marker_command_ratio: f32,
+    /// Mean `PaperEval::body_alignment` (body text, markers, captions and
+    /// math removed) over papers that have one.
     pub mean_body_alignment: Option<f32>,
+    /// Mean `PaperEval::body_alignment_raw` over papers that have one.
+    #[serde(default)]
+    pub mean_body_alignment_raw: Option<f32>,
+    /// Summed `body_words_matched` over summed `body_words_truth`, over
+    /// papers with a `body_alignment`; 0.0 when there are none.
+    #[serde(default)]
+    pub body_word_recall: f32,
+    /// Summed `body_words_matched` over summed `body_words_extracted`, over
+    /// papers with a `body_alignment`; 0.0 when there are none.
+    #[serde(default)]
+    pub body_word_precision: f32,
     pub p50_ms_per_chunk: f64,
     pub p95_ms_per_chunk: f64,
     pub target_ms_per_chunk: f64,
@@ -354,19 +391,227 @@ fn lcs_len(left: &[u32], right: &[u32]) -> usize {
 /// [`MAX_ALIGN_TOKENS`] by even sampling. Returns 1.0 when both sides have no
 /// tokens and 0.0 when exactly one side has none.
 pub fn word_alignment(a: &str, b: &str) -> f32 {
+    alignment_score(align_counts(a, b))
+}
+
+/// Word tokens and their matches behind [`word_alignment`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AlignCounts {
+    /// Tokens of the left text, after sampling to [`MAX_ALIGN_TOKENS`].
+    left: usize,
+    /// Tokens of the right text, after sampling to [`MAX_ALIGN_TOKENS`].
+    right: usize,
+    /// Longest common subsequence of the two token sequences.
+    matched: usize,
+}
+
+/// Token counts and LCS length of `a` against `b`, as [`word_alignment`]
+/// computes them.
+fn align_counts(a: &str, b: &str) -> AlignCounts {
     let left_words = words(a);
     let right_words = words(b);
-    if left_words.is_empty() && right_words.is_empty() {
-        return 1.0;
-    }
     if left_words.is_empty() || right_words.is_empty() {
-        return 0.0;
+        return AlignCounts {
+            left: left_words.len().min(MAX_ALIGN_TOKENS),
+            right: right_words.len().min(MAX_ALIGN_TOKENS),
+            matched: 0,
+        };
     }
     let mut table: HashMap<&str, u32> = HashMap::new();
     let left = sample_evenly(intern_tokens(&left_words, &mut table), MAX_ALIGN_TOKENS);
     let right = sample_evenly(intern_tokens(&right_words, &mut table), MAX_ALIGN_TOKENS);
-    let lcs = lcs_len(&left, &right);
-    ((2 * lcs) as f64 / (left.len() + right.len()) as f64) as f32
+    let matched = lcs_len(&left, &right);
+    AlignCounts {
+        left: left.len(),
+        right: right.len(),
+        matched,
+    }
+}
+
+/// `2 * matched / (left + right)`; 1.0 when both sides are empty, 0.0 when
+/// exactly one is.
+fn alignment_score(counts: AlignCounts) -> f32 {
+    if counts.left == 0 && counts.right == 0 {
+        return 1.0;
+    }
+    if counts.left == 0 || counts.right == 0 {
+        return 0.0;
+    }
+    ((2 * counts.matched) as f64 / (counts.left + counts.right) as f64) as f32
+}
+
+/// Numeric citation groups (`[3]`, `[2, 5]`, `[4–6]`) and parenthetical
+/// author-year groups (`(Smith, 2020)`, `(Smith et al., 2020; Lee and Kim,
+/// 2019a)`).
+fn citation_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\[\s*\d+(?:\s*[,;–—-]\s*\d+)*\s*\]|\([A-Z][^()\[\]]{0,200}?(?:19|20)\d{2}[a-z]?\)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A figure or table caption's first line: `Figure N`, `Fig. N` or
+/// `Table N` (any case, `N` possibly dotted like `2.1`, optional letter)
+/// followed by `:`, `.` or `|` and then whitespace or the line end, so prose
+/// such as "Table 2 shows" or "Table 1.5 lists" is kept.
+fn caption_start_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(?i:figure|fig\.|table)\s*\d+(?:\.\d+)*[a-z]?\s*[:.|](?:\s|$)")
+            .expect("valid regex")
+    })
+}
+
+/// Whether at least half of the line's non-whitespace characters are not
+/// letters (display math, table rows, bare page numbers). Blank lines are
+/// not math-heavy.
+fn is_math_heavy(line: &str) -> bool {
+    let mut letters = 0_usize;
+    let mut other = 0_usize;
+    for c in line.chars().filter(|c| !c.is_whitespace()) {
+        if c.is_alphabetic() {
+            letters += 1;
+        } else {
+            other += 1;
+        }
+    }
+    other > 0 && other >= letters
+}
+
+/// `text` without its math-heavy lines (see [`is_math_heavy`]).
+fn drop_math_lines(text: &str) -> String {
+    text.split('\n')
+        .filter(|line| !is_math_heavy(line))
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
+/// Most lines a caption paragraph may run past its [`caption_start_re`]
+/// line when no blank line or sentence end closes it first.
+const CAPTION_MAX_EXTRA_LINES: usize = 3;
+
+/// Whether the line ends a sentence or a parenthetical (`.`, `!`, `?` or
+/// `)` after trailing whitespace).
+fn ends_sentence(line: &str) -> bool {
+    line.trim_end().ends_with(['.', '!', '?', ')'])
+}
+
+/// `text` without caption paragraphs and without math-heavy lines. A
+/// caption paragraph is a [`caption_start_re`] line plus at most
+/// `CAPTION_MAX_EXTRA_LINES` further lines; it ends early at a blank line or
+/// after the first line (the start line included) that ends a sentence, so
+/// prose that follows a caption without a blank line is kept.
+fn drop_caption_and_math_lines(text: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    // `Some(n)`: inside a caption that may drop `n` more lines.
+    let mut caption_left: Option<usize> = None;
+    for line in text.split('\n') {
+        if line.trim().is_empty() {
+            caption_left = None;
+            kept.push(line);
+            continue;
+        }
+        if caption_start_re().is_match(line) {
+            caption_left = if ends_sentence(line) {
+                None
+            } else {
+                Some(CAPTION_MAX_EXTRA_LINES)
+            };
+            continue;
+        }
+        if let Some(left) = caption_left {
+            caption_left = if ends_sentence(line) || left <= 1 {
+                None
+            } else {
+                Some(left - 1)
+            };
+            continue;
+        }
+        if !is_math_heavy(line) {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
+}
+
+/// Char ranges `[start, end)` of `page.text` covered by the markers of this
+/// page whose text is found at their recorded char offset, sorted by start.
+fn marker_char_ranges(page: &PageText, markers: &[CitationMarker]) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = page.text.chars().collect();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for marker in markers.iter().filter(|m| m.page == page.page) {
+        let start = marker.offset as usize;
+        let len = marker.text.chars().count();
+        let end = start.saturating_add(len);
+        if len == 0 || end > chars.len() {
+            continue;
+        }
+        if chars[start..end].iter().copied().eq(marker.text.chars()) {
+            ranges.push((start, end));
+        }
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
+/// `page.text` up to byte `cut` (the whole text when `None`), with each
+/// verified citation marker replaced by one space.
+fn page_body_text(page: &PageText, markers: &[CitationMarker], cut: Option<usize>) -> String {
+    let ranges = marker_char_ranges(page, markers);
+    let limit = cut.unwrap_or(page.text.len());
+    let mut out = String::with_capacity(page.text.len());
+    let mut next = 0_usize;
+    for (char_index, (byte_index, c)) in page.text.char_indices().enumerate() {
+        if byte_index >= limit {
+            break;
+        }
+        while next < ranges.len() && ranges[next].1 <= char_index {
+            next += 1;
+        }
+        let covered = ranges
+            .get(next)
+            .is_some_and(|&(start, end)| (start..end).contains(&char_index));
+        if covered {
+            if ranges[next].0 == char_index {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The two sides of the body-only alignment, `(extracted, truth)`.
+///
+/// Extracted: page texts up to the start of the reference section (the
+/// last reference heading, as in [`reference_section_text`]; every page when
+/// there is none), joined by blank lines, with the `markers` found at their
+/// char offsets and any remaining [`citation_marker_re`] match removed, then
+/// caption paragraphs and math-heavy lines dropped. Truth: `truth_body` with
+/// math-heavy lines dropped.
+fn alignment_texts(
+    pages: &[PageText],
+    markers: &[CitationMarker],
+    truth_body: &str,
+) -> (String, String) {
+    let start = reference_start(pages);
+    let mut parts: Vec<String> = Vec::new();
+    for (pos, page) in pages.iter().enumerate() {
+        let cut = match start {
+            Some((ref_pos, _)) if pos > ref_pos => break,
+            Some((ref_pos, offset)) if pos == ref_pos => Some(offset),
+            _ => None,
+        };
+        parts.push(page_body_text(page, markers, cut));
+    }
+    let joined = parts.join("\n\n");
+    let unmarked = citation_marker_re().replace_all(&joined, " ");
+    let extracted = drop_caption_and_math_lines(&unmarked);
+    (extracted, drop_math_lines(truth_body))
 }
 
 /// `10.NNNN/`: where a DOI starts inside a longer string.
@@ -1205,11 +1450,15 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         ))
     };
 
-    let body_alignment = if truth.body_text.trim().is_empty() {
-        None
+    let (body_alignment, body_alignment_raw, body_counts) = if truth.body_text.trim().is_empty() {
+        (None, None, AlignCounts::default())
     } else {
         let joined: Vec<&str> = result.pages.iter().map(|page| page.text.as_str()).collect();
-        Some(word_alignment(&joined.join("\n"), &truth.body_text))
+        let raw = word_alignment(&joined.join("\n"), &truth.body_text);
+        let (extracted_body, truth_body) =
+            alignment_texts(&result.pages, &result.citations, &truth.body_text);
+        let counts = align_counts(&extracted_body, &truth_body);
+        (Some(alignment_score(counts)), Some(raw), counts)
     };
 
     let timings = &result.timings;
@@ -1278,6 +1527,10 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         marker_command_ratio,
         marker_targets,
         body_alignment,
+        body_alignment_raw,
+        body_words_extracted: body_counts.left as u32,
+        body_words_truth: body_counts.right as u32,
+        body_words_matched: body_counts.matched as u32,
         ms_total,
         ms_per_chunk,
         chunks,
@@ -1327,6 +1580,10 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         marker_command_ratio: None,
         marker_targets: 0,
         body_alignment: None,
+        body_alignment_raw: None,
+        body_words_extracted: 0,
+        body_words_truth: 0,
+        body_words_matched: 0,
         ms_total: 0.0,
         ms_per_chunk: 0.0,
         chunks: 0,
@@ -1390,16 +1647,24 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         cited_keys += u64::from(p.truth_cited_keys);
     }
 
-    let alignments: Vec<f64> = ok
-        .iter()
-        .filter_map(|p| p.body_alignment)
-        .map(f64::from)
-        .collect();
-    let mean_body_alignment = if alignments.is_empty() {
-        None
-    } else {
-        Some((alignments.iter().sum::<f64>() / alignments.len() as f64) as f32)
+    let mean_of = |f: fn(&PaperEval) -> Option<f32>| -> Option<f32> {
+        let values: Vec<f64> = ok.iter().copied().filter_map(f).map(f64::from).collect();
+        if values.is_empty() {
+            None
+        } else {
+            Some((values.iter().sum::<f64>() / values.len() as f64) as f32)
+        }
     };
+    let mean_body_alignment = mean_of(|p| p.body_alignment);
+    let mean_body_alignment_raw = mean_of(|p| p.body_alignment_raw);
+    let mut body_matched = 0_u64;
+    let mut body_extracted = 0_u64;
+    let mut body_truth = 0_u64;
+    for p in ok.iter().filter(|p| p.body_alignment.is_some()) {
+        body_matched += u64::from(p.body_words_matched);
+        body_extracted += u64::from(p.body_words_extracted);
+        body_truth += u64::from(p.body_words_truth);
+    }
 
     let mut ms: Vec<f64> = ok.iter().map(|p| p.ms_per_chunk).collect();
     ms.sort_unstable_by(f64::total_cmp);
@@ -1436,6 +1701,9 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         marker_recall: ratio(targets_capped, cited_keys),
         marker_command_ratio: ratio(cited_resolved, cited_commands),
         mean_body_alignment,
+        mean_body_alignment_raw,
+        body_word_recall: ratio(body_matched, body_truth),
+        body_word_precision: ratio(body_matched, body_extracted),
         p50_ms_per_chunk: percentile(&ms, 50.0),
         p95_ms_per_chunk: percentile(&ms, 95.0),
         target_ms_per_chunk: TARGET_MS_PER_CHUNK,
@@ -1574,8 +1842,23 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     let _ = writeln!(
         out,
-        "| Mean body alignment | {} |",
+        "| Body alignment (body text, markers/captions/math removed) | {} |",
         align_cell(s.mean_body_alignment)
+    );
+    let _ = writeln!(
+        out,
+        "| Body alignment raw (all page text vs truth body) | {} |",
+        align_cell(s.mean_body_alignment_raw)
+    );
+    let _ = writeln!(
+        out,
+        "| Body word recall (matched/truth words) | {} |",
+        pct(s.body_word_recall)
+    );
+    let _ = writeln!(
+        out,
+        "| Body word precision (matched/extracted words) | {} |",
+        pct(s.body_word_precision)
     );
     let _ = writeln!(out, "| p50 ms per chunk | {:.1} |", s.p50_ms_per_chunk);
     let _ = writeln!(out, "| p95 ms per chunk | {:.1} |", s.p95_ms_per_chunk);
@@ -1608,18 +1891,18 @@ pub fn render_markdown(report: &CorpusReport) -> String {
         "| id | status | pages | refs truth/extracted/matched | count exact | ext/truth | \
          doi c/t/printed | year c/t | markers resolved/extracted | truth cites | \
          targets/cited keys | marker recall | align | ms/chunk | warnings | title ✓/✗ | \
-         authors c/t | paper doi ✓/✗/n/a |\n",
+         authors c/t | paper doi ✓/✗/n/a | align raw | body words m/e/t |\n",
     );
     out.push_str(
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | \
-         --- | --- | --- | --- |\n",
+         --- | --- | --- | --- | --- | --- |\n",
     );
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
         let _ = writeln!(
             out,
             "| {} | {} | {} | {}/{}/{} | {} | {:.2} | {}/{}/{} | {}/{} | {}/{} | {} | {}/{} | {} | \
-             {} | {:.1} | {} | {} | {}/{} | {} |",
+             {} | {:.1} | {} | {} | {}/{} | {} | {} | {}/{}/{} |",
             cell(&p.id),
             cell(&p.status),
             p.pages,
@@ -1646,6 +1929,10 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             p.authors_correct,
             p.authors_truth,
             check_cell(p.paper_doi_correct),
+            align_cell(p.body_alignment_raw),
+            p.body_words_matched,
+            p.body_words_extracted,
+            p.body_words_truth,
         );
     }
 
@@ -2466,6 +2753,13 @@ mod tests {
         assert!(close(command_ratio, 0.2), "got {command_ratio}");
         let alignment = eval.body_alignment.expect("body text present");
         assert!(close(alignment, 1.0), "got {alignment}");
+        let raw = eval.body_alignment_raw.expect("body text present");
+        assert!(close(raw, 1.0), "got {raw}");
+        // The stale `[1]` marker at offset 4 does not match the page text there
+        // and removes nothing.
+        assert_eq!(eval.body_words_extracted, 9);
+        assert_eq!(eval.body_words_truth, 9);
+        assert_eq!(eval.body_words_matched, 9);
         assert!((eval.ms_total - 20.0).abs() < 1e-9);
         assert!((eval.ms_per_chunk - 20.0).abs() < 1e-9);
         assert_eq!(eval.chunks, 1);
@@ -2584,6 +2878,8 @@ mod tests {
         let truth = truth_with(Vec::new(), "");
         let eval = evaluate("x", &result, &truth);
         assert!(eval.body_alignment.is_none());
+        assert!(eval.body_alignment_raw.is_none());
+        assert_eq!(eval.body_words_truth, 0);
         assert!(eval.ref_count_exact);
         assert_eq!(eval.matched_refs, 0);
     }
@@ -2627,12 +2923,20 @@ mod tests {
         p1.truth_cited_keys = 40;
         p1.resolved_targets = 10;
         p1.body_alignment = Some(0.8);
+        p1.body_alignment_raw = Some(0.5);
+        p1.body_words_extracted = 100;
+        p1.body_words_truth = 80;
+        p1.body_words_matched = 60;
         let mut p2 = paper_with("p2", 10.0);
         p2.truth_refs = 10;
         p2.extracted_refs = 12;
         p2.matched_refs = 10;
         p2.ref_count_exact = false;
         p2.body_alignment = Some(0.6);
+        p2.body_alignment_raw = Some(0.3);
+        p2.body_words_extracted = 100;
+        p2.body_words_truth = 120;
+        p2.body_words_matched = 90;
         // No truth cite commands: excluded from marker recall entirely.
         p2.extracted_markers = 4;
         p2.resolved_markers = 4;
@@ -2646,6 +2950,7 @@ mod tests {
         let mut failed = failed_paper("p6", "boom");
         failed.truth_cite_commands = 100;
         failed.truth_cited_keys = 100;
+        failed.body_words_truth = 1000;
 
         let s = summarize(&[p1, p2, p3, p4, p5, failed]);
         assert_eq!(s.papers, 6);
@@ -2684,6 +2989,18 @@ mod tests {
         );
         let mean = s.mean_body_alignment.expect("two alignments");
         assert!(close(mean, 0.7), "{mean}");
+        let mean_raw = s.mean_body_alignment_raw.expect("two raw alignments");
+        assert!(close(mean_raw, 0.4), "{mean_raw}");
+        assert!(
+            close(s.body_word_recall, 150.0 / 200.0),
+            "{}",
+            s.body_word_recall
+        );
+        assert!(
+            close(s.body_word_precision, 150.0 / 200.0),
+            "{}",
+            s.body_word_precision
+        );
     }
 
     #[test]
@@ -2692,6 +3009,8 @@ mod tests {
         assert_eq!(s.papers, 0);
         assert!(close(s.ref_recall, 0.0));
         assert!(s.mean_body_alignment.is_none());
+        assert!(s.mean_body_alignment_raw.is_none());
+        assert!(close(s.body_word_recall, 0.0));
         assert!(s.p50_ms_per_chunk.abs() < 1e-9);
 
         let s = summarize(&[failed_paper("a", "x"), failed_paper("b", "y")]);
@@ -3079,10 +3398,172 @@ mod tests {
             .collect();
         assert_eq!(table.len(), 4, "{table:?}");
         let columns = table[0].matches('|').count();
-        assert_eq!(columns, 19);
+        assert_eq!(columns, 21);
         for row in &table {
             assert_eq!(row.matches('|').count(), columns, "{row}");
         }
+    }
+
+    fn body_result(pages: Vec<PageText>, citations: Vec<CitationMarker>) -> ExtractionResult {
+        let mut result = sample_result(Vec::new(), citations);
+        result.pages = pages;
+        result
+    }
+
+    #[test]
+    fn body_alignment_ignores_reference_section_and_marker() {
+        let pages = vec![
+            lined_page(1, &["Intro text [3] more."]),
+            lined_page(
+                2,
+                &[
+                    "Closing words here.",
+                    "References",
+                    "[3] A. Author. Title. 2020.",
+                ],
+            ),
+        ];
+        let marker = CitationMarker {
+            page: 1,
+            offset: 11,
+            text: "[3]".to_string(),
+            targets: vec![3],
+        };
+        let result = body_result(pages, vec![marker]);
+        let truth = truth_with(Vec::new(), "Intro text more. Closing words here.");
+        let eval = evaluate("refs", &result, &truth);
+        let alignment = eval.body_alignment.expect("body text present");
+        assert!(close(alignment, 1.0), "got {alignment}");
+        assert_eq!(eval.body_words_extracted, 6);
+        assert_eq!(eval.body_words_truth, 6);
+        assert_eq!(eval.body_words_matched, 6);
+        // Raw keeps the marker and the bibliography: 13 extracted words
+        // (intro text 3 more closing words here references 3 a author title
+        // 2020) against 6 truth words, 6 matched.
+        let raw = eval.body_alignment_raw.expect("body text present");
+        assert!(close(raw, 12.0 / 19.0), "got {raw}");
+    }
+
+    #[test]
+    fn body_alignment_removes_unrecorded_marker_groups_by_pattern() {
+        let result = body_result(
+            vec![page(
+                1,
+                "Prior work [4, 5] and (Smith et al., 2020; Lee and Kim, 2019a) agree [7–9].",
+            )],
+            Vec::new(),
+        );
+        let (extracted, _) = alignment_texts(&result.pages, &result.citations, "");
+        assert_eq!(words(&extracted), vec!["prior", "work", "and", "agree"]);
+    }
+
+    #[test]
+    fn body_alignment_without_reference_heading_uses_all_text() {
+        let pages = vec![page(1, "First page words."), page(2, "Second page words.")];
+        let (extracted, _) = alignment_texts(&pages, &[], "");
+        assert_eq!(
+            words(&extracted),
+            vec!["first", "page", "words", "second", "page", "words"]
+        );
+    }
+
+    #[test]
+    fn body_alignment_drops_caption_paragraphs() {
+        let result = body_result(
+            vec![page(
+                1,
+                "Body one.\n\nFigure 2: A caption here\nsecond caption line\n\n\
+                 Table 1. Results of the run\n\nTable 2 shows the body two.",
+            )],
+            Vec::new(),
+        );
+        let truth = truth_with(Vec::new(), "Body one. Table 2 shows the body two.");
+        let eval = evaluate("captions", &result, &truth);
+        let alignment = eval.body_alignment.expect("body text present");
+        assert!(close(alignment, 1.0), "got {alignment}");
+        assert_eq!(eval.body_words_extracted, 8);
+    }
+
+    #[test]
+    fn caption_without_blank_line_does_not_swallow_following_prose() {
+        let text = "Body one.\n\
+                    Figure 3: Accuracy against model size for\n\
+                    all three datasets.\n\
+                    The prose resumes here.\n\
+                    More prose follows.";
+        assert_eq!(
+            drop_caption_and_math_lines(text),
+            "Body one.\nThe prose resumes here.\nMore prose follows."
+        );
+        let one_line = "Table 2: Results.\nProse after the table.";
+        assert_eq!(
+            drop_caption_and_math_lines(one_line),
+            "Prose after the table."
+        );
+        let paren = "Figure 1: Results (left) and (right)\nProse here.";
+        assert_eq!(drop_caption_and_math_lines(paren), "Prose here.");
+        let long = "Figure 1: a\nb\nc\nd\nkept line\nkept too";
+        assert_eq!(drop_caption_and_math_lines(long), "kept line\nkept too");
+    }
+
+    #[test]
+    fn body_alignment_drops_math_heavy_lines_on_both_sides() {
+        let result = body_result(
+            vec![page(
+                1,
+                "Prose words here\nx = 2 + 3 * (y - 1)\nmore prose\n12",
+            )],
+            Vec::new(),
+        );
+        let truth = truth_with(Vec::new(), "Prose words here\na_1 = 42 + 7\nmore prose");
+        let eval = evaluate("math", &result, &truth);
+        let alignment = eval.body_alignment.expect("body text present");
+        assert!(close(alignment, 1.0), "got {alignment}");
+        assert_eq!(eval.body_words_extracted, 5);
+        assert_eq!(eval.body_words_truth, 5);
+        assert_eq!(eval.body_words_matched, 5);
+        assert!(is_math_heavy("x = 2 + 3 * (y - 1)"));
+        assert!(is_math_heavy("12"));
+        assert!(!is_math_heavy("In 2019, 45 of the 1234 runs failed"));
+        assert!(!is_math_heavy(""));
+    }
+
+    #[test]
+    fn body_alignment_raw_matches_plain_word_alignment() {
+        let result = body_result(
+            vec![
+                page(1, "The quick brown [2] fox"),
+                page(2, "References\n[2] B. Writer. 2020."),
+            ],
+            Vec::new(),
+        );
+        let truth = truth_with(Vec::new(), "The quick brown fox");
+        let eval = evaluate("raw", &result, &truth);
+        let raw = eval.body_alignment_raw.expect("body text present");
+        let expected = word_alignment(
+            "The quick brown [2] fox\nReferences\n[2] B. Writer. 2020.",
+            "The quick brown fox",
+        );
+        assert!(close(raw, expected), "{raw} vs {expected}");
+        // 10 extracted tokens, 4 truth tokens, 4 matched: 8 / 14.
+        assert!(close(raw, 8.0 / 14.0), "got {raw}");
+        let alignment = eval.body_alignment.expect("body text present");
+        assert!(close(alignment, 1.0), "got {alignment}");
+    }
+
+    #[test]
+    fn align_counts_match_word_alignment() {
+        let counts = align_counts("the quick brown fox jumps", "the quick brown cat sleeps");
+        assert_eq!(
+            counts,
+            AlignCounts {
+                left: 5,
+                right: 5,
+                matched: 3,
+            }
+        );
+        assert!(close(alignment_score(counts), 0.6));
+        assert!(close(alignment_score(AlignCounts::default()), 1.0));
     }
 
     fn author(name: &str) -> Author {
@@ -3228,7 +3709,9 @@ mod tests {
         p2.authors_correct = 1;
         let p3 = paper_with("p3", 1.0);
         let md = render_markdown(&build_report("lopdf", "h", vec![p1, p2, p3]));
-        assert!(md.contains("| warnings | title ✓/✗ | authors c/t | paper doi ✓/✗/n/a |\n"));
+        assert!(md.contains(
+            "| warnings | title ✓/✗ | authors c/t | paper doi ✓/✗/n/a | align raw | body words m/e/t |\n"
+        ));
         assert!(md.contains("| Paper title accuracy | 50.0% |"));
         assert!(md.contains("| Paper author recall | 66.7% |"));
         assert!(md.contains("| Paper author precision | 66.7% |"));
@@ -3239,17 +3722,17 @@ mod tests {
                 .to_string()
         };
         assert!(
-            row("p1").ends_with("| 0 | ✓ | 3/4 | n/a |"),
+            row("p1").ends_with("| 0 | ✓ | 3/4 | n/a | n/a | 0/0/0 |"),
             "{}",
             row("p1")
         );
         assert!(
-            row("p2").ends_with("| 0 | ✗ | 1/2 | n/a |"),
+            row("p2").ends_with("| 0 | ✗ | 1/2 | n/a | n/a | 0/0/0 |"),
             "{}",
             row("p2")
         );
         assert!(
-            row("p3").ends_with("| 0 | n/a | 0/0 | n/a |"),
+            row("p3").ends_with("| 0 | n/a | 0/0 | n/a | n/a | 0/0/0 |"),
             "{}",
             row("p3")
         );
@@ -3288,9 +3771,13 @@ mod tests {
                 .unwrap_or_default()
                 .to_string()
         };
-        assert!(row("p1").ends_with("| ✓ |"), "{}", row("p1"));
-        assert!(row("p3").ends_with("| ✗ |"), "{}", row("p3"));
-        assert!(row("p4").ends_with("| n/a |"), "{}", row("p4"));
+        assert!(row("p1").ends_with("| ✓ | n/a | 0/0/0 |"), "{}", row("p1"));
+        assert!(row("p3").ends_with("| ✗ | n/a | 0/0/0 |"), "{}", row("p3"));
+        assert!(
+            row("p4").ends_with("| n/a | n/a | 0/0/0 |"),
+            "{}",
+            row("p4")
+        );
     }
 
     #[test]
