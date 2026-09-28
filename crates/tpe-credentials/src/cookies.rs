@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{CredError, CredentialStore, Secret};
 
 /// Service name under which cookie jars are stored.
-pub const COOKIE_SERVICE: &str = "cookies";
+pub const COOKIE_SERVICE: &str = "tpe.cookies";
 
 /// One HTTP cookie. `Debug` redacts `value`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

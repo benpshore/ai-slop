@@ -352,14 +352,23 @@ fn derive_cipher(passphrase: &Secret, header: &Header) -> Result<XChaCha20Poly13
     Ok(XChaCha20Poly1305::new(&Array(*key)))
 }
 
+/// Counter that makes every temporary vault file name unique within a process.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Write `data` to a sibling temp file (mode 0600 on unix), fsync it, then rename
 /// it over `path` so readers never observe a partial file.
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), CredError> {
     let file_name = path.file_name().ok_or_else(|| {
         CredError::InvalidInput("credential file path has no file name".to_owned())
     })?;
+    // Unique per write, so two handles on the same vault (even in one
+    // process) never truncate or rename each other's temporary file.
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
     let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(format!(".tmp{}", std::process::id()));
+    tmp_name.push(format!(".tmp{}-{seq}-{nanos}", std::process::id()));
     let tmp_path = path.with_file_name(tmp_name);
     let result = write_private(&tmp_path, data).and_then(|()| fs::rename(&tmp_path, path));
     if let Err(err) = result {
