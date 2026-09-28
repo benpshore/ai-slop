@@ -192,7 +192,7 @@ impl LedgerReader {
         let rows = stmt.query_map([], |row| {
             Ok(CorpusRow {
                 hash: row.get(0)?,
-                size: row.get(1)?,
+                size: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
                 pages: row.get(2)?,
                 run_id: row.get(3)?,
                 status: row.get(4)?,
