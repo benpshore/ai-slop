@@ -277,7 +277,7 @@ fn open_ledger(db: &Path) -> anyhow::Result<Ledger> {
 /// Fail early when the backend name is unknown or not compiled into this build.
 fn check_backend(name: &str) -> anyhow::Result<()> {
     let available = backend::available();
-    if available.iter().any(|known| *known == name) {
+    if available.contains(&name) {
         return Ok(());
     }
     let compiled = available.join(", ");
