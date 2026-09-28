@@ -39,6 +39,9 @@ struct Observed {
     inode: Option<u64>,
     device: Option<u64>,
     mtime_unix: Option<i64>,
+    /// Sub-second part of the modification time, so an in-place rewrite that
+    /// starts and ends within one second is still detected.
+    mtime_nsec: Option<i64>,
 }
 
 #[cfg(unix)]
@@ -50,6 +53,7 @@ fn observe(meta: &fs::Metadata) -> Observed {
         inode: Some(meta.ino()),
         device: Some(meta.dev()),
         mtime_unix: Some(meta.mtime()),
+        mtime_nsec: Some(meta.mtime_nsec()),
     }
 }
 
@@ -73,6 +77,7 @@ fn observe(meta: &fs::Metadata) -> Observed {
         inode: None,
         device: None,
         mtime_unix: meta.modified().ok().and_then(unix_seconds),
+        mtime_nsec: None,
     }
 }
 

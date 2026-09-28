@@ -258,15 +258,14 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
     match result {
         Ok(mut result) => {
             let write_start = Instant::now();
-            if let Some(source) = result.document.sources.first() {
-                ledger
-                    .record_source(&result.document.hash, result.document.size, source)
-                    .with_context(|| format!("recording source for {path_display}"))?;
-            }
-            ledger
+            // `write_result` upserts the document and its sources itself.
+            let run = ledger
                 .write_result(&result)
                 .with_context(|| format!("writing result for {path_display}"))?;
             result.timings.write_ms = elapsed_ms(write_start);
+            ledger
+                .update_timings(run, &result.timings)
+                .with_context(|| format!("recording write time for {path_display}"))?;
             if let Some(dir) = &args.out {
                 write_outputs(dir, &result)?;
             }

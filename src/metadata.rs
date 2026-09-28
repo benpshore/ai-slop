@@ -102,7 +102,7 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         info: info.clone(),
         ..Metadata::default()
     };
-    let first_page: Option<&PageText> = pages.first();
+    let first_page: Option<&PageText> = pages.iter().find(|page| page.page == 1);
 
     // Title.
     if let Some(title) = info
