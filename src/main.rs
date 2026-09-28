@@ -372,6 +372,7 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
 
 fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
+    pipeline::warm_up();
     let mut ledger = open_ledger(&args.db)?;
     if let Some(dir) = &args.out {
         fs::create_dir_all(dir)
@@ -658,6 +659,7 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
 
 fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
     check_backend(&args.backend)?;
+    pipeline::warm_up();
     let iterations = args.iterations.max(1);
     let mut all_samples: Vec<f64> = Vec::new();
     for path in &args.paths {
@@ -882,6 +884,7 @@ fn print_summary(report: &CorpusReport) {
 
 fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
     check_backend(&args.backend)?;
+    pipeline::warm_up();
     let manifest = load_corpus(&args.manifest, &args.cache)?;
     fs::create_dir_all(&args.out)
         .with_context(|| format!("creating output directory {}", args.out.display()))?;

@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Version of the record shapes and of the `SQLite` schema. Bumped to 2 when
+/// Version of the record shapes and of the `SQLite` schema. Bumped to 3 when
+/// `StageTimings::hash_ms` was added (older rows read it as 0). Bumped to 2 when
 /// `Line::role` was added: older ledgers deserialise every line as `body`.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Pages per scheduling chunk (the "20-page chunk" of the product target).
 pub const CHUNK_PAGES: u32 = 20;
@@ -232,6 +233,10 @@ pub struct StageTimings {
     pub metadata_ms: f64,
     pub citations_ms: f64,
     pub write_ms: f64,
+    /// Time the document hash took on its own thread. It overlaps `parse_ms`
+    /// (any wait for it is inside `parse_ms`), so it is not part of the total.
+    #[serde(default)]
+    pub hash_ms: f64,
 }
 
 /// A 20-page scheduling chunk summary; the unit of the 30 ms target.
@@ -300,7 +305,8 @@ pub struct Job {
 /// Lower-case hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(bytes))
+    let digest = Sha256::digest(bytes);
+    hex::encode(digest.as_slice())
 }
 
 /// Digest of a configuration map, stable across key order.
@@ -357,6 +363,32 @@ mod tests {
         let s = serde_json::to_string(&r).unwrap();
         let back: ExtractionResult = serde_json::from_str(&s).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // 1000 bytes: several 64-byte compression blocks plus a partial one.
+        let long: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            sha256_hex(&long),
+            "4e4c294b331f7a2099a379bec34b9f9fc03dc46ab465d998f4d683da53487e6d"
+        );
+    }
+
+    #[test]
+    fn timings_without_hash_ms_parse() {
+        let json = r#"{"acquire_ms":1.0,"parse_ms":2.0,"order_ms":3.0,"metadata_ms":4.0,"citations_ms":5.0,"write_ms":6.0}"#;
+        let timings: StageTimings = serde_json::from_str(json).unwrap();
+        assert!((timings.write_ms - 6.0).abs() < f64::EPSILON);
+        assert!(timings.hash_ms.abs() < f64::EPSILON);
     }
 
     #[test]

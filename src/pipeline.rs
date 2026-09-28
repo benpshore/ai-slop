@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
 
 use thiserror::Error;
@@ -23,8 +24,8 @@ use crate::metadata;
 use crate::reading_order;
 use crate::regions;
 use crate::schema::{
-    BackendIdentity, CHUNK_PAGES, ChunkResult, Document, ExtractionResult, Job, PageText,
-    SCHEMA_VERSION, StageTimings, Status, config_digest, sha256_hex,
+    BackendIdentity, CHUNK_PAGES, ChunkResult, ContentHash, Document, ExtractionResult, Job,
+    PageText, SCHEMA_VERSION, StageTimings, Status, config_digest, sha256_hex,
 };
 use crate::text_cleanup;
 
@@ -94,26 +95,30 @@ fn write_figure(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(target, bytes)
 }
 
-/// Take the bytes of every figure on `page` from `session`, record their
-/// SHA-256 and, with a `figures_dir`, export them to
-/// `<figures_dir>/<hash>/p<page>-f<index>.<ext>` and set `file` to that path
-/// relative to `figures_dir` (always `/`-separated). A failed write leaves
-/// `file` unset and returns a warning (never prefixed `failed:`, which is
-/// reserved for pages whose text could not be extracted).
-fn collect_figures(
-    session: &mut dyn DocumentSession,
-    page: &mut PageText,
-    hash: &str,
-    identity: &BackendIdentity,
-    figures_dir: Option<&Path>,
-) -> Vec<String> {
-    // Runs of different backends/configurations on one document must not
-    // overwrite each other's exports: the path carries the backend identity.
-    let run_dir = format!(
+/// The export directory of one run, relative to the figures directory:
+/// `<hash>/<backend name>-<first 8 digits of the config digest>`. Runs of
+/// different backends/configurations on one document must not overwrite
+/// each other's exports, so the path carries the backend identity.
+fn figure_run_dir(hash: &str, identity: &BackendIdentity) -> String {
+    format!(
         "{hash}/{}-{}",
         identity.name,
         &identity.config_digest[..identity.config_digest.len().min(8)]
-    );
+    )
+}
+
+/// Take the bytes of every figure on `page` from `session` and record their
+/// SHA-256. With `export = Some((figures_dir, run_dir))` (see
+/// [`figure_run_dir`]), also write them to
+/// `<figures_dir>/<run_dir>/p<page>-f<index>.<ext>` and set `file` to that
+/// path relative to `figures_dir` (always `/`-separated). A failed write
+/// leaves `file` unset and returns a warning (never prefixed `failed:`, which
+/// is reserved for pages whose text could not be extracted).
+fn collect_figures(
+    session: &mut dyn DocumentSession,
+    page: &mut PageText,
+    export: Option<(&Path, &str)>,
+) -> Vec<String> {
     let page_no = page.page;
     let mut warnings: Vec<String> = Vec::new();
     for figure in &mut page.figures {
@@ -122,7 +127,7 @@ fn collect_figures(
             continue;
         };
         figure.sha256 = Some(sha256_hex(&bytes));
-        let Some(dir) = figures_dir else {
+        let Some((dir, run_dir)) = export else {
             continue;
         };
         let ext = figure_extension(figure.mime.as_deref());
@@ -138,6 +143,133 @@ fn collect_figures(
     }
     page.warnings.extend(warnings.iter().cloned());
     warnings
+}
+
+/// Compile every lazily built regex of the text stages (and of the `LaTeX`
+/// ground truth used by `tpe eval`) once, so the first document does not pay
+/// for it inside its stage timings. Call it before timing starts; calling it
+/// again is cheap and harmless.
+pub fn warm_up() {
+    citations::warm_up();
+    metadata::warm_up();
+    text_cleanup::warm_up();
+    crate::latex_refs::warm_up();
+}
+
+/// The document hash and how long computing it took.
+struct TimedHash {
+    hash: ContentHash,
+    ms: f64,
+}
+
+/// SHA-256 of `bytes`, timed.
+fn hash_timed(bytes: &[u8]) -> TimedHash {
+    let start = Instant::now();
+    let hash = ContentHash(sha256_hex(bytes));
+    TimedHash {
+        hash,
+        ms: elapsed_ms(start),
+    }
+}
+
+/// The document hash, either still being computed on its thread or done.
+enum HashState<'scope> {
+    Running(ScopedJoinHandle<'scope, TimedHash>),
+    Done(TimedHash),
+}
+
+impl HashState<'_> {
+    /// Wait for the hash. A panic on the hashing thread is re-raised here, so
+    /// callers that catch panics per document still see it.
+    fn finish(self) -> TimedHash {
+        match self {
+            Self::Running(handle) => match handle.join() {
+                Ok(hashed) => hashed,
+                Err(payload) => std::panic::resume_unwind(payload),
+            },
+            Self::Done(hashed) => hashed,
+        }
+    }
+}
+
+/// What the parse stage hands to the later stages.
+struct Parsed {
+    hashed: TimedHash,
+    page_count: u32,
+    pages: Vec<PageText>,
+    warnings: Vec<String>,
+    status: Status,
+    info: BTreeMap<String, String>,
+}
+
+/// Open `bytes` with `extractor` and extract the job's pages while the
+/// document hash is computed on a scoped thread.
+///
+/// The hash is joined after the page loop, so it overlaps the whole parse.
+/// Figure exports are filed under the hash, so with a `figures_dir` it is
+/// joined right after `open` instead. Waiting for it happens inside the
+/// caller's parse timer. `identity` gets the sub-range digest when the range
+/// does not cover every page (see [`run_job`]).
+fn parse_while_hashing(
+    extractor: &dyn Extractor,
+    job: &Job,
+    bytes: &[u8],
+    identity: &mut BackendIdentity,
+) -> Result<Parsed, PipelineError> {
+    thread::scope(|scope| -> Result<Parsed, PipelineError> {
+        let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
+
+        let mut session = extractor.open(bytes, job.password.as_deref())?;
+        let page_count = session.page_count();
+        let (first, last) = resolve_page_range(job.pages, page_count)?;
+        let covers_all_pages = first <= 1 && last >= page_count;
+
+        let mut pages: Vec<PageText> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut status = Status::Complete;
+        if !covers_all_pages {
+            warnings.push(format!(
+                "partial extraction: pages {first}-{last} of {page_count}"
+            ));
+            status = Status::Partial;
+            identity.config_digest = sub_range_digest(&identity.config_digest, first, last);
+        }
+        let figures_dir: Option<&Path> = job.figures_dir.as_deref().map(Path::new);
+        let mut run_dir = String::new();
+        if figures_dir.is_some() {
+            let hashed = hash_state.finish();
+            run_dir = figure_run_dir(&hashed.hash.0, identity);
+            hash_state = HashState::Done(hashed);
+        }
+        let export: Option<(&Path, &str)> = figures_dir.map(|dir| (dir, run_dir.as_str()));
+        for page in first..=last {
+            match session.page_text(page) {
+                Ok(mut text) => {
+                    let figure_warnings = collect_figures(session.as_mut(), &mut text, export);
+                    warnings.extend(figure_warnings);
+                    pages.push(text);
+                }
+                Err(BackendError::Page { message, .. }) => {
+                    let warning = format!("failed: page {page}: {message}");
+                    let mut placeholder = PageText::new(page, 0.0, 0.0, 0);
+                    placeholder.warnings.push(warning.clone());
+                    warnings.push(warning);
+                    pages.push(placeholder);
+                    status = Status::Partial;
+                }
+                Err(other) => return Err(PipelineError::Backend(other)),
+            }
+        }
+        let info: BTreeMap<String, String> = session.info();
+        Ok(Parsed {
+            hashed: hash_state.finish(),
+            page_count,
+            pages,
+            warnings,
+            status,
+            info,
+        })
+    })
 }
 
 /// Run every stage for one document and return the complete result.
@@ -165,6 +297,10 @@ fn collect_figures(
 /// [`regions::tag_regions`] (figure text, table cells and algorithm blocks
 /// next to their captions get a line role; the text is unchanged), both
 /// timed as part of `order_ms`. Figure bytes are handled as described in the module docs.
+///
+/// `acquire_ms` covers reading the file only. Its SHA-256 is computed on a
+/// second thread while the backend parses; that work is reported as
+/// `hash_ms`, and any wait for it falls inside `parse_ms`.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
@@ -181,52 +317,21 @@ pub fn run_job_with(
     let mut timings = StageTimings::default();
 
     let acquire_start = Instant::now();
-    let snapshot = acquire::snapshot(Path::new(&job.path), job.max_bytes)?;
+    let read = acquire::read_verified(Path::new(&job.path), job.max_bytes)?;
     timings.acquire_ms = elapsed_ms(acquire_start);
 
     let parse_start = Instant::now();
-    let mut session = extractor.open(&snapshot.bytes, job.password.as_deref())?;
-    let page_count = session.page_count();
-    let (first, last) = resolve_page_range(job.pages, page_count)?;
-    let covers_all_pages = first <= 1 && last >= page_count;
-
-    let mut pages: Vec<PageText> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    let mut status = Status::Complete;
-    if !covers_all_pages {
-        warnings.push(format!(
-            "partial extraction: pages {first}-{last} of {page_count}"
-        ));
-        status = Status::Partial;
-        identity.config_digest = sub_range_digest(&identity.config_digest, first, last);
-    }
-    let figures_dir: Option<&Path> = job.figures_dir.as_deref().map(Path::new);
-    for page in first..=last {
-        match session.page_text(page) {
-            Ok(mut text) => {
-                let figure_warnings = collect_figures(
-                    session.as_mut(),
-                    &mut text,
-                    &snapshot.hash.0,
-                    &identity,
-                    figures_dir,
-                );
-                warnings.extend(figure_warnings);
-                pages.push(text);
-            }
-            Err(BackendError::Page { message, .. }) => {
-                let warning = format!("failed: page {page}: {message}");
-                let mut placeholder = PageText::new(page, 0.0, 0.0, 0);
-                placeholder.warnings.push(warning.clone());
-                warnings.push(warning);
-                pages.push(placeholder);
-                status = Status::Partial;
-            }
-            Err(other) => return Err(PipelineError::Backend(other)),
-        }
-    }
-    let info: BTreeMap<String, String> = session.info();
+    let Parsed {
+        hashed,
+        page_count,
+        mut pages,
+        warnings,
+        status,
+        info,
+    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity)?;
     timings.parse_ms = elapsed_ms(parse_start);
+    timings.hash_ms = hashed.ms;
+    let snapshot = read.into_snapshot(hashed.hash);
 
     let order_start = Instant::now();
     let backend_order = extractor.provides_reading_order();
@@ -336,7 +441,8 @@ mod tests {
     };
     use crate::backend::{BackendError, DocumentSession, Extractor, lopdf_backend::LopdfBackend};
     use crate::schema::{
-        BBox, BackendIdentity, Figure, Job, PageText, Span, Status, config_digest, sha256_hex,
+        BBox, BackendIdentity, ContentHash, Figure, Job, PageText, Span, Status, config_digest,
+        sha256_hex,
     };
 
     /// Bytes the fake backend hands out for figure 0 on page 1.
@@ -621,6 +727,23 @@ mod tests {
         assert_eq!(result.document.pages, 3);
         assert_eq!(result.pages.len(), 3);
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn document_hash_is_the_file_hash() {
+        let (_dir, path) = three_page_fixture();
+        let result = run_job(&lopdf_job(&path, None)).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(result.document.hash, ContentHash(sha256_hex(&bytes)));
+        assert_eq!(result.document.size, bytes.len() as u64);
+        assert!(result.timings.hash_ms >= 0.0);
+    }
+
+    #[test]
+    fn warm_up_is_repeatable() {
+        super::warm_up();
+        super::warm_up();
     }
 
     #[test]

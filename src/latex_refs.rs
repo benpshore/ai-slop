@@ -3280,6 +3280,51 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
     combined.ok_or(TruthError::NoBibliography)
 }
 
+/// Compile every regex this module uses, so the first document does not pay
+/// for it inside its stage timings. Repeated calls are cheap.
+pub fn warm_up() {
+    let accessors: &[fn() -> &'static Regex] = &[
+        command_re,
+        bibitem_re,
+        newblock_re,
+        acm_title_re,
+        year_re,
+        iso_date_re,
+        italic_re,
+        year_mask_re,
+        doi_re,
+        doi_url_re,
+        arxiv_re,
+        eprint_re,
+        arxiv_id_re,
+        and_re,
+        and_sep_re,
+        initials_re,
+        trailing_year_re,
+        author_year_title_re,
+        series_suffix_re,
+        input_re,
+        begin_re,
+        heading_re,
+        par_re,
+        blank_line_re,
+        newcommand_re,
+        entry_re,
+        field_re,
+        verb_re,
+        name_part_re,
+        abstract_start_re,
+        dimension_re,
+        author_and_re,
+        author_line_re,
+        author_gap_re,
+        doi_label_re,
+    ];
+    for accessor in accessors {
+        accessor();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

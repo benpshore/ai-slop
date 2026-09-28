@@ -1437,6 +1437,31 @@ fn page1_abstract(page: &PageText) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
+/// Compile every regex this module uses, so the first document does not pay
+/// for it inside its stage timings. Repeated calls are cheap.
+pub fn warm_up() {
+    let accessors: &[fn() -> &'static Regex] = &[
+        doi_start_re,
+        doi_at_line_end_re,
+        year_token_re,
+        ieee_membership_re,
+        arxiv_re,
+        year_re,
+        abstract_heading_re,
+        keywords_heading_re,
+        section_heading_re,
+        numbered_heading_re,
+        affiliation_re,
+        marker_chars_re,
+        info_split_re,
+        name_group_split_re,
+        attached_marker_re,
+    ];
+    for accessor in accessors {
+        accessor();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2953,6 +2953,7 @@ mod tests {
                 metadata_ms: 2.0,
                 citations_ms: 3.0,
                 write_ms: 0.0,
+                hash_ms: 0.0,
             },
         }
     }
@@ -4618,6 +4619,7 @@ mod tests {
             metadata_ms: 4.0,
             citations_ms: 6.0,
             write_ms: 0.0,
+            hash_ms: 0.0,
         };
         let mut p2 = paper_with("p2", 20.0);
         p2.timings = StageTimings {
@@ -4627,6 +4629,7 @@ mod tests {
             metadata_ms: 0.0,
             citations_ms: 2.0,
             write_ms: 1.0,
+            hash_ms: 0.0,
         };
         let mut failed = failed_paper("p3", "boom");
         failed.timings.parse_ms = 1000.0;

@@ -1287,6 +1287,7 @@ mod tests {
                 metadata_ms: 1.5,
                 citations_ms: 2.0,
                 write_ms: 0.0,
+                hash_ms: 0.0,
             },
         }
     }
