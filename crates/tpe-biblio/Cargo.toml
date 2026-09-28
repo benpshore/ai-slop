@@ -1,0 +1,15 @@
+[package]
+name = "tpe-biblio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scholarly metadata and full-text location clients (OpenAlex, Crossref, Semantic Scholar, PMC, Unpaywall, OpenURL)"
+
+[dependencies]
+serde_json = "1"
+thiserror = "2"
+tpe-common = { path = "../tpe-common" }
+ureq = "3"
+
+[lints]
+workspace = true
