@@ -211,16 +211,15 @@ fn convert_full(
 ) -> Result<DoclingDocument, PdfError> {
     let registry = PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
     let mut pipelines = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    let index = match pipelines.iter().position(|(existing, _)| *existing == key) {
-        Some(index) => index,
-        None => {
-            let pipeline = Pipeline::new()?
-                .no_ocr(!key.ocr)
-                .no_table_former(!key.tables)
-                .force_full_page_ocr(key.force_ocr);
-            pipelines.push((key, pipeline));
-            pipelines.len() - 1
-        }
+    let index = if let Some(index) = pipelines.iter().position(|(existing, _)| *existing == key) {
+        index
+    } else {
+        let pipeline = Pipeline::new()?
+            .no_ocr(!key.ocr)
+            .no_table_former(!key.tables)
+            .force_full_page_ocr(key.force_ocr);
+        pipelines.push((key, pipeline));
+        pipelines.len() - 1
     };
     let Some((_, pipeline)) = pipelines.get_mut(index) else {
         return Err(PdfError::Layout(
@@ -349,23 +348,20 @@ impl DocumentSession for DoclingSession {
         let fallback = self.geometry.get(index).copied().unwrap_or_default();
         let mut width = fallback.width;
         let mut height = fallback.height;
-        let mut text = match pages.get(index).and_then(Option::as_ref) {
-            Some(converted_page) => {
-                if converted_page.width > 0.0 && converted_page.height > 0.0 {
-                    width = converted_page.width;
-                    height = converted_page.height;
-                }
-                let mut text = PageText::new(page, width, height, fallback.rotation);
-                text.spans = converted_page.spans.clone();
-                text.figures = converted_page.figures.clone();
-                text.warnings = converted_page.warnings.clone();
-                text
+        let mut text = if let Some(converted_page) = pages.get(index).and_then(Option::as_ref) {
+            if converted_page.width > 0.0 && converted_page.height > 0.0 {
+                width = converted_page.width;
+                height = converted_page.height;
             }
-            None => {
-                let mut text = PageText::new(page, width, height, fallback.rotation);
-                text.warnings.push(NO_ITEMS_WARNING.to_string());
-                text
-            }
+            let mut text = PageText::new(page, width, height, fallback.rotation);
+            text.spans.clone_from(&converted_page.spans);
+            text.figures.clone_from(&converted_page.figures);
+            text.warnings.clone_from(&converted_page.warnings);
+            text
+        } else {
+            let mut text = PageText::new(page, width, height, fallback.rotation);
+            text.warnings.push(NO_ITEMS_WARNING.to_string());
+            text
         };
         if width <= 0.0 || height <= 0.0 {
             text.warnings
