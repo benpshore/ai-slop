@@ -85,24 +85,30 @@ jobs:
       - run: cargo build --release --features docling,pdfium
       # --nocapture so the "skipped: ..." lines of the native smoke tests show
       # in the log: with the artifacts present, none of them should appear.
-      - run: cargo test --features docling,pdfium -- --nocapture
       - run: cargo clippy --all-targets --features docling,pdfium -- -D warnings
+      - run: cargo test --features docling,pdfium -- --nocapture
       # `tpe backends` (lists compiled-in backends and whether their native
       # dependencies load) is added in the same batch by another change;
       - name: List backends
+        if: ${{ !cancelled() }}
         run: ./target/release/tpe backends
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ !cancelled() }}
         with:
           path: .corpus-cache
           key: corpus-${{ hashFiles('corpus/manifest.json') }}
           restore-keys: corpus-
       - name: Fetch the corpus (cached items are reused)
+        if: ${{ !cancelled() }}
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
       - name: Evaluate the docling backend
+        if: ${{ !cancelled() }}
         run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native --dump-dir eval-native/dumps
       - name: Publish the report in the job summary
+        if: ${{ !cancelled() }}
         run: cat eval-native/report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
         with:
           name: native-eval-${{ matrix.os }}
           path: eval-native
