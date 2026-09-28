@@ -8,8 +8,17 @@
 //! work:   { "title": [..], "author": [ { "given", "family", "name" } ],
 //!           "issued": { "date-parts": [[y, m, d]] }, "published", "published-print",
 //!           "published-online", "container-title": [..], "DOI", "URL",
-//!           "abstract" (JATS markup), "link": [ { "URL", "content-type" } ] }
+//!           "abstract" (JATS markup), "link": [ { "URL", "content-type" } ],
+//!           "license": [ { "URL", "delay-in-days", "content-version" } ] }
 //! ```
+//!
+//! A Crossref `link` of type `application/pdf` is often a publisher URL that
+//! needs a subscription, so `requires_session` is derived conservatively: it is
+//! `false` only when the work is known to be open access, that is when a
+//! `license` entry points at a Creative Commons URL with no embargo
+//! (`delay-in-days` absent or zero), or when the link's host is a known
+//! open-access host ([`OPEN_ACCESS_HOSTS`] or a subdomain of one). Every other
+//! link is marked `true`.
 
 use serde_json::Value;
 use tpe_common::{PaperRecord, normalize_doi};
@@ -17,12 +26,16 @@ use tpe_common::{PaperRecord, normalize_doi};
 use crate::client::Client;
 use crate::error::BiblioError;
 use crate::util::{
-    array, arxiv_from_doi, encode_path, first_str, str_field, strip_tags, with_query, year_of,
+    array, arxiv_from_doi, encode_path, first_str, host_of, str_field, strip_tags, with_query,
+    year_of,
 };
 use crate::{CandidateKind, Found, FullTextCandidate, push_unique};
 
 /// API base URL.
 pub const BASE: &str = "https://api.crossref.org";
+
+/// Hosts (and their subdomains) that serve full text without a subscription.
+pub const OPEN_ACCESS_HOSTS: [&str; 3] = ["arxiv.org", "europepmc.org", "ncbi.nlm.nih.gov"];
 
 /// `GET /works?query=<q>&rows=<n>&mailto=<m>`.
 pub fn search_url(query: &str, rows: u32, mailto: Option<&str>) -> String {
@@ -95,16 +108,48 @@ fn abstract_text(item: &Value) -> Option<String> {
     crate::util::non_empty(body)
 }
 
+/// True when `host` is `domain` or a subdomain of it.
+fn host_is(host: &str, domain: &str) -> bool {
+    host.strip_suffix(domain)
+        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('.'))
+}
+
+/// True when a `license` entry is a Creative Commons licence with no embargo.
+fn has_open_license(item: &Value) -> bool {
+    array(item, "license").iter().any(|license| {
+        let delay = license
+            .get("delay-in-days")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        delay <= 0
+            && str_field(license, "URL")
+                .is_some_and(|url| host_is(&host_of(&url), "creativecommons.org"))
+    })
+}
+
+/// Conservative `requires_session`: `false` only for known open access (see module docs).
+fn requires_session(url: &str, open_license: bool) -> bool {
+    if open_license {
+        return false;
+    }
+    let host = host_of(url);
+    !OPEN_ACCESS_HOSTS
+        .iter()
+        .any(|domain| host_is(&host, domain))
+}
+
 fn pdf_links(item: &Value) -> Vec<FullTextCandidate> {
+    let open_license = has_open_license(item);
     let mut out: Vec<FullTextCandidate> = Vec::new();
     for link in array(item, "link") {
         if str_field(link, "content-type").as_deref() != Some("application/pdf") {
             continue;
         }
         if let Some(url) = str_field(link, "URL") {
+            let session = requires_session(&url, open_license);
             push_unique(
                 &mut out,
-                FullTextCandidate::new(&url, "crossref", CandidateKind::Pdf, false),
+                FullTextCandidate::new(&url, "crossref", CandidateKind::Pdf, session),
             );
         }
     }
@@ -227,6 +272,8 @@ mod tests {
             found[0].candidates[0].url,
             "https://www.nature.com/articles/nature14539.pdf"
         );
+        // Publisher PDF with no open licence: assume a subscription is needed.
+        assert!(found[0].candidates[0].requires_session);
     }
 
     #[test]
@@ -244,13 +291,54 @@ mod tests {
     #[test]
     fn single_work_and_bad_shape() {
         let single =
-            r#"{"status":"ok","message-type":"work","message":{"DOI":"10.1/A","title":["X"]}}"#;
+            r#"{"status":"ok","message-type":"work","message":{"DOI":"10.1234/A","title":["X"]}}"#;
         let recs = parse_crossref(single).unwrap();
-        assert_eq!(recs[0].doi.as_deref(), Some("10.1/a"));
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].doi.as_deref(), Some("10.1234/a"));
+        // A DOI without the `10.<4-9 digits>/` shape is not invented into a record DOI.
+        let invalid =
+            r#"{"status":"ok","message-type":"work","message":{"DOI":"10.1/A","title":["X"]}}"#;
+        assert_eq!(parse_crossref(invalid).unwrap()[0].doi, None);
         assert!(matches!(
             parse_crossref(r#"{"status":"failed"}"#),
             Err(BiblioError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn closed_access_pdf_link_requires_session() {
+        let closed = r#"{"status":"ok","message":{"DOI":"10.1016/j.cell.2020.01.001",
+            "license":[{"URL":"https://www.elsevier.com/tdm/userlicense/1.0/","delay-in-days":0}],
+            "link":[{"URL":"https://api.elsevier.com/content/article/PII:X?httpAccept=text/pdf",
+                     "content-type":"application/pdf"}]}}"#;
+        let found = parse_crossref_found(closed).unwrap();
+        assert_eq!(found[0].candidates.len(), 1);
+        assert!(found[0].candidates[0].requires_session);
+
+        // A Creative Commons licence under embargo is not open yet.
+        let embargoed = r#"{"status":"ok","message":{"DOI":"10.1016/j.cell.2020.01.002",
+            "license":[{"URL":"https://creativecommons.org/licenses/by/4.0/","delay-in-days":365}],
+            "link":[{"URL":"https://example.com/a.pdf","content-type":"application/pdf"}]}}"#;
+        assert!(parse_crossref_found(embargoed).unwrap()[0].candidates[0].requires_session);
+    }
+
+    #[test]
+    fn open_access_pdf_links_need_no_session() {
+        let licensed = r#"{"status":"ok","message":{"DOI":"10.1371/journal.pone.0000001",
+            "license":[{"URL":"http://creativecommons.org/licenses/by/4.0/","delay-in-days":0}],
+            "link":[{"URL":"https://journals.plos.org/x.pdf","content-type":"application/pdf"}]}}"#;
+        assert!(!parse_crossref_found(licensed).unwrap()[0].candidates[0].requires_session);
+
+        let oa_host = r#"{"status":"ok","message":{"DOI":"10.48550/arXiv.1706.03762",
+            "link":[{"URL":"https://arxiv.org/pdf/1706.03762","content-type":"application/pdf"},
+                    {"URL":"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/pdf","content-type":"application/pdf"},
+                    {"URL":"https://notarxiv.org/x.pdf","content-type":"application/pdf"}]}}"#;
+        let found = parse_crossref_found(oa_host).unwrap();
+        assert_eq!(found[0].candidates.len(), 3);
+        assert!(!found[0].candidates[0].requires_session);
+        assert!(!found[0].candidates[1].requires_session);
+        // Only exact hosts and true subdomains count.
+        assert!(found[0].candidates[2].requires_session);
     }
 
     #[test]

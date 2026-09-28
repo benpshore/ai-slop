@@ -142,7 +142,11 @@ pub fn arxiv_from_doi(doi: &str) -> Option<String> {
     tpe_common::normalize_arxiv_id(rest)
 }
 
-/// Remove markup tags (`<jats:p>` and friends) and collapse whitespace.
+/// Remove markup tags (`<jats:p>` and friends), then decode character
+/// references (see [`decode_entities`]) and collapse whitespace.
+///
+/// Tags are removed before decoding so that an escaped `&lt;b&gt;` stays as
+/// the literal text `<b>` instead of being taken for a tag.
 pub fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
@@ -157,7 +161,62 @@ pub fn strip_tags(s: &str) -> String {
             _ => {}
         }
     }
-    out.split_whitespace().collect::<Vec<&str>>().join(" ")
+    decode_entities(&out)
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+/// Decode XML/HTML character references in one pass: the five XML entities
+/// (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`) and numeric `&#NNN;` /
+/// `&#xHHH;`. Unknown names, invalid or NUL code points and a missing `;` are
+/// kept verbatim. The result is not decoded again, so `&amp;lt;` gives `&lt;`.
+pub fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let decoded = after
+            .find(';')
+            .filter(|&semi| semi <= 10)
+            .and_then(|semi| entity_char(&after[..semi]).map(|c| (c, semi)));
+        if let Some((c, semi)) = decoded {
+            out.push(c);
+            rest = &after[semi + 1..];
+        } else {
+            out.push('&');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The character for one entity name (the text between `&` and `;`).
+fn entity_char(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let number = name.strip_prefix('#')?;
+            let code = if let Some(hex) = number.strip_prefix(['x', 'X']) {
+                if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return None;
+                }
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                number.parse::<u32>().ok()?
+            };
+            char::from_u32(code).filter(|&c| c != '\0')
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +268,37 @@ mod tests {
             strip_tags("<jats:p>Hello  <i>world</i></jats:p>"),
             "Hello world"
         );
+    }
+
+    #[test]
+    fn strip_tags_decodes_entities() {
+        assert_eq!(
+            strip_tags("<jats:p>Cats &amp; dogs: x &lt; y &gt; z</jats:p>"),
+            "Cats & dogs: x < y > z"
+        );
+        assert_eq!(
+            strip_tags("<p>&quot;quoted&quot; and &apos;single&apos;</p>"),
+            "\"quoted\" and 'single'"
+        );
+        // Escaped markup is text, not a tag.
+        assert_eq!(strip_tags("<p>&lt;b&gt;bold&lt;/b&gt;</p>"), "<b>bold</b>");
+        assert_eq!(strip_tags("a&#160;&#160;b"), "a b");
+    }
+
+    #[test]
+    fn numeric_and_malformed_entities() {
+        assert_eq!(
+            decode_entities("&#946;-cells &#x3B2; &#X3b2;"),
+            "\u{3b2}-cells \u{3b2} \u{3b2}"
+        );
+        assert_eq!(decode_entities("&#8211;"), "\u{2013}");
+        assert_eq!(decode_entities("&amp;lt;"), "&lt;");
+        // Unknown names, bad numbers, NUL, surrogates and missing `;` stay verbatim.
+        assert_eq!(
+            decode_entities("&nbsp; &#; &#x; &#xZZ; &#0; &#xD800;"),
+            "&nbsp; &#; &#x; &#xZZ; &#0; &#xD800;"
+        );
+        assert_eq!(decode_entities("AT&T and R&D;"), "AT&T and R&D;");
+        assert_eq!(decode_entities("tail &amp"), "tail &amp");
     }
 }

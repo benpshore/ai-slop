@@ -1,7 +1,8 @@
 //! Merge records describing the same paper, reported by several sources.
 //!
 //! Two records are the same paper when they share a DOI, an `arXiv` id, or a
-//! normalised title together with the same year. Matching is transitive (a
+//! normalised title together with the same known year (records without a year
+//! never match on title alone). Matching is transitive (a
 //! record with both a DOI and an `arXiv` id links a DOI-only record to an
 //! `arXiv`-only one). Within a group the record from the highest-precedence
 //! source wins each field; empty fields are filled from the others.
@@ -46,10 +47,13 @@ fn match_keys(rec: &PaperRecord) -> Vec<String> {
     if let Some(id) = rec.arxiv_id.as_deref().and_then(normalize_arxiv_id) {
         keys.push(format!("arxiv:{id}"));
     }
-    let title = normalize_title(&rec.title);
-    if !title.is_empty() {
-        let year = rec.year.map_or_else(|| "?".to_string(), |y| y.to_string());
-        keys.push(format!("title:{title}|{year}"));
+    // Title keys need a concrete year: two year-less records with the same title
+    // (editorials, "Correction", "Reply to ...") are not evidence of one paper.
+    if let Some(year) = rec.year {
+        let title = normalize_title(&rec.title);
+        if !title.is_empty() {
+            keys.push(format!("title:{title}|{year}"));
+        }
     }
     keys
 }
@@ -214,6 +218,22 @@ mod tests {
         assert_eq!(merged[0].source, "semantic_scholar");
         assert_eq!(merged[0].authors, vec!["H Piwowar"]);
         assert_eq!(merged[1].source, "crossref");
+    }
+
+    #[test]
+    fn same_title_without_years_stays_apart() {
+        let a = rec("crossref", "Editorial");
+        let b = rec("openalex", "editorial");
+        let merged = merge_records(vec![a, b]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].source, "crossref");
+        assert_eq!(merged[1].source, "openalex");
+
+        // One year known, the other missing: still not the same paper by title.
+        let mut c = rec("crossref", "Editorial");
+        c.year = Some(2020);
+        let d = rec("openalex", "Editorial");
+        assert_eq!(merge_records(vec![c, d]).len(), 2);
     }
 
     #[test]
