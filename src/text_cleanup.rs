@@ -116,15 +116,28 @@ const HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{00AD}'];
 /// Opening punctuation allowed before a hyphenated word.
 const OPENERS: [char; 7] = ['(', '[', '{', '"', '\'', '\u{201C}', '\u{2018}'];
 /// Shortest word half that counts as attested on its own when deciding to
-/// keep a line-end hyphen (`in-` + `formation` must still join).
-const MIN_ATTESTED_HALF: usize = 3;
-/// Prefixes that usually form real compounds (`self-supervised`); a line-end
-/// hyphen after one is kept unless the joined word is attested.
-const COMPOUND_PREFIXES: [&str; 25] = [
-    "self", "non", "pre", "post", "co", "multi", "semi", "anti", "re", "low", "high", "well",
-    "state", "end", "long", "short", "real", "time", "data", "open", "cross", "inter", "intra",
-    "sub", "super",
+/// keep a line-end hyphen between two words (`cost-` + `effective`); shorter
+/// halves (`with-` + `out`, `in-` + `formation`) never keep it by this rule.
+const MIN_ATTESTED_HALF: usize = 4;
+/// Left halves that form real compounds (`self-supervised`,
+/// `cross-domain`): a line-end hyphen after one is kept unless the joined
+/// word is attested.
+const COMPOUND_PREFIXES: &[&str] = &["self", "cross", "well", "high", "low", "long", "short"];
+/// Bound prefixes normally written solid (`preserving`, `nonlinear`,
+/// `multimodal`): a line-end hyphen after one is dropped when the right
+/// half is lowercase and an attested word or at least
+/// [`PREFIX_JOIN_MIN_RIGHT`] letters long.
+const JOIN_PREFIXES: &[&str] = &[
+    "pre", "re", "non", "un", "sub", "multi", "semi", "inter", "intra", "over", "under", "micro",
+    "nano", "co", "de", "dis", "mis", "anti", "auto", "bio", "counter", "hyper", "meta", "post",
+    "pseudo", "super", "trans", "ultra", "extra", "infra", "pro",
 ];
+/// Shortest unattested right half that still joins after a
+/// [`JOIN_PREFIXES`] entry (`pre-` + `serving`).
+const PREFIX_JOIN_MIN_RIGHT: usize = 5;
+/// Longest right half that is never a typeset word break (`TeX` leaves at
+/// least three letters after a break), so `most-` + `dl` stays a compound.
+const MAX_UNBREAKABLE_RIGHT: usize = 2;
 
 /// What the cleanup pass changed, summed over the document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -994,11 +1007,88 @@ fn strip_final_hyphen(text: &str) -> Option<&str> {
     }
 }
 
-/// Rule 2 for one pair of consecutive lines. The halves join when the
-/// joined word is attested; otherwise the hyphen stays when the hyphenated
-/// pair is attested, when both halves are attested as whole words
-/// (`cost-` / `effective`), or when the left half is a compound prefix; any
-/// other split (`algo-` / `rithm`) joins.
+/// Outcome of [`hyphen_policy`] for one line-end hyphen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HyphenPolicy {
+    /// A word broken for justification: `opti-` + `mization` → `optimization`.
+    Join,
+    /// A real compound: `cost-` + `effective` → `cost-effective`.
+    Keep,
+}
+
+/// Whether a right half of three letters has no vowel (`cnn`), so it reads
+/// as an acronym rather than a word ending (`ing`, `ves`).
+fn vowelless(right: &str) -> bool {
+    !right
+        .chars()
+        .any(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
+}
+
+/// Whether the printed halves themselves mark a real compound: the right
+/// half starts with a capital or has a digit, the left half is one letter
+/// (`k-space`, `x-ray`) or an all-capital acronym (`MRI-guided`), or the
+/// right half is too short to be a typeset break (`most-dl`, `state-of`) or
+/// is a three-letter acronym after a short left half (`deep-cnn`).
+fn printed_compound(left: &str, right: &str) -> bool {
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    right.chars().next().is_some_and(char::is_uppercase)
+        || right.chars().any(char::is_numeric)
+        || left.chars().any(char::is_numeric)
+        || left_len == 1
+        || (left_len >= 2 && left.chars().all(char::is_uppercase))
+        || right_len <= MAX_UNBREAKABLE_RIGHT
+        || (left_len <= 5 && right_len == 3 && vowelless(right))
+}
+
+/// Decide a line-end hyphen between `left`, the word before the hyphen, and
+/// `right`, the word that starts the next line, both as printed.
+/// `attested(piece)` tells whether the lower-cased word (`optimization`) or
+/// hyphenated pair (`noise-regularized`) occurs elsewhere in the document
+/// as a whole word. The first matching rule wins:
+/// 1. the joined word is attested → join (`with-` + `out`, `without` seen);
+/// 2. the hyphenated pair is attested → keep (`noise-regularized` seen);
+/// 3. the left half is a `COMPOUND_PREFIXES` entry (`self-`) → keep;
+/// 4. the left half is a `JOIN_PREFIXES` entry and the right half is all
+///    lowercase and an attested word or at least `PREFIX_JOIN_MIN_RIGHT`
+///    letters → join (`pre-` + `serving`);
+/// 5. the printed halves mark a compound (see `printed_compound`) → keep;
+/// 6. both halves are attested words of at least `MIN_ATTESTED_HALF`
+///    letters → keep (`cost-` + `effective`, `Dual-` + `domain`);
+/// 7. otherwise join (`algo-` + `rithm`).
+pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -> HyphenPolicy {
+    let lower_left = left.to_lowercase();
+    let lower_right = right.to_lowercase();
+    if attested(&format!("{lower_left}{lower_right}")) {
+        return HyphenPolicy::Join;
+    }
+    if attested(&format!("{lower_left}-{lower_right}")) {
+        return HyphenPolicy::Keep;
+    }
+    if COMPOUND_PREFIXES.contains(&lower_left.as_str()) {
+        return HyphenPolicy::Keep;
+    }
+    let lowercase_word = !right.is_empty() && right.chars().all(char::is_lowercase);
+    if JOIN_PREFIXES.contains(&lower_left.as_str())
+        && lowercase_word
+        && (attested(&lower_right) || right.chars().count() >= PREFIX_JOIN_MIN_RIGHT)
+    {
+        return HyphenPolicy::Join;
+    }
+    if printed_compound(left, right) {
+        return HyphenPolicy::Keep;
+    }
+    let word = |half: &str| half.chars().count() >= MIN_ATTESTED_HALF && attested(half);
+    if word(&lower_left) && word(&lower_right) {
+        HyphenPolicy::Keep
+    } else {
+        HyphenPolicy::Join
+    }
+}
+
+/// Rule 2 for one pair of consecutive lines: a lowercase continuation after
+/// an alphabetic word and a line-end hyphen is decided by [`hyphen_policy`]
+/// against the document vocabulary.
 fn hyphen_decision(first: &str, second: &str, vocab: &Vocabulary) -> Decision {
     let Some(stem) = strip_final_hyphen(first) else {
         return Decision::NotApplicable;
@@ -1015,29 +1105,21 @@ fn hyphen_decision(first: &str, second: &str, vocab: &Vocabulary) -> Decision {
     if !head.chars().next().is_some_and(char::is_lowercase) {
         return Decision::NotApplicable;
     }
-    let suffix: String = head.chars().take_while(|c| c.is_alphabetic()).collect();
-    if suffix.is_empty() {
+    let right: String = head.chars().take_while(|c| c.is_alphanumeric()).collect();
+    if right.is_empty() {
         return Decision::NotApplicable;
     }
-    let left = word.to_lowercase();
-    let right = suffix.to_lowercase();
-    let joined = format!("{left}{right}");
-    let hyphenated = format!("{left}-{right}");
-    let whole_word =
-        |half: &str| half.chars().count() >= MIN_ATTESTED_HALF && vocab.words.contains(half);
-    let attested = vocab.words.contains(&joined);
-    let compound = vocab.compounds.contains(&hyphenated)
-        || (whole_word(left.as_str()) && whole_word(right.as_str()))
-        || COMPOUND_PREFIXES.contains(&left.as_str());
-    if attested || !compound {
-        let tail = rest
-            .get(head.len()..)
-            .unwrap_or("")
-            .trim_start()
-            .to_string();
-        Decision::Join(format!("{stem}{head}"), tail)
-    } else {
-        Decision::Keep
+    let attested = |piece: &str| vocab.words.contains(piece) || vocab.compounds.contains(piece);
+    match hyphen_policy(word, &right, &attested) {
+        HyphenPolicy::Join => {
+            let tail = rest
+                .get(head.len()..)
+                .unwrap_or("")
+                .trim_start()
+                .to_string();
+            Decision::Join(format!("{stem}{head}"), tail)
+        }
+        HyphenPolicy::Keep => Decision::Keep,
     }
 }
 
@@ -1607,6 +1689,131 @@ mod tests {
             pages[0].text,
             "the optimization\nstep runs first.\nOur optimization is fast.\n\
              the algorithm\nends."
+        );
+    }
+
+    /// [`hyphen_policy`] against a fixed document vocabulary.
+    fn policy(left: &str, right: &str, seen: &[&str]) -> HyphenPolicy {
+        let vocab: BTreeSet<String> = seen.iter().map(|word| String::from(*word)).collect();
+        hyphen_policy(left, right, &|piece: &str| vocab.contains(piece))
+    }
+
+    /// Rule 1: an attested joined word wins over every keep rule.
+    #[test]
+    fn hyphen_policy_joins_an_attested_word_first() {
+        use HyphenPolicy::Join;
+        assert_eq!(policy("with", "out", &["with", "out", "without"]), Join);
+        assert_eq!(policy("work", "flow", &["work", "flow", "workflow"]), Join);
+        assert_eq!(
+            policy(
+                "noise",
+                "regularized",
+                &["noiseregularized", "noise-regularized"]
+            ),
+            Join
+        );
+        assert_eq!(policy("opti", "mization", &["optimization"]), Join);
+        assert_eq!(policy("self", "supervised", &["selfsupervised"]), Join);
+    }
+
+    /// Rule 2: an attested hyphenated pair keeps the hyphen.
+    #[test]
+    fn hyphen_policy_keeps_an_attested_compound() {
+        use HyphenPolicy::Keep;
+        assert_eq!(policy("noise", "regularized", &["noise-regularized"]), Keep);
+        assert_eq!(policy("pre", "serving", &["pre-serving"]), Keep);
+    }
+
+    /// Rules 3 and 4: compound prefixes keep, bound prefixes join.
+    #[test]
+    fn hyphen_policy_prefix_lists() {
+        use HyphenPolicy::{Join, Keep};
+        assert_eq!(policy("self", "supervised", &[]), Keep);
+        assert_eq!(policy("Cross", "domain", &[]), Keep);
+        assert_eq!(policy("well", "known", &[]), Keep);
+        assert_eq!(policy("pre", "serving", &[]), Join);
+        assert_eq!(policy("pre", "serving", &["pre", "serving"]), Join);
+        assert_eq!(policy("non", "linear", &[]), Join);
+        assert_eq!(policy("multi", "modal", &[]), Join);
+        assert_eq!(policy("re", "use", &["use"]), Join);
+        // A capitalised right half is not a bound-prefix join.
+        assert_eq!(policy("pre", "MRI", &["mri"]), Keep);
+        // Too short and unattested: decided by the later rules.
+        assert_eq!(policy("co", "rn", &[]), Keep);
+    }
+
+    /// Rule 5: capitals, digits, one-letter or acronym left halves and
+    /// right halves too short for a typeset break keep the hyphen.
+    #[test]
+    fn hyphen_policy_keeps_printed_compounds() {
+        use HyphenPolicy::{Join, Keep};
+        assert_eq!(policy("most", "dl", &["most"]), Keep);
+        assert_eq!(policy("MOST", "dl", &[]), Keep);
+        assert_eq!(policy("deep", "ai", &[]), Keep);
+        assert_eq!(policy("deep", "cnn", &[]), Keep);
+        assert_eq!(policy("k", "space", &["space"]), Keep);
+        assert_eq!(policy("MRI", "guided", &[]), Keep);
+        assert_eq!(policy("resnet", "v2", &[]), Keep);
+        assert_eq!(policy("state", "of", &[]), Keep);
+        // Three-letter word endings are ordinary breaks.
+        assert_eq!(policy("learn", "ing", &[]), Join);
+        assert_eq!(policy("cur", "ves", &[]), Join);
+    }
+
+    /// Rule 6 and the fallback join.
+    #[test]
+    fn hyphen_policy_keeps_two_attested_words_and_joins_the_rest() {
+        use HyphenPolicy::{Join, Keep};
+        assert_eq!(policy("cost", "effective", &["cost", "effective"]), Keep);
+        assert_eq!(policy("Dual", "domain", &["dual", "domain"]), Keep);
+        assert_eq!(policy("Dual", "channel", &["dual", "channel"]), Keep);
+        assert_eq!(
+            policy("noise", "regularized", &["noise", "regularized"]),
+            Keep
+        );
+        // `out` is shorter than `MIN_ATTESTED_HALF`.
+        assert_eq!(policy("with", "out", &["with", "out"]), Join);
+        assert_eq!(policy("cost", "effective", &["cost"]), Join);
+        assert_eq!(policy("opti", "mization", &[]), Join);
+        assert_eq!(policy("algo", "rithm", &[]), Join);
+        assert_eq!(policy("noise", "regularized", &[]), Join);
+    }
+
+    /// The observed reference-title cases through the whole pass.
+    #[test]
+    fn hyphen_policy_in_the_document_pass() {
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("structure pre-", 60.0, 600.0, 0),
+                ("serving reconstruction of scans.", 60.0, 588.0, 0),
+                ("the with-", 60.0, 576.0, 0),
+                (
+                    "out step, with and without it, out of range.",
+                    60.0,
+                    564.0,
+                    0,
+                ),
+                ("a noise-", 60.0, 552.0, 0),
+                (
+                    "regularized prior and a noise-regularized loss.",
+                    60.0,
+                    540.0,
+                    0,
+                ),
+                ("the most-", 60.0, 528.0, 0),
+                ("dl network.", 60.0, 516.0, 0),
+            ],
+        )];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.hyphens_joined, 2);
+        assert_eq!(report.hyphens_kept, 2);
+        assert_eq!(
+            pages[0].text,
+            "structure preserving\nreconstruction of scans.\n\
+             the without\nstep, with and without it, out of range.\n\
+             a noise-\nregularized prior and a noise-regularized loss.\n\
+             the most-\ndl network."
         );
     }
 
