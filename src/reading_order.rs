@@ -4,10 +4,11 @@
 //! order, which on multi-column pages is rarely the reading order. This
 //! module groups spans into lines by baseline, orders the lines with a
 //! recursive XY-cut over their boxes (columns before rows, except that
-//! full-width lines at the top or bottom of a region are split off first)
-//! and joins them into `PageText::text`. Coordinates are PDF user space (origin
-//! bottom-left, `y` grows upwards) and are used unrotated. No text repair
-//! of any kind is performed.
+//! full-width lines at the top or bottom of a region are split off first
+//! and that a row gap across the columns is cut first when the line texts
+//! read on better by rows) and joins them into `PageText::text`.
+//! Coordinates are PDF user space (origin bottom-left, `y` grows upwards)
+//! and are used unrotated. No text repair of any kind is performed.
 //!
 //! Fonts without precomposed accented letters (`pdfTeX` with the OT1
 //! encoding, say) set an accent as a glyph of its own, placed slightly
@@ -816,17 +817,95 @@ fn column_cut(boxes: &[BBox], idx: &mut [usize], min_gap: f32) -> Option<usize> 
     best.map(|(pos, _)| pos)
 }
 
-/// Recursive XY-cut. When a column gap runs through the whole region and
-/// the two sides stand side by side (see [`columns_coexist`]), only a row
-/// gap that splits margin lines (see [`margin_runs`]) off its top or bottom
-/// is taken before it (paragraph gaps that happen to line up across columns
-/// must not cut the columns into bands). When such a column gap appears
-/// only once those margin lines are left out, the row gap that splits them
-/// off is taken first. Otherwise split on the widest row gap, else on the
-/// widest column gap, else emit the indices as one leaf block sorted
-/// top-to-bottom.
+/// Whether `ch` ends a sentence or a clause for [`flow`].
+fn is_terminal(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?' | ':' | ';' | ')' | ']')
+}
+
+/// How strongly the text of line `prev` reads on into line `next`: +2 when
+/// `prev` ends in a hyphen and `next` starts lowercase, +2 when `prev` has
+/// no terminal punctuation (see [`is_terminal`]) and `next` starts
+/// lowercase, +1 when `prev` has no terminal punctuation and `next` starts
+/// uppercase, -1 when `prev` ends in `.` and `next` starts lowercase, else
+/// 0 (also when either line is blank or `next` does not start with a
+/// letter).
+fn flow(prev: &str, next: &str) -> i32 {
+    let Some(last) = prev.trim_end().chars().next_back() else {
+        return 0;
+    };
+    let Some(first) = next.trim_start().chars().next() else {
+        return 0;
+    };
+    if !first.is_alphabetic() {
+        return 0;
+    }
+    let lower = first.is_lowercase();
+    if is_terminal(last) {
+        if last == '.' && lower { -1 } else { 0 }
+    } else if lower {
+        // A trailing hyphen is not terminal, so a hyphen before a
+        // lowercase letter scores +2 here.
+        2
+    } else {
+        i32::from(first.is_uppercase())
+    }
+}
+
+/// Whether the row gap at `at` in `idx` (sorted top-to-bottom), which runs
+/// across a region that a column gap at `split_x` also runs through, is to
+/// be cut before the columns. The region falls into four blocks: left top,
+/// right top, left bottom and right bottom. Columns first reads left top,
+/// left bottom, right top; rows first reads left top, right top, then left
+/// bottom, right bottom. The row gap is taken first when the text of the
+/// lines at the block boundaries flows (see [`flow`]) better that way: a
+/// balanced column band followed by a new two-column band (an appendix
+/// ending above a bibliography) reads by rows, paragraph gaps that merely
+/// line up across the columns read by columns. Ties keep columns first.
+fn rows_read_first(boxes: &[BBox], texts: &[&str], idx: &[usize], at: usize, split_x: f32) -> bool {
+    let (top, bottom) = idx.split_at(at);
+    let (top_left, top_right): (Vec<usize>, Vec<usize>) =
+        top.iter().copied().partition(|&i| boxes[i].x0 < split_x);
+    let (bottom_left, bottom_right): (Vec<usize>, Vec<usize>) =
+        bottom.iter().copied().partition(|&i| boxes[i].x0 < split_x);
+    let (
+        Some(&left_top_end),
+        Some(&right_top_start),
+        Some(&left_bottom_start),
+        Some(&left_bottom_end),
+        Some(&right_bottom_start),
+    ) = (
+        top_left.last(),
+        top_right.first(),
+        bottom_left.first(),
+        bottom_left.last(),
+        bottom_right.first(),
+    )
+    else {
+        return false;
+    };
+    let text = |i: usize| texts.get(i).copied().unwrap_or("");
+    let by_columns = flow(text(left_top_end), text(left_bottom_start))
+        + flow(text(left_bottom_end), text(right_top_start));
+    let by_rows = flow(text(left_top_end), text(right_top_start))
+        + flow(text(left_bottom_end), text(right_bottom_start));
+    by_rows > by_columns
+}
+
+/// Recursive XY-cut over `boxes`, with `texts` the text of the line of each
+/// box. When a column gap runs through the whole region and the two sides
+/// stand side by side (see [`columns_coexist`]), a row gap that splits
+/// margin lines (see [`margin_runs`]) off its top or bottom is taken before
+/// it; otherwise the widest row gap across the region is taken first only
+/// when the text reads on better by rows than by columns (see
+/// [`rows_read_first`]), so paragraph gaps that happen to line up across
+/// columns do not cut the columns into bands. When such a column gap
+/// appears only once those margin lines are left out, the row gap that
+/// splits them off is taken first. Otherwise split on the widest row gap,
+/// else on the widest column gap, else emit the indices as one leaf block
+/// sorted top-to-bottom.
 fn xy_cut(
     boxes: &[BBox],
+    texts: &[&str],
     mut idx: Vec<usize>,
     depth: u32,
     params: &CutParams,
@@ -836,7 +915,14 @@ fn xy_cut(
         let cut = column_cut(boxes, &mut idx, params.column_gap);
         let has_column = cut.is_some_and(|at| columns_coexist(boxes, &idx, at));
         let row = if has_column {
-            spanning_row_cut(boxes, &mut idx, params.row_gap)
+            // `idx` is sorted left-to-right here, so the right side starts
+            // at the box at the cut.
+            let split_x = cut.map(|at| boxes[idx[at]].x0);
+            spanning_row_cut(boxes, &mut idx, params.row_gap).or_else(|| {
+                let x = split_x?;
+                let at = row_cut(boxes, &mut idx, params.row_gap)?;
+                rows_read_first(boxes, texts, &idx, at, x).then_some(at)
+            })
         } else {
             let masked = masked_column_cut(boxes, &mut idx, params.column_gap);
             let margin = if masked {
@@ -848,14 +934,14 @@ fn xy_cut(
         };
         if let Some(at) = row {
             let lower = idx.split_off(at);
-            xy_cut(boxes, idx, depth + 1, params, out);
-            xy_cut(boxes, lower, depth + 1, params, out);
+            xy_cut(boxes, texts, idx, depth + 1, params, out);
+            xy_cut(boxes, texts, lower, depth + 1, params, out);
             return;
         }
         if let Some(at) = column_cut(boxes, &mut idx, params.column_gap) {
             let right = idx.split_off(at);
-            xy_cut(boxes, idx, depth + 1, params, out);
-            xy_cut(boxes, right, depth + 1, params, out);
+            xy_cut(boxes, texts, idx, depth + 1, params, out);
+            xy_cut(boxes, texts, right, depth + 1, params, out);
             return;
         }
     }
@@ -871,7 +957,8 @@ fn xy_cut(
 /// character widths). Lines without a finite box, and lines beyond
 /// `MAX_LINES`, keep their order and form one extra block at the end. A
 /// column split through a whole region wins over any row split except one
-/// that separates spanning lines at its top or bottom.
+/// that separates spanning lines at its top or bottom, or one after which
+/// the line texts read on better by rows than by columns.
 pub fn order_lines(lines: Vec<Line>, page_width: f32) -> Vec<Line> {
     let mut placed: Vec<(Line, BBox)> = Vec::new();
     let mut loose: Vec<Line> = Vec::new();
@@ -904,10 +991,11 @@ pub fn order_lines(lines: Vec<Line>, page_width: f32) -> Vec<Line> {
     };
 
     let boxes: Vec<BBox> = placed.iter().map(|(_, b)| *b).collect();
+    let texts: Vec<&str> = placed.iter().map(|(line, _)| line.text.as_str()).collect();
     let mut blocks: Vec<Vec<usize>> = Vec::new();
     if !boxes.is_empty() {
         let all: Vec<usize> = (0..boxes.len()).collect();
-        xy_cut(&boxes, all, 0, &params, &mut blocks);
+        xy_cut(&boxes, &texts, all, 0, &params, &mut blocks);
     }
 
     let mut slots: Vec<Option<Line>> = placed.into_iter().map(|(l, _)| Some(l)).collect();
@@ -1316,6 +1404,114 @@ mod tests {
         let paragraph = "row 3 of the two column body text goes here\n\nleft row 4 ";
         assert!(page.text.contains(paragraph));
         assert!(page.text.contains("goes here\n\nright row 0 of"));
+    }
+
+    #[test]
+    fn balanced_column_band_above_a_new_two_column_band_is_read_by_rows() {
+        // An appendix set in two balanced columns, then, below a gap across
+        // both, a headingless bibliography whose first entry runs on from
+        // the bottom of the left column into the top of the right one.
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 0..6u16 {
+            let y0 = 700.0 - 18.0 * f32::from(k);
+            let right = format!("right appendix row {k} of the derivation continues with");
+            spans.push(span(&right, 320.0, y0, 560.0, y0 + 10.0, seq));
+            let left = format!("left appendix row {k} of the derivation continues with");
+            spans.push(span(&left, 50.0, y0, 290.0, y0 + 10.0, seq + 1));
+            seq += 2;
+        }
+        // The top band ends at y0 = 610; a gap of 1.5 line heights follows.
+        let bottom = [
+            (
+                "[1] U. Seifert, Stochastic thermodynamics, fluctuation theorems",
+                "physics 75, 126001 (2012).",
+            ),
+            (
+                "and molecular machines, Reports on progress in",
+                "[2] N. Shiraishi, An Introduction to Stochastic Thermodynamics:",
+            ),
+        ];
+        for (k, (left, right)) in bottom.iter().enumerate() {
+            let y0 = 585.0 - 18.0 * k as f32;
+            spans.push(span(right, 320.0, y0, 560.0, y0 + 10.0, seq));
+            spans.push(span(left, 50.0, y0, 290.0, y0 + 10.0, seq + 1));
+            seq += 2;
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 16);
+        for (k, line) in lines[..6].iter().enumerate() {
+            assert!(
+                line.starts_with(&format!("left appendix row {k} ")),
+                "{line}"
+            );
+        }
+        for (k, line) in lines[6..12].iter().enumerate() {
+            assert!(
+                line.starts_with(&format!("right appendix row {k} ")),
+                "{line}"
+            );
+        }
+        assert_eq!(lines[12], bottom[0].0);
+        assert_eq!(lines[13], bottom[1].0);
+        assert_eq!(lines[14], bottom[0].1);
+        assert_eq!(lines[15], bottom[1].1);
+    }
+
+    #[test]
+    fn aligned_gap_is_kept_inside_columns_when_the_text_flows_down_them() {
+        // A paragraph gap that lines up across both columns, where the left
+        // column's last line runs on into the top of the right column.
+        let left = [
+            "Left column opens the first paragraph and",
+            "carries it on over a second line until",
+            "the first paragraph ends here.",
+            "Second paragraph starts here with a claim",
+            "that the text keeps on going across",
+            "and the argument addresses risks beyond",
+        ];
+        let right = [
+            "those generally associated with models.",
+            "The right column continues the text with",
+            "a closing sentence of its first paragraph.",
+            "Another paragraph opens on the right and",
+            "runs over its second line until it",
+            "ends at the bottom of the right column.",
+        ];
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 0..6u16 {
+            let gap = if k > 2 { 20.0 } else { 0.0 };
+            let y0 = 700.0 - 18.0 * f32::from(k) - gap;
+            let i = usize::from(k);
+            spans.push(span(right[i], 320.0, y0, 560.0, y0 + 10.0, seq));
+            spans.push(span(left[i], 50.0, y0, 290.0, y0 + 10.0, seq + 1));
+            seq += 2;
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines[..6], left);
+        assert_eq!(lines[6..], right);
+    }
+
+    #[test]
+    fn flow_scores_line_continuity() {
+        assert_eq!(flow("stochastic thermo-", "dynamics of"), 2);
+        assert_eq!(flow("reports on progress in", "physics 75"), 2);
+        assert_eq!(flow("risks beyond", "those generally"), 2);
+        assert_eq!(flow("as shown by", "Seifert"), 1);
+        assert_eq!(flow("the bound holds.", "the next"), -1);
+        assert_eq!(flow("the bound holds.", "The next"), 0);
+        assert_eq!(flow("(2012).", "[2] N. Shiraishi"), 0);
+        assert_eq!(flow("progress in", "[1] U. Seifert"), 0);
+        assert_eq!(flow("", "text"), 0);
+        assert_eq!(flow("text", "   "), 0);
+        assert_eq!(flow("see Eq. (3)", "and"), 0);
     }
 
     #[test]

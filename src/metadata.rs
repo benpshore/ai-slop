@@ -195,13 +195,38 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         }
     }
 
-    // DOI: any Info value first, then page 1.
+    // DOI: any Info value first, then page 1. arXiv's own DOI for the
+    // preprint (`10.48550/arXiv.<id>`) in `/Info` ranks like the same DOI
+    // printed on page 1: a page-1 publisher DOI with positive evidence
+    // (header/footer furniture or a `DOI` label) replaces it. The `/Info`
+    // scan stops at the first DOI of either kind, so an unrelated DOI in a
+    // later key (a `Subject` citing other work) never overrides it.
+    let mut info_arxiv_doi: Option<(String, String)> = None;
     for (key, value) in info {
         if let Some(doi) = find_doi(value) {
+            if is_arxiv_doi(&doi) {
+                info_arxiv_doi = Some((doi, key.clone()));
+                break;
+            }
             meta.doi = Some(doi);
             meta.provenance
                 .insert("doi".to_string(), format!("info:{key}"));
             break;
+        }
+    }
+    if meta.doi.is_none()
+        && let Some((doi, key)) = info_arxiv_doi
+    {
+        if let Some(page) = first_page
+            && let Some((publisher, source)) = page1_publisher_doi(page)
+        {
+            meta.doi = Some(publisher);
+            meta.provenance
+                .insert("doi".to_string(), source.to_string());
+        } else {
+            meta.doi = Some(doi);
+            meta.provenance
+                .insert("doi".to_string(), format!("info:{key}"));
         }
     }
     if meta.doi.is_none()
@@ -678,8 +703,32 @@ fn is_arxiv_doi(doi: &str) -> bool {
 /// bare DOI in running text (usually a citation in the abstract), which is
 /// used only when page 1 carries no arXiv DOI at all.
 fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
+    if let Some(found) = page1_publisher_doi(page) {
+        return Some(found);
+    }
     let found: Vec<(usize, String)> = (0..page.lines.len())
         .filter_map(|i| line_doi(page, i).map(|doi| (i, doi)))
+        .collect();
+    // No positive evidence for a publisher DOI: arXiv's own DOI names this
+    // very paper, while a bare DOI in running text is usually a citation.
+    if let Some((_, doi)) = found.iter().find(|(_, doi)| is_arxiv_doi(doi)) {
+        return Some((doi.clone(), "first_page:doi"));
+    }
+    found
+        .into_iter()
+        .find(|(_, doi)| !is_arxiv_doi(doi))
+        .map(|(_, doi)| (doi, "first_page:doi"))
+}
+
+/// A DOI other than arXiv's own that page 1 gives positive evidence for, with
+/// its provenance: header/footer furniture that also labels it
+/// (`first_page:doi-header-footer`), a labelled line (`first_page:doi`), or
+/// header/footer furniture alone (`first_page:doi-header-footer`), in that
+/// order. `None` when page 1 has only bare DOIs in running text or arXiv's.
+fn page1_publisher_doi(page: &PageText) -> Option<(String, &'static str)> {
+    let candidates: Vec<(usize, String)> = (0..page.lines.len())
+        .filter_map(|i| line_doi(page, i).map(|doi| (i, doi)))
+        .filter(|(_, doi)| !is_arxiv_doi(doi))
         .collect();
     let labelled = |i: usize| page.lines[i].text.to_lowercase().contains("doi");
     // Publisher furniture: a short line (no running sentence) in the margin
@@ -689,11 +738,6 @@ fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
         in_header_footer(page, &page.lines[i])
             && page.lines[i].text.split_whitespace().count() <= 12
     };
-    let candidates: Vec<(usize, String)> = found
-        .iter()
-        .filter(|(_, doi)| !is_arxiv_doi(doi))
-        .cloned()
-        .collect();
     if let Some((_, doi)) = candidates
         .iter()
         .find(|(i, _)| furniture(*i) && labelled(*i))
@@ -703,18 +747,10 @@ fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
     if let Some((_, doi)) = candidates.iter().find(|(i, _)| labelled(*i)) {
         return Some((doi.clone(), "first_page:doi"));
     }
-    if let Some((_, doi)) = candidates.iter().find(|(i, _)| furniture(*i)) {
-        return Some((doi.clone(), "first_page:doi-header-footer"));
-    }
-    // No positive evidence for a publisher DOI: arXiv's own DOI names this
-    // very paper, while a bare DOI in running text is usually a citation.
-    if let Some((_, doi)) = found.iter().find(|(_, doi)| is_arxiv_doi(doi)) {
-        return Some((doi.clone(), "first_page:doi"));
-    }
     candidates
         .into_iter()
-        .next()
-        .map(|(_, doi)| (doi, "first_page:doi"))
+        .find(|(i, _)| furniture(*i))
+        .map(|(_, doi)| (doi, "first_page:doi-header-footer"))
 }
 
 /// The arXiv id inside the first `10.48550/arXiv.<id>` DOI printed anywhere
@@ -2134,6 +2170,98 @@ mod tests {
         assert_eq!(meta.provenance["doi"], "first_page:doi");
         assert_eq!(meta.arxiv_id.as_deref(), Some("2410.19245"));
         assert_eq!(meta.provenance["arxiv_id"], "doi");
+    }
+
+    /// arXiv:2410.19245: the PDF `/Info` dictionary carries arXiv's own DOI,
+    /// while page 1 prints the ACM footer DOI. The publisher's DOI with
+    /// page-1 evidence wins; the `/Info` arXiv DOI still names the preprint.
+    #[test]
+    fn page1_publisher_doi_wins_over_info_arxiv_doi() {
+        let info = info_from(&[("DOI", "10.48550/arXiv.2410.19245")]);
+        let page = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+            ("ACM ISBN 979-8-4007-2025-3/26/04", 7.0, 50.0),
+            ("https://doi.org/10.1145/3744916.3773221", 7.0, 40.0),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1145/3744916.3773221"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi-header-footer");
+        // The `/Info` scan for an arXiv id reads it out of the arXiv DOI.
+        assert_eq!(meta.arxiv_id.as_deref(), Some("2410.19245"));
+        assert_eq!(meta.provenance["arxiv_id"], "info:DOI");
+    }
+
+    /// With no other DOI anywhere, the `/Info` arXiv DOI is kept.
+    #[test]
+    fn info_arxiv_doi_is_kept_when_page_one_has_no_other_doi() {
+        let info = info_from(&[("DOI", "10.48550/arXiv.2410.19245")]);
+        let page = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arXiv.2410.19245"));
+        assert_eq!(meta.provenance["doi"], "info:DOI");
+        assert_eq!(meta.arxiv_id.as_deref(), Some("2410.19245"));
+        let without_page = extract_metadata(&info, &[]);
+        assert_eq!(
+            without_page.doi.as_deref(),
+            Some("10.48550/arXiv.2410.19245")
+        );
+        assert_eq!(without_page.provenance["doi"], "info:DOI");
+    }
+
+    /// An unrelated DOI in a later `/Info` key (`Subject` citing other work)
+    /// never replaces the `/Info` arXiv DOI; only a page-1 publisher DOI
+    /// with evidence (the ACM footer) does.
+    #[test]
+    fn later_info_doi_does_not_override_info_arxiv_doi() {
+        let info = info_from(&[
+            ("DOI", "10.48550/arXiv.2410.19245"),
+            ("Subject", "see also 10.1000/unrelated"),
+        ]);
+        let plain = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+        ]);
+        let meta = extract_metadata(&info, &[plain]);
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arXiv.2410.19245"));
+        assert_eq!(meta.provenance["doi"], "info:DOI");
+
+        let with_footer = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+            ("ACM ISBN 979-8-4007-2025-3/26/04", 7.0, 50.0),
+            ("https://doi.org/10.1145/3744916.3773221", 7.0, 40.0),
+        ]);
+        let meta = extract_metadata(&info, &[with_footer]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1145/3744916.3773221"));
+        assert_eq!(meta.provenance["doi"], "first_page:doi-header-footer");
+    }
+
+    /// A non-arXiv `/Info` DOI keeps its priority over page 1's arXiv DOI.
+    #[test]
+    fn info_publisher_doi_wins_over_page_one_arxiv_doi() {
+        let info = info_from(&[("DOI", "10.1000/real")]);
+        let page = page_at(&[
+            ("Sparse Widgets at Scale", 17.0, 700.0),
+            ("Jane Doe", 11.0, 670.0),
+            ("ABSTRACT", 9.0, 640.0),
+            ("We propose sparse widgets and show gains.", 9.0, 628.0),
+            ("DOI: 10.48550/arXiv.2410.19245", 7.0, 50.0),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(meta.doi.as_deref(), Some("10.1000/real"));
+        assert_eq!(meta.provenance["doi"], "info:DOI");
     }
 
     #[test]

@@ -129,6 +129,13 @@ pub struct PaperEval {
     /// All truth references that carry a title, matched or not.
     #[serde(default)]
     pub title_truth_total: u32,
+    /// Matched truth references with a title whose extracted entry has no
+    /// title and whose raw text is a title-less journal style (RSC
+    /// `…, Nature, 2015, 518, 179–186.`, see [`titleless_raw`]). Counted in
+    /// `title_truth`, but left out of the summary's title-accuracy
+    /// denominator.
+    #[serde(default)]
+    pub title_not_applicable: u32,
     /// Matched truth references with a DOI that is printed in the PDF: the
     /// normalised DOI occurs in the concatenated page text (case-insensitive,
     /// whitespace ignored on both sides so line-wrapped DOIs count), or the
@@ -243,7 +250,13 @@ pub struct Summary {
     #[serde(default)]
     pub doi_accuracy_printed: f32,
     pub year_accuracy: f32,
+    /// `title_correct` over `title_truth - title_not_applicable`, summed
+    /// over papers: matched entries of a title-less style do not count.
     pub title_accuracy: f32,
+    /// Summed `PaperEval::title_not_applicable`: matched entries left out of
+    /// the title-accuracy denominator as a title-less style.
+    #[serde(default)]
+    pub title_not_applicable: u32,
     /// Precision-like: resolved markers over extracted markers.
     pub marker_resolution_rate: f32,
     /// Resolved marker targets over truth cited keys, each paper's targets
@@ -1579,6 +1592,94 @@ fn doi_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
     }
 }
 
+/// A leading printed label (`[12]`, `(12)`, `12.`, `12)` or a bare `12`)
+/// before a reference's text.
+fn raw_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)]?)\s+").expect("valid regex")
+    })
+}
+
+/// The tail of a title-less journal reference: `, <year>, <volume>,
+/// <pages>.` (`, 2013, 42, 3127–3171.`, `, 2015, 518, 179–186.`), with an
+/// optional `(issue)` after the volume.
+fn titleless_tail_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r",\s*(?:19|20)\d{2}[a-z]?,\s*\d{1,5}(?:\s*\(\d{1,4}\))?,\s*\p{Lu}?\d{1,6}(?:\s*[–—-]\s*\p{Lu}?\d{1,6})?\.?$",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// One initials-first person name: `Q. Zhang`, `J.-P. Sauvage`,
+/// `P. G. de Gennes`, `A. Smith-Jones`.
+fn initials_first_name_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:\p{Lu}\p{Ll}?\.\s*(?:-\s*\p{Lu}\p{Ll}?\.\s*)?)+(?:\p{Ll}+\s+)*\p{Lu}[\p{L}'’-]*(?:[\s-]\p{Lu}[\p{L}'’-]*)*$",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Whether one comma-delimited part of a reference is a list of
+/// initials-first names (`Q. Zhang`, `E. Uchaker and G. Cao`, `and G. Cao`,
+/// `et al.`).
+fn is_initials_first_names(part: &str) -> bool {
+    let part = part.trim();
+    let part = part.strip_prefix("and ").unwrap_or(part);
+    let mut any = false;
+    for name in part.split(" and ").map(str::trim) {
+        let is_name = name == "et al." || initials_first_name_re().is_match(name);
+        if name.is_empty() || !is_name {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Whether a reference's `raw` text is a title-less journal style (Royal
+/// Society of Chemistry: `Q. Zhang, E. Uchaker and G. Cao, Chem. Soc. Rev.,
+/// 2013, 42, 3127–3171.`): after an optional label, one or more
+/// initials-first author parts, then a journal abbreviation of at most 80
+/// characters that starts upper-case and has no lower-case word of four or
+/// more letters (no sentence), then `, <year>, <volume>, <pages>.` at the
+/// end, and no quotation marks anywhere. An ordinary entry whose title
+/// parsing merely failed does not match.
+fn titleless_raw(raw: &str) -> bool {
+    let raw = raw.trim();
+    let body = raw_label_re()
+        .find(raw)
+        .map_or(raw, |found| &raw[found.end()..])
+        .trim();
+    if body.contains(['"', '“', '”', '„', '‘']) {
+        return false;
+    }
+    let Some(tail) = titleless_tail_re().find(body) else {
+        return false;
+    };
+    let parts: Vec<&str> = body[..tail.start()].split(',').collect();
+    let names = parts
+        .iter()
+        .take_while(|part| is_initials_first_names(part))
+        .count();
+    if names == 0 || names >= parts.len() {
+        return false;
+    }
+    let journal = parts[names..].join(",");
+    let journal = journal.trim();
+    journal.chars().next().is_some_and(char::is_uppercase)
+        && journal.chars().count() <= 80
+        && !journal
+            .split_whitespace()
+            .any(|w| w.chars().count() >= 4 && w.starts_with(char::is_lowercase))
+}
+
 /// Whether two optional titles are both present and equal after normalisation.
 fn title_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
     match (title_key(truth), title_key(extracted)) {
@@ -1702,6 +1803,7 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
     let mut doi_truth_total = 0_u32;
     let mut year_truth_total = 0_u32;
     let mut title_truth_total = 0_u32;
+    let mut title_not_applicable = 0_u32;
     let mut doi_printed = 0_u32;
     let printed_text = squashed_page_text(&result.pages);
 
@@ -1730,6 +1832,8 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
             doi_correct += u32::from(correct);
             year_correct += u32::from(truth_ref.year.is_some() && truth_ref.year == ext.year);
             title_correct += u32::from(title_equal(truth_ref.title.as_ref(), ext.title.as_ref()));
+            let titleless_style = ext.title.is_none() && titleless_raw(&ext.raw);
+            title_not_applicable += u32::from(truth_ref.title.is_some() && titleless_style);
         }
     }
 
@@ -1832,6 +1936,7 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         doi_truth_total,
         year_truth_total,
         title_truth_total,
+        title_not_applicable,
         doi_printed,
         over_segmentation: ratio(u64::from(extracted_refs), u64::from(truth_refs)),
         timings: result.timings,
@@ -1885,6 +1990,7 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         doi_truth_total: 0,
         year_truth_total: 0,
         title_truth_total: 0,
+        title_not_applicable: 0,
         doi_printed: 0,
         over_segmentation: 0.0,
         timings: StageTimings::default(),
@@ -2014,7 +2120,11 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         doi_accuracy: ratio(sum(|p| p.doi_correct), sum(|p| p.doi_truth)),
         doi_accuracy_printed: ratio(sum(|p| p.doi_correct), sum(|p| p.doi_printed)),
         year_accuracy: ratio(sum(|p| p.year_correct), sum(|p| p.year_truth)),
-        title_accuracy: ratio(sum(|p| p.title_correct), sum(|p| p.title_truth)),
+        title_accuracy: ratio(
+            sum(|p| p.title_correct),
+            sum(|p| p.title_truth).saturating_sub(sum(|p| p.title_not_applicable)),
+        ),
+        title_not_applicable: sum(|p| p.title_not_applicable) as u32,
         marker_resolution_rate: ratio(sum(|p| p.resolved_markers), sum(|p| p.extracted_markers)),
         marker_recall: ratio(targets_capped, cited_keys),
         marker_command_ratio: ratio(cited_resolved, cited_commands),
@@ -2114,6 +2224,11 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     let _ = writeln!(out, "| Year accuracy | {} |", pct(s.year_accuracy));
     let _ = writeln!(out, "| Title accuracy | {} |", pct(s.title_accuracy));
+    let _ = writeln!(
+        out,
+        "| Title n/a (title-less style) | {} |",
+        s.title_not_applicable
+    );
     let _ = writeln!(
         out,
         "| Paper title accuracy | {} |",
@@ -3281,6 +3396,114 @@ mod tests {
         assert_eq!(eval.matches[0].method, "doi");
         assert_eq!(eval.matches[1].method, "arxiv");
         assert_eq!(eval.matches[2].method, "none");
+    }
+
+    /// A matched entry without a title whose raw text is a title-less style
+    /// (RSC `…, Nature, 2015, 518, 179–186.`) leaves the title-accuracy
+    /// denominator; one whose raw text is not still counts as a miss.
+    #[test]
+    fn title_accuracy_skips_titleless_styles() {
+        let mut truth_refs: Vec<TruthReference> = Vec::new();
+        for i in 0..3_u16 {
+            let mut r = truth_ref(&format!("k{i}"));
+            r.doi = Some(format!("10.1000/ref{i}"));
+            r.year = Some(2000 + i);
+            r.title = Some(format!("Distinct title number {i}"));
+            truth_refs.push(r);
+        }
+        let mut e1 = extracted(1);
+        e1.doi = Some("10.1000/ref0".to_string());
+        e1.year = Some(2000);
+        e1.title = Some("Distinct title number 0".to_string());
+        let mut e2 = extracted(2);
+        e2.doi = Some("10.1000/ref1".to_string());
+        e2.year = Some(2001);
+        e2.venue = Some("Nature".to_string());
+        e2.raw = "J. Smith and K. Lee, Nature, 2001, 518, 179–186.".to_string();
+        let mut e3 = extracted(3);
+        e3.doi = Some("10.1000/ref2".to_string());
+        e3.year = Some(2002);
+        let result = sample_result(vec![e1, e2, e3], Vec::new());
+        let truth = truth_with(truth_refs, "");
+
+        let eval = evaluate("p", &result, &truth);
+        assert_eq!(eval.matched_refs, 3);
+        assert_eq!(eval.title_truth, 3);
+        assert_eq!(eval.title_correct, 1);
+        assert_eq!(eval.title_not_applicable, 1);
+
+        let s = summarize(std::slice::from_ref(&eval));
+        assert_eq!(s.title_not_applicable, 1);
+        assert!(close(s.title_accuracy, 0.5), "{}", s.title_accuracy);
+        let md = render_markdown(&build_report("lopdf", "h", vec![eval]));
+        assert!(md.contains("| Title accuracy | 50.0% |\n| Title n/a (title-less style) | 1 |\n"));
+    }
+
+    /// Title-less style is judged from the raw text, not from a missing
+    /// title: an RSC entry without a title is n/a, while an ordinary entry
+    /// whose (over-long) title was left unset still counts as a miss even
+    /// though its venue and year were parsed.
+    #[test]
+    fn title_not_applicable_needs_titleless_raw_text() {
+        let long_title = "A very long title ".repeat(30);
+        let mut truth_refs: Vec<TruthReference> = Vec::new();
+        for i in 0..2_u16 {
+            let mut r = truth_ref(&format!("k{i}"));
+            r.doi = Some(format!("10.1000/ref{i}"));
+            r.year = Some(2013 + i);
+            r.title = Some(format!("Distinct title number {i}"));
+            truth_refs.push(r);
+        }
+        let mut rsc = extracted(1);
+        rsc.doi = Some("10.1000/ref0".to_string());
+        rsc.year = Some(2013);
+        rsc.venue = Some("Chem. Soc. Rev.".to_string());
+        rsc.raw =
+            "1 Q. Zhang, E. Uchaker and G. Cao, Chem. Soc. Rev., 2013, 42, 3127–3171.".to_string();
+        let mut failed = extracted(2);
+        failed.doi = Some("10.1000/ref1".to_string());
+        failed.year = Some(2014);
+        failed.venue = Some("Journal".to_string());
+        failed.raw = format!("A. Author. {}. Journal 12, 1–2 (2014).", long_title.trim());
+        let result = sample_result(vec![rsc, failed], Vec::new());
+        let truth = truth_with(truth_refs, "");
+
+        let eval = evaluate("p", &result, &truth);
+        assert_eq!(eval.matched_refs, 2);
+        assert_eq!(eval.title_truth, 2);
+        assert_eq!(eval.title_correct, 0);
+        assert_eq!(eval.title_not_applicable, 1);
+        let s = summarize(std::slice::from_ref(&eval));
+        assert!(close(s.title_accuracy, 0.0), "{}", s.title_accuracy);
+    }
+
+    #[test]
+    fn titleless_raw_accepts_only_rsc_style() {
+        assert!(titleless_raw(
+            "Q. Zhang, E. Uchaker and G. Cao, Chem. Soc. Rev., 2013, 42, 3127–3171."
+        ));
+        assert!(titleless_raw(
+            "[3] J.-P. Sauvage, Nature, 2015, 518, 179–186."
+        ));
+        assert!(titleless_raw(
+            "A. B. Smith and P. G. de Gennes, Angew. Chem., Int. Ed., 2010, 49, 1–5."
+        ));
+        assert!(titleless_raw(
+            "12. K. Lee, M. Park, et al., J. Am. Chem. Soc., 2019, 141(3), 100."
+        ));
+        // Ordinary styles whose title parsing failed.
+        assert!(!titleless_raw(
+            "A. Author. A very long title about things. Journal 12, 1–2 (2020)."
+        ));
+        assert!(!titleless_raw(
+            "A. Author, \u{201c}A quoted title,\u{201d} Nature, 2015, 518, 179–186."
+        ));
+        assert!(!titleless_raw(
+            "A. Author, A study of the effects of things, Nature, 2015, 518, 179–186."
+        ));
+        assert!(!titleless_raw("Smith, J., Nature, 2015, 518, 179–186."));
+        assert!(!titleless_raw("Q. Zhang, 2013, 42, 3127–3171."));
+        assert!(!titleless_raw(""));
     }
 
     #[test]
