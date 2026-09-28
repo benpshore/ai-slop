@@ -167,12 +167,21 @@ impl BrowserSession {
             HostDecision::Proxied { origin } => Some(origin),
         };
         let judged_host = proxied_origin.as_deref().unwrap_or(url.host.as_str());
+        // Detection runs against the unwrapped origin so a proxied arXiv or
+        // publisher URL (arxiv-org.ezproxy.example.edu/abs/…) is recognised.
+        let judged_url = NormalizedUrl {
+            host: judged_host.to_string(),
+            ..url.clone()
+        };
         let intercept = if is_doi_resolver(judged_host) {
-            dois_in_url(&url).into_iter().next().map(Intercept::Doi)
-        } else if let Some(id) = arxiv_id_in_url(&url) {
+            dois_in_url(&judged_url)
+                .into_iter()
+                .next()
+                .map(Intercept::Doi)
+        } else if let Some(id) = arxiv_id_in_url(&judged_url) {
             Some(Intercept::Arxiv(id))
         } else {
-            pdf_intercept(&text, &classify_pdf_url(&url))
+            pdf_intercept(&text, &classify_pdf_url(&judged_url))
         };
         self.history.push(url.clone());
         if let Some(intercept) = intercept {
@@ -396,6 +405,15 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            s.navigate("https://arxiv-org.ezproxy.lib.edu/abs/2502.00857")
+                .unwrap(),
+            Navigation::Handoff {
+                url: "https://arxiv-org.ezproxy.lib.edu/abs/2502.00857".to_string(),
+                intercept: Intercept::Arxiv("2502.00857".to_string()),
+            },
+            "arXiv detection uses the unwrapped proxy origin"
+        );
         assert!(matches!(
             s.navigate("https://www-example-com.ezproxy.lib.edu/")
                 .unwrap(),

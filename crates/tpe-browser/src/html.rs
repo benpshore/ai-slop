@@ -99,15 +99,12 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(pos) = rest.find('&') {
         out.push_str(&rest[..pos]);
         let tail = &rest[pos..];
-        match entity_at(tail) {
-            Some((decoded, consumed)) => {
-                out.push_str(&decoded);
-                rest = &tail[consumed..];
-            }
-            None => {
-                out.push('&');
-                rest = &tail[1..];
-            }
+        if let Some((decoded, consumed)) = entity_at(tail) {
+            out.push_str(&decoded);
+            rest = &tail[consumed..];
+        } else {
+            out.push('&');
+            rest = &tail[1..];
         }
     }
     out.push_str(rest);
@@ -118,7 +115,7 @@ pub fn decode_entities(s: &str) -> String {
 /// replacement and the byte length consumed.
 fn entity_at(tail: &str) -> Option<(String, usize)> {
     let semi = tail.find(';')?;
-    if semi < 2 || semi > 12 {
+    if !(2..=12).contains(&semi) {
         return None;
     }
     let body = &tail[1..semi];
@@ -282,7 +279,7 @@ fn read_value(body: &str, i: usize) -> (&str, usize) {
         Some(_) => {
             let end = bytes[i..]
                 .iter()
-                .position(|b| b.is_ascii_whitespace())
+                .position(u8::is_ascii_whitespace)
                 .map_or(bytes.len(), |e| i + e);
             (&body[i..end], end)
         }
