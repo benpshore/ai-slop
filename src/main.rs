@@ -329,8 +329,10 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
     let start = Instant::now();
     // A panic inside a backend must fail this file only, not the whole batch.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| pipeline::run_job(&job)))
-        .map(|outcome| outcome.map_err(|err| err.to_string()))
-        .unwrap_or_else(|payload| Err(format!("panic: {}", panic_message(&*payload))));
+        .map_or_else(
+            |payload| Err(format!("panic: {}", panic_message(&*payload))),
+            |outcome| outcome.map_err(|err| err.to_string()),
+        );
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
@@ -410,7 +412,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
                 let line = serde_json::json!({
                     "status": Status::Failed.as_str(),
                     "path": path_display,
-                    "error": err.to_string(),
+                    "error": err.clone(),
                     "ms": wall_ms,
                 });
                 println!("{line}");
