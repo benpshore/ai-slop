@@ -9,6 +9,7 @@
 //! human-checked acceptance protocol.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -782,50 +783,42 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     let s = &report.summary;
     let mut out = String::new();
     out.push_str("# Evaluation report\n\n");
-    out.push_str(&format!("- Backend: `{}`\n", cell(&report.backend)));
-    out.push_str(&format!("- Host: `{}`\n", cell(&report.host)));
-    out.push_str(&format!(
-        "- Generated (unix): {}\n\n",
-        report.generated_unix
-    ));
+    let _ = write!(out, "- Backend: `{}`\n", cell(&report.backend));
+    let _ = write!(out, "- Host: `{}`\n", cell(&report.host));
+    let _ = write!(out, "- Generated (unix): {}\n\n", report.generated_unix);
 
     out.push_str("## Summary\n\n");
     out.push_str("| Metric | Value |\n");
     out.push_str("| --- | --- |\n");
-    out.push_str(&format!("| Papers | {} |\n", s.papers));
-    out.push_str(&format!("| Failed | {} |\n", s.failed));
-    out.push_str(&format!(
+    let _ = write!(out, "| Papers | {} |\n", s.papers);
+    let _ = write!(out, "| Failed | {} |\n", s.failed);
+    let _ = write!(
+        out,
         "| Reference count exact | {} |\n",
         pct(s.ref_count_exact_rate)
-    ));
-    out.push_str(&format!("| Reference recall | {} |\n", pct(s.ref_recall)));
-    out.push_str(&format!(
-        "| Reference precision | {} |\n",
-        pct(s.ref_precision)
-    ));
-    out.push_str(&format!("| DOI accuracy | {} |\n", pct(s.doi_accuracy)));
-    out.push_str(&format!("| Year accuracy | {} |\n", pct(s.year_accuracy)));
-    out.push_str(&format!("| Title accuracy | {} |\n", pct(s.title_accuracy)));
-    out.push_str(&format!(
+    );
+    let _ = write!(out, "| Reference recall | {} |\n", pct(s.ref_recall));
+    let _ = write!(out, "| Reference precision | {} |\n", pct(s.ref_precision));
+    let _ = write!(out, "| DOI accuracy | {} |\n", pct(s.doi_accuracy));
+    let _ = write!(out, "| Year accuracy | {} |\n", pct(s.year_accuracy));
+    let _ = write!(out, "| Title accuracy | {} |\n", pct(s.title_accuracy));
+    let _ = write!(
+        out,
         "| Marker resolution | {} |\n",
         pct(s.marker_resolution_rate)
-    ));
-    out.push_str(&format!(
+    );
+    let _ = write!(
+        out,
         "| Mean body alignment | {} |\n",
         align_cell(s.mean_body_alignment)
-    ));
-    out.push_str(&format!(
-        "| p50 ms per chunk | {:.1} |\n",
-        s.p50_ms_per_chunk
-    ));
-    out.push_str(&format!(
-        "| p95 ms per chunk | {:.1} |\n",
-        s.p95_ms_per_chunk
-    ));
-    out.push_str(&format!(
+    );
+    let _ = write!(out, "| p50 ms per chunk | {:.1} |\n", s.p50_ms_per_chunk);
+    let _ = write!(out, "| p95 ms per chunk | {:.1} |\n", s.p95_ms_per_chunk);
+    let _ = write!(
+        out,
         "| Target ms per chunk | {:.1} |\n\n",
         s.target_ms_per_chunk
-    ));
+    );
 
     out.push_str("## Papers\n\n");
     out.push_str(
@@ -835,7 +828,8 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "| {} | {} | {} | {}/{}/{} | {} | {}/{} | {}/{} | {}/{} | {} | {:.1} | {} |\n",
             cell(&p.id),
             cell(&p.status),
@@ -853,7 +847,7 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             align_cell(p.body_alignment),
             p.ms_per_chunk,
             p.warnings,
-        ));
+        );
     }
 
     out.push_str("\n## Unmatched truth keys\n\n");
@@ -873,9 +867,9 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             .unmatched_truth_keys
             .len()
             .saturating_sub(UNMATCHED_KEYS_SHOWN);
-        out.push_str(&format!("- {}: {}", cell(&p.id), shown.join(", ")));
+        let _ = write!(out, "- {}: {}", cell(&p.id), shown.join(", "));
         if more > 0 {
-            out.push_str(&format!(" (+{more} more)"));
+            let _ = write!(out, " (+{more} more)");
         }
         out.push('\n');
     }
