@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Version of the record shapes and of the `SQLite` schema.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Version of the record shapes and of the `SQLite` schema. Bumped to 2 when
+/// `Line::role` was added: older ledgers deserialise every line as `body`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Pages per scheduling chunk (the "20-page chunk" of the product target).
 pub const CHUNK_PAGES: u32 = 20;
