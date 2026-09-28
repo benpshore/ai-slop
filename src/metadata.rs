@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::schema::{Author, Line, Metadata, PageText};
 
@@ -19,6 +20,9 @@ const SUPERSCRIPT_RATIO: f32 = 0.8;
 const MAX_AUTHOR_LINES: usize = 30;
 /// Maximum number of lines collected for the abstract.
 const MAX_ABSTRACT_LINES: usize = 80;
+/// Leading words the printed title must share with a differing `/Info` title
+/// before the printed one replaces it.
+const MIN_SHARED_LEADING_WORDS: usize = 3;
 /// Fraction of the page height at the top and at the bottom that counts as
 /// the running header / footer band.
 const HEADER_FOOTER_BAND: f32 = 0.1;
@@ -127,8 +131,11 @@ fn name_group_split_re() -> &'static Regex {
 ///
 /// `info` keys are the dictionary keys without the leading `/`. Page-1
 /// evidence is used when the corresponding `info` entry is missing or generic
-/// (for example `untitled` or `Microsoft Word - draft.docx`). Every field that
-/// is set gets an entry in `provenance`.
+/// (for example `untitled` or `Microsoft Word - draft.docx`). A non-generic
+/// `/Info` title is replaced by the largest-font title printed on page 1 when
+/// the two differ but clearly name the same paper: the `/Info` title can be
+/// stale (an earlier version's title) or drop the printed subtitle.
+/// Every field that is set gets an entry in `provenance`.
 pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> Metadata {
     let mut meta = Metadata {
         info: info.clone(),
@@ -146,6 +153,14 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         set_title(&mut meta, title, "info:Title");
     }
     let mut title_lines: Vec<usize> = Vec::new();
+    if let Some(info_title) = meta.title.clone()
+        && let Some(page) = first_page
+        && let Some((indices, printed)) = title_block(page)
+        && printed_title_supersedes(page, &info_title, &printed)
+    {
+        set_title(&mut meta, &printed, "first_page:largest-font");
+        title_lines = indices;
+    }
     if meta.title.is_none()
         && let Some(page) = first_page
         && let Some((indices, text)) = title_block(page)
@@ -226,7 +241,9 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         let same_as_title = meta
             .title
             .as_deref()
-            .is_some_and(|t| t.eq_ignore_ascii_case(subject));
+            .into_iter()
+            .chain(info.get("Title").map(String::as_str))
+            .any(|t| t.trim().eq_ignore_ascii_case(subject));
         if !same_as_title && find_doi(subject).is_none() && find_arxiv_id(subject).is_none() {
             meta.venue = Some(subject.to_string());
             meta.provenance
@@ -765,8 +782,26 @@ fn median_line_size(page: &PageText) -> Option<f32> {
     Some(sizes[sizes.len() / 2])
 }
 
+/// True for a line holding vertically set text, such as the rotated
+/// `arXiv:<id> [cs.XX]` stamp in the left margin: one of its spans has a box
+/// more than twice as tall as it is wide and taller than 1.5 times its font
+/// size (a horizontal span's box is about one font size tall). Checked per
+/// span so that a stamp grouped with a horizontal line is still recognised.
+fn is_rotated_line(page: &PageText, line: &Line) -> bool {
+    line.spans.iter().any(|idx| {
+        page.spans.get(*idx as usize).is_some_and(|span| {
+            span.bbox.is_some_and(|bbox| {
+                let width = bbox.x1 - bbox.x0;
+                let height = bbox.y1 - bbox.y0;
+                height > 2.0 * width && height > 1.5 * span.size.unwrap_or(0.0)
+            })
+        })
+    })
+}
+
 /// The group of consecutive largest-font lines near the top of the page.
 ///
+/// Vertically set lines (the `arXiv` margin stamp) are never part of it.
 /// Returns the indices of the lines and their joined text. `None` when there
 /// is no font-size evidence or when the largest size is not clearly larger
 /// than the page's typical size (no title stands out).
@@ -778,7 +813,7 @@ fn title_block(page: &PageText) -> Option<(Vec<usize>, String)> {
         if text.chars().count() < 3 || !text.chars().any(char::is_alphabetic) {
             continue;
         }
-        if line.bbox.is_some_and(|b| b.y1 < top_limit) {
+        if line.bbox.is_some_and(|b| b.y1 < top_limit) || is_rotated_line(page, line) {
             continue;
         }
         if let Some(size) = line_size(page, line) {
@@ -797,11 +832,15 @@ fn title_block(page: &PageText) -> Option<(Vec<usize>, String)> {
     let first = sized.iter().find(|(_, s)| *s >= threshold)?.0;
     let mut indices: Vec<usize> = vec![first];
     let mut next = first + 1;
-    while let Some(line) = page.lines.get(next)
-        && let Some(size) = line_size(page, line)
-        && size >= threshold
-        && line.text.trim().chars().any(char::is_alphabetic)
-    {
+    while let Some(line) = page.lines.get(next) {
+        if is_rotated_line(page, line) {
+            next += 1;
+            continue;
+        }
+        let large = line_size(page, line).is_some_and(|size| size >= threshold);
+        if !large || !line.text.trim().chars().any(char::is_alphabetic) {
+            break;
+        }
         indices.push(next);
         next += 1;
     }
@@ -874,6 +913,68 @@ fn matching_title_lines(page: &PageText, title: &str) -> Option<Vec<usize>> {
         }
     }
     None
+}
+
+/// [`normalize_for_match`] after NFKC folding (ligatures, full-width forms).
+fn fold_for_match(text: &str) -> String {
+    let compat: String = text.nfkc().collect();
+    normalize_for_match(&compat)
+}
+
+/// Lower-case alphanumeric words of `text` after NFKC folding, in order.
+fn match_words(text: &str) -> Vec<String> {
+    let compat: String = text.nfkc().collect();
+    compat
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether the title `printed` in the largest font on page 1 should replace
+/// the (non-generic) `/Info` title `info_title`.
+///
+/// Compared on lower-case letters and digits only, so case, spacing,
+/// punctuation, hyphenated wraps and footnote symbols never count as a
+/// difference:
+/// - equal, or `printed` a strict prefix of `info_title` (a truncated block):
+///   keep `/Info`;
+/// - `info_title` a strict prefix of `printed`: replace only when the text of
+///   `printed` before one of its `:` equals `info_title`, i.e. the `/Info`
+///   title dropped the printed subtitle (a trailing footnote digit or an
+///   author line swallowed by the block is not a subtitle);
+/// - otherwise replace when both start with the same
+///   [`MIN_SHARED_LEADING_WORDS`] words, neither is more than twice as long
+///   as the other in words, and `info_title` itself is not printed on the
+///   page (a stale `/Info` title from an earlier version of the paper).
+fn printed_title_supersedes(page: &PageText, info_title: &str, printed: &str) -> bool {
+    let info_key = fold_for_match(info_title);
+    let printed_key = fold_for_match(printed);
+    if info_key.is_empty() || printed_key.is_empty() || info_key == printed_key {
+        return false;
+    }
+    if info_key.starts_with(printed_key.as_str()) {
+        return false;
+    }
+    if printed_key.starts_with(info_key.as_str()) {
+        return printed
+            .match_indices(':')
+            .any(|(pos, _)| fold_for_match(&printed[..pos]) == info_key);
+    }
+    let info_words = match_words(info_title);
+    let printed_words = match_words(printed);
+    let shared = info_words
+        .iter()
+        .zip(printed_words.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if shared < MIN_SHARED_LEADING_WORDS {
+        return false;
+    }
+    if printed_words.len() > 2 * info_words.len() || info_words.len() > 2 * printed_words.len() {
+        return false;
+    }
+    matching_title_lines(page, info_title).is_none()
 }
 
 /// Lower-case alphanumeric characters only, for comparing printed text with
@@ -1502,6 +1603,239 @@ mod tests {
         assert_eq!(meta.provenance["title"], "info:Title");
         assert_eq!(author_names(&meta), vec!["Jane Doe", "John Smith"]);
         assert_eq!(meta.provenance["authors"], "page1:below-title");
+    }
+
+    /// Put the rotated `arXiv` margin stamp (20 pt, a tall narrow box) first
+    /// in reading order, as the column split of the reading order does.
+    fn with_arxiv_stamp(mut page: PageText, stamp: &str) -> PageText {
+        let bbox = BBox {
+            x0: 12.0,
+            y0: 220.0,
+            x1: 32.0,
+            y1: 570.0,
+        };
+        let index = page.spans.len() as u32;
+        page.spans.push(Span {
+            text: stamp.to_string(),
+            bbox: Some(bbox),
+            font: None,
+            size: Some(20.0),
+            seq: index,
+        });
+        page.lines.insert(
+            0,
+            Line {
+                text: stamp.to_string(),
+                bbox: Some(bbox),
+                column: 0,
+                spans: vec![index],
+            },
+        );
+        page.text = format!("{stamp}\n{}", page.text);
+        page
+    }
+
+    #[test]
+    fn rotated_arxiv_stamp_is_never_the_title() {
+        let page = with_arxiv_stamp(
+            page_from(&[
+                ("Kernel Widgets for Everyone", 14.0),
+                ("Jane Doe", 11.0),
+                ("Abstract", 10.0),
+                ("Body text one.", 10.0),
+                ("Body text two.", 10.0),
+            ]),
+            "arXiv:2501.00001v1 [cs.LG] 1 Jan 2025",
+        );
+        assert!(is_rotated_line(&page, &page.lines[0]));
+        assert!(!is_rotated_line(&page, &page.lines[1]));
+        // The stamp span grouped with a wide horizontal line still marks it.
+        let stamp_index = page.lines[0].spans[0];
+        let mut merged = page.lines[4].clone();
+        merged.spans.insert(0, stamp_index);
+        if let (Some(a), Some(b)) = (merged.bbox, page.lines[0].bbox) {
+            merged.bbox = Some(BBox {
+                x0: a.x0.min(b.x0),
+                y0: a.y0.min(b.y0),
+                x1: a.x1.max(b.x1),
+                y1: a.y1.max(b.y1),
+            });
+        }
+        assert!(is_rotated_line(&page, &merged));
+        let meta = extract_metadata(&BTreeMap::new(), &[page]);
+        assert_eq!(meta.title.as_deref(), Some("Kernel Widgets for Everyone"));
+        assert_eq!(meta.provenance["title"], "first_page:largest-font");
+    }
+
+    /// arXiv:2505.16990: `/Info` carries the title of an earlier version; page
+    /// 1 prints the `\title` of the current one.
+    #[test]
+    fn stale_info_title_is_replaced_by_printed_title() {
+        let stale =
+            "Dimple: Discrete Diffusion Multimodal Large Language Model with Parallel Decoding";
+        let info = info_from(&[("Title", stale), ("Subject", stale)]);
+        let page = with_arxiv_stamp(
+            page_from(&[
+                ("Dimple: Discrete Diffusion Parallel Generation for", 14.3),
+                ("Large Multimodal Modal", 14.3),
+                ("Runpeng Yu Xinyin Ma Xinchao Wang*", 12.0),
+                ("National University of Singapore", 12.0),
+                ("Abstract", 12.0),
+                ("This paper introduces Dimple and Dimple+,", 10.0),
+                ("two discrete diffusion multimodal large lan-", 10.0),
+                ("guage models (dMLLMs). Dimple is derived", 10.0),
+            ]),
+            "arXiv:2505.16990v3 [cs.CV] 30 Aug 2026",
+        );
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("Dimple: Discrete Diffusion Parallel Generation for Large Multimodal Modal")
+        );
+        assert_eq!(meta.provenance["title"], "first_page:largest-font");
+        // A Subject that repeats the (stale) `/Info` title is not a venue.
+        assert_eq!(meta.venue, None);
+    }
+
+    /// arXiv:2305.13843: `/Info` says "Recommender System", page 1 prints
+    /// "Recommender Systems".
+    #[test]
+    fn info_title_differing_in_one_word_is_replaced_by_printed_title() {
+        let info = info_from(&[(
+            "Title",
+            "Advances and Challenges of Multi-task Learning Method in Recommender System: A Survey",
+        )]);
+        let page = page_from(&[
+            (
+                "Advances and Challenges of Multi-task Learning Method in",
+                17.0,
+            ),
+            ("Recommender Systems: A Survey", 17.0),
+            (
+                "Mingzhu Zhang a , Ruiping Yin a,\u{2217} , Zhen Yang a and Yipeng Wang a",
+                11.0,
+            ),
+            (
+                "a Beijing University of Technology, Beijing, 100124, China",
+                8.0,
+            ),
+            ("ABSTRACT", 10.0),
+            (
+                "Multi-task learning (MTL) has been widely applied to modern",
+                10.0,
+            ),
+            (
+                "RSs, enabling the simultaneous optimization of diverse",
+                10.0,
+            ),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(
+            meta.title.as_deref(),
+            Some(
+                "Advances and Challenges of Multi-task Learning Method in Recommender Systems: A Survey"
+            )
+        );
+        assert_eq!(meta.provenance["title"], "first_page:largest-font");
+    }
+
+    /// arXiv:2608.28714: `/Info` drops the subtitle printed after the `:`.
+    #[test]
+    fn info_title_without_printed_subtitle_is_replaced() {
+        let info = info_from(&[(
+            "Title",
+            "Evaluating the Safety of Deep Learning-Based Brain MRI Reconstruction",
+        )]);
+        let page = page_from(&[
+            ("1", 8.0),
+            ("Evaluating the Safety of Deep Learning-Based", 24.0),
+            ("Brain MRI Reconstruction:", 24.0),
+            ("A Systematic Review of Current Evaluation", 24.0),
+            ("Practices", 24.0),
+            (
+                "Dat Tat Mai, Thai Viet Pham, Thu Nguyen Thi Dang, and James Jin Kang",
+                11.0,
+            ),
+            (
+                "Abstract\u{2014}Objective: Deep learning accelerates brain MRI",
+                9.0,
+            ),
+            (
+                "four- to tenfold, but learned models can erase a lesion or invent",
+                9.0,
+            ),
+            (
+                "tissue, and pixel-averaged scores such as PSNR and SSIM miss",
+                9.0,
+            ),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(
+            meta.title.as_deref(),
+            Some(
+                "Evaluating the Safety of Deep Learning-Based Brain MRI Reconstruction: \
+                 A Systematic Review of Current Evaluation Practices"
+            )
+        );
+        assert_eq!(meta.provenance["title"], "first_page:largest-font");
+    }
+
+    #[test]
+    fn printed_title_supersedes_only_on_clear_evidence() {
+        let page = page_from(&[("Body", 10.0)]);
+        let keep = |info: &str, printed: &str| !printed_title_supersedes(&page, info, printed);
+        // Same words up to case, punctuation, footnote symbols and wraps.
+        assert!(keep(
+            "A Practical Mode-parallel Implementation of the (H-)Tucker Decomposition via Randomization",
+            "A PRACTICAL MODE-PARALLEL IMPLEMENTATION OF THE (H-)TUCKER DECOMPOSITION VIA RANDOMIZATION"
+        ));
+        assert!(keep(
+            "Personality pairing improves human-AI collaboration",
+            "Personality pairing improves human\u{2013}AI collaboration \u{2217}"
+        ));
+        assert!(keep("Robust Reconstruction", "Robust Recon- struction"));
+        // A footnote digit or a swallowed author line is not a subtitle.
+        assert!(keep(
+            "Attention Is All You Need",
+            "Attention Is All You Need1"
+        ));
+        assert!(keep(
+            "Attention Is All You Need",
+            "Attention Is All You Need Ashish Vaswani"
+        ));
+        // A truncated block never replaces the full `/Info` title.
+        assert!(keep("Attention Is All You Need", "Attention Is"));
+        // Unrelated or barely related printed text.
+        assert!(keep(
+            "Final Camera Ready Version",
+            "Attention Is All You Need"
+        ));
+        assert!(keep(
+            "Deep Widgets for Graphs",
+            "Deep Widgets: A Survey of Everything"
+        ));
+        // An `/Info` title with its own `:` still gains a printed subtitle.
+        assert!(!keep(
+            "HintEval: A Python Toolkit",
+            "HintEval: A Python Toolkit: Hint Generation and Evaluation"
+        ));
+    }
+
+    #[test]
+    fn info_title_printed_on_the_page_is_kept_over_a_different_block() {
+        let info = info_from(&[("Title", "Kernel Widgets for Graph Learning")]);
+        let page = page_from(&[
+            ("Kernel Widgets for Everyone and More", 18.0),
+            ("Kernel Widgets for Graph Learning", 12.0),
+            ("Jane Doe", 10.0),
+            ("Body.", 10.0),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("Kernel Widgets for Graph Learning")
+        );
+        assert_eq!(meta.provenance["title"], "info:Title");
     }
 
     #[test]

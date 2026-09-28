@@ -59,7 +59,12 @@ const DOI_TRAILING: [char; 8] = ['.', ',', ';', ')', ']', ':', '}', '\''];
 /// Byte cap on [`PaperDump::reference_section_text`] (60 kB).
 pub const REFERENCE_TEXT_CAP: usize = 60_000;
 
-/// Separator between pages in [`PaperDump::reference_section_text`].
+/// Byte cap on [`PaperDump::body_text_extracted`] and
+/// [`PaperDump::body_text_truth`] (200 kB each).
+pub const BODY_TEXT_CAP: usize = 200_000;
+
+/// Separator between pages in [`PaperDump::reference_section_text`] and
+/// [`PaperDump::body_text_extracted`].
 pub const DUMP_PAGE_SEPARATOR: &str = "\n\u{c}\n";
 
 /// How one truth reference was (or was not) paired with an extracted entry.
@@ -1662,6 +1667,14 @@ pub struct PaperDump {
     /// (`GroundTruth::paper`).
     #[serde(default)]
     pub paper_truth: TruthPaper,
+    /// Every extracted page text in page order, joined by
+    /// [`DUMP_PAGE_SEPARATOR`], capped at [`BODY_TEXT_CAP`] bytes.
+    #[serde(default)]
+    pub body_text_extracted: String,
+    /// The `LaTeX` body text (`GroundTruth::body_text`), capped at
+    /// [`BODY_TEXT_CAP`] bytes.
+    #[serde(default)]
+    pub body_text_truth: String,
 }
 
 /// Reference heading on a single text line, for pages without `lines`.
@@ -1756,9 +1769,27 @@ pub fn reference_section_text(pages: &[PageText]) -> String {
     out
 }
 
+/// All page texts joined by [`DUMP_PAGE_SEPARATOR`], capped at
+/// [`BODY_TEXT_CAP`] bytes on a char boundary.
+pub fn body_text_extracted(pages: &[PageText]) -> String {
+    let mut out = String::new();
+    for (i, page) in pages.iter().enumerate() {
+        if i > 0 {
+            out.push_str(DUMP_PAGE_SEPARATOR);
+        }
+        out.push_str(&page.text);
+        if out.len() > BODY_TEXT_CAP {
+            break;
+        }
+    }
+    truncate_on_char_boundary(&mut out, BODY_TEXT_CAP);
+    out
+}
+
 /// Collects the truth, the extracted entries, the pairing from `eval`, the
-/// markers, warnings, timings, reference-section text, and the extracted
-/// and truth paper metadata for one paper.
+/// markers, warnings, timings, reference-section text, the extracted and
+/// truth paper metadata, and the extracted and truth body texts for one
+/// paper.
 pub fn dump_paper(
     id: &str,
     result: &ExtractionResult,
@@ -1770,6 +1801,8 @@ pub fn dump_paper(
         .iter()
         .flat_map(|page| page.warnings.iter().map(|w| (page.page, w.clone())))
         .collect();
+    let mut body_text_truth = truth.body_text.clone();
+    truncate_on_char_boundary(&mut body_text_truth, BODY_TEXT_CAP);
     PaperDump {
         id: id.to_string(),
         truth_method: truth.method.clone(),
@@ -1786,6 +1819,8 @@ pub fn dump_paper(
         reference_section_text: reference_section_text(&result.pages),
         metadata: result.metadata.clone(),
         paper_truth: truth.paper.clone(),
+        body_text_extracted: body_text_extracted(&result.pages),
+        body_text_truth,
     }
 }
 
@@ -2647,7 +2682,7 @@ mod tests {
             page2,
             lined_page(3, &["[2] B. Jones. Other. 2021."]),
         ];
-        let truth = truth_with(vec![ref_a, ref_b], "");
+        let truth = truth_with(vec![ref_a, ref_b], "Intro text.");
         let eval = evaluate("arxiv:1234.5678", &result, &truth);
         let dump = dump_paper("arxiv:1234.5678", &result, &truth, &eval);
 
@@ -2672,6 +2707,13 @@ mod tests {
         );
         assert_eq!(dump.metadata, result.metadata);
         assert_eq!(dump.paper_truth, truth.paper);
+        assert_eq!(
+            dump.body_text_extracted,
+            "Intro\nReferences\nnot the real section\n\u{c}\n\
+             Body text\n1 References\n[1] A. Smith. Alpha title. 2020.\n\u{c}\n\
+             [2] B. Jones. Other. 2021."
+        );
+        assert_eq!(dump.body_text_truth, "Intro text.");
     }
 
     #[test]
@@ -2705,9 +2747,33 @@ mod tests {
         let object = value.as_object_mut().unwrap();
         object.remove("metadata");
         object.remove("paper_truth");
+        object.remove("body_text_extracted");
+        object.remove("body_text_truth");
         let old: PaperDump = serde_json::from_value(value).unwrap();
         assert_eq!(old.metadata, Metadata::default());
         assert_eq!(old.paper_truth, TruthPaper::default());
+        assert_eq!(old.body_text_extracted, "");
+        assert_eq!(old.body_text_truth, "");
+    }
+
+    #[test]
+    fn dump_body_texts_are_capped_on_char_boundary() {
+        let long = "\u{e9}".repeat(120_000);
+        let mut result = sample_result(Vec::new(), Vec::new());
+        result.pages = vec![page(1, &long), page(2, "tail")];
+        let truth = truth_with(Vec::new(), &long);
+        let eval = evaluate("m", &result, &truth);
+        let dump = dump_paper("m", &result, &truth, &eval);
+        for text in [&dump.body_text_extracted, &dump.body_text_truth] {
+            assert!(text.len() <= BODY_TEXT_CAP, "{}", text.len());
+            assert!(text.len() >= BODY_TEXT_CAP - 1, "{}", text.len());
+            assert!(text.chars().all(|c| c == '\u{e9}'));
+        }
+        assert_eq!(body_text_extracted(&[]), "");
+        assert_eq!(
+            body_text_extracted(&[page(1, "a"), page(2, "b")]),
+            "a\n\u{c}\nb"
+        );
     }
 
     #[test]

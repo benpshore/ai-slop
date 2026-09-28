@@ -442,6 +442,628 @@
       ],
       "split": "holdout",
       "notes": null
+    },
+    {
+      "id": "arxiv:2309.10334",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2309.10334v1",
+      "source_url": "https://arxiv.org/e-print/2309.10334v1",
+      "pdf_sha256": "f5dea342cce3a0968d3c364da4dedf74c51cb3ce59c1448c2366a5a3fc7a5794",
+      "source_sha256": "69b6844e61abc34ad3652a4fb73b261b98c80b58126a31284937ac590d918471",
+      "categories": [
+        "physics.chem-ph",
+        "cond-mat.stat-mech",
+        "cs.IT",
+        "math.IT",
+        "stat.ML"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2401.15719",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2401.15719v5",
+      "source_url": "https://arxiv.org/e-print/2401.15719v5",
+      "pdf_sha256": "048fb6e704c293246a561d091443ce1d0a8b996cc9e5cc56655a2df78b239cca",
+      "source_sha256": "0c6390eecea5217bff3c3870e0482d7dd11c024e9d28e1ae503f41c4e57ed604",
+      "categories": [
+        "math.PR",
+        "cs.LG",
+        "cs.SY",
+        "eess.SY",
+        "math.OC"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2406.19204",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2406.19204v3",
+      "source_url": "https://arxiv.org/e-print/2406.19204v3",
+      "pdf_sha256": "55140b995648e0a395dd6a1911194092288514856a7938e3d284ef248795dd2a",
+      "source_sha256": "4abf82d2627a5ca1476d4855ec1ffbc651a56f71189c5db6c6c52318489639a1",
+      "categories": [
+        "cs.SI",
+        "physics.soc-ph"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2410.17124",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2410.17124v1",
+      "source_url": "https://arxiv.org/e-print/2410.17124v1",
+      "pdf_sha256": "2eba8c5cb339f1ceed03ba0a78cd035cd030f19c29964dbb1babb5df35164386",
+      "source_sha256": "50b73e962fbf64d2674da06295a7337d676a69ab05b070bcee16b0bcec8403c0",
+      "categories": [
+        "physics.med-ph",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2410.19245",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2410.19245v3",
+      "source_url": "https://arxiv.org/e-print/2410.19245v3",
+      "pdf_sha256": "51d9ee4102714b2b8a8ac67955ddd4a0a43063c2aef6e53f3a82e5cee3bedeb0",
+      "source_sha256": "1f384fa8d19b48c5272477e6fa7877ab8a1df7588e602668e6b6024fd22c49b0",
+      "categories": [
+        "cs.SE",
+        "cs.CV",
+        "cs.MA"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2412.11061",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2412.11061v2",
+      "source_url": "https://arxiv.org/e-print/2412.11061v2",
+      "pdf_sha256": "e5c64e1a58ed448809ada5c388b34aee224f3f75713594bfa75061a2b5c2a3b5",
+      "source_sha256": "a003d651e6d777c1912f23a4893e4f575541f405b0edaa308ccc43ed72253e07",
+      "categories": [
+        "cs.CV",
+        "cs.CY",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2503.00030",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2503.00030v3",
+      "source_url": "https://arxiv.org/e-print/2503.00030v3",
+      "pdf_sha256": "28e587c9718046232ae7ddc62f00fcd4a451f319a49dbc220ca088be47559063",
+      "source_sha256": "754108b40e076b0738d6217091773a6b34a1861b7c5b37200eb41f008b5c02b9",
+      "categories": [
+        "cs.LG",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2503.04404",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2503.04404v3",
+      "source_url": "https://arxiv.org/e-print/2503.04404v3",
+      "pdf_sha256": "7d2cc1894016503bf1ec14f73dceda290cfdfb7dc5ade345dcdd4a4d9b440b22",
+      "source_sha256": "9241938ce88cc5855d7f208e4b927e5f62c96582d9fcfac6827eb080dc1da55a",
+      "categories": [
+        "cs.LG",
+        "cs.CR",
+        "cs.NI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2503.13415",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2503.13415v2",
+      "source_url": "https://arxiv.org/e-print/2503.13415v2",
+      "pdf_sha256": "c32123a52893d3f1d35416daebb8ea94f26f4cf7bcd1f27fa22323fdfb1f71e6",
+      "source_sha256": "4d2b91c5b19a2fc5dcf7d93fd3bdfd7c4652885bf4243437fd292b2e54f0d177",
+      "categories": [
+        "cs.MA",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2504.10389",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2504.10389v3",
+      "source_url": "https://arxiv.org/e-print/2504.10389v3",
+      "pdf_sha256": "408c310a9559ca61f8737f0842e8fb6f6858ad391d9d74d11a38c7ac8fa5e6ab",
+      "source_sha256": "eff76dd7898d518e44a31746a5b480eba71acd3b43f092c7fbf2e4499858e64f",
+      "categories": [
+        "econ.TH",
+        "cs.DS",
+        "math.OC"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2505.22973",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2505.22973v3",
+      "source_url": "https://arxiv.org/e-print/2505.22973v3",
+      "pdf_sha256": "0c102cdbecbbb903f9693d081259d8611cc6296c32648f03ae861e5342011048",
+      "source_sha256": "715a134209f80a47c934f65dacbb6ac952de4fb4192286ff2b3985769892e26d",
+      "categories": [
+        "cs.LG",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2505.23862",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2505.23862v2",
+      "source_url": "https://arxiv.org/e-print/2505.23862v2",
+      "pdf_sha256": "49d399946d760ea550c17c2aa2e29fbe3397b76ebc421f32dbf84ad1c08c5e60",
+      "source_sha256": "a048e7fd8f3c2052f53f5855e5e224f320218be88ed227a1ea74dd295b1335d7",
+      "categories": [
+        "q-bio.QM",
+        "cs.AI",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2506.03828",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2506.03828v4",
+      "source_url": "https://arxiv.org/e-print/2506.03828v4",
+      "pdf_sha256": "324491be7d19ee3ff0fde0effa790a96d700d7dcc677f919ed7d02beaf3d3588",
+      "source_sha256": "fbe4bb83e0f61263b2cafa34d31a2e057761a9d407e4978d47a8ddd3bcb7d478",
+      "categories": [
+        "cs.AI",
+        "cs.MA"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2506.08311",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2506.08311v3",
+      "source_url": "https://arxiv.org/e-print/2506.08311v3",
+      "pdf_sha256": "c1bafcfe04d22fd4cedf31140414d076f8308d3bd97deeed67be103a51a59b6e",
+      "source_sha256": "2a24439efacb52b0be304973eab4fd1a6f4b579243713c3987a576ac41dfbd8e",
+      "categories": [
+        "cs.SE",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2506.23487",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2506.23487v2",
+      "source_url": "https://arxiv.org/e-print/2506.23487v2",
+      "pdf_sha256": "3b82421639a46210f245e91d203e3615d38ac68da4e7856ed24c75327c8fe971",
+      "source_sha256": "e4272bfad77ffa085429a6b3580748fe44a6b686942e51550cbd75ea9aa604fd",
+      "categories": [
+        "stat.ML",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2507.14211",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2507.14211v1",
+      "source_url": "https://arxiv.org/e-print/2507.14211v1",
+      "pdf_sha256": "187cb024beb09eb9dbc2d469cd63ad287782be386b2ca68a25e8d4f4e446b171",
+      "source_sha256": "a5c111a32574a03fefc54c60bb327cff1dfaf8b071146783503c9d6e24de00ee",
+      "categories": [
+        "cs.NI",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2507.14212",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2507.14212v1",
+      "source_url": "https://arxiv.org/e-print/2507.14212v1",
+      "pdf_sha256": "9b79461e25e3532fa9488c804a168b514cec8b988f9286e90582025b12e8c7a6",
+      "source_sha256": "043969154fdb4a269b621c76394abe592bdc9bd391e5193d7dddacaa99c68dbb",
+      "categories": [
+        "cs.CR",
+        "cs.SY",
+        "eess.SY"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2508.02208",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2508.02208v3",
+      "source_url": "https://arxiv.org/e-print/2508.02208v3",
+      "pdf_sha256": "bafd4bf7879d54e4b7ed4742e3bfdca93c1e750b51ee66d36f9349eaa20546e1",
+      "source_sha256": "6f16d2d541e42d01458550539de10ae66247a6e526bf1b2d06690d7e2f96a8ad",
+      "categories": [
+        "cs.CL",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2508.19485",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2508.19485v2",
+      "source_url": "https://arxiv.org/e-print/2508.19485v2",
+      "pdf_sha256": "241bf465af91e86ea386073098eb71dce21fe9c503fd4b9cc72f32af4db8e5a5",
+      "source_sha256": "746fe96bebdfdc20c4f7bef82c226a51d72ea36e8a3a86ca3f4edce30ff948b8",
+      "categories": [
+        "cs.CV"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2509.04183",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2509.04183v3",
+      "source_url": "https://arxiv.org/e-print/2509.04183v3",
+      "pdf_sha256": "e292ef6977535326a16df9590ee737fbf666aead0e6be1a9467b961270a6062b",
+      "source_sha256": "523e63eeb62cf212a9f02989d781209a65b07c4685ac4c8cded4fadb510ea2c1",
+      "categories": [
+        "cs.CL",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2509.12458",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2509.12458v3",
+      "source_url": "https://arxiv.org/e-print/2509.12458v3",
+      "pdf_sha256": "d16e884cb01112608826d6875d2032a7a56b87eff8815129d992f9a760af9e0d",
+      "source_sha256": "f9afaa43c090ee6f3c4a96b2f2e74b0a5479449aaa447f1e8b7e74ea8447d848",
+      "categories": [
+        "cs.RO",
+        "cs.AR",
+        "cs.CV",
+        "cs.ET",
+        "cs.SY",
+        "eess.SY"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2509.17930",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2509.17930v3",
+      "source_url": "https://arxiv.org/e-print/2509.17930v3",
+      "pdf_sha256": "17896029aafad03625f543e585aaecf957d88ffca681e91fae34cbbf2fe1dce4",
+      "source_sha256": "e520f6a92687fc3d573d55ae1fe44cf201100cc2b1813689af34f0577836e51d",
+      "categories": [
+        "cs.CL",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2509.24852",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2509.24852v3",
+      "source_url": "https://arxiv.org/e-print/2509.24852v3",
+      "pdf_sha256": "51a30bbf492e22e49261f28ef94fc034bf3fac01d8622bad02c5f717f1a9ee57",
+      "source_sha256": "9fd0829c9887dbd3f39547cf9148d8366c560ff3d937d13b53514ed287d71901",
+      "categories": [
+        "cs.NE"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2510.07065",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2510.07065v5",
+      "source_url": "https://arxiv.org/e-print/2510.07065v5",
+      "pdf_sha256": "11d7a6ce66859faed5d6d2406a8d99fc6b40b9c3226629983bf43bdc1f76b2db",
+      "source_sha256": "34db5b265f4f062ce8826bfab6aee15c97ac4a539ad3fedbfc9051b119c54654",
+      "categories": [
+        "cs.DM",
+        "cs.DS"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2510.26824",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2510.26824v2",
+      "source_url": "https://arxiv.org/e-print/2510.26824v2",
+      "pdf_sha256": "b0447c8f5e0ba689db050619f1bdb600bd021a4ac4be220101de74d9ea7b52b7",
+      "source_sha256": "48cbc56e2cccdb84593deaf3a912928c2ac88e9a01dbd2cc0d3bd3a6f57c0e55",
+      "categories": [
+        "cs.DL",
+        "cs.AI",
+        "cs.IR"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2511.15503",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2511.15503v5",
+      "source_url": "https://arxiv.org/e-print/2511.15503v5",
+      "pdf_sha256": "5682c7c0c805b3145b15eb5b55a1db81d491211b7fc0155cc919462c657ad349",
+      "source_sha256": "e76f7151e334a032670b47c4424d6997c5deb35e96cda9e73f709785fb2bb320",
+      "categories": [
+        "cs.AR",
+        "cs.DC",
+        "cs.LG",
+        "cs.PF"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2511.22707",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2511.22707v2",
+      "source_url": "https://arxiv.org/e-print/2511.22707v2",
+      "pdf_sha256": "6c3f533d3381ad343480b6c94814cb91fb52fc404e2f0c982551712ae7989837",
+      "source_sha256": "9f7dfc8c3fe39b13ce2fa7cd18fc98f806a5d918d64e8486382582bdeb538f14",
+      "categories": [
+        "cs.IR",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2512.10223",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2512.10223v2",
+      "source_url": "https://arxiv.org/e-print/2512.10223v2",
+      "pdf_sha256": "5d769462ea857ab4c0cbf0f4b151c607bb25b7a1242627530ca8fc22513d511e",
+      "source_sha256": "bbfcdc21314f04b6f0a76a61bd345b0341703479dae0645832d53ec5ee7f7ad2",
+      "categories": [
+        "cs.IT",
+        "eess.SP",
+        "math.IT"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2601.09974",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2601.09974v3",
+      "source_url": "https://arxiv.org/e-print/2601.09974v3",
+      "pdf_sha256": "e025680ca33e5ef9f7d45c9b02ee3b781dfa84e7d5ca13b23ba2bf75836650f7",
+      "source_sha256": "6be8581a785d70c389cb42d03732716fae3bbf5118c2fc99475d2e3198c3ff74",
+      "categories": [
+        "cs.AI",
+        "cs.CL"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2601.12491",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2601.12491v2",
+      "source_url": "https://arxiv.org/e-print/2601.12491v2",
+      "pdf_sha256": "1979f41a0b65edc89b31f5a7ba4e42977f032ef2f03a8f0cc7f2da677f0a5df2",
+      "source_sha256": "053b570771b9347163cebda93070433d445703153a9b9c24116ca8824183d6fe",
+      "categories": [
+        "cs.HC"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2602.00685",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2602.00685v2",
+      "source_url": "https://arxiv.org/e-print/2602.00685v2",
+      "pdf_sha256": "a43597bac0d9339e8ee6d4590fd33bf79357b976795b6dc34cb56ed456faff55",
+      "source_sha256": "fe9380ef7d3ff78769e8579e033e9c0ae385d5778545d6fe3d16e5d496b06af4",
+      "categories": [
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2602.01390",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2602.01390v3",
+      "source_url": "https://arxiv.org/e-print/2602.01390v3",
+      "pdf_sha256": "16476f2256bb2cea12a8f9ea29c4a338ed88a6b63ac2209b11470593cf247647",
+      "source_sha256": "a6bcac0314f9a0921e61e3e5c1c6234ad955b63d8925571c521bb345dbc9107f",
+      "categories": [
+        "cs.HC",
+        "cs.AI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2602.02748",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2602.02748v2",
+      "source_url": "https://arxiv.org/e-print/2602.02748v2",
+      "pdf_sha256": "b4efcc5888b883c3215e95d18b82d6276c8891eb2a5b778ddf3cf7fd0b98f85d",
+      "source_sha256": "8fe707cd6ca05afe9ef5653a120868382a0de6e5bb4cb488d8e2cd2d69dc0f0b",
+      "categories": [
+        "cs.DM"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2602.16061",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2602.16061v3",
+      "source_url": "https://arxiv.org/e-print/2602.16061v3",
+      "pdf_sha256": "b887868d3d59429b86adbd762050eb19d13161ffc76199f4a9c7278e5a9fd985",
+      "source_sha256": "909cd906265644a79f92d43b51f23eb5e9ce1d5e99214cb38b14df27ea5e5dd7",
+      "categories": [
+        "stat.ML",
+        "cs.LG",
+        "econ.EM",
+        "stat.ME"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2602.17690",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2602.17690v3",
+      "source_url": "https://arxiv.org/e-print/2602.17690v3",
+      "pdf_sha256": "6a31877f0e14cbb8bccb27ba38691d0eef1077e07cddbfe1cce62cda6b4ccc35",
+      "source_sha256": "d7dec42bea3a3f3c957ebb10b556df688523687054a32982f02e6726fe015693",
+      "categories": [
+        "cs.GR",
+        "cs.AI",
+        "cs.CV",
+        "cs.LG",
+        "cs.MM"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2603.03010",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2603.03010v2",
+      "source_url": "https://arxiv.org/e-print/2603.03010v2",
+      "pdf_sha256": "191196b9266ca92239964d5d4998e5088c161661fb35e1ad9b344250177c5517",
+      "source_sha256": "957c8fa4530fc34899a8ab652a0c9e48093554c2faff3b433bf59fd83184256a",
+      "categories": [
+        "cs.IR"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2603.04445",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2603.04445v3",
+      "source_url": "https://arxiv.org/e-print/2603.04445v3",
+      "pdf_sha256": "034b24ebf60d6dfe41a9e8f277fa129f45eaeff63e7acb38306d8d94d7c84831",
+      "source_sha256": "78d030a3079f3a3e44f96ceb54b920a9895a6a912e040cc3917286a6175de7c9",
+      "categories": [
+        "cs.NI",
+        "cs.CL",
+        "cs.PF"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2603.05575",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2603.05575v2",
+      "source_url": "https://arxiv.org/e-print/2603.05575v2",
+      "pdf_sha256": "31b7f00ed2c8fb5962dfc99ef8937d6e5e248d19b80717b437da52f7874e62f5",
+      "source_sha256": "ebd63dedb2736f361f2c0f63e34a1eb53b6d758a104c76902c15eff5f966c3aa",
+      "categories": [
+        "stat.ML",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2603.12824",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2603.12824v3",
+      "source_url": "https://arxiv.org/e-print/2603.12824v3",
+      "pdf_sha256": "cf9bd0d07a12af22c99a23620383db50a4c48a3512c3a5152b5bd29b5ed96b39",
+      "source_sha256": "8d97963038262f02382c567479e25d6199d5b2b2fed4d4fefdcbefcb344d255b",
+      "categories": [
+        "cs.IR",
+        "cs.CV",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2603.19305",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2603.19305v3",
+      "source_url": "https://arxiv.org/e-print/2603.19305v3",
+      "pdf_sha256": "b66edb729feedc84b507c9e87a65e969cc23f8be0360f624696ea9b3759680a0",
+      "source_sha256": "ae62b10968bf3fee3c83e65c23e98f1bbeb45ff74fdfbcbbf337fe26f60f4bdc",
+      "categories": [
+        "cs.RO",
+        "cs.AI",
+        "cs.CV"
+      ],
+      "split": "dev",
+      "notes": null
     }
   ]
 }
