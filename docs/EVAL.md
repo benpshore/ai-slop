@@ -103,20 +103,26 @@ as `marker_command_ratio`, uncapped, as a diagnostic.
 
 ## Measured status (2026-09-28)
 
-Eval run 36470860921 (`lopdf`, `dev` split, 60 papers) and run 36472085645 (`holdout`, 10
-papers), both on `ubuntu-24.04-arm` after PR #32. Full per-metric numbers for both splits are
+Eval run 36498236950 (`lopdf`, `dev` split, 60 papers) and run 36498705659 (`holdout`, 10
+papers), both on `ubuntu-24.04-arm` after PR #36. Full per-metric numbers for both splits are
 in [README.md](../README.md) and GitHub issue #15.
 
-Known gaps: `body_alignment` (0.751 `dev` / 0.787 `holdout`, body only) is far from the
-chunk-level acceptance protocol in [ENGINE.md](ENGINE.md) (the 99% error-free-chunk target is
-in [README.md](../README.md)), and the loop-7 region tagger over-tags prose on
-some papers (loop 8 is fixing this); `marker_recall` does not yet check that a marker resolved
-to the *correct* entry, only that it resolved to one; `ms_per_chunk` p50 (33.8 ms `dev`, 30.3
-ms `holdout`) is at or above the 30 ms target on these hosted runners, and M1 numbers have not
-been measured; the full `docling` pipeline is a routed exception at about 7.7 s/document, and
-`pdfium` is about 5x slower than `lopdf` on the reference-metrics path.
+Known gaps: `body_alignment` (0.877 `dev` / 0.883 `holdout`, exact word LCS, appendices
+included) is far from the chunk-level acceptance protocol in [ENGINE.md](ENGINE.md) (the 99%
+error-free-chunk target is in [README.md](../README.md)), and `body_word_precision` (82.3%
+`dev` / 82.0% `holdout`) is held down by untagged figure/table/math fragments; a few papers
+remain at 0.65–0.78 body alignment. `marker_precision` (targets that resolve to the *correct*
+entry, not just any entry) is 99.5% `dev` / 99.9% `holdout`, and `marker_key_recall` is 97.2%
+`dev` / 99.2% `holdout`; the plain `marker_recall` diagnostic still does not check correctness.
+Reference title accuracy is 94.4% `dev`. `ms_per_chunk` p50 (22.9 ms `dev`, 20.8 ms `holdout`)
+now meets the 30 ms target on these hosted runners — perf loop PR #35 took arm p50 from 35.4 ms
+to 18.7 ms before loop 10's region tagging added about 4 ms back — and M1 numbers have not been
+measured; a pre-loop-10 comparison (Native run 36491886979) found the full `docling` pipeline a
+routed exception at about 4.9 s per chunk, and `pdfium` about 6x slower than `lopdf` on the
+reference-metrics path.
 
 Per-loop taxonomies are in `docs/analysis/`: `eval-2026-09-28-lopdf.md`,
 `eval-2026-09-28-holdout.md`, `reading-order-2026-09-28.md`,
 `citations-loop6-2026-09-28.md`, `reading-order-loop7-2026-09-28.md`,
-`markers-loop8-2026-09-28.md`.
+`markers-loop8-2026-09-28.md`, `titles-loop9-2026-09-28.md`,
+`body-loop10-2026-09-28.md`, `perf-2026-09-28.md`.
