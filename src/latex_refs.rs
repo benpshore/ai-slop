@@ -152,9 +152,10 @@ pub struct TruthCitations {
     pub cite_commands: u32,
     /// Keys in document order, duplicates kept.
     pub cited_keys: Vec<String>,
-    /// Keys from `\nocite{...}` (excluding `*`).
+    /// Keys from `\nocite{...}` and `multibib`'s `\nocite<name>{...}`
+    /// (excluding `*`).
     pub nocite_keys: Vec<String>,
-    /// `\nocite{*}` was present.
+    /// `\nocite{*}` (or a `multibib` `\nocite<name>{*}`) was present.
     pub nocite_all: bool,
     /// Commands among `cite_commands` that print only an author, year,
     /// title, date or URL (`\citeauthor`, `\citeyear`, ...); their keys are
@@ -1689,7 +1690,7 @@ fn normalize_author(piece: &str) -> Option<String> {
 struct CiteCommand {
     /// Byte range of the whole command including its arguments.
     span: Range<usize>,
-    /// It was `\nocite`.
+    /// It was `\nocite` or a `multibib` `\nocite<name>`.
     nocite: bool,
     /// It prints only an author, year, title, date or URL.
     author_year_only: bool,
@@ -1718,17 +1719,22 @@ fn is_plain_key(key: &str) -> bool {
     !key.contains(|c: char| c.is_whitespace() || matches!(c, '\\' | '{' | '}'))
 }
 
+/// Whether `\name` is `\nocite` or a `multibib` variant (`\nociteapp`, ...).
+fn is_nocite_command(name: &str) -> bool {
+    name.starts_with("nocite")
+}
+
 /// All `\cite`-family and `\nocite` commands with their key lists.
 fn scan_cites(clean: &str) -> Vec<CiteCommand> {
     let mut found = Vec::new();
     for caps in command_re().captures_iter(clean) {
         let Some(whole) = caps.get(0) else { continue };
         let name = &caps[1];
-        let nocite = name == "nocite";
+        let nocite = is_nocite_command(name);
         if !nocite && !is_cite_command(name) {
             continue;
         }
-        let known = nocite || CITE_COMMANDS.contains(&name);
+        let known = name == "nocite" || CITE_COMMANDS.contains(&name);
         let mut i = skip_ws(clean, whole.end());
         for _ in 0..2 {
             if clean.as_bytes().get(i) != Some(&b'[') {
@@ -1775,7 +1781,8 @@ fn scan_cites(clean: &str) -> Vec<CiteCommand> {
 /// `\textcite`, `\autocite`, `\footcite` and friends, and any other command
 /// named `cite...` (`multibib`'s `\citeapp`, `\citeA`, ...) whose keys look
 /// like keys, with `*` and up to two `[...]` arguments before `{keys}`;
-/// `\nocite{keys}` and `\nocite{*}`. Commented text is ignored, and so are
+/// `\nocite{keys}` and `\nocite{*}`, and `multibib`'s `\nocite<name>{keys}`
+/// and `\nocite<name>{*}` (`\nociteapp{*}`). Commented text is ignored, and so are
 /// commands with no key (macro definitions such as `\cite{#1}`). Keys are
 /// trimmed and split on `,`. Only the first key group of multi-group
 /// commands (`\cites{a}{b}`) is read. Author- or year-only commands are
@@ -2606,10 +2613,26 @@ fn bbl_is_partial(merged: &str, wanted: &BTreeSet<String>, bbl: &[TruthReference
     merged.contains("\\newcites") || covered * 2 < wanted.len()
 }
 
-/// `.bib` entries for wanted keys that no `.bbl` entry has.
+/// Whether a `.bbl` set of a `\nocite{*}` source misses a whole
+/// bibliography. With `\nocite{*}` the wanted keys say nothing (every `.bib`
+/// entry is printed), so the test is the source declaring extra
+/// bibliographies with `multibib`'s `\newcites`, or the `.bbl` keys covering
+/// fewer than half of the distinct `.bib` keys.
+fn bbl_is_partial_for_all(merged: &str, bib: &[TruthReference], bbl: &[TruthReference]) -> bool {
+    let keys: BTreeSet<String> = bib.iter().map(|r| r.key.to_ascii_lowercase()).collect();
+    if keys.is_empty() {
+        return false;
+    }
+    let have: BTreeSet<String> = bbl.iter().map(|r| r.key.to_ascii_lowercase()).collect();
+    let covered = keys.iter().filter(|k| have.contains(*k)).count();
+    merged.contains("\\newcites") || covered * 2 < keys.len()
+}
+
+/// `.bib` entries that no `.bbl` entry has, restricted to `wanted` keys when
+/// given (`None` keeps every such entry, for `\nocite{*}`).
 fn missing_from_bbl(
     entries: Vec<TruthReference>,
-    wanted: &BTreeSet<String>,
+    wanted: Option<&BTreeSet<String>>,
     bbl: &[TruthReference],
 ) -> Vec<TruthReference> {
     let have: BTreeSet<String> = bbl.iter().map(|r| r.key.to_ascii_lowercase()).collect();
@@ -2617,10 +2640,35 @@ fn missing_from_bbl(
         .into_iter()
         .filter(|entry| {
             let key = entry.key.to_ascii_lowercase();
-            wanted.contains(&key) && !have.contains(&key)
+            wanted.is_none_or(|keys| keys.contains(&key)) && !have.contains(&key)
         })
         .collect();
     dedupe_keys(extra)
+}
+
+/// `.bib` entries to append to a `.bbl` set that misses a whole
+/// bibliography: every `.bib` entry no `.bbl` has when `\nocite{*}` is
+/// present (see `bbl_is_partial_for_all`), else the wanted ones (see
+/// `bbl_is_partial`). Empty when the `.bbl` set looks complete.
+fn bib_extras(
+    files: &LatexFiles,
+    merged: &str,
+    citations: &TruthCitations,
+    wanted: &BTreeSet<String>,
+    bbl: &[TruthReference],
+) -> Result<Vec<TruthReference>, TruthError> {
+    if !citations.nocite_all && !bbl_is_partial(merged, wanted, bbl) {
+        return Ok(Vec::new());
+    }
+    let entries = read_bib_entries(files)?;
+    let extra = if citations.nocite_all && bbl_is_partial_for_all(merged, &entries, bbl) {
+        missing_from_bbl(entries, None, bbl)
+    } else if bbl_is_partial(merged, wanted, bbl) {
+        missing_from_bbl(entries, Some(wanted), bbl)
+    } else {
+        Vec::new()
+    };
+    Ok(extra)
 }
 
 /// Ground truth for one paper's source tree.
@@ -2634,7 +2682,9 @@ fn missing_from_bbl(
 /// `.bib` entry when `\nocite{*}` is present (`bib-all`). When `.bbl` files
 /// exist but miss a whole bibliography (`multibib` shipping only `app.bbl`,
 /// see `bbl_is_partial`), the `.bib` entries of cited keys that no `.bbl`
-/// has are appended after the `.bbl` entries (method `bbl+bib`).
+/// has are appended after the `.bbl` entries (method `bbl+bib`); with
+/// `\nocite{*}` that is every `.bib` entry no `.bbl` has (see
+/// `bbl_is_partial_for_all`).
 /// [`TruthError::NoBibliography`] when none of these yields an entry.
 pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
     let mut main: Option<(PathBuf, String)> = None;
@@ -2687,11 +2737,8 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
             references = dedupe_keys(cited_entries);
             "bib-cited"
         }
-    } else if from_bbl_files
-        && !files.bib.is_empty()
-        && bbl_is_partial(&merged, &wanted, &references)
-    {
-        let extra = missing_from_bbl(read_bib_entries(files)?, &wanted, &references);
+    } else if from_bbl_files && !files.bib.is_empty() {
+        let extra = bib_extras(files, &merged, &citations, &wanted, &references)?;
         if extra.is_empty() {
             "bbl"
         } else {
@@ -2877,6 +2924,54 @@ As \citeauthor{gamma} showed in \citeyear{gamma}.
     const REFS_BIB: &str = r"@article{alpha, title={A}, year={2001}}
 @article{beta, title={B}, year={2002}}
 @article{gamma, title={G}, year={2003}}
+";
+
+    const NOCITE_MULTIBIB_TEX: &str = r"\documentclass{article}
+\usepackage{multibib}
+\newcites{app}{References for the Appendices}
+\begin{document}
+Main text.
+\nocite{*}
+\bibliographystyle{plain}
+\bibliography{refs}
+\appendix
+Appendix text.
+\nociteapp{*}
+\bibliographystyleapp{plain}
+\bibliographyapp{app}
+\end{document}
+";
+
+    const APP_BBL: &str = r"\begin{thebibliography}{2}
+\bibitem{app1} Ann Appendix.
+\newblock First appendix paper.
+\newblock Venue, 2011.
+\bibitem{app2} Bob Appendix.
+\newblock Second appendix paper.
+\newblock Venue, 2012.
+\end{thebibliography}
+";
+
+    const MAIN_BBL: &str = r"\begin{thebibliography}{4}
+\bibitem{m1} Author One.
+\newblock Main one.
+\newblock Venue, 2001.
+\bibitem{m2} Author Two.
+\newblock Main two.
+\newblock Venue, 2002.
+\bibitem{m3} Author Three.
+\newblock Main three.
+\newblock Venue, 2003.
+\bibitem{m4} Author Four.
+\newblock Main four.
+\newblock Venue, 2004.
+\end{thebibliography}
+";
+
+    const MAIN_REFS_BIB: &str = r"@article{m1, title={Main one}, year={2001}}
+@article{m2, title={Main two}, year={2002}}
+@article{m3, title={Main three}, year={2003}}
+@article{m4, title={Main four}, year={2004}}
 ";
 
     const NOCITE_TEX: &str = r"\begin{document}
@@ -3442,6 +3537,52 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
         .unwrap();
         assert_eq!(truth.method, "bbl+bib");
         assert_eq!(truth.references.len(), 5);
+    }
+
+    #[test]
+    fn ground_truth_nocite_all_multibib_merges_every_missing_bib_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.tex"), NOCITE_MULTIBIB_TEX).unwrap();
+        fs::write(dir.path().join("app.bbl"), APP_BBL).unwrap();
+        fs::write(dir.path().join("refs.bib"), MAIN_REFS_BIB).unwrap();
+
+        let cites = parse_cites(NOCITE_MULTIBIB_TEX);
+        assert!(cites.nocite_all);
+        assert!(cites.nocite_keys.is_empty());
+        assert!(cites.cited_keys.is_empty());
+        assert_eq!(cites.cite_commands, 0);
+
+        let partial = ground_truth(&files(
+            dir.path(),
+            &["main.tex"],
+            &["app.bbl"],
+            &["refs.bib"],
+        ))
+        .unwrap();
+        assert_eq!(partial.method, "bbl+bib");
+        let keys: Vec<&str> = partial.references.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["app1", "app2", "m1", "m2", "m3", "m4"]);
+        assert_eq!(partial.references[1].source, TruthSource::Bbl);
+        assert_eq!(partial.references[2].source, TruthSource::Bib);
+        assert!(!partial.body_text.contains('*'), "{}", partial.body_text);
+
+        // Every `.bbl` shipped: nothing is merged.
+        fs::write(dir.path().join("main.bbl"), MAIN_BBL).unwrap();
+        let complete = ground_truth(&files(
+            dir.path(),
+            &["main.tex"],
+            &["app.bbl", "main.bbl"],
+            &["refs.bib"],
+        ))
+        .unwrap();
+        assert_eq!(complete.method, "bbl");
+        assert_eq!(complete.references.len(), 6);
+        assert!(
+            complete
+                .references
+                .iter()
+                .all(|r| r.source == TruthSource::Bbl)
+        );
     }
 
     #[test]

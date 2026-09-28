@@ -40,6 +40,11 @@ enum Style {
     Paren,
     /// `Smith, A. (2020)` and friends.
     AuthorYear,
+    /// `[12]` printed on a line of its own, apart from the entry it labels
+    /// (the label column of an IEEE list that the layout pass detached).
+    /// The entries segment like author-year ones and take the printed
+    /// numbers as labels.
+    Detached,
 }
 
 /// One line of the reference section with the layout evidence needed for
@@ -636,10 +641,44 @@ fn numbered_label_re() -> &'static Regex {
 }
 
 /// A bare `[n]` label with nothing after it (the label column of an IEEE
-/// list that the layout pass emitted apart from its entries).
+/// list that the layout pass emitted apart from its entries). Group 1 is
+/// the number.
 fn bare_label_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\s*\[\d+\]\s*$").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"^\s*\[(\d+)\]\s*$").expect("valid regex"))
+}
+
+/// Printed number of a bare `[n]` line ([`bare_label_re`]).
+fn bare_label_number(text: &str) -> Option<u32> {
+    let caps = bare_label_re().captures(text)?;
+    caps.get(1)?.as_str().parse::<u32>().ok()
+}
+
+/// Shortest run of ascending bare `[n]` lines that numbers a list.
+const DETACHED_RUN: usize = 3;
+
+/// Do at least [`DETACHED_RUN`] bare `[n]` lines with ascending numbers
+/// follow one another in `lines` (other lines may sit between them)? Such
+/// a run is the label column of a numbered list that the layout pass
+/// emitted apart from its entries.
+fn detached_run(lines: &[SectionLine]) -> bool {
+    let mut run = 0usize;
+    let mut previous: Option<u32> = None;
+    for line in lines {
+        let Some(number) = bare_label_number(&line.text) else {
+            continue;
+        };
+        run = if previous.is_some_and(|p| number > p) {
+            run + 1
+        } else {
+            1
+        };
+        if run >= DETACHED_RUN {
+            return true;
+        }
+        previous = Some(number);
+    }
+    false
 }
 
 /// Could `text` be the first line of a reference entry: a numbered label,
@@ -986,7 +1025,7 @@ fn numbered_label(style: Style, text: &str) -> Option<(u32, String)> {
         Style::Bracket => bracket_label_re(),
         Style::Dot => dot_label_re(),
         Style::Paren => paren_label_re(),
-        Style::AuthorYear => return None,
+        Style::AuthorYear | Style::Detached => return None,
     };
     let caps = re.captures(text)?;
     let number: u32 = caps.get(1)?.as_str().parse().ok()?;
@@ -994,16 +1033,17 @@ fn numbered_label(style: Style, text: &str) -> Option<(u32, String)> {
         Style::Bracket => format!("[{number}]"),
         Style::Dot => format!("{number}."),
         Style::Paren => format!("{number})"),
-        Style::AuthorYear => return None,
+        Style::AuthorYear | Style::Detached => return None,
     };
     Some((number, label))
 }
 
 /// Numbering style from the first three lines (the first line may be a
-/// stray fragment or a column artefact).
+/// stray fragment or a column artefact). Bare `[n]` lines are labels the
+/// layout pass detached from their entries: they are no evidence of the
+/// bracket style, but a run of them ([`detached_run`]) numbers the list
+/// ([`Style::Detached`]).
 fn detect_style(lines: &[SectionLine]) -> Style {
-    // A bare `[n]` line is a label the layout pass detached from its
-    // entry, not evidence of the bracket style.
     let candidates = lines
         .iter()
         .filter(|line| !bare_label_re().is_match(&line.text))
@@ -1018,6 +1058,9 @@ fn detect_style(lines: &[SectionLine]) -> Style {
         if paren_label_re().is_match(&line.text) {
             return Style::Paren;
         }
+    }
+    if detached_run(lines) {
+        return Style::Detached;
     }
     Style::AuthorYear
 }
@@ -1060,6 +1103,9 @@ struct ListBody {
     /// appendix heading, a caption, a biography, ...); `None` when the list
     /// runs to `stop` or to the end of the document.
     end: Option<(u32, usize)>,
+    /// Printed numbers of the bare `[n]` lines of a [`Style::Detached`]
+    /// list, in reading order and before the cut; empty for other styles.
+    labels: Vec<u32>,
 }
 
 /// Collect, clean and cut the lines of the list that starts at `section`
@@ -1071,11 +1117,25 @@ fn list_body(
 ) -> ListBody {
     let mut lines = section_lines(pages, section, stop);
     let style = detect_style(&lines);
-    if style == Style::AuthorYear {
-        // Labels the layout pass detached from their entries carry no text.
-        lines.retain(|line| !bare_label_re().is_match(&line.text));
-    } else {
-        lines = drop_foreign_column_lines(lines, style);
+    // Labels the layout pass detached from their entries carry no text;
+    // a detached list keeps their numbers (with their positions) to label
+    // the entries with.
+    let mut detached: Vec<(u32, usize, u32)> = Vec::new();
+    match style {
+        Style::AuthorYear => {
+            lines.retain(|line| !bare_label_re().is_match(&line.text));
+        }
+        Style::Detached => {
+            for line in &lines {
+                if let Some(number) = bare_label_number(&line.text) {
+                    detached.push((line.page, line.line, number));
+                }
+            }
+            lines.retain(|line| !bare_label_re().is_match(&line.text));
+        }
+        Style::Bracket | Style::Dot | Style::Paren => {
+            lines = drop_foreign_column_lines(lines, style);
+        }
     }
     let median = median_size(&lines);
     let context: String = lines
@@ -1093,11 +1153,29 @@ fn list_body(
     if let Some(k) = cut {
         lines.truncate(k);
     }
+    let labels: Vec<u32> = detached
+        .into_iter()
+        .filter(|&(page, line, _)| end.is_none_or(|e| (page, line) < e))
+        .map(|(_, _, number)| number)
+        .collect();
     ListBody {
         lines,
         style,
         context,
         end,
+        labels,
+    }
+}
+
+/// Label the entries of a list whose `[n]` labels arrived on lines of
+/// their own: the k-th printed label goes to the k-th entry in reading
+/// order; entries beyond the last label continue the sequence.
+fn assign_detached_labels(entries: &mut [ReferenceEntry], labels: &[u32]) {
+    let mut next: u32 = 1;
+    for (k, entry) in entries.iter_mut().enumerate() {
+        let number = labels.get(k).copied().unwrap_or(next);
+        entry.label = Some(format!("[{number}]"));
+        next = number.saturating_add(1);
     }
 }
 
@@ -1108,10 +1186,16 @@ fn segment_list(
     stop: Option<(u32, usize)>,
 ) -> Vec<ReferenceEntry> {
     let body = list_body(pages, section, stop);
-    if body.style == Style::AuthorYear {
-        segment_author_year(&body.lines, &body.context)
-    } else {
-        segment_numbered(&body.lines, body.style, &body.context)
+    match body.style {
+        Style::AuthorYear => segment_author_year(&body.lines, &body.context),
+        Style::Detached => {
+            let mut entries = segment_author_year(&body.lines, &body.context);
+            assign_detached_labels(&mut entries, &body.labels);
+            entries
+        }
+        Style::Bracket | Style::Dot | Style::Paren => {
+            segment_numbered(&body.lines, body.style, &body.context)
+        }
     }
 }
 
@@ -2543,17 +2627,54 @@ fn mask_year(text: &str, year: Option<&(Range<usize>, u16)>) -> String {
     }
 }
 
+/// The numeric namespace of one reference list: its printed numbers and
+/// where the list ends, so that a marker past that end (in an appendix)
+/// resolves in the next list first.
+struct NumberSpace {
+    /// Page of the list's first numbered entry, used to pair the namespace
+    /// with its [`ListExtent`].
+    first_page: u32,
+    /// `(page number, line index)` of the line that ends the list; `None`
+    /// when it runs to the end of the document or its extent is unknown.
+    end: Option<(u32, usize)>,
+    /// Printed number -> entry index (the first entry wins when a number
+    /// repeats within one list).
+    by_number: BTreeMap<u32, u32>,
+}
+
 /// Lookup tables for resolving markers to `ReferenceEntry::index`.
 struct RefIndex {
     /// The list is numbered (`[n]`, `n.`, `n)`); markers are numeric.
     numbered: bool,
-    /// Printed number -> entry index (the first list wins when two lists
-    /// print the same number).
-    by_number: BTreeMap<u32, u32>,
-    /// Largest printed number; a marker citing more is not a citation.
+    /// One numeric namespace per list in document order: a list whose
+    /// numbers restart (`References for the Appendices` starting again at
+    /// `[1]`) opens a new one; a list that continues the numbering shares
+    /// the namespace of the list before it.
+    spaces: Vec<NumberSpace>,
+    /// Largest printed number of any list; a marker citing more is not a
+    /// citation.
     max_number: u32,
     /// (first-author surname, lower case; year; entry index).
     by_author_year: Vec<(String, u16, u32)>,
+}
+
+/// Printed number of a numbered entry's label (`[12]`, `12.`, `12)`).
+fn printed_number(entry: &ReferenceEntry) -> Option<u32> {
+    let label = entry.label.as_deref()?;
+    let caps = numbered_label_re().captures(label)?;
+    caps.get(1)?.as_str().parse::<u32>().ok()
+}
+
+/// The namespace a marker at byte `offset` of a page resolves in first,
+/// given [`RefIndex::space_ends`] for that page: the list after the last
+/// list whose end the marker has passed (a marker in the appendix after
+/// the main bibliography cites the appendix list), else the first list.
+fn home_space(ends: &[Option<usize>], offset: usize) -> usize {
+    let passed = ends
+        .iter()
+        .take_while(|end| matches!(**end, Some(e) if offset >= e))
+        .count();
+    passed.min(ends.len().saturating_sub(1))
 }
 
 /// Surname of a printed author name: the part before a comma, else the last
@@ -2580,15 +2701,26 @@ fn author_surname(name: &str) -> String {
 }
 
 impl RefIndex {
-    fn build(refs: &[ReferenceEntry]) -> Self {
-        let mut by_number: BTreeMap<u32, u32> = BTreeMap::new();
+    /// Tables over `refs`; `extents` (the lists in document order, see
+    /// [`list_extents`]) give every numeric namespace its end.
+    fn build(refs: &[ReferenceEntry], extents: &[ListExtent]) -> Self {
+        let mut spaces: Vec<NumberSpace> = Vec::new();
+        let mut last_number: Option<u32> = None;
         let mut by_author_year: Vec<(String, u16, u32)> = Vec::new();
         for entry in refs {
-            if let Some(label) = entry.label.as_deref()
-                && let Some(caps) = numbered_label_re().captures(label)
-                && let Some(number) = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok())
-            {
-                by_number.entry(number).or_insert(entry.index);
+            if let Some(number) = printed_number(entry) {
+                let restart = last_number.is_some_and(|previous| number <= previous);
+                if spaces.is_empty() || restart {
+                    spaces.push(NumberSpace {
+                        first_page: entry.page,
+                        end: None,
+                        by_number: BTreeMap::new(),
+                    });
+                }
+                if let Some(space) = spaces.last_mut() {
+                    space.by_number.entry(number).or_insert(entry.index);
+                }
+                last_number = Some(number);
             }
             let surname = entry
                 .authors
@@ -2607,20 +2739,65 @@ impl RefIndex {
                 by_author_year.push((surname, year, entry.index));
             }
         }
-        let max_number = by_number.keys().next_back().copied().unwrap_or(0);
+        // Pair every namespace with the list it was segmented from: the
+        // last list that starts on or before the namespace's first page,
+        // never one already taken by an earlier namespace.
+        let mut taken: Option<usize> = None;
+        for space in &mut spaces {
+            let by_page = extents
+                .iter()
+                .rposition(|extent| extent.start.0 <= space.first_page)
+                .unwrap_or(0);
+            let extent_index = taken.map_or(by_page, |t| by_page.max(t + 1));
+            space.end = extents.get(extent_index).and_then(|extent| extent.end);
+            taken = Some(extent_index);
+        }
+        let max_number = spaces
+            .iter()
+            .filter_map(|space| space.by_number.keys().next_back().copied())
+            .max()
+            .unwrap_or(0);
         Self {
-            numbered: !by_number.is_empty(),
-            by_number,
+            numbered: !spaces.is_empty(),
+            spaces,
             max_number,
             by_author_year,
         }
     }
 
+    /// Per numeric namespace: the byte offset of `page.text` from which a
+    /// marker lies past that list's end (`Some(0)` when the list ended on
+    /// an earlier page), or `None` when the list has not ended by this
+    /// page. See [`home_space`].
+    fn space_ends(&self, page: &PageText) -> Vec<Option<usize>> {
+        self.spaces
+            .iter()
+            .map(|space| match space.end {
+                Some((end_page, _)) if page.page > end_page => Some(0),
+                Some((end_page, end_line)) if page.page == end_page => {
+                    Some(heading_byte_offset(page, end_line))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Entry indices of the printed `numbers`, in order, without repeats.
-    fn targets_for(&self, numbers: &[u32]) -> Vec<u32> {
+    /// Each number is looked up in the namespace `home` first and then in
+    /// the other lists in document order.
+    fn targets_for(&self, numbers: &[u32], home: usize) -> Vec<u32> {
         let mut targets: Vec<u32> = Vec::new();
         for number in numbers {
-            if let Some(&idx) = self.by_number.get(number)
+            let found = self
+                .spaces
+                .get(home)
+                .and_then(|space| space.by_number.get(number))
+                .or_else(|| {
+                    self.spaces
+                        .iter()
+                        .find_map(|space| space.by_number.get(number))
+                });
+            if let Some(&idx) = found
                 && !targets.contains(&idx)
             {
                 targets.push(idx);
@@ -2684,12 +2861,14 @@ fn heading_byte_offset(page: &PageText, first_line: usize) -> usize {
 
 /// A marker found on a page: its byte range in `PageText::text`, its text,
 /// the resolved entry indices and, for a numeric marker, the printed
-/// numbers it cites.
+/// numbers it cites and the namespace ([`home_space`]) they resolve in
+/// first.
 struct Found {
     range: Range<usize>,
     text: String,
     targets: Vec<u32>,
     numbers: Vec<u32>,
+    space: usize,
 }
 
 /// Is the bracket group at `start..end` part of a symbol rather than a
@@ -2714,8 +2893,15 @@ fn glued_to_word(text: &str, start: usize, end: usize) -> bool {
 /// group is rejected when any item is `0` or above the largest printed
 /// number (`[0, 1]` is an interval), or when it is glued to a symbol
 /// ([`glued_to_word`]). A note after the numbers (`[22, Theorem 4]`) is
-/// kept in the marker text but cites nothing.
-fn numeric_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> Vec<Found> {
+/// kept in the marker text but cites nothing. `ends` is
+/// [`RefIndex::space_ends`] for the page: it picks the namespace each
+/// marker resolves in first.
+fn numeric_markers(
+    text: &str,
+    window: &Range<usize>,
+    index: &RefIndex,
+    ends: &[Option<usize>],
+) -> Vec<Found> {
     let mut out: Vec<Found> = Vec::new();
     for caps in numeric_marker_re().captures_iter(&text[window.clone()]) {
         let (Some(whole), Some(inner)) = (caps.get(0), caps.get(1)) else {
@@ -2751,7 +2937,8 @@ fn numeric_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> Vec<F
         if !plausible || numbers.is_empty() {
             continue;
         }
-        let targets = index.targets_for(&numbers);
+        let space = home_space(ends, start);
+        let targets = index.targets_for(&numbers, space);
         if targets.is_empty() {
             continue;
         }
@@ -2760,6 +2947,7 @@ fn numeric_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> Vec<F
             text: whole.as_str().to_string(),
             targets,
             numbers,
+            space,
         });
     }
     out
@@ -2800,7 +2988,7 @@ fn merge_adjacent(text: &str, found: Vec<Found>, index: &RefIndex) -> Vec<Found>
             && let Some(numbers) =
                 adjacent_numbers(&text[last.range.end..next.range.start], last, &next)
         {
-            let targets = index.targets_for(&numbers);
+            let targets = index.targets_for(&numbers, last.space);
             if !targets.is_empty() {
                 last.range.end = next.range.end;
                 last.text = text[last.range.clone()].to_string();
@@ -2835,6 +3023,7 @@ fn author_year_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> V
             text: whole.as_str().to_string(),
             targets,
             numbers: Vec::new(),
+            space: 0,
         });
     }
     for found in parenthetical_re().find_iter(slice) {
@@ -2876,6 +3065,7 @@ fn author_year_markers(text: &str, window: &Range<usize>, index: &RefIndex) -> V
             text: found.as_str().to_string(),
             targets,
             numbers: Vec::new(),
+            space: 0,
         });
     }
     out
@@ -2965,21 +3155,26 @@ fn page_scan_windows(page: &PageText, extents: &[ListExtent]) -> Vec<Range<usize
 /// marker. Author-year lists get `(Smith, 2020)`, `(Smith et al., 2020; Lee
 /// and Kim, 2019)` and `Smith (2020)`. Pages before the first list, the part
 /// of a list's first page above its heading and the pages after a list's
-/// end (an appendix) are searched. `offset` is a char offset into
-/// `PageText::text`.
+/// end (an appendix) are searched. Numbered lists that restart at `[1]`
+/// (`References` and `References for the Appendices`) keep separate
+/// numberings: a marker before the first list's end resolves in the first
+/// list, a marker after it (in the appendix that the later list serves)
+/// in the later list first, each falling back to the other lists. `offset`
+/// is a char offset into `PageText::text`.
 pub fn find_citation_markers(pages: &[PageText], refs: &[ReferenceEntry]) -> Vec<CitationMarker> {
     if refs.is_empty() {
         return Vec::new();
     }
-    let index = RefIndex::build(refs);
     let sections = find_reference_sections(pages);
     let extents = list_extents(pages, &sections);
+    let index = RefIndex::build(refs, &extents);
     let mut markers: Vec<CitationMarker> = Vec::new();
     for page in pages {
+        let ends = index.space_ends(page);
         let mut found: Vec<Found> = Vec::new();
         for window in page_scan_windows(page, &extents) {
             if index.numbered {
-                found.extend(numeric_markers(&page.text, &window, &index));
+                found.extend(numeric_markers(&page.text, &window, &index, &ends));
             } else {
                 found.extend(author_year_markers(&page.text, &window, &index));
             }
@@ -3583,7 +3778,7 @@ mod tests {
             parsed("Smith, A. (2020b). Second. Venue.", None),
         ];
         refs[1].index = 2;
-        let index = RefIndex::build(&refs);
+        let index = RefIndex::build(&refs, &[]);
         assert_eq!(index.resolve_author_year("Smith", 2020, "b"), vec![2]);
         assert_eq!(index.resolve_author_year("Smith", 2020, ""), vec![1, 2]);
         assert!(index.resolve_author_year("Jones", 2020, "").is_empty());
@@ -4826,6 +5021,150 @@ mod tests {
         assert_eq!(markers[3].targets, vec![2]);
         assert_marker_offsets(&body, &markers);
         assert_marker_offsets(&first, &markers);
+    }
+
+    /// Two numbered lists that both start at `[1]` (`References` and
+    /// `References for the Appendices`) keep their own numbering: a marker
+    /// before the first list's end cites the first list; a marker after
+    /// that end (in the appendix the second list serves) cites the second
+    /// list first and falls back to the first for a number the second does
+    /// not print.
+    #[test]
+    fn restarted_numbering_resolves_by_position() {
+        let body = column_page(1, &["Main text cites [1] and [2, 3]."]);
+        let first = column_page(
+            2,
+            &[
+                "References",
+                "[1] A. Author. First. Venue, 2020.",
+                "[2] B. Author. Second. Venue, 2021.",
+                "[3] C. Author. Third. Venue, 2022.",
+                "Appendix A",
+                "The appendix cites [1] and [3].",
+            ],
+        );
+        let appendix = column_page(3, &["Appendix B proves the bound of [2]."]);
+        let second = column_page(
+            4,
+            &[
+                "References for the Appendices",
+                "[1] D. Author. Fourth. Venue, 2023.",
+                "[2] E. Author. Fifth. Venue, 2024.",
+            ],
+        );
+        let pages = vec![body.clone(), first.clone(), appendix.clone(), second];
+        let (refs, markers) = extract_citations(&pages);
+        assert_eq!(refs.len(), 5);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]", "[1]", "[2]"]);
+        let indices: Vec<u32> = refs.iter().map(|r| r.index).collect();
+        assert_eq!(indices, vec![1, 2, 3, 4, 5]);
+
+        let sections = find_reference_sections(&pages);
+        let index = RefIndex::build(&refs, &list_extents(&pages, &sections));
+        assert!(index.numbered);
+        assert_eq!(index.spaces.len(), 2);
+        assert_eq!(index.spaces[0].end, Some((2, 4)));
+        assert_eq!(index.max_number, 3);
+        assert_eq!(index.targets_for(&[1, 3], 0), vec![1, 3]);
+        assert_eq!(index.targets_for(&[1, 3], 1), vec![4, 3]);
+        assert_eq!(home_space(&[None, None], 0), 0);
+        assert_eq!(home_space(&[Some(10), None], 9), 0);
+        assert_eq!(home_space(&[Some(10), None], 10), 1);
+        assert_eq!(home_space(&[Some(0), None], 5), 1);
+
+        let texts: Vec<(u32, &str)> = markers.iter().map(|m| (m.page, m.text.as_str())).collect();
+        assert_eq!(
+            texts,
+            vec![
+                (1, "[1]"),
+                (1, "[2, 3]"),
+                (2, "[1]"),
+                (2, "[3]"),
+                (3, "[2]")
+            ]
+        );
+        let targets: Vec<Vec<u32>> = markers.iter().map(|m| m.targets.clone()).collect();
+        assert_eq!(
+            targets,
+            vec![vec![1], vec![2, 3], vec![4], vec![3], vec![5]]
+        );
+        assert_marker_offsets(&body, &markers);
+        assert_marker_offsets(&first, &markers);
+        assert_marker_offsets(&appendix, &markers);
+    }
+
+    /// The label column of an IEEE list emitted apart from its entries
+    /// (arXiv:2509.12458): bare `[1]`, `[2]`, `[3]` lines number the list,
+    /// so the entries take the printed labels, the index is numbered and
+    /// body markers resolve.
+    #[test]
+    fn detached_labels_number_the_list() {
+        let body = column_page(1, &["Prior work [2] builds on [1]."]);
+        let list = page_of(
+            2,
+            vec![
+                bare_line("References"),
+                bare_line("[1]"),
+                bare_line("[2]"),
+                bare_line("[3]"),
+                bare_line("A. Author, “First title,” Journal One, vol. 1, pp. 1–2, 2020."),
+                bare_line("B. Writer, “Second title,” Journal Two, vol. 2, pp. 3–4, 2021."),
+                bare_line("C. Third, “Third title,” Journal Three, vol. 3, pp. 5–6, 2022."),
+            ],
+        );
+        let (refs, markers) = extract_citations(&[body.clone(), list]);
+        assert_eq!(refs.len(), 3);
+        let labels: Vec<&str> = refs.iter().filter_map(|r| r.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[1]", "[2]", "[3]"]);
+        assert!(refs.iter().all(|r| !r.raw.contains('[')));
+        assert!(refs[1].raw.starts_with("B. Writer"));
+        assert_eq!(refs[1].title.as_deref(), Some("Second title"));
+        assert_eq!(refs[2].year, Some(2022));
+
+        let index = RefIndex::build(&refs, &[]);
+        assert!(index.numbered);
+        assert_eq!(index.max_number, 3);
+
+        let texts: Vec<(u32, &str)> = markers.iter().map(|m| (m.page, m.text.as_str())).collect();
+        assert_eq!(texts, vec![(1, "[2]"), (1, "[1]")]);
+        assert_eq!(markers[0].targets, vec![2]);
+        assert_eq!(markers[1].targets, vec![1]);
+        assert_marker_offsets(&body, &markers);
+
+        // Two bare labels are not a run; the list stays author-year.
+        let two = vec![
+            bare_line("[4]"),
+            bare_line("[5]"),
+            bare_line("A. Author, “First title,” Journal One, vol. 1, pp. 1–2, 2020."),
+        ];
+        let lines: Vec<SectionLine> = two
+            .iter()
+            .enumerate()
+            .map(|(i, l)| SectionLine {
+                page: 1,
+                line: i,
+                column: 0,
+                x0: None,
+                y0: None,
+                size: None,
+                text: l.text.clone(),
+            })
+            .collect();
+        assert!(!detached_run(&lines));
+        assert_eq!(detect_style(&lines), Style::AuthorYear);
+        assert_eq!(bare_label_number("[12]"), Some(12));
+        assert_eq!(bare_label_number("[12] text"), None);
+
+        // Entries beyond the printed labels continue the sequence.
+        let mut entries = vec![
+            parsed("A. Author, “First title,” 2020.", None),
+            parsed("B. Writer, “Second title,” 2021.", None),
+            parsed("C. Third, “Third title,” 2022.", None),
+        ];
+        assign_detached_labels(&mut entries, &[7, 8]);
+        let labels: Vec<&str> = entries.iter().filter_map(|e| e.label.as_deref()).collect();
+        assert_eq!(labels, vec!["[7]", "[8]", "[9]"]);
     }
 
     /// `REVTeX` sets the list right after the last appendix without a
