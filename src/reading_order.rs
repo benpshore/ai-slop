@@ -4,11 +4,25 @@
 //! order, which on multi-column pages is rarely the reading order. This
 //! module groups spans into lines by baseline, orders the lines with a
 //! recursive XY-cut over their boxes (columns before rows, except that
-//! full-width lines at the top or bottom of a region are split off first
-//! and that a row gap across the columns is cut first when the line texts
-//! read on better by rows) and joins them into `PageText::text`.
-//! Coordinates are PDF user space (origin bottom-left, `y` grows upwards)
-//! and are used unrotated. No text repair of any kind is performed.
+//! full-width lines at the top or bottom of a region are split off first,
+//! that a region is cut into bands at lines bridging its gutter, and that
+//! a row gap across the columns is cut first when the line texts read on
+//! better by rows) and joins them into `PageText::text`.
+//! Coordinates are PDF user space (origin bottom-left, `y` grows upwards).
+//! On a page with `/Rotate` 90, 180 or 270 the spans are grouped and
+//! ordered in the turned frame the page is displayed in, and the line
+//! boxes are turned back into user space. No text repair of any kind is
+//! performed.
+//!
+//! A line bridges the gutter of a two-column region (a figure caption, a
+//! table or an equation set across both columns, or a row of the two
+//! columns fused into one line) when it runs past the gutter by more than
+//! `BRIDGE_REACH` of the region's width on both sides. Such a line blocks
+//! every column cut through the region, and the whitespace above and below
+//! it is often narrower than a row gap, so the region is first cut into
+//! bands where bridging and other lines meet (see [`bridge_row_cut`]):
+//! the band above reads left column then right column, then the bridging
+//! lines, then the band below.
 //!
 //! Fonts without precomposed accented letters (`pdfTeX` with the OT1
 //! encoding, say) set an accent as a glyph of its own, placed slightly
@@ -26,6 +40,26 @@
 //! glyph and the span under that glyph's tail holds the letter, which is
 //! composed the same way once the overlap is confirmed; without a letter
 //! under it the span's text is kept as shown.
+//!
+//! Vertical text (the rotated `arXiv` stamp in the left margin, rotated
+//! axis labels) never joins a horizontal line. A span is vertical when it
+//! shows at least two glyphs in a box more than `VERTICAL_RATIO` times
+//! taller than wide and `VERTICAL_MIN_HEIGHT` sizes tall, or when it is one
+//! rotated glyph (a box about as wide as tall) in a run of at least
+//! `STACK_MIN` such glyphs stacked in the page margin in content-stream
+//! order. Vertical spans are grouped into lines of their own in
+//! content-stream order; such a line in the margin band (`MARGIN_FRACTION`
+//! of the page width from either edge) is placed after all other lines with
+//! a page warning, anywhere else it is ordered like any other line.
+//!
+//! Spans on a shared baseline in the two columns of a page can end up in
+//! one line when the gutter is narrower than `LINE_REACH`. A line whose
+//! widest gap is wider than `GUTTER_SPACES` space widths, straddles the
+//! vertical midline of the page (or of the text on it) and has at least
+//! `GUTTER_WORDS` words on either side is split there. A line wider than
+//! `SPANNING_PAGE` of the page (a title, or a fused row of two justified
+//! columns) is split only when that gap also covers the gutter the other
+//! lines of the page leave open, so a title's stretched word space is kept.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -80,11 +114,65 @@ const COEXIST_OVERLAP: f32 = 0.5;
 /// Fewest lines each side of a column cut needs inside the vertically
 /// overlapping band for the sides to count as columns.
 const COEXIST_LINES: usize = 2;
+/// A span of at least two glyphs whose box is more than this many times
+/// taller than wide is vertical text.
+const VERTICAL_RATIO: f32 = 3.0;
+/// Smallest height of a vertical span's box, in multiples of its size (a
+/// horizontal box is one size tall, whatever its advance).
+const VERTICAL_MIN_HEIGHT: f32 = 2.0;
+/// Fraction of the page width, from either edge, that counts as the page
+/// margin for vertical text (the `arXiv` stamp) and stacked glyphs.
+const MARGIN_FRACTION: f32 = 0.07;
+/// Fewest single glyphs stacked in the margin that make vertical text.
+const STACK_MIN: usize = 4;
+/// Largest height of a rotated glyph's box, in multiples of its width (the
+/// width is the em of the rotated glyph, the height its advance).
+const STACK_SHAPE: f32 = 1.2;
+/// Smallest horizontal overlap of two stacked glyph boxes, as a fraction of
+/// the narrower one.
+const STACK_OVERLAP: f32 = 0.5;
+/// Largest vertical gap between two stacked glyphs, in box widths (ems).
+const STACK_GAP: f32 = 1.0;
+/// Largest `seq` step between two stacked glyphs (room for blank spaces).
+const STACK_SEQ_STEP: u32 = 3;
+/// Gaps between the spans of a line wider than this many sizes are not
+/// word spaces when the page's space width is measured.
+const SPACE_MAX: f32 = 0.6;
+/// Space width, in multiples of the size, when no word gap is measured.
+const DEFAULT_SPACE: f32 = 0.25;
+/// A gap in a line wider than this many space widths may be a gutter.
+const GUTTER_SPACES: f32 = 2.5;
+/// Fewest words each side of a gutter gap needs for the line to be split.
+const GUTTER_WORDS: usize = 3;
+/// Fraction of the page width above which a line with a gutter gap is
+/// split only when the gap covers the gutter of the page's other lines.
+const SPANNING_PAGE: f32 = 0.7;
+/// Slack, as a fraction of the page width, for a gap straddling the midline.
+const MIDLINE_SLACK: f32 = 0.02;
+/// Fewest other lines wholly left and wholly right of a gap that locate the
+/// page's gutter.
+const GUTTER_EVIDENCE: usize = 3;
+/// Fewest other rows with a gap at the same place that locate the gutter
+/// when too few lines lie wholly to either side of it (all rows fused).
+const GUTTER_ROWS: usize = 2;
+/// Tolerance, in points, of a gap covering the page's gutter.
+const GUTTER_COVER: f32 = 1.0;
+/// Fraction of a region's width by which a line must run past the gutter
+/// on both sides to bridge it.
+const BRIDGE_REACH: f32 = 0.2;
+/// Fraction of a region's width that the lines of a column of prose reach;
+/// each side of a bridged gutter needs `COEXIST_LINES` lines this wide.
+const BRIDGE_COLUMN: f32 = 0.3;
+/// Largest vertical overlap, in median line heights, of the boxes on either
+/// side of a cut at a bridging line (touching lines of tight leading).
+const BRIDGE_OVERLAP: f32 = 0.25;
 
 /// Thresholds of one XY-cut run, in points.
 struct CutParams {
     row_gap: f32,
     column_gap: f32,
+    /// Smallest (negative) gap of a cut at a bridging line.
+    bridge_gap: f32,
 }
 
 /// An accent glyph attached to a line: its span index and box, the span
@@ -556,6 +644,400 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
     }
 }
 
+/// A span of at least two glyphs set vertically: its box is more than
+/// `VERTICAL_RATIO` times taller than wide and more than
+/// `VERTICAL_MIN_HEIGHT` sizes tall.
+fn is_tall_text(span: &Span, b: BBox, fallback: f32) -> bool {
+    let glyphs = span.text.chars().filter(|ch| !ch.is_whitespace()).count();
+    let width = b.x1 - b.x0;
+    let height = b.y1 - b.y0;
+    glyphs >= 2
+        && height > VERTICAL_RATIO * width
+        && height > VERTICAL_MIN_HEIGHT * span_size(span, fallback)
+}
+
+/// Whether a box's centre lies in the margin band of a page `width` wide.
+fn in_margin(b: BBox, width: f32) -> bool {
+    let cx = centre_x(b);
+    cx < MARGIN_FRACTION * width || cx > (1.0 - MARGIN_FRACTION) * width
+}
+
+/// A single glyph in the page margin whose box is shaped like a rotated
+/// glyph: at most `STACK_SHAPE` times taller than wide.
+fn is_margin_glyph(span: &Span, b: BBox, width: f32) -> bool {
+    let mut glyphs = span.text.trim().chars().filter(|ch| !is_combining(*ch));
+    let single = glyphs.next().is_some() && glyphs.next().is_none();
+    let w = b.x1 - b.x0;
+    single && w > 0.0 && b.y1 - b.y0 <= STACK_SHAPE * w && in_margin(b, width)
+}
+
+/// Set `flags[p]` for every member of `run` (positions in `all`) when the
+/// run is long enough to be a stack of rotated glyphs.
+fn close_stack(run: &[usize], flags: &mut [bool]) {
+    if run.len() >= STACK_MIN {
+        for &p in run {
+            flags[p] = true;
+        }
+    }
+}
+
+/// Flag the single margin glyphs of `all` (see [`is_margin_glyph`]) that
+/// are stacked into vertical text: at least `STACK_MIN` of them in
+/// content-stream order, each at most `STACK_SEQ_STEP` spans after the
+/// previous one in the stream, overlapping the previous one horizontally by
+/// `STACK_OVERLAP` of the narrower box, at most `STACK_GAP` ems above or
+/// below it, and all moving the same way.
+fn flag_glyph_stacks(spans: &[Span], all: &[(usize, BBox)], width: f32, flags: &mut [bool]) {
+    let mut glyphs: Vec<usize> = (0..all.len())
+        .filter(|&p| !flags[p] && is_margin_glyph(&spans[all[p].0], all[p].1, width))
+        .collect();
+    if glyphs.len() < STACK_MIN {
+        return;
+    }
+    glyphs.sort_by_key(|&p| (spans[all[p].0].seq, all[p].0));
+    let mut run: Vec<usize> = Vec::new();
+    let mut upward: Option<bool> = None;
+    for p in glyphs {
+        let b = all[p].1;
+        let mut stacked = false;
+        if let Some(&last) = run.last() {
+            let a = all[last].1;
+            let step = b.y0.midpoint(b.y1) - a.y0.midpoint(a.y1);
+            let narrow = (a.x1 - a.x0).min(b.x1 - b.x0);
+            let em = (a.x1 - a.x0).max(b.x1 - b.x0);
+            let overlap = a.x1.min(b.x1) - a.x0.max(b.x0);
+            let gap = (b.y0 - a.y1).max(a.y0 - b.y1);
+            let up = step > 0.0;
+            // Consecutive in the stream, blank space spans aside.
+            let next_in_stream =
+                spans[all[p].0].seq.saturating_sub(spans[all[last].0].seq) <= STACK_SEQ_STEP;
+            if next_in_stream
+                && overlap >= STACK_OVERLAP * narrow
+                && step.abs() > 0.0
+                && upward.is_none_or(|was_up| was_up == up)
+                && gap <= STACK_GAP * em
+            {
+                upward = Some(up);
+                stacked = true;
+            }
+        }
+        if !stacked {
+            close_stack(&run, flags);
+            run.clear();
+            upward = None;
+        }
+        run.push(p);
+    }
+    close_stack(&run, flags);
+}
+
+/// Split `all` into vertical spans (see [`is_tall_text`] and
+/// [`flag_glyph_stacks`]) and the rest, each keeping the order of `all`.
+fn split_vertical(
+    spans: &[Span],
+    all: Vec<(usize, BBox)>,
+    fallback: f32,
+    width: f32,
+) -> (Vec<(usize, BBox)>, Vec<(usize, BBox)>) {
+    let mut flags: Vec<bool> = all
+        .iter()
+        .map(|(i, b)| is_tall_text(&spans[*i], *b, fallback))
+        .collect();
+    flag_glyph_stacks(spans, &all, width, &mut flags);
+    let mut vertical: Vec<(usize, BBox)> = Vec::new();
+    let mut rest: Vec<(usize, BBox)> = Vec::with_capacity(all.len());
+    for (member, flag) in all.into_iter().zip(flags) {
+        if flag {
+            vertical.push(member);
+        } else {
+            rest.push(member);
+        }
+    }
+    (vertical, rest)
+}
+
+/// One line of vertical text from `members` (in content-stream order): the
+/// span texts joined in that order, with one space where the vertical gap
+/// between neighbours exceeds `SPACE_GAP` ems and neither side already has
+/// a boundary space.
+fn vertical_line(spans: &[Span], bbox: BBox, members: &[(usize, BBox)]) -> Line {
+    let mut text = String::new();
+    let mut prev: Option<BBox> = None;
+    for (i, b) in members {
+        let piece = spans[*i].text.as_str();
+        if let Some(p) = prev {
+            let gap = (b.y0 - p.y1).max(p.y0 - b.y1);
+            let em = (b.x1 - b.x0).max(p.x1 - p.x0);
+            let has_space =
+                text.ends_with(char::is_whitespace) || piece.starts_with(char::is_whitespace);
+            if gap > SPACE_GAP * em && !has_space {
+                text.push(' ');
+            }
+        }
+        text.push_str(piece);
+        prev = Some(*b);
+    }
+    Line {
+        text: text.trim().to_string(),
+        bbox: Some(bbox),
+        column: 0,
+        spans: members
+            .iter()
+            .map(|(i, _)| u32::try_from(*i).unwrap_or(u32::MAX))
+            .collect(),
+        role: crate::schema::default_line_role(),
+    }
+}
+
+/// Group vertical spans into lines: in content-stream order, a span joins
+/// the latest group it overlaps horizontally by `STACK_OVERLAP` of the
+/// narrower box and lies at most `STACK_GAP` ems above or below.
+fn vertical_lines(spans: &[Span], vertical: &[(usize, BBox)]) -> Vec<Line> {
+    let mut order: Vec<(usize, BBox)> = vertical.to_vec();
+    order.sort_by_key(|(i, _)| (spans[*i].seq, *i));
+    let mut groups: Vec<(BBox, Vec<(usize, BBox)>)> = Vec::new();
+    for (i, b) in order {
+        let found = groups.iter().rposition(|(g, _)| {
+            let narrow = (g.x1 - g.x0).min(b.x1 - b.x0);
+            let em = (g.x1 - g.x0).max(b.x1 - b.x0);
+            let overlap = g.x1.min(b.x1) - g.x0.max(b.x0);
+            let gap = (b.y0 - g.y1).max(g.y0 - b.y1);
+            overlap > 0.0 && overlap >= STACK_OVERLAP * narrow && gap <= STACK_GAP * em
+        });
+        if let Some(k) = found {
+            groups[k].0 = union(groups[k].0, b);
+            groups[k].1.push((i, b));
+        } else {
+            groups.push((b, vec![(i, b)]));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(bbox, members)| vertical_line(spans, bbox, &members))
+        .collect()
+}
+
+/// A line's glyph spans sorted left-to-right (then by `seq`).
+fn sorted_members(spans: &[Span], build: &LineBuild) -> Vec<(usize, BBox)> {
+    let mut members = build.spans.clone();
+    members.sort_by(|a, b| {
+        let by_x = a.1.x0.total_cmp(&b.1.x0);
+        by_x.then(spans[a.0].seq.cmp(&spans[b.0].seq))
+    });
+    members
+}
+
+/// The widest gap between neighbours of `members` (sorted left-to-right):
+/// the position of the first member right of it and the gap's left and
+/// right edge. `None` when no two members leave a gap.
+fn widest_gap(members: &[(usize, BBox)]) -> Option<(usize, f32, f32)> {
+    let (_, first) = members.first()?;
+    let mut right = first.x1;
+    let mut best: Option<(usize, f32, f32)> = None;
+    for (pos, (_, b)) in members.iter().enumerate().skip(1) {
+        let gap = b.x0 - right;
+        if gap > 0.0 && best.is_none_or(|(_, x0, x1)| gap > x1 - x0) {
+            best = Some((pos, right, b.x0));
+        }
+        right = right.max(b.x1);
+    }
+    best
+}
+
+/// Median word space of the page: gaps between neighbouring spans of a
+/// line wider than `SPACE_GAP` and at most `SPACE_MAX` times the line's
+/// size; `DEFAULT_SPACE` times `fallback` when there are none.
+fn typical_space(sorted: &[Vec<(usize, BBox)>], builds: &[LineBuild], fallback: f32) -> f32 {
+    let mut gaps: Vec<f32> = Vec::new();
+    for (members, build) in sorted.iter().zip(builds) {
+        let low = SPACE_GAP * build.size;
+        let high = SPACE_MAX * build.size;
+        for pair in members.windows(2) {
+            let gap = pair[1].1.x0 - pair[0].1.x1;
+            if gap > low && gap <= high {
+                gaps.push(gap);
+            }
+        }
+    }
+    positive(median(&mut gaps)).unwrap_or(DEFAULT_SPACE * fallback)
+}
+
+/// Number of words in `members` (sorted left-to-right) joined the way
+/// `finish_line` joins them.
+fn word_count(spans: &[Span], members: &[(usize, BBox)], fallback: f32) -> usize {
+    let mut joined = String::new();
+    let mut prev_x1: Option<f32> = None;
+    for (i, b) in members {
+        let span = &spans[*i];
+        if let Some(x1) = prev_x1
+            && b.x0 - x1 > SPACE_GAP * span_size(span, fallback)
+        {
+            joined.push(' ');
+        }
+        joined.push_str(&span.text);
+        prev_x1 = Some(b.x1);
+    }
+    joined.split_whitespace().count()
+}
+
+/// The gutter the lines of the page other than `skip` leave open around
+/// `centre`: from the right edge of the lines wholly left of it to the left
+/// edge of the lines wholly right of it when at least `GUTTER_EVIDENCE`
+/// lie on either side; else the common part of the gaps (at least
+/// `min_gap` wide) around `centre` of at least `GUTTER_ROWS` other rows.
+fn gutter_band(
+    builds: &[LineBuild],
+    gaps: &[Option<(usize, f32, f32)>],
+    skip: usize,
+    centre: f32,
+    min_gap: f32,
+) -> Option<(f32, f32)> {
+    let (mut left_count, mut right_count, mut row_count) = (0_usize, 0_usize, 0_usize);
+    let mut left_edge = f32::NEG_INFINITY;
+    let mut right_edge = f32::INFINITY;
+    let mut common = (f32::NEG_INFINITY, f32::INFINITY);
+    for (k, line) in builds.iter().enumerate() {
+        if k == skip {
+            continue;
+        }
+        let b = line.bbox;
+        if b.x1 <= centre {
+            left_count += 1;
+            left_edge = left_edge.max(b.x1);
+        } else if b.x0 >= centre {
+            right_count += 1;
+            right_edge = right_edge.min(b.x0);
+        } else if let Some((_, gap_left, gap_right)) = gaps[k]
+            && gap_right - gap_left > min_gap
+            && (gap_left..=gap_right).contains(&centre)
+        {
+            row_count += 1;
+            common = (common.0.max(gap_left), common.1.min(gap_right));
+        }
+    }
+    if left_count >= GUTTER_EVIDENCE && right_count >= GUTTER_EVIDENCE {
+        Some((left_edge, right_edge))
+    } else if row_count >= GUTTER_ROWS && common.0 <= common.1 {
+        Some(common)
+    } else {
+        None
+    }
+}
+
+/// A line under construction made of `members`, on `baseline`.
+fn build_of(
+    spans: &[Span],
+    baseline: f32,
+    members: Vec<(usize, BBox)>,
+    fallback: f32,
+) -> LineBuild {
+    let mut bbox = members[0].1;
+    let mut size: f32 = 0.0;
+    for (i, b) in &members {
+        bbox = union(bbox, *b);
+        size = size.max(span_size(&spans[*i], fallback));
+    }
+    LineBuild {
+        baseline,
+        size,
+        bbox,
+        spans: members,
+        accents: Vec::new(),
+    }
+}
+
+/// Split every line that joins the two columns of a page across the gutter
+/// (see the module documentation) into its left and right part. Both parts
+/// keep the line's baseline, so the order of `builds` by baseline is kept.
+/// `width` is the page width. Runs before accents are attached.
+fn split_fused_rows(
+    spans: &[Span],
+    builds: Vec<LineBuild>,
+    fallback: f32,
+    width: f32,
+) -> Vec<LineBuild> {
+    if builds.is_empty() {
+        return builds;
+    }
+    let sorted: Vec<Vec<(usize, BBox)>> = builds
+        .iter()
+        .map(|build| sorted_members(spans, build))
+        .collect();
+    let gaps: Vec<Option<(usize, f32, f32)>> = sorted
+        .iter()
+        .map(|members| widest_gap(members.as_slice()))
+        .collect();
+    let space = typical_space(&sorted, &builds, fallback);
+    let min_gap = GUTTER_SPACES * space;
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for build in &builds {
+        left = left.min(build.bbox.x0);
+        right = right.max(build.bbox.x1);
+    }
+    let middles = [0.5 * width, left.midpoint(right)];
+    let slack = MIDLINE_SLACK * width;
+
+    let mut cuts: Vec<Option<usize>> = vec![None; builds.len()];
+    for (k, build) in builds.iter().enumerate() {
+        let Some((pos, gap_left, gap_right)) = gaps[k] else {
+            continue;
+        };
+        let straddles = middles
+            .iter()
+            .any(|m| (gap_left - slack..=gap_right + slack).contains(m));
+        if gap_right - gap_left <= min_gap || !straddles {
+            continue;
+        }
+        let members = &sorted[k];
+        let (head, tail) = members.split_at(pos);
+        if word_count(spans, head, fallback) < GUTTER_WORDS
+            || word_count(spans, tail, fallback) < GUTTER_WORDS
+        {
+            continue;
+        }
+        let spanning = build.bbox.x1 - build.bbox.x0 > SPANNING_PAGE * width;
+        if spanning {
+            let centre = gap_left.midpoint(gap_right);
+            let Some((band_left, band_right)) = gutter_band(&builds, &gaps, k, centre, min_gap)
+            else {
+                continue;
+            };
+            if gap_left > band_left + GUTTER_COVER || gap_right < band_right - GUTTER_COVER {
+                continue;
+            }
+        }
+        cuts[k] = Some(pos);
+    }
+    if cuts.iter().all(Option::is_none) {
+        return builds;
+    }
+
+    let mut out: Vec<LineBuild> = Vec::with_capacity(builds.len() + 1);
+    for ((build, members), cut) in builds.into_iter().zip(sorted).zip(cuts) {
+        let Some(pos) = cut else {
+            out.push(build);
+            continue;
+        };
+        let mut head = members;
+        let tail = head.split_off(pos);
+        out.push(build_of(spans, build.baseline, head, fallback));
+        out.push(build_of(spans, build.baseline, tail, fallback));
+    }
+    out
+}
+
+/// Lines grouped from a page's spans: the horizontal lines and the
+/// vertical lines outside the margin band sorted top-to-bottom, the
+/// vertical lines in the margin band (top-to-bottom) and the number of
+/// accent-only spans that sit over no glyph span.
+#[derive(Default)]
+struct Grouped {
+    lines: Vec<Line>,
+    margin: Vec<Line>,
+    unattached: usize,
+}
+
 /// Group spans into lines by shared baseline and horizontal proximity, with
 /// no column ordering. Blank spans and spans without a finite box are
 /// skipped. Every returned line has a box, `column == 0`, its span indices
@@ -563,20 +1045,54 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
 /// accent-only span joins the line of the glyph it sits over (see the
 /// module documentation); over no glyph it is an ordinary span. A span
 /// ending in an accent glyph has that accent composed onto the letter of
-/// the overlapping span under it, if there is one. The lines are sorted
-/// top-to-bottom.
+/// the overlapping span under it, if there is one. Vertical text never
+/// joins a horizontal line and a line fusing two columns is split at the
+/// gutter (see the module documentation); the page width is taken as the
+/// right edge of the text plus its left margin. The lines are sorted
+/// top-to-bottom, except that vertical lines in the page margin come last.
 pub fn group_lines(spans: &[Span]) -> Vec<Line> {
-    group_lines_counted(spans).0
+    let grouped = group_spans(spans, None);
+    let mut lines = grouped.lines;
+    lines.extend(grouped.margin);
+    lines
 }
 
-/// [`group_lines`] together with the number of accent-only spans that sit
-/// over no glyph span and so form lines of their own.
-fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
-    let mut candidates = positioned(spans);
-    if candidates.is_empty() {
-        return (Vec::new(), 0);
+/// [`group_lines`] on a page `page_width` wide (estimated from the spans
+/// when `None` or not a positive number), with the vertical margin lines
+/// kept apart.
+fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
+    let all = positioned(spans);
+    if all.is_empty() {
+        return Grouped::default();
     }
-    let fallback = typical_size(spans, &candidates);
+    let fallback = typical_size(spans, &all);
+    let width = positive(page_width).unwrap_or_else(|| {
+        let mut left = f32::INFINITY;
+        let mut right = f32::NEG_INFINITY;
+        for (_, b) in &all {
+            left = left.min(b.x0);
+            right = right.max(b.x1);
+        }
+        right + left.max(0.0)
+    });
+    let (vertical, mut candidates) = split_vertical(spans, all, fallback, width);
+    let mut inner: Vec<Line> = Vec::new();
+    let mut margin: Vec<Line> = Vec::new();
+    for line in vertical_lines(spans, &vertical) {
+        if line.bbox.is_some_and(|b| in_margin(b, width)) {
+            margin.push(line);
+        } else {
+            inner.push(line);
+        }
+    }
+    margin.sort_by(line_top_first);
+    // The body text sets the typical size, not a large margin stamp.
+    let fallback = if candidates.is_empty() {
+        fallback
+    } else {
+        typical_size(spans, &candidates)
+    };
+
     let largest = candidates
         .iter()
         .map(|(i, _)| span_size(&spans[*i], fallback))
@@ -585,9 +1101,9 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
 
     let mut builds: Vec<LineBuild> = Vec::new();
     let mut accents: Vec<(usize, BBox, String)> = Vec::new();
-    // Spans ending in an accent glyph: span index, its line, the byte
-    // offset of the tail and its marks.
-    let mut tails: Vec<(usize, usize, usize, String)> = Vec::new();
+    // Spans ending in an accent glyph: span index, the byte offset of the
+    // tail and its marks.
+    let mut tails: Vec<(usize, usize, String)> = Vec::new();
     for (i, bbox) in &candidates {
         let text = &spans[*i].text;
         if let Some(marks) = accent_marks(text) {
@@ -595,12 +1111,11 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
             continue;
         }
         let size = span_size(&spans[*i], fallback);
-        let k = if let Some(k) = find_line(&builds, *bbox, size, largest) {
+        if let Some(k) = find_line(&builds, *bbox, size, largest) {
             let line = &mut builds[k];
             line.bbox = union(line.bbox, *bbox);
             line.size = line.size.max(size);
             line.spans.push((*i, *bbox));
-            k
         } else {
             builds.push(LineBuild {
                 baseline: bbox.y0,
@@ -609,18 +1124,24 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
                 spans: vec![(*i, *bbox)],
                 accents: Vec::new(),
             });
-            builds.len() - 1
-        };
+        }
         if let Some((cut, marks)) = trailing_accent(text) {
-            tails.push((*i, k, cut, marks));
+            tails.push((*i, cut, marks));
         }
     }
+    let mut builds = split_fused_rows(spans, builds, fallback, width);
 
     // The letter under a trailing accent was kerned back under it, so its
     // span overlaps the tail of the accent's span: no slack, and the
     // accent's own span is never the base. Without such a span the text
     // stays as shown.
-    for (i, k, cut, marks) in tails {
+    for (i, cut, marks) in tails {
+        let Some(k) = builds
+            .iter()
+            .position(|line| line.spans.iter().any(|(j, _)| *j == i))
+        else {
+            continue;
+        };
         let line = &mut builds[k];
         let Some(host) = line.spans.iter().find_map(|(j, b)| (*j == i).then_some(*b)) else {
             continue;
@@ -678,8 +1199,13 @@ fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
         .into_iter()
         .map(|build| finish_line(spans, build, fallback))
         .collect();
+    lines.extend(inner);
     lines.sort_by(line_top_first);
-    (lines, unattached)
+    Grouped {
+        lines,
+        margin,
+        unattached,
+    }
 }
 
 /// Position in `idx` (already sorted top-to-bottom) at which the widest
@@ -744,6 +1270,89 @@ fn spanning_row_cut(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> Option<us
     let bottom_start = by_top.len() - bottom_run;
     widest_row_gap(boxes, by_top, min_gap, |pos| {
         pos <= top_run || pos >= bottom_start
+    })
+}
+
+/// Position in `by_top` (sorted top-to-bottom) at which a region bridged
+/// across its gutter is cut into bands, if any; `by_left` holds the same
+/// indices sorted left-to-right. The candidates are the lines that run past
+/// the region's horizontal midpoint by more than `BRIDGE_REACH` of its
+/// width on both sides. Without them the region must split into two
+/// columns (see [`column_cut`] and [`columns_coexist`]) with at least
+/// `COEXIST_LINES` lines of `BRIDGE_COLUMN` of the width on each side, and
+/// the lines that run past that gutter by `BRIDGE_REACH` of the width on
+/// both sides bridge it. The cut is the widest horizontal gap, wider than
+/// `bridge_gap` (a small overlap is allowed), between a bridging line and a
+/// line that is not bridging, where that line has a line of the other
+/// column beside it: a band of columns meets a bridging line with a row of
+/// both columns, while the short last line of a full-width paragraph above
+/// two columns stands alone and stays with its paragraph.
+fn bridge_row_cut(
+    boxes: &[BBox],
+    by_top: &[usize],
+    by_left: &[usize],
+    params: &CutParams,
+) -> Option<usize> {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for &i in by_top {
+        left = left.min(boxes[i].x0);
+        right = right.max(boxes[i].x1);
+    }
+    let width = right - left;
+    if width.is_nan() || width <= 0.0 {
+        return None;
+    }
+    let reach = BRIDGE_REACH * width;
+    let middle = left.midpoint(right);
+    let rest: Vec<usize> = by_left
+        .iter()
+        .copied()
+        .filter(|&i| boxes[i].x0 > middle - reach || boxes[i].x1 < middle + reach)
+        .collect();
+    if rest.len() == by_left.len() || rest.len() < 2 * COEXIST_LINES {
+        return None;
+    }
+    let at = column_cut(boxes, &rest, params.column_gap)?;
+    if !columns_coexist(boxes, &rest, at) {
+        return None;
+    }
+    let (left_side, right_side) = rest.split_at(at);
+    let wide = |side: &[usize]| {
+        side.iter()
+            .filter(|&&i| boxes[i].x1 - boxes[i].x0 >= BRIDGE_COLUMN * width)
+            .count()
+    };
+    if wide(left_side) < COEXIST_LINES || wide(right_side) < COEXIST_LINES {
+        return None;
+    }
+    let gutter_left = left_side
+        .iter()
+        .map(|&i| boxes[i].x1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    // `right_side` is sorted left-to-right: its first box starts the gutter's right edge.
+    let gutter_right = boxes[right_side[0]].x0;
+    let bridges: Vec<bool> = by_top
+        .iter()
+        .map(|&i| boxes[i].x0 <= gutter_left - reach && boxes[i].x1 >= gutter_right + reach)
+        .collect();
+    if !bridges.contains(&true) {
+        return None;
+    }
+    let right_of = |i: usize| boxes[i].x0 >= gutter_right;
+    let paired = |x: usize| {
+        rest.iter().any(|&j| {
+            right_of(j) != right_of(x) && boxes[j].y0 < boxes[x].y1 && boxes[j].y1 > boxes[x].y0
+        })
+    };
+    widest_row_gap(boxes, by_top, params.bridge_gap, |pos| {
+        // The line on the side of the cut that is not bridging.
+        let near = if bridges[pos] {
+            by_top[pos - 1]
+        } else {
+            by_top[pos]
+        };
+        bridges[pos] != bridges[pos - 1] && paired(near)
     })
 }
 
@@ -943,8 +1552,10 @@ impl XyCut<'_> {
     /// [`rows_read_first`]), so paragraph gaps that happen to line up
     /// across columns do not cut the columns into bands. When such a
     /// column gap appears only once those margin lines are left out, the
-    /// row gap that splits them off is taken first. Otherwise split on the
-    /// widest row gap, else on the widest column gap, else emit the indices
+    /// row gap that splits them off is taken first. Otherwise a region
+    /// whose gutter is bridged is cut into bands at the bridging lines (see
+    /// [`bridge_row_cut`]). Otherwise split on the widest row gap, else on
+    /// the widest column gap, else emit the indices
     /// as one leaf block sorted top-to-bottom. Both lists are sorted once
     /// at the root and split with stable partitions, which keeps the order
     /// a stable re-sort of each region would give: the two sort keys are
@@ -971,7 +1582,9 @@ impl XyCut<'_> {
                 } else {
                     None
                 };
-                margin.or_else(|| row_cut(boxes, &by_top, params.row_gap))
+                margin
+                    .or_else(|| bridge_row_cut(boxes, &by_top, &by_left, params))
+                    .or_else(|| row_cut(boxes, &by_top, params.row_gap))
             };
             if let Some(at) = row {
                 let lower_top = by_top.split_off(at);
@@ -1001,7 +1614,9 @@ impl XyCut<'_> {
 /// `MAX_LINES`, keep their order and form one extra block at the end. A
 /// column split through a whole region wins over any row split except one
 /// that separates spanning lines at its top or bottom, or one after which
-/// the line texts read on better by rows than by columns.
+/// the line texts read on better by rows than by columns. A region whose
+/// gutter is bridged by lines running across it is cut into bands at those
+/// lines first, whatever the whitespace around them.
 pub fn order_lines(lines: Vec<Line>, page_width: f32) -> Vec<Line> {
     let mut placed: Vec<(Line, BBox)> = Vec::new();
     let mut loose: Vec<Line> = Vec::new();
@@ -1031,6 +1646,7 @@ pub fn order_lines(lines: Vec<Line>, page_width: f32) -> Vec<Line> {
     let params = CutParams {
         row_gap: ROW_GAP * line_height,
         column_gap: (COLUMN_GAP * char_width).max(floor),
+        bridge_gap: -BRIDGE_OVERLAP * line_height,
     };
 
     let boxes: Vec<BBox> = placed.iter().map(|(_, b)| *b).collect();
@@ -1088,6 +1704,79 @@ fn separator(prev: &Line, cur: &Line, line_height: f32) -> &'static str {
     }
 }
 
+/// A turn of the page frame under `/Rotate`: the clockwise angle (90, 180
+/// or 270) the page is displayed at and the page's unturned size.
+#[derive(Clone, Copy)]
+struct Turn {
+    degrees: i32,
+    width: f32,
+    height: f32,
+}
+
+impl Turn {
+    /// The turn of `page`; `None` unless its rotation is 90, 180 or 270
+    /// (modulo 360).
+    fn of(page: &PageText) -> Option<Self> {
+        let degrees = page.rotation.rem_euclid(360);
+        let turn = Self {
+            degrees,
+            width: page.width,
+            height: page.height,
+        };
+        matches!(degrees, 90 | 180 | 270).then_some(turn)
+    }
+
+    /// Width of the turned frame (the page's height after a quarter turn).
+    fn frame_width(self) -> f32 {
+        if self.degrees == 180 {
+            self.width
+        } else {
+            self.height
+        }
+    }
+
+    /// The user-space point `(x, y)` in the turned frame, or with `back`
+    /// the turned-frame point `(x, y)` in user space.
+    fn point(self, x: f32, y: f32, back: bool) -> (f32, f32) {
+        match (self.degrees, back) {
+            (90, false) => (y, self.width - x),
+            (90, true) => (self.width - y, x),
+            (270, false) => (self.height - y, x),
+            (270, true) => (y, self.height - x),
+            (180, _) => (self.width - x, self.height - y),
+            _ => (x, y),
+        }
+    }
+
+    /// The box `b` in the turned frame, or back in user space with `back`.
+    fn bbox(self, b: BBox, back: bool) -> BBox {
+        let first = self.point(b.x0, b.y0, back);
+        let second = self.point(b.x1, b.y1, back);
+        BBox {
+            x0: first.0.min(second.0),
+            y0: first.1.min(second.1),
+            x1: first.0.max(second.0),
+            y1: first.1.max(second.1),
+        }
+    }
+
+    /// Copies of `spans`, in the same order, with every finite box turned;
+    /// a box that is not finite is dropped.
+    fn spans(self, spans: &[Span]) -> Vec<Span> {
+        spans
+            .iter()
+            .map(|span| {
+                let mut turned = span.clone();
+                turned.bbox = span
+                    .bbox
+                    .filter(|b| is_finite_box(*b))
+                    .map(|b| self.bbox(b, false));
+                turned
+            })
+            .collect()
+    }
+}
+
 /// Add a page warning unless the same text is already present.
 fn push_warning(page: &mut PageText, warning: String) {
     if !page.warnings.contains(&warning) {
@@ -1097,21 +1786,45 @@ fn push_warning(page: &mut PageText, warning: String) {
 
 /// Fill `page.lines` and `page.text` from `page.spans`. Idempotent: lines
 /// and text are rebuilt from scratch and warnings are never duplicated.
-/// Coordinates are used as supplied (unrotated); a non-zero rotation is
-/// only noted as a warning. Non-blank spans without geometry are appended
+/// On a page with `/Rotate` 90, 180 or 270 the spans are grouped and
+/// ordered in the frame the page is displayed in (for 90, `(x, y)` turns to
+/// `(y, width - x)` in a frame `height` wide), so lines follow the rotated
+/// baselines; the spans keep their boxes, the line boxes are turned back
+/// into user space, and the warning `page N rotated R: ordered in the
+/// turned frame` is added. Any other non-zero rotation is only noted as a
+/// warning and the coordinates are used as supplied. Non-blank spans without geometry are appended
 /// at the end, one line each in content-stream order, as their own block.
 /// An accent-only span that sits over no glyph is left as its own line and
 /// noted with the warning `unattached accent glyph at page N: M span(s)`.
+/// Vertical text in the page margin (the rotated `arXiv` stamp) is placed
+/// after the ordered lines, before the spans without geometry, as a block
+/// of its own, and noted with the warning
+/// `vertical margin text at page N: M line(s) placed last`.
 pub fn order_page(page: &mut PageText) {
     page.lines.clear();
     page.text.clear();
-    if page.rotation != 0 {
+    let turn = Turn::of(page);
+    if let Some(t) = turn {
+        let number = page.page;
+        let degrees = t.degrees;
+        let msg = format!("page {number} rotated {degrees}: ordered in the turned frame");
+        push_warning(page, msg);
+    } else if page.rotation != 0 {
         let rotation = page.rotation;
         let msg = format!("page rotation {rotation}: coordinates used unrotated");
         push_warning(page, msg);
     }
 
-    let (grouped, unattached) = group_lines_counted(&page.spans);
+    let turned: Option<Vec<Span>> = turn.map(|t| t.spans(&page.spans));
+    let width = turn.map_or(page.width, Turn::frame_width);
+    let Grouped {
+        lines: grouped,
+        margin,
+        unattached,
+    } = group_spans(
+        turned.as_deref().unwrap_or(page.spans.as_slice()),
+        Some(width),
+    );
     if unattached > 0 {
         let number = page.page;
         let msg = format!("unattached accent glyph at page {number}: {unattached} span(s)");
@@ -1122,7 +1835,13 @@ pub fn order_page(page: &mut PageText) {
         let msg = format!("too many lines: {n} > {MAX_LINES}; the rest is appended unordered");
         push_warning(page, msg);
     }
-    let ordered = order_lines(grouped, page.width);
+    if !margin.is_empty() {
+        let number = page.page;
+        let n = margin.len();
+        let msg = format!("vertical margin text at page {number}: {n} line(s) placed last");
+        push_warning(page, msg);
+    }
+    let ordered = order_lines(grouped, width);
     let mut heights: Vec<f32> = ordered
         .iter()
         .filter_map(|l| l.bbox)
@@ -1148,6 +1867,15 @@ pub fn order_page(page: &mut PageText) {
     loose.sort_unstable();
 
     let mut lines = ordered;
+    let margin_column = lines.last().map_or(0, |l| l.column.saturating_add(1));
+    for (k, mut line) in margin.into_iter().enumerate() {
+        if !text.is_empty() {
+            text.push_str(if k == 0 { "\n\n" } else { "\n" });
+        }
+        text.push_str(&line.text);
+        line.column = margin_column;
+        lines.push(line);
+    }
     if !loose.is_empty() {
         let next_column = lines.last().map_or(0, |l| l.column.saturating_add(1));
         for (k, (_, i)) in loose.iter().enumerate() {
@@ -1167,6 +1895,11 @@ pub fn order_page(page: &mut PageText) {
         let n = loose.len();
         let msg = format!("spans without geometry: {n}");
         push_warning(page, msg);
+    }
+    if let Some(t) = turn {
+        for line in &mut lines {
+            line.bbox = line.bbox.map(|b| t.bbox(b, true));
+        }
     }
     page.lines = lines;
     page.text = text;
@@ -1362,7 +2095,10 @@ mod tests {
         assert_eq!(page.lines, first_lines);
         assert_eq!(page.warnings, first_warnings);
         assert_eq!(page.warnings.len(), 2);
-        assert!(page.warnings[0].starts_with("page rotation 90"));
+        assert_eq!(
+            page.warnings[0],
+            "page 1 rotated 90: ordered in the turned frame"
+        );
     }
 
     #[test]
@@ -1927,5 +2663,484 @@ mod tests {
         let lines = group_lines(&spans);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0].text, "Da\u{015F}");
+    }
+
+    /// `rows` rows of two columns whose gutter (300 to 309.5) is narrower
+    /// than the line reach, so the spans of a row share one line unless the
+    /// gutter rule splits it; the right column is emitted first.
+    fn fused_columns(rows: u16, seq: &mut u32) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for k in 0..rows {
+            let y0 = 700.0 - 18.0 * f32::from(k);
+            let right =
+                format!("right row {k} of the fused two column body text runs on until it ends");
+            spans.push(span(&right, 309.5, y0, 560.0, y0 + 10.0, *seq));
+            let left =
+                format!("left row {k} of the fused two column body text runs on until it ends");
+            spans.push(span(&left, 50.0, y0, 300.0, y0 + 10.0, *seq + 1));
+            *seq += 2;
+        }
+        spans
+    }
+
+    #[test]
+    fn two_columns_on_shared_baselines_stay_two_lines_per_row() {
+        let mut seq = 0;
+        let mut page = page_with(fused_columns(6, &mut seq));
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 12, "{lines:?}");
+        for (k, line) in lines[..6].iter().enumerate() {
+            assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+            assert!(!line.contains("right row"), "{line}");
+        }
+        for (k, line) in lines[6..].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+        assert_ne!(page.lines[0].column, page.lines[6].column);
+        assert!(page.warnings.is_empty());
+    }
+
+    #[test]
+    fn full_width_title_with_a_wide_word_space_still_joins() {
+        // The title's widest word gap (302 to 309.5, 7.5 pt) straddles the
+        // midline and is wider than 2.5 spaces, but does not cover the
+        // gutter (300 to 309.5) the body rows leave open.
+        let mut seq = 0;
+        let mut spans = fused_columns(6, &mut seq);
+        spans.push(sized(
+            "A Study of Fused Rows",
+            60.0,
+            750.0,
+            302.0,
+            762.0,
+            12.0,
+            seq,
+        ));
+        spans.push(sized(
+            "in Two Column Layouts",
+            309.5,
+            750.0,
+            552.0,
+            762.0,
+            12.0,
+            seq + 1,
+        ));
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 13, "{lines:?}");
+        assert_eq!(lines[0], "A Study of Fused Rows in Two Column Layouts");
+        assert_eq!(page.lines[0].spans, vec![12, 13]);
+        for (k, line) in lines[1..7].iter().enumerate() {
+            assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+        }
+        for (k, line) in lines[7..].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+    }
+
+    #[test]
+    fn gutter_rule_needs_three_words_on_each_side() {
+        // Two words each side of an 8 pt gap across the midline stay one
+        // line; three words each side are split there.
+        let lines = group_lines(&[
+            span("Figure one", 200.0, 700.0, 300.0, 710.0, 0),
+            span("left half", 308.0, 700.0, 380.0, 710.0, 1),
+        ]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].text, "Figure one left half");
+
+        let lines = group_lines(&[
+            span("Figure one two", 200.0, 700.0, 300.0, 710.0, 0),
+            span("left half three", 308.0, 700.0, 380.0, 710.0, 1),
+        ]);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["Figure one two", "left half three"]);
+    }
+
+    #[test]
+    fn rotated_arxiv_stamp_is_kept_out_of_the_body_and_placed_last() {
+        // arXiv:2604.03540, page 1: `q 0 1 -1 0 45.92 219.36 cm` then one
+        // 20 pt `Tj` of the stamp, so one tall, narrow span in the left
+        // margin whose foot (219.36) is level with the baseline of left
+        // column row 10 (220), which starts 6 pt to its right.
+        let stamp = "arXiv:2604.03540v4  [cs.RO]  29 Aug 2026";
+        let mut spans = vec![sized(stamp, 21.92, 219.36, 41.92, 560.0, 20.0, 0)];
+        for k in 0..12u16 {
+            let y0 = 400.0 - 18.0 * f32::from(k);
+            let seq = 1 + 2 * u32::from(k);
+            let left = format!("left row {k} of the two column body text goes here");
+            spans.push(span(&left, 48.0, y0, 300.0, y0 + 10.0, seq));
+            let right = format!("right row {k} of the two column body text goes here");
+            spans.push(span(&right, 312.0, y0, 564.0, y0 + 10.0, seq + 1));
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 25, "{lines:?}");
+        for (k, line) in lines[..12].iter().enumerate() {
+            assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+            assert!(line.ends_with("goes here"), "{line}");
+        }
+        for (k, line) in lines[12..24].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+        assert_eq!(lines[24], stamp);
+        assert_eq!(page.lines[24].spans, vec![0]);
+        assert!(page.lines[24].column > page.lines[23].column);
+        assert!(page.text.ends_with(&format!("goes here\n\n{stamp}")));
+        assert_eq!(
+            page.warnings,
+            ["vertical margin text at page 1: 1 line(s) placed last"]
+        );
+        assert!(page.lines[..24].iter().all(|l| !l.spans.contains(&0)));
+
+        let first = page.clone();
+        order_page(&mut page);
+        assert_eq!(page, first);
+    }
+
+    #[test]
+    fn stamp_of_stacked_rotated_glyphs_does_not_join_body_lines() {
+        // One rotated glyph per span, running upwards from y 200: each box
+        // is one em (20 pt) wide and one advance (10 pt) tall. Spaces are
+        // blank spans, which leave a gap.
+        let stamp = "arXiv:2507.14211v1 [cs.NI] 15 Jul 2025";
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for (n, ch) in stamp.chars().enumerate() {
+            let y0 = 200.0 + 10.0 * n as f32;
+            let text = ch.to_string();
+            spans.push(sized(&text, 22.0, y0, 42.0, y0 + 10.0, 20.0, seq));
+            seq += 1;
+        }
+        for k in 0..9u16 {
+            let y0 = 200.0 + 14.0 * f32::from(k);
+            let text = format!("body line {k} of the single column page");
+            spans.push(span(&text, 48.0, y0, 560.0, y0 + 10.0, seq));
+            seq += 1;
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 10, "{lines:?}");
+        for (k, line) in lines[..9].iter().enumerate() {
+            let expected = format!("body line {} of the single column page", 8 - k);
+            assert_eq!(*line, expected);
+        }
+        assert_eq!(lines[9], stamp);
+        assert_eq!(
+            page.warnings,
+            ["vertical margin text at page 1: 1 line(s) placed last"]
+        );
+
+        // `group_lines` lists the margin line last as well.
+        let grouped = group_lines(&page.spans);
+        assert_eq!(grouped.len(), 10);
+        assert_eq!(grouped[9].text, stamp);
+    }
+
+    #[test]
+    fn line_numbers_and_zero_advance_spans_are_not_vertical_text() {
+        // Line numbers in the margin are taller than wide (upright glyphs),
+        // and a zero-advance span is only one size tall.
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 1..=9u16 {
+            let y0 = 700.0 - 14.0 * f32::from(k);
+            spans.push(span(&k.to_string(), 20.0, y0, 25.0, y0 + 10.0, seq));
+            seq += 1;
+        }
+        for k in 1..=9u16 {
+            let y0 = 700.0 - 14.0 * f32::from(k);
+            let text = format!("numbered line {k} of the body");
+            spans.push(span(&text, 48.0, y0, 400.0, y0 + 10.0, seq));
+            seq += 1;
+        }
+        spans.push(span("hidden text layer", 300.0, 500.0, 300.0, 510.0, seq));
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 19, "{lines:?}");
+        for k in 1..=9u16 {
+            assert!(lines.contains(&k.to_string().as_str()), "{lines:?}");
+            let body = format!("numbered line {k} of the body");
+            assert!(lines.contains(&body.as_str()), "{lines:?}");
+        }
+        assert!(lines.contains(&"hidden text layer"));
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn vertical_span_and_stack_helpers() {
+        let b = |x0: f32, y0: f32, x1: f32, y1: f32| BBox { x0, y0, x1, y1 };
+        let tall = span("arXiv", 20.0, 200.0, 40.0, 400.0, 0);
+        assert!(is_tall_text(&tall, tall.bbox.unwrap(), 10.0));
+        let one = span("l", 20.0, 200.0, 22.0, 400.0, 0);
+        assert!(!is_tall_text(&one, one.bbox.unwrap(), 10.0));
+        let flat = span("text", 20.0, 200.0, 20.0, 210.0, 0);
+        assert!(!is_tall_text(&flat, flat.bbox.unwrap(), 10.0));
+
+        assert!(in_margin(b(22.0, 0.0, 42.0, 10.0), 612.0));
+        assert!(in_margin(b(580.0, 0.0, 600.0, 10.0), 612.0));
+        assert!(!in_margin(b(48.0, 0.0, 300.0, 10.0), 612.0));
+
+        let members = [
+            (0, b(50.0, 0.0, 100.0, 10.0)),
+            (1, b(102.0, 0.0, 150.0, 10.0)),
+            (2, b(160.0, 0.0, 200.0, 10.0)),
+        ];
+        let (pos, left, right) = widest_gap(&members).unwrap();
+        assert_eq!(pos, 2);
+        assert!(approx(left, 150.0) && approx(right, 160.0));
+        assert!(widest_gap(&members[..1]).is_none());
+    }
+
+    /// One row of two columns of prose at `y0` (right column emitted first).
+    fn prose_row(k: u16, y0: f32, seq: &mut u32, spans: &mut Vec<Span>) {
+        let right = format!("right row {k} of the two column body text goes here");
+        spans.push(span(&right, 320.0, y0, 560.0, y0 + 10.0, *seq));
+        let left = format!("left row {k} of the two column body text goes here");
+        spans.push(span(&left, 50.0, y0, 290.0, y0 + 10.0, *seq + 1));
+        *seq += 2;
+    }
+
+    #[test]
+    fn caption_bridging_the_gutter_cuts_the_columns_into_bands() {
+        // arXiv:2508.19485-like: rows 18 pt apart with 10 pt boxes leave
+        // 8 pt of whitespace, less than a row gap (one 10 pt line height),
+        // also around the caption set across both columns on row 4, so
+        // only the bridge rule can cut the page into bands.
+        let caption = "Figure 1: A caption set across both columns of the page body";
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 0..9u16 {
+            let y0 = 700.0 - 18.0 * f32::from(k);
+            if k == 4 {
+                spans.push(span(caption, 50.0, y0, 560.0, y0 + 10.0, seq));
+                seq += 1;
+            } else {
+                prose_row(k, y0, &mut seq, &mut spans);
+            }
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let mut expected: Vec<String> = Vec::new();
+        for band in [0..4u16, 5..9u16] {
+            for side in ["left", "right"] {
+                for k in band.clone() {
+                    expected.push(format!(
+                        "{side} row {k} of the two column body text goes here"
+                    ));
+                }
+            }
+            if band.start == 0 {
+                expected.push(caption.to_string());
+            }
+        }
+        assert_eq!(texts(&page), expected);
+        assert!(
+            page.text
+                .contains("row 3 of the two column body text goes here\n\nright row 0 ")
+        );
+        assert!(page.text.contains("goes here\n\nFigure 1: A caption"));
+        assert!(page.text.contains("page body\n\nleft row 5 "));
+        let cols: Vec<u32> = page.lines.iter().map(|l| l.column).collect();
+        assert_eq!(cols, [0, 0, 0, 0, 1, 1, 1, 1, 2, 3, 3, 3, 3, 4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn bridging_line_at_the_bottom_is_cut_off_without_a_row_gap() {
+        // A row of the two columns fused into one line at the bottom of the
+        // page, 8 pt below the last rows: narrower than a row gap, so the
+        // spanning-row rule does not cut it off and it blocked the columns.
+        let fused = "fused bottom row of the left column running on into the right one";
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 0..6u16 {
+            prose_row(k, 700.0 - 18.0 * f32::from(k), &mut seq, &mut spans);
+        }
+        spans.push(span(fused, 50.0, 592.0, 560.0, 602.0, seq));
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 13, "{lines:?}");
+        for (k, line) in lines[..6].iter().enumerate() {
+            assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+        }
+        for (k, line) in lines[6..12].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+        assert_eq!(lines[12], fused);
+    }
+
+    #[test]
+    fn bridge_needs_two_columns_of_prose_beside_the_bridging_lines() {
+        let b = |x0: f32, y0: f32, x1: f32| BBox {
+            x0,
+            y0,
+            x1,
+            y1: y0 + 10.0,
+        };
+        let params = CutParams {
+            row_gap: 10.0,
+            column_gap: 8.0,
+            bridge_gap: -2.5,
+        };
+        // Full-width prose with short numbered lines at the left margin and
+        // one at the right: no column of prose on either side.
+        let single = [
+            b(50.0, 700.0, 560.0),
+            b(20.0, 682.0, 30.0),
+            b(20.0, 664.0, 30.0),
+            b(500.0, 682.0, 560.0),
+            b(500.0, 664.0, 560.0),
+            b(50.0, 646.0, 560.0),
+        ];
+        let by_top: Vec<usize> = (0..single.len()).collect();
+        let mut by_left = by_top.clone();
+        by_left.sort_by(|x, y| left_first(&single[*x], &single[*y]));
+        assert_eq!(bridge_row_cut(&single, &by_top, &by_left, &params), None);
+        // Two columns of prose under a caption: cut below the caption.
+        let columns = [
+            b(50.0, 700.0, 560.0),
+            b(50.0, 682.0, 290.0),
+            b(320.0, 682.0, 560.0),
+            b(50.0, 664.0, 290.0),
+            b(320.0, 664.0, 560.0),
+        ];
+        let by_top: Vec<usize> = (0..columns.len()).collect();
+        let mut by_left = by_top.clone();
+        by_left.sort_by(|x, y| left_first(&columns[*x], &columns[*y]));
+        assert_eq!(
+            bridge_row_cut(&columns, &by_top, &by_left, &params),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn short_last_line_of_a_full_width_paragraph_stays_with_it() {
+        // The paragraph's full-width lines bridge the columns below, but its
+        // short last line, 8 pt under them, has no line of the right column
+        // beside it: no bridge cut there, the row gap under it is taken.
+        let mut spans = Vec::new();
+        let mut seq = 0;
+        for k in 0..3u16 {
+            let y0 = 760.0 - 18.0 * f32::from(k);
+            let text = format!("full width paragraph line {k} above the two columns of the page");
+            spans.push(span(&text, 50.0, y0, 560.0, y0 + 10.0, seq));
+            seq += 1;
+        }
+        spans.push(span("short last line.", 50.0, 706.0, 200.0, 716.0, seq));
+        seq += 1;
+        for k in 0..4u16 {
+            prose_row(k, 670.0 - 18.0 * f32::from(k), &mut seq, &mut spans);
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+
+        let lines = texts(&page);
+        assert_eq!(lines.len(), 12, "{lines:?}");
+        for (k, line) in lines[..3].iter().enumerate() {
+            assert!(
+                line.starts_with(&format!("full width paragraph line {k} ")),
+                "{line}"
+            );
+        }
+        assert_eq!(lines[3], "short last line.");
+        for (k, line) in lines[4..8].iter().enumerate() {
+            assert!(line.starts_with(&format!("left row {k} ")), "{line}");
+        }
+        for (k, line) in lines[8..].iter().enumerate() {
+            assert!(line.starts_with(&format!("right row {k} ")), "{line}");
+        }
+        assert!(
+            page.text
+                .contains("of the page\nshort last line.\n\nleft row 0 ")
+        );
+    }
+
+    #[test]
+    fn rotated_page_groups_lines_along_the_turned_baselines() {
+        // `/Rotate 90`: text runs upwards in user space. Two lines at x 100
+        // to 110 and 118 to 128 (the first reads on top once turned), each
+        // of three pieces whose y ranges match the other line's, so
+        // grouping by user-space baseline would slice across them.
+        let pieces = [("Info", "DSC"), ("cell", "="), ("one", "0.91")];
+        let mut spans = Vec::new();
+        for (k, (first, second)) in pieces.iter().enumerate() {
+            let y0 = 100.0 + 22.0 * k as f32;
+            let seq = 2 * u32::try_from(k).unwrap();
+            spans.push(span(second, 118.0, y0, 128.0, y0 + 18.0, seq));
+            spans.push(span(first, 100.0, y0, 110.0, y0 + 18.0, seq + 1));
+        }
+        let mut page = PageText::new(3, 612.0, 792.0, 90);
+        page.spans = spans;
+        order_page(&mut page);
+
+        assert_eq!(texts(&page), ["Info cell one", "DSC = 0.91"]);
+        assert_eq!(page.text, "Info cell one\nDSC = 0.91");
+        assert_eq!(
+            page.warnings,
+            ["page 3 rotated 90: ordered in the turned frame"]
+        );
+        let first = page.lines[0].bbox.unwrap();
+        assert!(
+            approx(first.x0, 100.0) && approx(first.x1, 110.0),
+            "{first:?}"
+        );
+        assert!(
+            approx(first.y0, 100.0) && approx(first.y1, 162.0),
+            "{first:?}"
+        );
+        let kept = BBox {
+            x0: 100.0,
+            y0: 100.0,
+            x1: 110.0,
+            y1: 118.0,
+        };
+        assert_eq!(page.spans[1].bbox, Some(kept));
+        let copy = page.clone();
+        order_page(&mut page);
+        assert_eq!(page, copy);
+    }
+
+    #[test]
+    fn turn_maps_boxes_into_the_displayed_frame_and_back() {
+        let b = BBox {
+            x0: 100.0,
+            y0: 200.0,
+            x1: 110.0,
+            y1: 260.0,
+        };
+        for degrees in [90, 180, 270, -90] {
+            let page = PageText::new(1, 612.0, 792.0, degrees);
+            let t = Turn::of(&page).unwrap();
+            let back = t.bbox(t.bbox(b, false), true);
+            let same = approx(back.x0, b.x0)
+                && approx(back.y0, b.y0)
+                && approx(back.x1, b.x1)
+                && approx(back.y1, b.y1);
+            assert!(same, "{degrees}: {back:?}");
+        }
+        let quarter = Turn::of(&PageText::new(1, 612.0, 792.0, 90)).unwrap();
+        let turned = quarter.bbox(b, false);
+        assert!(approx(turned.x0, 200.0) && approx(turned.x1, 260.0));
+        assert!(approx(turned.y0, 502.0) && approx(turned.y1, 512.0));
+        assert!(approx(quarter.frame_width(), 792.0));
+        let counter = Turn::of(&PageText::new(1, 612.0, 792.0, 270)).unwrap();
+        let turned = counter.bbox(b, false);
+        assert!(approx(turned.x0, 532.0) && approx(turned.x1, 592.0));
+        assert!(approx(turned.y0, 100.0) && approx(turned.y1, 110.0));
+        assert!(Turn::of(&PageText::new(1, 612.0, 792.0, 0)).is_none());
+        assert!(Turn::of(&PageText::new(1, 612.0, 792.0, 45)).is_none());
     }
 }
