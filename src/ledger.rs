@@ -783,6 +783,7 @@ fn load_pages(conn: &Connection, run: RunId) -> Result<Vec<PageText>, LedgerErro
             height: row.height,
             rotation: row.rotation,
             spans: serde_json::from_str(&row.spans_json)?,
+            figures: Vec::new(),
             lines: serde_json::from_str(&row.lines_json)?,
             text: row.text,
             warnings: serde_json::from_str(&row.warnings_json)?,

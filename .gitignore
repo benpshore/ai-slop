@@ -159,3 +159,9 @@ postgres-data/
 
 # engine outputs
 /out/
+.corpus-cache/
+eval-out/
+.claude/settings.local.json
+.models/
+.pdfium/
+eval-native/

@@ -10,6 +10,11 @@
 //! - `citations`: reference-list segmentation, entry parsing, in-text markers.
 //! - `ledger`: `SQLite` schema and idempotent writer.
 //! - `pipeline`: glue that runs the stages for one document.
+//!
+//! Evaluation harness against `arXiv` `LaTeX` ground truth (batch 2):
+//! - `corpus`: manifest of CC-BY papers, cached download and source unpacking.
+//! - `latex_refs`: `.bbl`/`.bib`/`\cite` parsing into reference ground truth.
+//! - `eval`: reference matching, field accuracy, marker resolution, report.
 
 #![allow(
     clippy::missing_errors_doc,
@@ -25,6 +30,9 @@
 pub mod acquire;
 pub mod backend;
 pub mod citations;
+pub mod corpus;
+pub mod eval;
+pub mod latex_refs;
 pub mod ledger;
 pub mod metadata;
 pub mod pipeline;
