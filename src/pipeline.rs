@@ -16,7 +16,7 @@ use crate::metadata;
 use crate::reading_order;
 use crate::schema::{
     CHUNK_PAGES, ChunkResult, Document, ExtractionResult, Job, PageText, SCHEMA_VERSION,
-    StageTimings, Status, sha256_hex,
+    StageTimings, Status, config_digest, sha256_hex,
 };
 
 /// Failure of a whole job. Per-page backend failures are not errors: they
@@ -55,16 +55,37 @@ fn resolve_page_range(
     }
 }
 
+/// `config_digest` for a run that covers only pages `first..=last` of the
+/// document. The backend's own digest is folded together with the page range
+/// (`backend_config` and `pages` keys through [`config_digest`]) so a
+/// sub-range run has a different identity from a full run of the same
+/// backend and from any other sub-range.
+fn sub_range_digest(backend_digest: &str, first: u32, last: u32) -> String {
+    let mut config: BTreeMap<String, String> = BTreeMap::new();
+    config.insert("backend_config".to_string(), backend_digest.to_string());
+    config.insert("pages".to_string(), format!("{first}-{last}"));
+    config_digest(&config)
+}
+
 /// Run every stage for one document and return the complete result.
 ///
 /// A `BackendError::Page` for one page is recorded as a warning prefixed with
 /// `failed:` (on the result and on a placeholder `PageText` for that page so
 /// chunking stays stable) and the status becomes `Partial`. Any other backend
 /// error aborts the job.
+///
+/// When the effective page range (after clamping) does not cover every page
+/// of the document, the result is a *sub-range run*: its status is `Partial`
+/// (never `Complete`), a warning `partial extraction: pages a-b of n` is
+/// recorded, and `backend.config_digest` is replaced by a digest derived from
+/// the backend's digest plus the range (see `sub_range_digest`). The ledger
+/// keys runs by backend identity, so this keeps a sub-range run from being
+/// published over, or in place of, the full-document run. A full run keeps
+/// the backend's identity unchanged.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
-    let identity = extractor.identity();
+    let mut identity = extractor.identity();
 
     let mut timings = StageTimings::default();
 
@@ -76,10 +97,18 @@ pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
     let mut session = extractor.open(&snapshot.bytes, job.password.as_deref())?;
     let page_count = session.page_count();
     let (first, last) = resolve_page_range(job.pages, page_count)?;
+    let covers_all_pages = first <= 1 && last >= page_count;
 
     let mut pages: Vec<PageText> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut status = Status::Complete;
+    if !covers_all_pages {
+        warnings.push(format!(
+            "partial extraction: pages {first}-{last} of {page_count}"
+        ));
+        status = Status::Partial;
+        identity.config_digest = sub_range_digest(&identity.config_digest, first, last);
+    }
     for page in first..=last {
         match session.page_text(page) {
             Ok(text) => pages.push(text),
@@ -185,9 +214,83 @@ pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkR
 
 #[cfg(test)]
 mod tests {
-    use super::{PipelineError, chunk_results, resolve_page_range, run_job};
-    use crate::backend::BackendError;
-    use crate::schema::{Job, PageText, Status, sha256_hex};
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Document, Object, Stream, dictionary};
+    use tempfile::TempDir;
+
+    use super::{PipelineError, chunk_results, resolve_page_range, run_job, sub_range_digest};
+    use crate::backend::{BackendError, Extractor, lopdf_backend::LopdfBackend};
+    use crate::schema::{Job, PageText, Status, config_digest, sha256_hex};
+
+    /// Build a three-page PDF with Helvetica as `/F1`; page `n` shows `Page n`.
+    fn three_page_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let tree_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let mut kids: Vec<Object> = Vec::new();
+        for n in 1..=3_i32 {
+            let operations = vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12_i32.into()]),
+                Operation::new("Td", vec![72_i32.into(), 720_i32.into()]),
+                Operation::new("Tj", vec![Object::string_literal(format!("Page {n}"))]),
+                Operation::new("ET", vec![]),
+            ];
+            let content = Content { operations }.encode().unwrap();
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => tree_id,
+                "Contents" => content_id,
+                "Resources" => resources_id,
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        let tree = dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => Object::Integer(3),
+            "MediaBox" => vec![0_i32.into(), 0_i32.into(), 612_i32.into(), 792_i32.into()],
+        };
+        doc.objects.insert(tree_id, Object::Dictionary(tree));
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => tree_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut bytes: Vec<u8> = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Write the three-page fixture into a fresh temporary directory. Keep the
+    /// `TempDir` alive for as long as the path is used.
+    fn three_page_fixture() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("three.pdf");
+        std::fs::write(&path, three_page_pdf()).unwrap();
+        (dir, path)
+    }
+
+    fn lopdf_job(path: &Path, pages: Option<(u32, u32)>) -> Job {
+        Job {
+            path: path.to_string_lossy().into_owned(),
+            backend: "lopdf".to_string(),
+            pages,
+            password: None,
+            max_bytes: None,
+        }
+    }
 
     fn synthetic_pages(count: u32) -> Vec<PageText> {
         (1..=count)
@@ -267,5 +370,85 @@ mod tests {
             Err(PipelineError::UnknownBackend(name)) => assert_eq!(name, "no-such-backend"),
             other => panic!("expected UnknownBackend, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sub_range_digest_folds_backend_digest_and_range() {
+        let backend = LopdfBackend::default().identity();
+        let digest = sub_range_digest(&backend.config_digest, 2, 2);
+        assert_ne!(digest, backend.config_digest);
+
+        let mut config: BTreeMap<String, String> = BTreeMap::new();
+        config.insert("backend_config".to_string(), backend.config_digest.clone());
+        config.insert("pages".to_string(), "2-2".to_string());
+        assert_eq!(digest, config_digest(&config));
+
+        assert_ne!(digest, sub_range_digest(&backend.config_digest, 1, 2));
+        assert_ne!(digest, sub_range_digest("other-backend-digest", 2, 2));
+    }
+
+    #[test]
+    fn full_run_keeps_backend_identity_and_is_complete() {
+        let (_dir, path) = three_page_fixture();
+        let result = run_job(&lopdf_job(&path, None)).unwrap();
+
+        let expected = LopdfBackend::default().identity();
+        assert_eq!(result.backend.config_digest, expected.config_digest);
+        assert_eq!(result.backend, expected);
+        assert_eq!(result.status, Status::Complete);
+        assert_eq!(result.document.pages, 3);
+        assert_eq!(result.pages.len(), 3);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn explicit_range_covering_every_page_is_a_full_run() {
+        let (_dir, path) = three_page_fixture();
+        let expected = LopdfBackend::default().identity();
+        for pages in [Some((1, 3)), Some((0, 99))] {
+            let result = run_job(&lopdf_job(&path, pages)).unwrap();
+            assert_eq!(result.status, Status::Complete, "pages {pages:?}");
+            assert_eq!(result.backend, expected, "pages {pages:?}");
+            assert_eq!(result.pages.len(), 3, "pages {pages:?}");
+        }
+    }
+
+    #[test]
+    fn sub_range_run_is_partial_with_its_own_digest() {
+        let (_dir, path) = three_page_fixture();
+        let result = run_job(&lopdf_job(&path, Some((2, 2)))).unwrap();
+
+        assert_eq!(result.status, Status::Partial);
+        assert_eq!(result.document.pages, 3);
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].page, 2);
+        let expected_warning = "partial extraction: pages 2-2 of 3".to_string();
+        assert!(result.warnings.contains(&expected_warning));
+
+        let full = LopdfBackend::default().identity();
+        assert_eq!(result.backend.name, full.name);
+        assert_eq!(result.backend.version, full.version);
+        assert_ne!(result.backend.config_digest, full.config_digest);
+        assert_eq!(
+            result.backend.config_digest,
+            sub_range_digest(&full.config_digest, 2, 2)
+        );
+    }
+
+    #[test]
+    fn different_sub_ranges_have_different_digests() {
+        let (_dir, path) = three_page_fixture();
+        let first_two = run_job(&lopdf_job(&path, Some((1, 2)))).unwrap();
+        let last_two = run_job(&lopdf_job(&path, Some((2, 3)))).unwrap();
+        assert_eq!(first_two.status, Status::Partial);
+        assert_eq!(last_two.status, Status::Partial);
+        assert_ne!(
+            first_two.backend.config_digest,
+            last_two.backend.config_digest
+        );
+        let want_first = "partial extraction: pages 1-2 of 3".to_string();
+        let want_last = "partial extraction: pages 2-3 of 3".to_string();
+        assert!(first_two.warnings.contains(&want_first));
+        assert!(last_two.warnings.contains(&want_last));
     }
 }

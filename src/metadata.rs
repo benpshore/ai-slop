@@ -86,6 +86,11 @@ fn info_split_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\s*(?:,|;|&|\band\b)\s*").expect("valid regex"))
 }
 
+fn name_group_split_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s*(?:;|&|\band\b)\s*").expect("valid regex"))
+}
+
 /// Extract metadata from the `/Info` dictionary and the first page.
 ///
 /// `info` keys are the dictionary keys without the leading `/`. Page-1
@@ -124,7 +129,7 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
         .map(str::trim)
         .filter(|a| !author_is_generic(a))
     {
-        let names = split_author_names(author);
+        let names = split_info_authors(author);
         if !names.is_empty() {
             meta.authors = names.into_iter().map(named_author).collect();
             meta.provenance
@@ -133,13 +138,13 @@ pub fn extract_metadata(info: &BTreeMap<String, String>, pages: &[PageText]) -> 
     }
     if meta.authors.is_empty()
         && let Some(page) = first_page
-        && let Some(&last_title_line) = title_lines.last()
+        && let Some((start, source)) = author_start(page, meta.title.as_deref(), &title_lines)
     {
-        let names = page1_authors(page, last_title_line + 1);
+        let names = page1_authors(page, start);
         if !names.is_empty() {
             meta.authors = names.into_iter().map(named_author).collect();
             meta.provenance
-                .insert("authors".to_string(), "first_page:authors".to_string());
+                .insert("authors".to_string(), source.to_string());
         }
     }
 
@@ -325,7 +330,7 @@ fn author_is_generic(author: &str) -> bool {
         || !lower.chars().any(char::is_alphabetic)
 }
 
-/// Split an `/Info` author string on commas, semicolons, `&` and `and`.
+/// Split a printed author line on commas, semicolons, `&` and `and`.
 fn split_author_names(text: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for part in info_split_re().split(text) {
@@ -343,6 +348,130 @@ fn split_author_names(text: &str) -> Vec<String> {
         names.push(cleaned);
     }
     names
+}
+
+/// Author names from an `/Info Author` string.
+///
+/// The string is split on `and`, `&` and `;` first. A part with exactly one
+/// comma is handled by `comma_pair_candidates` so that `Lovelace, Ada` stays
+/// one person while `Ada Lovelace, Charles Babbage` still splits. Every
+/// candidate must pass `is_acceptable_info_name`; login names, product
+/// names, organisations and addresses are dropped.
+fn split_info_authors(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for part in name_group_split_re().split(text) {
+        let collapsed = collapse_whitespace(part);
+        let group: &str = collapsed.as_str();
+        let candidates: Vec<String> = match group.split_once(',') {
+            Some((left, right)) if !right.contains(',') => {
+                comma_pair_candidates(left.trim(), right.trim())
+            }
+            Some(_) => split_author_names(group),
+            None => vec![group.to_string()],
+        };
+        for candidate in candidates {
+            if !candidate.is_empty() && is_acceptable_info_name(&candidate) {
+                names.push(candidate);
+            }
+        }
+    }
+    names
+}
+
+/// Candidates from an `/Info` part that contains exactly one comma.
+///
+/// `Ada Lovelace, Charles Babbage` is a list of two people. When the part
+/// before the comma is not itself a full name it is read as `Last, First`:
+/// `Lovelace, Ada` and `Smith, J. R.` become `Ada Lovelace` and
+/// `J. R. Smith`, while a longer given-name part (`Lovelace, Ada King`) and a
+/// suffix (`John Smith, Jr.`) are kept as printed.
+fn comma_pair_candidates(left: &str, right: &str) -> Vec<String> {
+    if left.is_empty() || right.is_empty() {
+        return vec![format!("{left}{right}")];
+    }
+    if is_name_suffix(right) {
+        return vec![format!("{left}, {right}")];
+    }
+    if looks_like_person_name(left) {
+        return vec![left.to_string(), right.to_string()];
+    }
+    if is_given_name_or_initials(right) {
+        return vec![format!("{right} {left}")];
+    }
+    vec![format!("{left}, {right}")]
+}
+
+/// True for the part after the comma in `Last, First` when it is a single
+/// given name (`Ada`) or only initials (`J. R.`, `J.-P.`).
+fn is_given_name_or_initials(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    match tokens.as_slice() {
+        [] => false,
+        [single] => is_capitalised_word(single),
+        _ => tokens.len() <= 3 && tokens.iter().all(|t| is_initials(t)),
+    }
+}
+
+/// A token starting with an upper-case letter and made of letters, dots,
+/// hyphens and apostrophes.
+fn is_capitalised_word(token: &str) -> bool {
+    let mut chars = token.chars();
+    chars.next().is_some_and(char::is_uppercase)
+        && chars.all(|c| c.is_alphabetic() || matches!(c, '\'' | '’' | '-' | '.'))
+}
+
+/// `A.`, `A.B.` or `J.-P.`: one to three upper-case letters with dots or hyphens.
+fn is_initials(token: &str) -> bool {
+    let letters = token.chars().filter(|c| c.is_alphabetic()).count();
+    let allowed = token
+        .chars()
+        .all(|c| c.is_uppercase() || matches!(c, '.' | '-'));
+    (1..=3).contains(&letters) && allowed
+}
+
+/// True for an `/Info`-derived candidate that names a person rather than a
+/// login, product, organisation or address.
+fn is_acceptable_info_name(candidate: &str) -> bool {
+    looks_like_person_name(candidate)
+        && !affiliation_re().is_match(candidate)
+        && !has_generic_name_token(candidate)
+}
+
+/// True when a word of `name` is a login, product or placeholder word such as
+/// `User` or `Office`.
+fn has_generic_name_token(name: &str) -> bool {
+    name.split_whitespace().any(|token| {
+        let lower = token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        matches!(
+            lower.as_str(),
+            "user"
+                | "users"
+                | "admin"
+                | "administrator"
+                | "office"
+                | "microsoft"
+                | "windows"
+                | "account"
+                | "guest"
+                | "owner"
+                | "unknown"
+                | "author"
+                | "default"
+                | "anonymous"
+                | "pc"
+                | "computer"
+                | "laptop"
+                | "desktop"
+                | "adobe"
+                | "acrobat"
+                | "latex"
+                | "pdftex"
+                | "libreoffice"
+                | "openoffice"
+        )
+    })
 }
 
 fn split_keywords(text: &str) -> Vec<String> {
@@ -531,6 +660,74 @@ fn title_block(page: &PageText) -> Option<(Vec<usize>, String)> {
         return None;
     }
     Some((indices, text))
+}
+
+/// Index of the first page-1 line after the title, with the provenance to
+/// record for authors found there.
+///
+/// `title_lines` are the page-1 title lines when the title itself came from
+/// page 1. Otherwise the (`/Info`) `title` is located on the page as a run of
+/// consecutive lines whose normalised text concatenates to the normalised
+/// title, falling back to the largest-font block, so that the author lines
+/// below the printed title can still be read.
+fn author_start(
+    page: &PageText,
+    title: Option<&str>,
+    title_lines: &[usize],
+) -> Option<(usize, &'static str)> {
+    if let Some(&last) = title_lines.last() {
+        return Some((last + 1, "first_page:authors"));
+    }
+    let lines = title
+        .and_then(|t| matching_title_lines(page, t))
+        .or_else(|| title_block(page).map(|(indices, _)| indices))?;
+    let last = *lines.last()?;
+    Some((last + 1, "page1:below-title"))
+}
+
+/// Indices of consecutive page lines whose normalised text concatenates to
+/// the normalised `title` (a title printed on one line or wrapped over
+/// several). Lines that normalise to nothing are skipped inside a run.
+fn matching_title_lines(page: &PageText, title: &str) -> Option<Vec<usize>> {
+    let target = normalize_for_match(title);
+    if target.is_empty() {
+        return None;
+    }
+    let pieces: Vec<String> = page
+        .lines
+        .iter()
+        .map(|line| normalize_for_match(&line.text))
+        .collect();
+    for start in 0..pieces.len() {
+        let mut joined = String::new();
+        let mut indices: Vec<usize> = Vec::new();
+        for (i, piece) in pieces.iter().enumerate().skip(start) {
+            if piece.is_empty() {
+                if indices.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            joined.push_str(piece);
+            indices.push(i);
+            if joined == target {
+                return Some(indices);
+            }
+            if !target.starts_with(joined.as_str()) {
+                break;
+            }
+        }
+    }
+    None
+}
+
+/// Lower-case alphanumeric characters only, for comparing printed text with
+/// an `/Info` value regardless of spacing, case and punctuation.
+fn normalize_for_match(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// Author names from the lines between the title block and the abstract.
@@ -967,5 +1164,103 @@ mod tests {
             split_author_names("Smith, Jr., John & Jane Doe"),
             vec!["Smith, Jr.", "John", "Jane Doe"]
         );
+    }
+
+    #[test]
+    fn info_title_without_author_reads_authors_below_page_one_title() {
+        let info = info_from(&[("Title", "Attention Is All You Need")]);
+        let page = page_from(&[
+            ("Attention Is", 18.0),
+            ("All You Need", 18.0),
+            ("Ashish Vaswani1, Noam Shazeer2 and Niki Parmar1", 11.0),
+            ("1Google Brain 2Google Research", 9.0),
+            ("Abstract", 10.0),
+            ("We propose a new architecture.", 10.0),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(meta.title.as_deref(), Some("Attention Is All You Need"));
+        assert_eq!(meta.provenance["title"], "info:Title");
+        assert_eq!(
+            author_names(&meta),
+            vec!["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"]
+        );
+        assert_eq!(meta.provenance["authors"], "page1:below-title");
+    }
+
+    #[test]
+    fn info_title_absent_from_page_falls_back_to_largest_font_block() {
+        let info = info_from(&[("Title", "Final Camera Ready Version")]);
+        let page = page_from(&[
+            ("Attention Is All You Need", 18.0),
+            ("Jane Doe and John Smith", 11.0),
+            ("Abstract", 10.0),
+            ("Text.", 10.0),
+        ]);
+        let meta = extract_metadata(&info, &[page]);
+        assert_eq!(meta.title.as_deref(), Some("Final Camera Ready Version"));
+        assert_eq!(meta.provenance["title"], "info:Title");
+        assert_eq!(author_names(&meta), vec!["Jane Doe", "John Smith"]);
+        assert_eq!(meta.provenance["authors"], "page1:below-title");
+    }
+
+    #[test]
+    fn info_title_is_located_across_wrapped_lines() {
+        let page = page_from(&[
+            ("Journal of Testing 12(3)", 8.0),
+            ("Attention Is", 18.0),
+            ("All You Need", 18.0),
+            ("Jane Doe", 11.0),
+        ]);
+        assert_eq!(
+            matching_title_lines(&page, "Attention is all you need!"),
+            Some(vec![1, 2])
+        );
+        assert_eq!(matching_title_lines(&page, "Something Else"), None);
+        assert_eq!(matching_title_lines(&page, "..."), None);
+    }
+
+    #[test]
+    fn info_author_surname_first_is_one_person() {
+        let info = info_from(&[("Author", "Lovelace, Ada")]);
+        let meta = extract_metadata(&info, &[]);
+        assert_eq!(author_names(&meta), vec!["Ada Lovelace"]);
+        assert_eq!(meta.provenance["authors"], "info:Author");
+    }
+
+    #[test]
+    fn info_author_list_of_full_names_splits() {
+        let author = "Ada Lovelace, Charles Babbage and Grace Hopper";
+        let info = info_from(&[("Author", author)]);
+        let meta = extract_metadata(&info, &[]);
+        assert_eq!(
+            author_names(&meta),
+            vec!["Ada Lovelace", "Charles Babbage", "Grace Hopper"]
+        );
+        assert_eq!(meta.provenance["authors"], "info:Author");
+    }
+
+    #[test]
+    fn generic_info_author_yields_no_authors() {
+        let info = info_from(&[("Author", "Microsoft Office User")]);
+        let meta = extract_metadata(&info, &[]);
+        assert!(meta.authors.is_empty());
+        assert!(!meta.provenance.contains_key("authors"));
+    }
+
+    #[test]
+    fn info_author_splitting_cases() {
+        assert_eq!(split_info_authors("Smith, J. R."), vec!["J. R. Smith"]);
+        assert_eq!(split_info_authors("Ann Lee, Jr."), vec!["Ann Lee, Jr."]);
+        assert_eq!(split_info_authors("de Vries, Ada"), vec!["Ada de Vries"]);
+        assert_eq!(
+            split_info_authors("Jane Doe; jane.doe@example.com; et al."),
+            vec!["Jane Doe"]
+        );
+        assert_eq!(
+            split_info_authors("Jane Doe & John Smith"),
+            vec!["Jane Doe", "John Smith"]
+        );
+        assert!(split_info_authors("Microsoft Office User").is_empty());
+        assert!(split_info_authors("MIT Media Lab").is_empty());
     }
 }

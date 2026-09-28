@@ -241,6 +241,9 @@ const INSERT_CITATION_TARGET: &str = "INSERT INTO citation_targets (citation_id,
 const SELECT_RUN_ID: &str = "SELECT id, status, finished_at FROM runs \
     WHERE hash = ?1 AND backend_name = ?2 AND backend_version = ?3 \
     AND config_digest = ?4 AND schema_version = ?5";
+const SELECT_LATEST_RUN_BY_PREFIX: &str = "SELECT id FROM runs \
+    WHERE substr(hash, 1, ?2) = ?1 ORDER BY finished_at DESC, id DESC LIMIT 1";
+const UPDATE_TIMINGS: &str = "UPDATE runs SET timings_json = ?1 WHERE id = ?2";
 const SELECT_RUN: &str = "SELECT hash, backend_name, backend_version, config_digest, \
     schema_version, status, timings_json, warnings_json FROM runs WHERE id = ?1";
 const SELECT_DOCUMENT: &str = "SELECT size, pages FROM documents WHERE hash = ?1";
@@ -382,6 +385,33 @@ impl Ledger {
         insert_citations(&tx, run_id, &result.citations)?;
         tx.commit()?;
         Ok(run_id)
+    }
+
+    /// Finds the most recently finished run whose document hash starts with
+    /// `prefix` (lower-case hex), regardless of backend identity.
+    pub fn latest_run_for_prefix(&self, prefix: &str) -> Result<Option<RunId>, LedgerError> {
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        optional_row(
+            &self.conn,
+            SELECT_LATEST_RUN_BY_PREFIX,
+            params![prefix, prefix_len],
+            |row| row.get::<_, RunId>(0),
+        )
+    }
+
+    /// Replaces the stored stage timings of `run`, so the cost of the ledger
+    /// write itself can be recorded after [`Ledger::write_result`] returns.
+    pub fn update_timings(
+        &mut self,
+        run: RunId,
+        timings: &StageTimings,
+    ) -> Result<(), LedgerError> {
+        let json = serde_json::to_string(timings)?;
+        let changed = self.conn.execute(UPDATE_TIMINGS, params![json, run])?;
+        if changed == 0 {
+            return Err(LedgerError::NotFound(format!("run {run}")));
+        }
+        Ok(())
     }
 
     /// Finds the run for `hash` produced by `backend` at the current

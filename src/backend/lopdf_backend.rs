@@ -13,8 +13,14 @@ use unicode_normalization::UnicodeNormalization;
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
 use crate::schema::{BBox, BackendIdentity, PageText, Span, config_digest};
 
+/// The `lopdf` release this backend is built against. It is part of the
+/// [`BackendIdentity`], so a dependency bump must change it (a unit test
+/// checks it against `Cargo.lock`).
+const LOPDF_VERSION: &str = "0.45.0";
 /// Glyph width (in 1/1000 em) assumed when a font declares nothing usable.
 const DEFAULT_WIDTH: f32 = 500.0;
+/// Glyph-space to text-space factor for every font type except Type3.
+const THOUSANDTH: f32 = 0.001;
 /// Descent estimate below the baseline, as a fraction of the font size.
 const DESCENT: f32 = -0.2;
 /// Ascent estimate above the baseline, as a fraction of the font size.
@@ -38,7 +44,7 @@ impl Default for LopdfBackend {
 }
 
 impl Extractor for LopdfBackend {
-    /// Name `lopdf`, version `0.45`, digest over `max_xobject_depth`.
+    /// Name `lopdf`, version [`LOPDF_VERSION`], digest over `max_xobject_depth`.
     fn identity(&self) -> BackendIdentity {
         let mut config = BTreeMap::new();
         config.insert(
@@ -47,7 +53,7 @@ impl Extractor for LopdfBackend {
         );
         BackendIdentity {
             name: "lopdf".to_string(),
-            version: "0.45".to_string(),
+            version: LOPDF_VERSION.to_string(),
             config_digest: config_digest(&config),
         }
     }
@@ -300,8 +306,13 @@ fn to_code(value: f32) -> Option<u32> {
 /// Glyph widths of a simple (single-byte) font.
 struct SimpleWidths {
     first_char: u32,
+    /// `/Widths`, in glyph space.
     widths: Vec<f32>,
+    /// `/MissingWidth`, in glyph space.
     missing: Option<f32>,
+    /// Glyph space to text space: 1/1000 for `Type1`/`TrueType`, the horizontal
+    /// scale of `/FontMatrix` for Type3.
+    glyph_scale: f32,
 }
 
 impl SimpleWidths {
@@ -310,18 +321,26 @@ impl SimpleWidths {
             first_char: 0,
             widths: Vec::new(),
             missing: None,
+            glyph_scale: THOUSANDTH,
         }
     }
 
+    /// Advance of `code` in text space (1.0 = the font size).
     fn width(&self, code: u32) -> f32 {
-        let fallback = self.missing.unwrap_or(DEFAULT_WIDTH);
+        let fallback = match self.missing {
+            Some(missing) => missing * self.glyph_scale,
+            None => DEFAULT_WIDTH * THOUSANDTH,
+        };
         let Some(offset) = code.checked_sub(self.first_char) else {
             return fallback;
         };
         let Ok(index) = usize::try_from(offset) else {
             return fallback;
         };
-        self.widths.get(index).copied().unwrap_or(fallback)
+        match self.widths.get(index) {
+            Some(glyph_width) => glyph_width * self.glyph_scale,
+            None => fallback,
+        }
     }
 }
 
@@ -333,13 +352,14 @@ struct CompositeWidths {
 }
 
 impl CompositeWidths {
+    /// Advance of `cid` in text space (1.0 = the font size).
     fn width(&self, cid: u32) -> f32 {
         for &(first, last, glyph_width) in &self.ranges {
             if (first..=last).contains(&cid) {
-                return glyph_width;
+                return glyph_width * THOUSANDTH;
             }
         }
-        self.default_width
+        self.default_width * THOUSANDTH
     }
 }
 
@@ -349,7 +369,8 @@ enum Widths {
 }
 
 impl Widths {
-    fn glyph_width(&self, code: u32) -> f32 {
+    /// Advance of `code` in text space (1.0 = the font size).
+    fn text_width(&self, code: u32) -> f32 {
         match self {
             Self::Simple(simple) => simple.width(code),
             Self::Composite(composite) => composite.width(code),
@@ -449,7 +470,35 @@ fn composite_decode<'a>(doc: &'a Document, dict: &'a Dictionary) -> Decode<'a> {
     }
 }
 
+/// Horizontal glyph-space scale of a Type3 font's `/FontMatrix`
+/// (`[a b c d e f]`, default `[0.001 0 0 0.001 0 0]`): a horizontal advance
+/// `w` in glyph space is `w * a` in text space.
+fn type3_glyph_scale(doc: &Document, dict: &Dictionary) -> f32 {
+    let Ok(value) = dict.get_deref(b"FontMatrix", doc) else {
+        return THOUSANDTH;
+    };
+    let Ok(array) = value.as_array() else {
+        return THOUSANDTH;
+    };
+    if array.len() != 6 {
+        return THOUSANDTH;
+    }
+    let Some(first) = array.first() else {
+        return THOUSANDTH;
+    };
+    match number(doc, first) {
+        Some(scale) if scale.is_finite() => scale,
+        _ => THOUSANDTH,
+    }
+}
+
 fn simple_widths(doc: &Document, dict: &Dictionary) -> SimpleWidths {
+    let subtype = dict.get(b"Subtype").and_then(Object::as_name);
+    let glyph_scale = if subtype.is_ok_and(|name| name == b"Type3") {
+        type3_glyph_scale(doc, dict)
+    } else {
+        THOUSANDTH
+    };
     let mut first_char = 0;
     if let Ok(value) = dict.get_deref(b"FirstChar", doc)
         && let Ok(first) = value.as_i64()
@@ -476,6 +525,7 @@ fn simple_widths(doc: &Document, dict: &Dictionary) -> SimpleWidths {
         first_char,
         widths,
         missing,
+        glyph_scale,
     }
 }
 
@@ -863,12 +913,12 @@ impl<'a> Interpreter<'a> {
                 for &unit in pair {
                     code = (code << 8) | u32::from(unit);
                 }
-                let glyph = font.widths.glyph_width(code) / 1000.0 * size;
+                let glyph = font.widths.text_width(code) * size;
                 total += glyph + self.state.char_spacing;
             }
         } else {
             for &unit in bytes {
-                let glyph = font.widths.glyph_width(u32::from(unit)) / 1000.0 * size;
+                let glyph = font.widths.text_width(u32::from(unit)) * size;
                 total += glyph + self.state.char_spacing;
                 if unit == 32 {
                     total += self.state.word_spacing;
@@ -1063,13 +1113,29 @@ mod tests {
     /// Build a PDF with Helvetica as `/F1`, one page per operation list, and
     /// optionally a Form `XObject` `/X1` holding `form` with the same font.
     fn build_pdf(pages: Vec<Vec<Operation>>, form: Option<Vec<Operation>>) -> Vec<u8> {
+        build_pdf_with_font(pages, form, |_| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Helvetica",
+            }
+        })
+    }
+
+    /// Like [`build_pdf`] but `/F1` is the font dictionary `make_font`
+    /// returns (it may add its own objects to the document first).
+    fn build_pdf_with_font<F>(
+        pages: Vec<Vec<Operation>>,
+        form: Option<Vec<Operation>>,
+        make_font: F,
+    ) -> Vec<u8>
+    where
+        F: FnOnce(&mut Document) -> Dictionary,
+    {
         let mut doc = Document::with_version("1.5");
         let tree_id = doc.new_object_id();
-        let font_id = doc.add_object(dictionary! {
-            "Type" => "Font",
-            "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
-        });
+        let font_dict = make_font(&mut doc);
+        let font_id = doc.add_object(font_dict);
         let mut resources = dictionary! {
             "Font" => dictionary! { "F1" => font_id },
         };
@@ -1123,10 +1189,35 @@ mod tests {
     fn identity_is_stable() {
         let identity = LopdfBackend::default().identity();
         assert_eq!(identity.name, "lopdf");
-        assert_eq!(identity.version, "0.45");
+        assert_eq!(identity.version, LOPDF_VERSION);
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
+    }
+
+    #[test]
+    fn lopdf_version_matches_cargo_lock() {
+        let lock = include_str!("../../Cargo.lock");
+        let mut locked: Option<&str> = None;
+        for block in lock.split("[[package]]") {
+            let mut name: Option<&str> = None;
+            let mut version: Option<&str> = None;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("name = ") {
+                    name = Some(value.trim().trim_matches('"'));
+                } else if let Some(value) = line.strip_prefix("version = ") {
+                    version = Some(value.trim().trim_matches('"'));
+                }
+            }
+            if name == Some("lopdf") {
+                locked = version;
+            }
+        }
+        assert_eq!(
+            locked,
+            Some(LOPDF_VERSION),
+            "Cargo.lock pins another lopdf; update LOPDF_VERSION (the identity key)"
+        );
     }
 
     #[test]
@@ -1219,6 +1310,44 @@ mod tests {
         assert!(close(left_box.x1, 55.0), "A x1 {}", left_box.x1);
         // -500/1000 * 10 pt moves the next glyph 5 pt to the right.
         assert!(close(right_box.x0, 60.0), "B x0 {}", right_box.x0);
+    }
+
+    #[test]
+    fn type3_widths_go_through_font_matrix() {
+        // Code 65 ("A") is glyph /a, 500 units wide in a glyph space where
+        // one unit is 0.01 text-space units: 500 * 0.01 * 10 pt = 50 pt.
+        let bytes = build_pdf_with_font(vec![text_ops(10, 100, 500, "A")], None, |doc| {
+            let glyph_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type3",
+                "FontBBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                "FontMatrix" => vec![
+                    Object::Real(0.01),
+                    0.into(),
+                    0.into(),
+                    Object::Real(0.01),
+                    0.into(),
+                    0.into(),
+                ],
+                "CharProcs" => dictionary! { "a" => glyph_id },
+                "Encoding" => dictionary! {
+                    "Type" => "Encoding",
+                    "Differences" => vec![65.into(), "a".into()],
+                },
+                "FirstChar" => 65_i64,
+                "LastChar" => 65_i64,
+                "Widths" => vec![500.into()],
+                "Resources" => dictionary! {},
+            }
+        });
+        let mut session = LopdfBackend::default().open(&bytes, None).unwrap();
+        let page = session.page_text(1).unwrap();
+        assert_eq!(page.spans.len(), 1);
+        let glyph_box = page.spans[0].bbox.unwrap();
+        assert!(close(glyph_box.x0, 100.0), "x0 {}", glyph_box.x0);
+        let width = glyph_box.x1 - glyph_box.x0;
+        assert!((width - 50.0).abs() < 0.01, "width {width}");
     }
 
     #[test]
