@@ -230,7 +230,7 @@ pub fn synthesize(text: &str, voice: &str, timeout: Duration) -> Result<Audio, S
         if started.elapsed() > timeout {
             // A timeout is a failure even when some buffers arrived: returning
             // the partial samples would pass truncated audio off as complete.
-            let received = shared.lock().map(|state| state.samples.len()).unwrap_or(0);
+            let received = shared.lock().map_or(0, |state| state.samples.len());
             return Err(SpeechError::Timeout(format!(
                 "AVSpeechSynthesizer did not finish within {} s ({received} samples received)",
                 timeout.as_secs()
