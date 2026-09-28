@@ -60,6 +60,26 @@ pub struct Line {
     pub spans: Vec<u32>,
 }
 
+/// An image or drawing region on a page. Pixel data never lives in text
+/// output: `file` points at the exported bytes when they were saved.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Figure {
+    /// 0-based index of the figure on its page, in backend order.
+    pub index: u32,
+    pub bbox: Option<BBox>,
+    /// `raster`, `vector`, or `layout` (a model-detected picture region).
+    pub kind: String,
+    /// MIME type of the exported bytes when known, e.g. `image/png`.
+    pub mime: Option<String>,
+    pub width_px: Option<u32>,
+    pub height_px: Option<u32>,
+    /// SHA-256 of the exported bytes when they were captured.
+    pub sha256: Option<String>,
+    /// Path of the exported file relative to the output directory.
+    pub file: Option<String>,
+    pub caption: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PageText {
     /// 1-based page number as printed by the backend (PDF page index + 1).
@@ -69,6 +89,9 @@ pub struct PageText {
     /// `/Rotate` in degrees, 0/90/180/270.
     pub rotation: i32,
     pub spans: Vec<Span>,
+    /// Images and drawings found on the page; never inlined into `text`.
+    #[serde(default)]
+    pub figures: Vec<Figure>,
     /// Filled by `reading_order`; empty until then.
     pub lines: Vec<Line>,
     /// Final ordered text for the page; lines joined by `\n`, paragraphs by `\n\n`.
@@ -84,6 +107,7 @@ impl PageText {
             height,
             rotation,
             spans: Vec::new(),
+            figures: Vec::new(),
             lines: Vec::new(),
             text: String::new(),
             warnings: Vec::new(),

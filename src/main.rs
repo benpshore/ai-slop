@@ -1,5 +1,6 @@
-//! `tpe` command-line interface: extract PDFs into a ledger, query the ledger
-//! and benchmark the extraction stages.
+//! `tpe` command-line interface: extract PDFs into a ledger, query the ledger,
+//! benchmark the extraction stages, and evaluate the engine against the
+//! `arXiv` corpus described by `corpus/manifest.json`.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -9,23 +10,30 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Mutex, mpsc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
-use clap::{Args, Parser, Subcommand};
-use rusqlite::OptionalExtension;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use tpe::backend;
+use tpe::corpus::{self, Manifest, ManifestItem};
+use tpe::eval::{self, CorpusReport, PaperEval};
+use tpe::latex_refs;
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, PipelineError};
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
 /// Service-time target per 20-page chunk, in milliseconds.
 const TARGET_MS_PER_CHUNK: f64 = 30.0;
+
+/// User agent sent with corpus downloads.
+const USER_AGENT: &str =
+    "text-processing-engine eval (github.com/benpshore/text-processing-engine)";
 
 #[derive(Parser)]
 #[command(name = "tpe", version, about)]
@@ -48,6 +56,41 @@ enum Cmd {
     Show(ShowArgs),
     /// Measure warm service time per 20-page chunk (no ledger writes).
     Bench(BenchArgs),
+    /// Manage the evaluation corpus described by a manifest.
+    Corpus {
+        #[command(subcommand)]
+        command: CorpusCmd,
+    },
+    /// Evaluate extraction against `arXiv` `LaTeX` ground truth and write a report.
+    Eval(EvalArgs),
+}
+
+#[derive(Subcommand)]
+enum CorpusCmd {
+    /// Download (or reuse from the cache) the PDF and e-print source of each item.
+    Fetch(FetchArgs),
+}
+
+/// Manifest split selected on the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Split {
+    /// Every item.
+    All,
+    /// Items whose manifest split is `dev`.
+    Dev,
+    /// Items whose manifest split is `holdout`.
+    Holdout,
+}
+
+impl Split {
+    /// Whether `item` belongs to this selection.
+    fn includes(self, item: &ManifestItem) -> bool {
+        match self {
+            Self::All => true,
+            Self::Dev => item.split == "dev",
+            Self::Holdout => item.split == "holdout",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -113,6 +156,50 @@ struct BenchArgs {
     iterations: usize,
 }
 
+#[derive(Args)]
+struct FetchArgs {
+    /// Path of the corpus manifest (JSON).
+    #[arg(long, value_name = "FILE")]
+    manifest: PathBuf,
+    /// Directory that caches downloaded PDFs and unpacked sources.
+    #[arg(long, value_name = "DIR")]
+    cache: PathBuf,
+    /// Never use the network; items missing from the cache fail.
+    #[arg(long)]
+    offline: bool,
+    /// Record newly computed SHA-256 digests in the manifest file.
+    #[arg(long)]
+    update_manifest: bool,
+    /// Which manifest split to fetch.
+    #[arg(long, value_enum, default_value_t = Split::All)]
+    split: Split,
+}
+
+#[derive(Args)]
+struct EvalArgs {
+    /// Path of the corpus manifest (JSON).
+    #[arg(long, value_name = "FILE")]
+    manifest: PathBuf,
+    /// Directory that caches downloaded PDFs and unpacked sources.
+    #[arg(long, value_name = "DIR")]
+    cache: PathBuf,
+    /// Directory that receives `report.json` and `report.md`.
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+    /// Extraction backend name.
+    #[arg(long, default_value = "lopdf")]
+    backend: String,
+    /// Which manifest split to evaluate.
+    #[arg(long, value_enum, default_value_t = Split::Dev)]
+    split: Split,
+    /// Never use the network; items missing from the cache count as failed papers.
+    #[arg(long)]
+    offline: bool,
+    /// Optional `SQLite` ledger that also receives every extraction result.
+    #[arg(long, value_name = "FILE")]
+    db: Option<PathBuf>,
+}
+
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
@@ -127,6 +214,13 @@ fn main() -> anyhow::Result<ExitCode> {
         }
         Cmd::Bench(args) => {
             run_bench(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Corpus { command } => match command {
+            CorpusCmd::Fetch(args) => run_corpus_fetch(&args),
+        },
+        Cmd::Eval(args) => {
+            run_eval(&args)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -172,11 +266,49 @@ fn check_backend(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Process exit code for a batch: failure when any item failed.
+fn exit_code(any_failed: bool) -> ExitCode {
+    if any_failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// First twelve hex digits of a digest, or the whole digest when shorter.
+fn short_hash(hash: &str) -> &str {
+    &hash[..hash.len().min(12)]
+}
+
+/// Record `result` in the ledger: its source observation, then the full run.
+fn store_result(
+    ledger: &mut Ledger,
+    result: &ExtractionResult,
+    label: &str,
+) -> anyhow::Result<i64> {
+    // `write_result` upserts the document and its source observations itself,
+    // so a separate `record_source` call would only add a second transaction.
+    ledger
+        .write_result(result)
+        .with_context(|| format!("writing result for {label}"))
+}
+
 /// Outcome of one worker job, sent to the main thread over the channel.
 struct Outcome {
     path: PathBuf,
     wall_ms: f64,
-    result: Result<ExtractionResult, PipelineError>,
+    result: Result<ExtractionResult, String>,
+}
+
+/// Human-readable text of a panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 /// Pop the next input path, or `None` when the queue is empty or poisoned.
@@ -195,7 +327,10 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         max_bytes: args.max_bytes,
     };
     let start = Instant::now();
-    let result = pipeline::run_job(&job);
+    // A panic inside a backend must fail this file only, not the whole batch.
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| pipeline::run_job(&job)))
+        .unwrap_or_else(|payload| Err(format!("panic: {}", panic_message(&*payload))))
+        .map_err(|err| err.to_string());
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
@@ -239,11 +374,7 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
         Ok(any_failed)
     })?;
 
-    Ok(if any_failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    })
+    Ok(exit_code(any_failed))
 }
 
 /// Record one outcome in the ledger (main thread only), write the optional
@@ -258,10 +389,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
     match result {
         Ok(mut result) => {
             let write_start = Instant::now();
-            // `write_result` upserts the document and its sources itself.
-            let run = ledger
-                .write_result(&result)
-                .with_context(|| format!("writing result for {path_display}"))?;
+            let run = store_result(ledger, &result, &path_display)?;
             result.timings.write_ms = elapsed_ms(write_start);
             ledger
                 .update_timings(run, &result.timings)
@@ -296,8 +424,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
 
 /// The tab-separated line printed per document.
 fn summary_line(result: &ExtractionResult, path: &str) -> String {
-    let hash = result.document.hash.0.as_str();
-    let short = &hash[..hash.len().min(12)];
+    let short = short_hash(&result.document.hash.0);
     let t = &result.timings;
     let total_ms =
         t.acquire_ms + t.parse_ms + t.order_ms + t.metadata_ms + t.citations_ms + t.write_ms;
@@ -339,20 +466,10 @@ fn run_stats(db: &Path) -> anyhow::Result<()> {
 
 /// Find the most recently finished run whose document hash starts with
 /// `prefix`, using the ledger's `runs` table directly.
-fn latest_run_for_prefix(db: &Path, prefix: &str) -> anyhow::Result<Option<i64>> {
-    let connection = rusqlite::Connection::open(db)
-        .with_context(|| format!("opening ledger {}", db.display()))?;
-    let prefix_len = i64::try_from(prefix.len())?;
-    let run_id: Option<i64> = connection
-        .query_row(
-            "SELECT id FROM runs WHERE substr(hash, 1, ?2) = ?1 \
-             ORDER BY finished_at DESC, id DESC LIMIT 1",
-            rusqlite::params![prefix, prefix_len],
-            |row| row.get(0),
-        )
-        .optional()
-        .context("looking up run by hash prefix")?;
-    Ok(run_id)
+fn latest_run_for_prefix(ledger: &Ledger, prefix: &str) -> anyhow::Result<Option<i64>> {
+    ledger
+        .latest_run_for_prefix(prefix)
+        .context("looking up run by hash prefix")
 }
 
 /// Text shown for an optional field.
@@ -392,7 +509,7 @@ fn run_show(args: &ShowArgs) -> anyhow::Result<()> {
         bail!("--hash must be a hexadecimal prefix of a document hash");
     }
     let ledger = open_ledger(&args.db)?;
-    let run_id = latest_run_for_prefix(&args.db, &prefix)?
+    let run_id = latest_run_for_prefix(&ledger, &prefix)?
         .ok_or_else(|| anyhow!("no run found for hash prefix {prefix}"))?;
     let result = ledger
         .load_result(run_id)
@@ -511,9 +628,227 @@ fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Load the manifest and make sure the cache directory exists.
+fn load_corpus(manifest_path: &Path, cache: &Path) -> anyhow::Result<Manifest> {
+    let manifest = corpus::load_manifest(manifest_path)
+        .with_context(|| format!("loading manifest {}", manifest_path.display()))?;
+    fs::create_dir_all(cache)
+        .with_context(|| format!("creating cache directory {}", cache.display()))?;
+    Ok(manifest)
+}
+
+/// Whether `path` was modified at or after `since`; `false` when unknown.
+fn modified_since(path: &Path, since: SystemTime) -> bool {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| modified >= since)
+}
+
+fn run_corpus_fetch(args: &FetchArgs) -> anyhow::Result<ExitCode> {
+    let mut manifest = load_corpus(&args.manifest, &args.cache)?;
+    let selected: Vec<ManifestItem> = manifest
+        .items
+        .iter()
+        .filter(|item| args.split.includes(item))
+        .cloned()
+        .collect();
+    let mut any_failed = false;
+    let mut changed = false;
+    for item in &selected {
+        let started = SystemTime::now();
+        match corpus::fetch_item(item, &args.cache, USER_AGENT, args.offline) {
+            Ok(fetched) => {
+                let origin = if args.offline || !modified_since(&fetched.pdf_path, started) {
+                    "cached"
+                } else {
+                    "downloaded"
+                };
+                let source = if fetched.source_dir.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let short = short_hash(&fetched.pdf_sha256);
+                println!("{}\t{short}\tsource {source}\t{origin}", item.id);
+                if args.update_manifest
+                    && corpus::update_manifest_hashes(&mut manifest, &item.id, &fetched)
+                {
+                    changed = true;
+                }
+            }
+            Err(err) => {
+                eprintln!("{}: {err}", item.id);
+                println!("{}\t-\tsource no\tfailed", item.id);
+                any_failed = true;
+            }
+        }
+    }
+    if changed {
+        corpus::save_manifest(&args.manifest, &manifest)
+            .with_context(|| format!("saving manifest {}", args.manifest.display()))?;
+        println!("manifest updated: {}", args.manifest.display());
+    }
+    Ok(exit_code(any_failed))
+}
+
+/// Host label for reports: operating system and CPU architecture.
+fn host_label() -> String {
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Everything `eval` produced for one manifest item.
+struct Evaluated {
+    paper: PaperEval,
+    /// The extraction result when the pipeline ran, for the optional ledger write.
+    result: Option<ExtractionResult>,
+}
+
+/// Fetch, extract and score one manifest item. Every failure becomes a
+/// `failed:` paper so the measurement continues with the next item.
+fn eval_item(args: &EvalArgs, item: &ManifestItem) -> Evaluated {
+    let id = item.id.as_str();
+    let failed = |error: String| Evaluated {
+        paper: eval::failed_paper(id, &error),
+        result: None,
+    };
+    let fetched = match corpus::fetch_item(item, &args.cache, USER_AGENT, args.offline) {
+        Ok(fetched) => fetched,
+        Err(err) => return failed(format!("fetch: {err}")),
+    };
+    let Some(source_dir) = fetched.source_dir.as_deref() else {
+        return failed("no LaTeX source in the e-print".to_string());
+    };
+    let files = match corpus::find_latex_files(source_dir) {
+        Ok(files) => files,
+        Err(err) => return failed(format!("source: {err}")),
+    };
+    let truth = match latex_refs::ground_truth(&files) {
+        Ok(truth) => truth,
+        Err(err) => return failed(format!("ground truth: {err}")),
+    };
+    let job = Job {
+        path: fetched.pdf_path.to_string_lossy().into_owned(),
+        backend: args.backend.clone(),
+        pages: None,
+        password: None,
+        max_bytes: None,
+    };
+    let result = match pipeline::run_job(&job) {
+        Ok(result) => result,
+        Err(err) => return failed(format!("extract: {err}")),
+    };
+    Evaluated {
+        paper: eval::evaluate(id, &result, &truth),
+        result: Some(result),
+    }
+}
+
+/// The tab-separated line printed per evaluated paper.
+fn paper_line(paper: &PaperEval) -> String {
+    let refs = format!(
+        "{}/{}/{} refs (truth/extracted/matched)",
+        paper.truth_refs, paper.extracted_refs, paper.matched_refs
+    );
+    format!(
+        "{}\t{}\t{}p\t{refs}\t{:.1} ms/chunk",
+        paper.id, paper.status, paper.pages, paper.ms_per_chunk
+    )
+}
+
+/// Write `report.json` and `report.md` into `dir`.
+fn write_report(dir: &Path, report: &CorpusReport) -> anyhow::Result<()> {
+    let json_path = dir.join("report.json");
+    let mut json = serde_json::to_string_pretty(report)?;
+    json.push('\n');
+    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    let md_path = dir.join("report.md");
+    fs::write(&md_path, eval::render_markdown(report))
+        .with_context(|| format!("writing {}", md_path.display()))?;
+    Ok(())
+}
+
+/// Print the corpus summary as `key: value` lines.
+fn print_summary(report: &CorpusReport) {
+    let s = &report.summary;
+    println!("papers: {}", s.papers);
+    println!("failed: {}", s.failed);
+    println!("ref_count_exact_rate: {:.3}", s.ref_count_exact_rate);
+    println!("ref_recall: {:.3}", s.ref_recall);
+    println!("ref_precision: {:.3}", s.ref_precision);
+    println!("doi_accuracy: {:.3}", s.doi_accuracy);
+    println!("year_accuracy: {:.3}", s.year_accuracy);
+    println!("title_accuracy: {:.3}", s.title_accuracy);
+    println!("marker_resolution_rate: {:.3}", s.marker_resolution_rate);
+    match s.mean_body_alignment {
+        Some(alignment) => println!("mean_body_alignment: {alignment:.3}"),
+        None => println!("mean_body_alignment: -"),
+    }
+    println!("p50_ms_per_chunk: {:.2}", s.p50_ms_per_chunk);
+    println!("p95_ms_per_chunk: {:.2}", s.p95_ms_per_chunk);
+    println!("target_ms_per_chunk: {:.1}", s.target_ms_per_chunk);
+}
+
+fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
+    check_backend(&args.backend)?;
+    let manifest = load_corpus(&args.manifest, &args.cache)?;
+    fs::create_dir_all(&args.out)
+        .with_context(|| format!("creating output directory {}", args.out.display()))?;
+    let mut ledger: Option<Ledger> = args.db.as_deref().map(open_ledger).transpose()?;
+    let mut papers: Vec<PaperEval> = Vec::new();
+    for item in manifest
+        .items
+        .iter()
+        .filter(|item| args.split.includes(item))
+    {
+        let evaluated = eval_item(args, item);
+        if let (Some(ledger), Some(result)) = (ledger.as_mut(), evaluated.result.as_ref()) {
+            store_result(ledger, result, &item.id)?;
+        }
+        println!("{}", paper_line(&evaluated.paper));
+        papers.push(evaluated.paper);
+    }
+    let report = eval::build_report(&args.backend, &host_label(), papers);
+    write_report(&args.out, &report)?;
+    print_summary(&report);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_pages, percentile};
+    use super::{ManifestItem, Split, parse_pages, percentile, short_hash};
+
+    /// A manifest item in the given split; the other fields do not matter here.
+    fn item(split: &str) -> ManifestItem {
+        ManifestItem {
+            id: "arxiv:2108.04588".to_string(),
+            kind: "arxiv".to_string(),
+            license: "http://creativecommons.org/licenses/by/4.0/".to_string(),
+            pdf_url: "https://arxiv.org/pdf/2108.04588".to_string(),
+            source_url: Some("https://arxiv.org/e-print/2108.04588".to_string()),
+            pdf_sha256: None,
+            source_sha256: None,
+            categories: vec!["cs.CG".to_string()],
+            split: split.to_string(),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn split_selects_manifest_items() {
+        assert!(Split::All.includes(&item("dev")));
+        assert!(Split::All.includes(&item("holdout")));
+        assert!(Split::Dev.includes(&item("dev")));
+        assert!(!Split::Dev.includes(&item("holdout")));
+        assert!(Split::Holdout.includes(&item("holdout")));
+        assert!(!Split::Holdout.includes(&item("dev")));
+    }
+
+    #[test]
+    fn short_hash_takes_twelve_digits() {
+        assert_eq!(short_hash("0123456789abcdef"), "0123456789ab");
+        assert_eq!(short_hash("abc"), "abc");
+        assert_eq!(short_hash(""), "");
+    }
 
     #[test]
     fn parses_ranges_and_single_pages() {

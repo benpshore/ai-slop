@@ -1,0 +1,65 @@
+name: Eval
+
+# Diagnostic measurement of the engine against arXiv LaTeX ground truth
+# (docs/EVAL.md). Not part of the required `ci` check: poor metrics never
+# block a merge, and the run needs the network to fill the corpus cache.
+
+on:
+  workflow_dispatch:
+    inputs:
+      split:
+        description: Manifest split to evaluate (dev, holdout or all)
+        type: choice
+        options: [dev, holdout, all]
+        default: dev
+  schedule:
+    - cron: "0 9 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      SPLIT: ${{ inputs.split || 'dev' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup component add clippy rustfmt
+      - run: rustc --version --verbose && uname -m
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-release-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-release-${{ matrix.os }}-
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .corpus-cache
+          key: corpus-${{ hashFiles('corpus/manifest.json') }}
+          restore-keys: corpus-
+      - run: cargo build --release
+      - name: Fetch the corpus (cached items are reused)
+        run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split "$SPLIT"
+      - name: Evaluate
+        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --out eval-out --split "$SPLIT"
+      - name: Publish the report in the job summary
+        run: cat eval-out/report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-${{ matrix.os }}
+          path: eval-out
