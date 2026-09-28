@@ -8,8 +8,7 @@ use crate::audio::Audio;
 pub fn play(audio: &Audio) -> Result<(), SpeechError> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "tpe-speech-play-{}-{nanos}.wav",
         std::process::id()
@@ -31,6 +30,7 @@ pub fn play(_audio: &Audio) -> Result<(), SpeechError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
     use super::*;
 
     #[cfg(not(target_os = "macos"))]
