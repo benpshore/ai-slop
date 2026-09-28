@@ -7,8 +7,19 @@
 //! them into `PageText::text`. Coordinates are PDF user space (origin
 //! bottom-left, `y` grows upwards) and are used unrotated. No text repair
 //! of any kind is performed.
+//!
+//! Fonts without precomposed accented letters (`pdfTeX` with the OT1
+//! encoding, say) set an accent as a glyph of its own, placed slightly
+//! above the letter it belongs to and often shown before that letter. Such
+//! an accent span is not a line of its own: it is attached to the line
+//! whose glyph it sits over, listed right after that glyph's span, and its
+//! spacing accent is composed onto the letter under it as the combining
+//! mark it stands for (`Verdu` + acute over the `u` reads `Verdú`). That
+//! is a rendering of what the page shows, not a repair of it.
 
 use std::cmp::Ordering;
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::schema::{BBox, Line, PageText, Span};
 
@@ -30,11 +41,28 @@ const COLUMN_GAP: f32 = 2.0;
 const PARAGRAPH_GAP: f32 = 1.5;
 /// Font size assumed when nothing on the page carries a size or a height.
 const FALLBACK_SIZE: f32 = 10.0;
+/// Highest an accent glyph sits above the baseline of its letter (multiple of the size).
+const ACCENT_RISE: f32 = 1.5;
+/// Lowest an accent glyph sits below the baseline of its letter (multiple of
+/// the size); absorbs rounding in the accent's placement.
+const ACCENT_DIP: f32 = 0.1;
+/// Horizontal slack when matching an accent's centre to the glyph span under
+/// it (multiple of the size); bridges kerning between two spans of one word.
+const ACCENT_SLACK: f32 = 0.1;
 
 /// Thresholds of one XY-cut run, in points.
 struct CutParams {
     row_gap: f32,
     column_gap: f32,
+}
+
+/// An accent glyph attached to a line: its span index and box, the span
+/// index of the glyph it sits over, and the combining marks it stands for.
+struct Accent {
+    index: usize,
+    bbox: BBox,
+    base: usize,
+    marks: String,
 }
 
 /// A line under construction while spans are grouped.
@@ -43,6 +71,7 @@ struct LineBuild {
     size: f32,
     bbox: BBox,
     spans: Vec<(usize, BBox)>,
+    accents: Vec<Accent>,
 }
 
 /// Median of `values` (sorts the slice in place); `None` when empty.
@@ -175,37 +204,242 @@ fn find_line(builds: &[LineBuild], bbox: BBox, size: f32, largest: f32) -> Optio
     None
 }
 
-/// Sort a line's spans left-to-right and join their texts, inserting one
-/// space where the horizontal gap exceeds `SPACE_GAP` times the size and
-/// neither neighbour already has a boundary space.
+/// True for a Unicode combining diacritical mark (U+0300 to U+036F).
+fn is_combining(ch: char) -> bool {
+    ('\u{0300}'..='\u{036F}').contains(&ch)
+}
+
+/// The combining mark a spacing accent glyph stands for: the spacing
+/// accents of the Latin-1 and Spacing Modifier blocks as `lopdf` decodes
+/// the accent glyph names (`acute`, `dieresis`, `circumflex`, `tilde`,
+/// `caron`, ...), the ASCII grave, circumflex and tilde, and the modifier
+/// acute and grave. A combining mark stands for itself.
+fn combining_accent(ch: char) -> Option<char> {
+    let mark = match ch {
+        '\u{00B4}' | '\u{02CA}' => '\u{0301}',
+        '\u{0060}' | '\u{02CB}' => '\u{0300}',
+        '\u{00A8}' => '\u{0308}',
+        '\u{005E}' | '\u{02C6}' => '\u{0302}',
+        '\u{007E}' | '\u{02DC}' => '\u{0303}',
+        '\u{00AF}' => '\u{0304}',
+        '\u{02D8}' => '\u{0306}',
+        '\u{02D9}' => '\u{0307}',
+        '\u{02DA}' => '\u{030A}',
+        '\u{02DB}' => '\u{0328}',
+        '\u{02DD}' => '\u{030B}',
+        '\u{00B8}' => '\u{0327}',
+        '\u{02C7}' => '\u{030C}',
+        mark if is_combining(mark) => mark,
+        _ => return None,
+    };
+    Some(mark)
+}
+
+/// The combining marks of a span that shows nothing but accent glyphs;
+/// `None` for any other text, blank text included.
+fn accent_marks(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut marks = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        marks.push(combining_accent(ch)?);
+    }
+    Some(marks)
+}
+
+/// Horizontal centre of a box.
+fn centre_x(b: BBox) -> f32 {
+    b.x0.midpoint(b.x1)
+}
+
+/// Position in `members` of the glyph span an accent centred at `cx` sits
+/// over: the span whose x range, widened by `slack`, contains `cx`; the
+/// nearer range when two do.
+fn base_member(members: &[(usize, BBox)], cx: f32, slack: f32) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (m, (_, b)) in members.iter().enumerate() {
+        if !(b.x0 - slack..=b.x1 + slack).contains(&cx) {
+            continue;
+        }
+        let distance = (b.x0 - cx).max(cx - b.x1).max(0.0);
+        if best.is_none_or(|(_, d)| distance < d) {
+            best = Some((m, distance));
+        }
+    }
+    best.map(|(m, _)| m)
+}
+
+/// Index of the base character (combining marks not counted) of `piece`
+/// under `cx`, taking the characters to share the box `b` evenly.
+fn base_char_slot(piece: &str, b: BBox, cx: f32) -> usize {
+    let count = piece.chars().filter(|ch| !is_combining(*ch)).count();
+    if count < 2 {
+        return 0;
+    }
+    let width = b.x1 - b.x0;
+    if width <= 0.0 {
+        return count - 1;
+    }
+    let fraction = ((cx - b.x0) / width).clamp(0.0, 1.0);
+    let slot = (fraction * count as f32) as usize;
+    slot.min(count - 1)
+}
+
+/// Insert `marks` after the `slot`-th base character of `piece`, behind any
+/// marks that character already carries; a blank character there yields to
+/// the nearest non-blank one. Appends when `piece` has no base character.
+fn insert_marks(piece: &mut String, slot: usize, marks: &str) {
+    let bases: Vec<(usize, char)> = piece
+        .char_indices()
+        .filter(|(_, ch)| !is_combining(*ch))
+        .collect();
+    let Some(last) = bases.len().checked_sub(1) else {
+        piece.push_str(marks);
+        return;
+    };
+    let mut at = slot.min(last);
+    if bases[at].1.is_whitespace() {
+        let before = (0..at).rev().find(|j| !bases[*j].1.is_whitespace());
+        let after = (at + 1..=last).find(|j| !bases[*j].1.is_whitespace());
+        at = match (before, after) {
+            (Some(prev), Some(next)) if next - at < at - prev => next,
+            (Some(prev), _) => prev,
+            (None, Some(next)) => next,
+            (None, None) => at,
+        };
+    }
+    let start = bases[at].0 + bases[at].1.len_utf8();
+    let end = piece[start..]
+        .find(|ch: char| !is_combining(ch))
+        .map_or(piece.len(), |offset| start + offset);
+    piece.insert_str(end, marks);
+}
+
+/// `(start, end)` of the lines in `builds` (baselines descending) whose
+/// baseline lies in `[low, high]`.
+fn baseline_window(builds: &[LineBuild], low: f32, high: f32) -> (usize, usize) {
+    let start = builds.partition_point(|line| line.baseline > high);
+    let end = builds.partition_point(|line| line.baseline >= low);
+    (start, end.max(start))
+}
+
+/// The line an accent glyph with `bbox` sits over: its baseline at most
+/// `ACCENT_RISE` sizes below the accent's (or `ACCENT_DIP` above it) and one
+/// of its glyph spans under the accent's centre; the nearest baseline wins.
+/// Returns the line's index in `builds` and the span index of that glyph.
+fn find_base_line(
+    builds: &[LineBuild],
+    bbox: BBox,
+    size: f32,
+    largest: f32,
+) -> Option<(usize, usize)> {
+    let cx = centre_x(bbox);
+    let low = bbox.y0 - ACCENT_RISE * largest;
+    let high = bbox.y0 + ACCENT_DIP * largest;
+    let (start, end) = baseline_window(builds, low, high);
+    let mut best: Option<(usize, usize, f32)> = None;
+    for (offset, line) in builds[start..end].iter().enumerate() {
+        let reference = size.max(line.size);
+        let rise = bbox.y0 - line.baseline;
+        if !(-ACCENT_DIP * reference..=ACCENT_RISE * reference).contains(&rise) {
+            continue;
+        }
+        let Some(m) = base_member(&line.spans, cx, ACCENT_SLACK * reference) else {
+            continue;
+        };
+        let distance = rise.abs();
+        if best.is_none_or(|(_, _, d)| distance < d) {
+            best = Some((start + offset, line.spans[m].0, distance));
+        }
+    }
+    best.map(|(k, base, _)| (k, base))
+}
+
+/// Ordinary line membership (the rule of `find_line`) for an accent glyph
+/// that sits over no glyph span, searched from the lowest matching baseline
+/// like `find_line` does.
+fn find_same_baseline(builds: &[LineBuild], bbox: BBox, size: f32, largest: f32) -> Option<usize> {
+    let low = bbox.y0 - BASELINE_TOLERANCE * largest;
+    let high = bbox.y0 + BASELINE_TOLERANCE * largest;
+    let (start, end) = baseline_window(builds, low, high);
+    for (offset, line) in builds[start..end].iter().enumerate().rev() {
+        let reference = size.max(line.size);
+        let same_baseline = (line.baseline - bbox.y0).abs() <= BASELINE_TOLERANCE * reference;
+        let reach = LINE_REACH * reference;
+        let near = bbox.x0 <= line.bbox.x1 + reach && bbox.x1 >= line.bbox.x0 - reach;
+        if same_baseline && near {
+            return Some(start + offset);
+        }
+    }
+    None
+}
+
+/// Sort a line's glyph spans left-to-right and join their texts, inserting
+/// one space where the horizontal gap exceeds `SPACE_GAP` times the size and
+/// neither neighbour already has a boundary space. Each accent of the line
+/// is listed right after the glyph span it sits over and its combining marks
+/// are composed onto the character under it, after which the line text is
+/// put in NFC; a line without accents keeps its text exactly as joined.
 fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
     let mut members = build.spans;
     members.sort_by(|a, b| {
         let by_x = a.1.x0.total_cmp(&b.1.x0);
         by_x.then(spans[a.0].seq.cmp(&spans[b.0].seq))
     });
-    let mut text = String::new();
+    let mut pieces: Vec<String> = members
+        .iter()
+        .map(|(i, _)| spans[*i].text.clone())
+        .collect();
+    let mut attached: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
+    let mut accents = build.accents;
+    accents.sort_by(|a, b| {
+        let by_x = centre_x(a.bbox).total_cmp(&centre_x(b.bbox));
+        by_x.then(spans[a.index].seq.cmp(&spans[b.index].seq))
+    });
+    let composed = !accents.is_empty();
+    for accent in accents {
+        let last = members.len().saturating_sub(1);
+        let m = members
+            .iter()
+            .position(|(i, _)| *i == accent.base)
+            .unwrap_or(last);
+        let slot = base_char_slot(&pieces[m], members[m].1, centre_x(accent.bbox));
+        insert_marks(&mut pieces[m], slot, &accent.marks);
+        attached[m].push(accent.index);
+    }
+
+    let mut joined = String::new();
+    let mut order: Vec<usize> = Vec::with_capacity(members.len());
     let mut prev_x1: Option<f32> = None;
-    for (i, bbox) in &members {
+    for (m, (i, bbox)) in members.iter().enumerate() {
         let span = &spans[*i];
-        let piece = span.text.as_str();
+        let piece = pieces[m].as_str();
         if let Some(x1) = prev_x1 {
             let has_space =
-                text.ends_with(char::is_whitespace) || piece.starts_with(char::is_whitespace);
+                joined.ends_with(char::is_whitespace) || piece.starts_with(char::is_whitespace);
             if bbox.x0 - x1 > SPACE_GAP * span_size(span, fallback) && !has_space {
-                text.push(' ');
+                joined.push(' ');
             }
         }
-        text.push_str(piece);
+        joined.push_str(piece);
         prev_x1 = Some(bbox.x1);
+        order.push(*i);
+        order.extend(attached[m].iter().copied());
     }
+    let text: String = if composed {
+        joined.nfc().collect()
+    } else {
+        joined
+    };
     Line {
         text: text.trim().to_string(),
         bbox: Some(build.bbox),
         column: 0,
-        spans: members
+        spans: order
             .iter()
-            .map(|(i, _)| u32::try_from(*i).unwrap_or(u32::MAX))
+            .map(|i| u32::try_from(*i).unwrap_or(u32::MAX))
             .collect(),
     }
 }
@@ -213,12 +447,20 @@ fn finish_line(spans: &[Span], build: LineBuild, fallback: f32) -> Line {
 /// Group spans into lines by shared baseline and horizontal proximity, with
 /// no column ordering. Blank spans and spans without a finite box are
 /// skipped. Every returned line has a box, `column == 0`, its span indices
-/// left-to-right and its text joined as described in `finish_line`. The
-/// lines are sorted top-to-bottom.
+/// in visual order and its text joined as described in `finish_line`. An
+/// accent-only span joins the line of the glyph it sits over (see the
+/// module documentation); over no glyph it is an ordinary span. The lines
+/// are sorted top-to-bottom.
 pub fn group_lines(spans: &[Span]) -> Vec<Line> {
+    group_lines_counted(spans).0
+}
+
+/// [`group_lines`] together with the number of accent-only spans that sit
+/// over no glyph span and so form lines of their own.
+fn group_lines_counted(spans: &[Span]) -> (Vec<Line>, usize) {
     let mut candidates = positioned(spans);
     if candidates.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let fallback = typical_size(spans, &candidates);
     let largest = candidates
@@ -228,7 +470,12 @@ pub fn group_lines(spans: &[Span]) -> Vec<Line> {
     candidates.sort_by(baseline_first);
 
     let mut builds: Vec<LineBuild> = Vec::new();
+    let mut accents: Vec<(usize, BBox, String)> = Vec::new();
     for (i, bbox) in &candidates {
+        if let Some(marks) = accent_marks(&spans[*i].text) {
+            accents.push((*i, *bbox, marks));
+            continue;
+        }
         let size = span_size(&spans[*i], fallback);
         if let Some(k) = find_line(&builds, *bbox, size, largest) {
             let line = &mut builds[k];
@@ -241,6 +488,41 @@ pub fn group_lines(spans: &[Span]) -> Vec<Line> {
                 size,
                 bbox: *bbox,
                 spans: vec![(*i, *bbox)],
+                accents: Vec::new(),
+            });
+        }
+    }
+
+    // An accent glyph sits above its letter, so baseline order reaches it
+    // before the letter's line exists; place accents once all lines do.
+    // `builds[..glyph_lines]` keeps the descending baseline order the
+    // windowed searches rely on; lines added below it are accents alone.
+    let glyph_lines = builds.len();
+    let mut unattached: usize = 0;
+    for (i, bbox, marks) in accents {
+        let size = span_size(&spans[i], fallback);
+        if let Some((k, base)) = find_base_line(&builds[..glyph_lines], bbox, size, largest) {
+            let line = &mut builds[k];
+            line.bbox = union(line.bbox, bbox);
+            line.accents.push(Accent {
+                index: i,
+                bbox,
+                base,
+                marks,
+            });
+        } else if let Some(k) = find_same_baseline(&builds[..glyph_lines], bbox, size, largest) {
+            let line = &mut builds[k];
+            line.bbox = union(line.bbox, bbox);
+            line.size = line.size.max(size);
+            line.spans.push((i, bbox));
+        } else {
+            unattached += 1;
+            builds.push(LineBuild {
+                baseline: bbox.y0,
+                size,
+                bbox,
+                spans: vec![(i, bbox)],
+                accents: Vec::new(),
             });
         }
     }
@@ -250,7 +532,7 @@ pub fn group_lines(spans: &[Span]) -> Vec<Line> {
         .map(|build| finish_line(spans, build, fallback))
         .collect();
     lines.sort_by(line_top_first);
-    lines
+    (lines, unattached)
 }
 
 /// Position in `idx` (sorted top-to-bottom here) at which the widest
@@ -405,6 +687,8 @@ fn push_warning(page: &mut PageText, warning: String) {
 /// Coordinates are used as supplied (unrotated); a non-zero rotation is
 /// only noted as a warning. Non-blank spans without geometry are appended
 /// at the end, one line each in content-stream order, as their own block.
+/// An accent-only span that sits over no glyph is left as its own line and
+/// noted with the warning `unattached accent glyph at page N: M span(s)`.
 pub fn order_page(page: &mut PageText) {
     page.lines.clear();
     page.text.clear();
@@ -414,7 +698,12 @@ pub fn order_page(page: &mut PageText) {
         push_warning(page, msg);
     }
 
-    let grouped = group_lines(&page.spans);
+    let (grouped, unattached) = group_lines_counted(&page.spans);
+    if unattached > 0 {
+        let number = page.page;
+        let msg = format!("unattached accent glyph at page {number}: {unattached} span(s)");
+        push_warning(page, msg);
+    }
     if grouped.len() > MAX_LINES {
         let n = grouped.len();
         let msg = format!("too many lines: {n} > {MAX_LINES}; the rest is appended unordered");
@@ -716,6 +1005,158 @@ mod tests {
         assert!(page.text.is_empty());
         assert!(page.warnings.is_empty());
         assert!(order_lines(Vec::new(), 612.0).is_empty());
+    }
+
+    #[test]
+    fn accent_glyph_composes_onto_the_letter_under_it() {
+        // OT1: "Verdu" then the acute set 0.04 pt up, centred over the u.
+        let mut page = page_with(vec![
+            span("Verdu", 100.0, 700.0, 126.0, 710.0, 0),
+            span("\u{B4}", 121.5, 700.04, 126.5, 710.04, 1),
+        ]);
+        order_page(&mut page);
+        assert_eq!(texts(&page), ["Verd\u{FA}"]);
+        assert_eq!(page.text, "Verd\u{FA}");
+        assert_eq!(page.lines[0].spans, vec![0, 1]);
+        assert!(page.warnings.is_empty());
+
+        // A dieresis raised over a capital, and a caron as lopdf decodes it.
+        let lines = group_lines(&[
+            span("Ungor", 100.0, 700.0, 130.0, 710.0, 0),
+            span("\u{A8}", 100.5, 702.5, 105.5, 712.5, 1),
+            span("Sarka", 140.0, 700.0, 170.0, 710.0, 2),
+            span("\u{2C7}", 140.2, 702.5, 145.2, 712.5, 3),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "\u{DC}ngor \u{160}arka");
+        assert_eq!(lines[0].spans, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn accent_shown_before_its_letter_still_attaches() {
+        // pdfTeX order: the accent is shown first, then the letter starts
+        // the next string; the accent's centre is over that letter.
+        let mut page = page_with(vec![
+            span("\u{B4}", 121.5, 700.04, 126.5, 710.04, 0),
+            span("Verd", 100.0, 700.0, 121.0, 710.0, 1),
+            span("u,", 121.5, 700.0, 131.0, 710.0, 2),
+        ]);
+        order_page(&mut page);
+        assert_eq!(texts(&page), ["Verd\u{FA},"]);
+        assert_eq!(page.lines[0].spans, vec![1, 2, 0]);
+        assert!(page.warnings.is_empty());
+
+        // The same with the accent over the last letter of the earlier span.
+        let lines = group_lines(&[
+            span("\u{B4}", 121.5, 700.04, 126.5, 710.04, 0),
+            span("Verdu", 100.0, 700.0, 126.0, 710.0, 1),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Verd\u{FA}");
+        assert_eq!(lines[0].spans, vec![1, 0]);
+    }
+
+    #[test]
+    fn reference_label_stays_first_before_accented_author() {
+        let mut page = page_with(vec![
+            span("\u{B4}", 96.5, 700.04, 101.5, 710.04, 0),
+            span("[13]", 50.0, 700.0, 68.0, 710.0, 1),
+            span("Verd", 75.0, 700.0, 96.0, 710.0, 2),
+            span("u,", 96.5, 700.0, 106.0, 710.0, 3),
+            span("J. Smith", 109.0, 700.0, 155.0, 710.0, 4),
+            span("[14] Smith, A.", 50.0, 688.0, 130.0, 698.0, 5),
+        ]);
+        order_page(&mut page);
+        assert_eq!(
+            texts(&page),
+            ["[13] Verd\u{FA}, J. Smith", "[14] Smith, A."]
+        );
+        assert_eq!(page.text, "[13] Verd\u{FA}, J. Smith\n[14] Smith, A.");
+        assert_eq!(page.lines[0].spans, vec![1, 2, 3, 0, 4]);
+        assert!(page.warnings.is_empty());
+
+        let first = page.clone();
+        order_page(&mut page);
+        assert_eq!(page, first);
+    }
+
+    #[test]
+    fn accent_over_no_glyph_stays_separate_with_warning() {
+        let mut page = page_with(vec![
+            span("Body text", 50.0, 700.0, 100.0, 710.0, 0),
+            span("\u{A8}", 300.0, 700.04, 305.0, 710.04, 1),
+            span("\u{B4}", 60.0, 730.0, 65.0, 740.0, 2),
+        ]);
+        order_page(&mut page);
+        assert_eq!(page.lines.len(), 3);
+        assert!(texts(&page).contains(&"Body text"));
+        assert!(texts(&page).contains(&"\u{A8}"));
+        assert!(texts(&page).contains(&"\u{B4}"));
+        assert_eq!(
+            page.warnings,
+            ["unattached accent glyph at page 1: 2 span(s)"]
+        );
+
+        let first = page.clone();
+        order_page(&mut page);
+        assert_eq!(page, first);
+    }
+
+    #[test]
+    fn ascii_tilde_on_the_baseline_over_no_glyph_is_an_ordinary_span() {
+        let mut page = page_with(vec![
+            span("a", 100.0, 700.0, 105.0, 710.0, 0),
+            span("~", 107.0, 700.0, 112.0, 710.0, 1),
+            span("b", 114.0, 700.0, 119.0, 710.0, 2),
+        ]);
+        order_page(&mut page);
+        assert_eq!(texts(&page), ["a ~ b"]);
+        assert_eq!(page.lines[0].spans, vec![0, 1, 2]);
+        assert!(page.warnings.is_empty());
+    }
+
+    #[test]
+    fn accent_helpers() {
+        assert_eq!(accent_marks("\u{B4}"), Some("\u{301}".to_string()));
+        assert_eq!(accent_marks(" ~ "), Some("\u{303}".to_string()));
+        assert_eq!(accent_marks("\u{308}"), Some("\u{308}".to_string()));
+        assert_eq!(
+            accent_marks("\u{2DC}\u{B8}"),
+            Some("\u{303}\u{327}".to_string())
+        );
+        assert_eq!(accent_marks("a"), None);
+        assert_eq!(accent_marks("~a"), None);
+        assert_eq!(accent_marks("  "), None);
+
+        let b = BBox {
+            x0: 100.0,
+            y0: 0.0,
+            x1: 130.0,
+            y1: 10.0,
+        };
+        assert_eq!(base_char_slot("Ungor", b, 103.0), 0);
+        assert_eq!(base_char_slot("Ungor", b, 127.0), 4);
+        assert_eq!(base_char_slot("Ungor", b, 500.0), 4);
+        assert_eq!(base_char_slot("u", b, 115.0), 0);
+
+        let mut piece = "ab cd".to_string();
+        insert_marks(&mut piece, 2, "\u{301}");
+        assert_eq!(piece, "ab\u{301} cd");
+        let mut piece = "e\u{308}x".to_string();
+        insert_marks(&mut piece, 0, "\u{304}");
+        assert_eq!(piece, "e\u{308}\u{304}x");
+        let mut piece = String::new();
+        insert_marks(&mut piece, 3, "\u{301}");
+        assert_eq!(piece, "\u{301}");
+
+        let members = [
+            (0, span("Verd", 100.0, 700.0, 121.0, 710.0, 0).bbox.unwrap()),
+            (1, span("u,", 121.5, 700.0, 131.0, 710.0, 1).bbox.unwrap()),
+        ];
+        assert_eq!(base_member(&members, 124.0, 1.0), Some(1));
+        assert_eq!(base_member(&members, 121.3, 1.0), Some(1));
+        assert_eq!(base_member(&members, 110.0, 1.0), Some(0));
+        assert_eq!(base_member(&members, 140.0, 1.0), None);
     }
 
     #[test]
