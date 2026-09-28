@@ -316,7 +316,7 @@ fn band_for(geometry: &PageGeometry, b: BBox) -> Band {
         return whole;
     }
     let half = 0.5 * geometry.width;
-    if 0.5 * (b.x0 + b.x1) < geometry.mid {
+    if f32::midpoint(b.x0, b.x1) < geometry.mid {
         Band {
             lo: f32::NEG_INFINITY,
             hi: geometry.mid,

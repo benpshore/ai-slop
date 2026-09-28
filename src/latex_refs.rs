@@ -4374,7 +4374,7 @@ We study things, see doi:10.9999/not.this.one.
 \end{document}
 ";
 
-    const IEEE_TEX: &str = r"\documentclass[conference]{IEEEtran}
+    const IEEE_FRONT_TEX: &str = r"\documentclass[conference]{IEEEtran}
 \begin{document}
 \title{Robust Sensing with\\ Sparse Arrays}
 \author{\IEEEauthorblockN{Alice M. Smith\IEEEauthorrefmark{1}, Bob Jones\IEEEauthorrefmark{2}}
@@ -4390,7 +4390,7 @@ Abstract text.
 \section{Introduction}
 ";
 
-    const ACM_TEX: &str = r"\documentclass[sigconf]{acmart}
+    const ACM_FRONT_TEX: &str = r"\documentclass[sigconf]{acmart}
 \acmDOI{10.1145/3580305.3599999}
 \begin{document}
 \title{H-FedSN: Personalized Sparse Networks for Hierarchical Federated Learning}
@@ -4415,7 +4415,7 @@ Abstract text.
 \section{Introduction}
 ";
 
-    const ELSARTICLE_TEX: &str = r"\documentclass[preprint,12pt]{elsarticle}
+    const ELSARTICLE_FRONT_TEX: &str = r"\documentclass[preprint,12pt]{elsarticle}
 \begin{document}
 \begin{frontmatter}
 \title{Graph Neural Networks for Traffic Forecasting\tnoteref{t1}}
@@ -4435,7 +4435,7 @@ Abstract text.
 \section{Introduction}
 ";
 
-    const ICML_TEX: &str = r"\documentclass{article}
+    const ICML_FRONT_TEX: &str = r"\documentclass{article}
 \usepackage{icml2024}
 \icmltitlerunning{Scaling Sparse Autoencoders}
 \begin{document}
@@ -4485,7 +4485,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_ieeetran_author_blocks() {
-        let paper = paper_truth(IEEE_TEX);
+        let paper = paper_truth(IEEE_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("Robust Sensing with Sparse Arrays")
@@ -4499,7 +4499,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_acm_author_and_affiliation() {
-        let paper = paper_truth(ACM_TEX);
+        let paper = paper_truth(ACM_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("H-FedSN: Personalized Sparse Networks for Hierarchical Federated Learning")
@@ -4510,7 +4510,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_elsarticle_frontmatter() {
-        let paper = paper_truth(ELSARTICLE_TEX);
+        let paper = paper_truth(ELSARTICLE_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("Graph Neural Networks for Traffic Forecasting")
@@ -4524,7 +4524,7 @@ Abstract text.
 
     #[test]
     fn paper_truth_icml_author_list() {
-        let paper = paper_truth(ICML_TEX);
+        let paper = paper_truth(ICML_FRONT_TEX);
         assert_eq!(
             paper.title.as_deref(),
             Some("Scaling Sparse Autoencoders to Many Features")
