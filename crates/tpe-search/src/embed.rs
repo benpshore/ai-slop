@@ -54,7 +54,7 @@ impl HashEmbedder {
         vector
     }
 
-    fn add_feature(&self, vector: &mut [f32], feature: &str) {
+    fn add_feature(self, vector: &mut [f32], feature: &str) {
         let hash = fnv1a(feature.as_bytes());
         let dim = u64::try_from(self.dim).unwrap_or(u64::MAX);
         let bucket = usize::try_from(hash % dim).unwrap_or(0);

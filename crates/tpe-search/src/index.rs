@@ -15,6 +15,7 @@ use crate::SearchError;
 use crate::chunker::{Chunk, Chunker};
 use crate::embed::Embedder;
 use crate::fusion::{RRF_K, reciprocal_rank_fusion};
+use crate::sha256;
 use crate::store::{FlatStore, VectorStore};
 #[cfg(feature = "usearch")]
 use crate::usearch_store::UsearchStore;
@@ -57,7 +58,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 
 /// Latest successful run per document, with its metadata (ledger schema of
 /// `text-processing-engine/src/ledger.rs`).
-const LATEST_RUNS: &str = "SELECT r.id, r.hash, m.title, m.doi FROM runs r \
+const LATEST_RUNS: &str = "SELECT r.id, r.hash, m.title, m.doi, \
+    r.backend_name, r.backend_version, r.config_digest, r.finished_at FROM runs r \
     LEFT JOIN metadata m ON m.run_id = r.id \
     WHERE r.id = (SELECT r2.id FROM runs r2 WHERE r2.hash = r.hash \
         AND r2.status IN ('complete', 'partial') \
@@ -65,7 +67,6 @@ const LATEST_RUNS: &str = "SELECT r.id, r.hash, m.title, m.doi FROM runs r \
     ORDER BY r.hash";
 const RUN_PAGES: &str = "SELECT page, text FROM pages WHERE run_id = ?1 ORDER BY page";
 const CHUNK_IDS: &str = "SELECT id FROM chunks WHERE doc_hash = ?1";
-const INDEXED_RUN: &str = "SELECT run_id FROM indexed_runs WHERE doc_hash = ?1";
 const UPSERT_INDEXED_RUN: &str = "INSERT INTO indexed_runs (doc_hash, run_id) VALUES (?1, ?2) \
     ON CONFLICT(doc_hash) DO UPDATE SET run_id = excluded.run_id";
 const INSERT_CHUNK: &str = "INSERT INTO chunks (doc_hash, run_id, page, idx, text, title, doi) \
@@ -116,11 +117,12 @@ pub struct IndexStats {
     pub documents_seen: u64,
     /// Documents (re)chunked and embedded in this call.
     pub documents_indexed: u64,
-    /// Documents whose latest run was already indexed.
+    /// Documents whose latest run's content fingerprint matches the one
+    /// recorded when it was indexed.
     pub documents_unchanged: u64,
     /// Chunks inserted.
     pub chunks_added: u64,
-    /// Chunks deleted because their document has a newer run.
+    /// Chunks deleted because their document's latest run changed.
     pub chunks_removed: u64,
     /// The index had been left inconsistent by an interrupted run and was
     /// rebuilt from scratch.
@@ -149,6 +151,10 @@ struct LedgerDoc {
     run_id: i64,
     title: Option<String>,
     doi: Option<String>,
+    backend_name: String,
+    backend_version: String,
+    config_digest: String,
+    finished_at: i64,
 }
 
 /// A search index stored in one directory.
@@ -201,9 +207,11 @@ impl SearchIndex {
     }
 
     /// Index the latest complete or partial run of every document in the
-    /// ledger at `ledger_path` (opened read-only). Documents whose latest run
-    /// is already indexed are skipped; documents with a newer run replace
-    /// their old chunks.
+    /// ledger at `ledger_path` (opened read-only). Each indexed run's content
+    /// fingerprint (see `run_fingerprint`) is kept in the `meta` table;
+    /// documents whose latest run still has that fingerprint are skipped, and
+    /// any other document replaces its old chunks. The ledger reuses
+    /// `runs.id` when it rewrites a run, so the id alone is not trusted.
     pub fn index_ledger(
         &mut self,
         ledger_path: &Path,
@@ -248,16 +256,15 @@ impl SearchIndex {
         embedder: &dyn Embedder,
         stats: &mut IndexStats,
     ) -> Result<(), SearchError> {
-        let indexed_run: Option<i64> = self
-            .conn
-            .query_row(INDEXED_RUN, params![doc.hash], |row| row.get(0))
-            .optional()?;
-        if indexed_run == Some(doc.run_id) {
+        let pages = run_pages(ledger, doc.run_id)?;
+        let fingerprint = run_fingerprint(doc, &pages);
+        let fingerprint_key = format!("fp:{}", doc.hash);
+        if get_meta(&self.conn, &fingerprint_key)?.as_deref() == Some(fingerprint.as_str()) {
             stats.documents_unchanged += 1;
             return Ok(());
         }
         let existing = chunk_ids(&self.conn, &doc.hash)?;
-        let chunks = self.chunk_run(ledger, doc)?;
+        let chunks = self.chunk_pages(doc, &pages);
         let vectors = embed_all(embedder, &chunks)?;
         // From here on the SQLite tables and the vector file can disagree
         // until the vector file is saved; an interrupted run is rebuilt.
@@ -289,6 +296,7 @@ impl SearchIndex {
             new_ids.push(id);
         }
         tx.execute(UPSERT_INDEXED_RUN, params![doc.hash, doc.run_id])?;
+        set_meta(&tx, &fingerprint_key, &fingerprint)?;
         tx.commit()?;
         let store = self
             .store
@@ -306,23 +314,18 @@ impl SearchIndex {
         Ok(())
     }
 
-    fn chunk_run(&self, ledger: &Connection, doc: &LedgerDoc) -> Result<Vec<Chunk>, SearchError> {
-        let mut stmt = ledger.prepare(RUN_PAGES)?;
-        let rows = stmt.query_map(params![doc.run_id], |row| {
-            Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
-        })?;
+    fn chunk_pages(&self, doc: &LedgerDoc, pages: &[(u32, String)]) -> Vec<Chunk> {
         let mut chunks: Vec<Chunk> = Vec::new();
         let mut next_idx: u32 = 0;
-        for row in rows {
-            let (page, text) = row?;
+        for (page, text) in pages {
             let page_chunks = self
                 .chunker
-                .chunk_page(&doc.hash, doc.run_id, page, next_idx, &text);
+                .chunk_page(&doc.hash, doc.run_id, *page, next_idx, text);
             let added = u32::try_from(page_chunks.len()).unwrap_or(u32::MAX);
             next_idx = next_idx.saturating_add(added);
             chunks.extend(page_chunks);
         }
-        Ok(chunks)
+        chunks
     }
 
     /// Search the index. `embedder` must be the one the index was built
@@ -593,6 +596,61 @@ fn chunk_ids(conn: &Connection, doc_hash: &str) -> Result<Vec<i64>, SearchError>
     Ok(out)
 }
 
+fn run_pages(ledger: &Connection, run_id: i64) -> Result<Vec<(u32, String)>, SearchError> {
+    let mut stmt = ledger.prepare(RUN_PAGES)?;
+    let rows = stmt.query_map(params![run_id], |row| {
+        Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut out: Vec<(u32, String)> = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Content fingerprint of a ledger run: SHA-256 over the length-prefixed run
+/// id, document hash, backend name, backend version, config digest,
+/// `finished_at`, page count, the SHA-256 of every page (number and
+/// length-prefixed text, in page order), and the title and DOI that are
+/// copied into the chunk rows. A run rewritten under a reused `runs.id`
+/// with different text gets a different fingerprint.
+fn run_fingerprint(doc: &LedgerDoc, pages: &[(u32, String)]) -> String {
+    let mut page_bytes: Vec<u8> = Vec::new();
+    for (page, text) in pages {
+        page_bytes.extend_from_slice(&page.to_be_bytes());
+        push_field(&mut page_bytes, text.as_bytes());
+    }
+    let pages_digest = sha256_hex(&page_bytes);
+    let page_count = u64::try_from(pages.len()).unwrap_or(u64::MAX);
+    let mut input: Vec<u8> = Vec::new();
+    input.extend_from_slice(&doc.run_id.to_be_bytes());
+    push_field(&mut input, doc.hash.as_bytes());
+    push_field(&mut input, doc.backend_name.as_bytes());
+    push_field(&mut input, doc.backend_version.as_bytes());
+    push_field(&mut input, doc.config_digest.as_bytes());
+    input.extend_from_slice(&doc.finished_at.to_be_bytes());
+    input.extend_from_slice(&page_count.to_be_bytes());
+    push_field(&mut input, pages_digest.as_bytes());
+    push_optional(&mut input, doc.title.as_deref());
+    push_optional(&mut input, doc.doi.as_deref());
+    sha256_hex(&input)
+}
+
+fn push_field(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn push_optional(out: &mut Vec<u8>, value: Option<&str>) {
+    if let Some(text) = value {
+        out.push(1);
+        push_field(out, text.as_bytes());
+    } else {
+        out.push(0);
+    }
+}
+
 fn latest_runs(ledger: &Connection) -> Result<Vec<LedgerDoc>, SearchError> {
     let mut stmt = ledger.prepare(LATEST_RUNS)?;
     let rows = stmt.query_map([], |row| {
@@ -601,6 +659,10 @@ fn latest_runs(ledger: &Connection) -> Result<Vec<LedgerDoc>, SearchError> {
             hash: row.get(1)?,
             title: row.get(2)?,
             doi: row.get(3)?,
+            backend_name: row.get(4)?,
+            backend_version: row.get(5)?,
+            config_digest: row.get(6)?,
+            finished_at: row.get(7)?,
         })
     })?;
     let mut out: Vec<LedgerDoc> = Vec::new();
@@ -632,6 +694,18 @@ fn embed_all(embedder: &dyn Embedder, chunks: &[Chunk]) -> Result<Vec<Vec<f32>>,
         out.extend(vectors);
     }
     Ok(out)
+}
+
+/// Lower-case hex SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -979,6 +1053,99 @@ CREATE TABLE IF NOT EXISTS metadata (
         let summary = index.stats().unwrap();
         assert_eq!(summary.chunks, 3);
         assert_eq!(summary.vectors, 3);
+    }
+
+    #[test]
+    fn reused_run_id_with_new_text_is_reindexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("ledger.sqlite");
+        make_ledger(&ledger, &three_docs());
+        let embedder = HashEmbedder::default();
+        let mut index = SearchIndex::open(&dir.path().join("idx")).unwrap();
+        index.index_ledger(&ledger, &embedder).unwrap();
+
+        // Rewrite the run the way `Ledger::write_result` does (delete, then
+        // reinsert under the same identity), keeping the same `runs.id`, hash,
+        // backend, config digest, `finished_at`, page count, title and DOI:
+        // only the page text differs.
+        let conn = Connection::open(&ledger).unwrap();
+        let old_id: i64 = conn
+            .query_row(
+                "SELECT id FROM runs WHERE hash = 'a1a1a1a1a1a1a1a1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute_batch(&format!(
+            "DELETE FROM pages WHERE run_id = {old_id}; \
+             DELETE FROM metadata WHERE run_id = {old_id}; \
+             DELETE FROM runs WHERE id = {old_id};"
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs (id, hash, backend_name, backend_version, config_digest, \
+             schema_version, status, started_at, finished_at, timings_json, warnings_json) \
+             VALUES (?1, 'a1a1a1a1a1a1a1a1', 'lopdf', '0.45', 'cfg10', 1, 'complete', 0, 10, \
+             '{}', '[]')",
+            params![old_id],
+        )
+        .unwrap();
+        for (page, text) in [
+            (
+                1_i64,
+                "Superconductivity appears in cuprates below a critical temperature.",
+            ),
+            (2_i64, "Meissner effect expels magnetic fields."),
+        ] {
+            conn.execute(
+                "INSERT INTO pages (run_id, page, width, height, rotation, text, spans_json, \
+                 lines_json, warnings_json) VALUES (?1, ?2, 612.0, 792.0, 0, ?3, '[]', '[]', '[]')",
+                params![old_id, page, text],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO metadata (run_id, title, doi, keywords_json, info_json, provenance_json) \
+             VALUES (?1, 'Photosynthesis in leaves', '10.1000/photo', '[]', '{}', '{}')",
+            params![old_id],
+        )
+        .unwrap();
+        let new_id: i64 = conn
+            .query_row(
+                "SELECT id FROM runs WHERE hash = 'a1a1a1a1a1a1a1a1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_id, old_id);
+        drop(conn);
+
+        let stats = index.index_ledger(&ledger, &embedder).unwrap();
+        assert_eq!(stats.documents_seen, 3);
+        assert_eq!(stats.documents_indexed, 1);
+        assert_eq!(stats.documents_unchanged, 2);
+        assert_eq!(stats.chunks_removed, 2);
+        assert_eq!(stats.chunks_added, 2);
+        assert!(
+            index
+                .search("chlorophyll", 5, SearchMode::Lexical, &embedder)
+                .unwrap()
+                .is_empty()
+        );
+        let hits = index
+            .search("superconductivity", 5, SearchMode::Lexical, &embedder)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_hash, "a1a1a1a1a1a1a1a1");
+        assert_eq!(hits[0].page, 1);
+        let summary = index.stats().unwrap();
+        assert_eq!(summary.chunks, 4);
+        assert_eq!(summary.vectors, 4);
+
+        // Indexing again without further changes is a no-op.
+        let again = index.index_ledger(&ledger, &embedder).unwrap();
+        assert_eq!(again.documents_unchanged, 3);
+        assert_eq!(again.documents_indexed, 0);
     }
 
     #[test]

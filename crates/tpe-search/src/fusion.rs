@@ -7,11 +7,16 @@ pub const RRF_K: f64 = 60.0;
 
 /// Fuse ranked key lists. Each list contributes `weight / (k_const + rank)`
 /// for every key it contains (rank starts at 1; only a key's first
-/// occurrence in a list counts). Returns keys by fused score, best first;
-/// ties are broken by ascending key so the order is deterministic.
+/// occurrence in a list counts). Lists whose weight is not positive (for
+/// example the lexical list at hybrid `alpha` 1) are skipped entirely, so
+/// their keys never enter the result. Returns keys by fused score, best
+/// first; ties are broken by ascending key so the order is deterministic.
 pub fn reciprocal_rank_fusion(lists: &[(f64, &[u64])], k_const: f64) -> Vec<(u64, f64)> {
     let mut scores: HashMap<u64, f64> = HashMap::new();
     for (weight, keys) in lists {
+        if *weight <= 0.0 {
+            continue;
+        }
         let mut seen: HashSet<u64> = HashSet::new();
         let mut rank = 0.0_f64;
         for key in *keys {
@@ -54,6 +59,29 @@ mod tests {
         assert_eq!(keys(&fused), vec![9, 8, 7]);
         let fused = reciprocal_rank_fusion(&[(1.0, a), (0.0, b)], RRF_K);
         assert_eq!(keys(&fused), vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn rrf_alpha_zero_is_lexical_only() {
+        // Same list order as `SearchIndex::search`: (alpha, semantic), (1 - alpha, lexical).
+        let alpha = 0.0_f64;
+        let semantic: &[u64] = &[10, 20, 30, 40];
+        let lexical: &[u64] = &[30, 50];
+        let fused = reciprocal_rank_fusion(&[(alpha, semantic), (1.0 - alpha, lexical)], RRF_K);
+        assert_eq!(keys(&fused), vec![30, 50]);
+        assert!((fused[0].1 - 1.0 / 61.0).abs() < 1e-12);
+        assert!((fused[1].1 - 1.0 / 62.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rrf_alpha_one_is_semantic_only() {
+        let alpha = 1.0_f64;
+        let semantic: &[u64] = &[20, 10];
+        let lexical: &[u64] = &[10, 60, 70, 80];
+        let fused = reciprocal_rank_fusion(&[(alpha, semantic), (1.0 - alpha, lexical)], RRF_K);
+        assert_eq!(keys(&fused), vec![20, 10]);
+        assert!((fused[0].1 - 1.0 / 61.0).abs() < 1e-12);
+        assert!((fused[1].1 - 1.0 / 62.0).abs() < 1e-12);
     }
 
     #[test]

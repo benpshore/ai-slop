@@ -23,6 +23,7 @@ onnx = ["dep:fastembed"]
 clap = { version = "4.5", features = ["derive"] }
 fastembed = { version = "7", optional = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.10"
 thiserror = "2"
 usearch = { version = "2", optional = true }
 
