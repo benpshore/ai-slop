@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::schema::{BBox, CitationMarker, Line, PageText, ReferenceEntry};
+use crate::text_cleanup::{HyphenPolicy, hyphen_policy};
 
 /// Where a reference list starts. A document may hold several lists
 /// (`References` and `References for the Appendices`, say); see
@@ -198,15 +199,16 @@ const MAX_FURNITURE_CHARS: usize = 80;
 /// reference entry must start for the heading to open a list.
 const HEADING_LOOKAHEAD: usize = 3;
 
-/// Prefixes that usually keep their hyphen when a compound is broken at a
-/// line end (`multi- task` → `multi-task`).
+/// First halves that keep their hyphen when [`hyphen_policy`] would join an
+/// unattested word (`spatio- temporal` → `spatio-temporal`). Bound prefixes
+/// that are normally written solid (`pre`, `non`, `multi`) are left to the
+/// policy.
 const COMPOUND_PREFIXES: &[&str] = &[
-    "anti", "auto", "bi", "co", "cross", "e", "fine", "high", "hyper", "inter", "intra", "long",
-    "low", "meta", "micro", "multi", "non", "of", "one", "post", "pre", "pseudo", "quasi", "real",
-    "self", "semi", "short", "spatio", "sub", "super", "the", "three", "two", "ultra", "well",
-    "zero",
+    "bi", "cross", "e", "fine", "high", "long", "low", "of", "one", "quasi", "real", "self",
+    "short", "spatio", "the", "three", "two", "well", "zero",
 ];
-/// Second halves that usually keep their hyphen (`privacy- preserving`).
+/// Second halves that keep their hyphen when [`hyphen_policy`] would join an
+/// unattested word (`privacy- preserving`).
 const COMPOUND_HEADS: &[&str] = &[
     "agnostic",
     "augmented",
@@ -1277,8 +1279,8 @@ fn drop_foreign_column_lines(lines: Vec<SectionLine>, style: Style) -> Vec<Secti
 struct ListBody {
     lines: Vec<SectionLine>,
     style: Style,
-    /// Every section line joined by newlines (before the cut), for
-    /// [`hyphen_break`].
+    /// Every section line joined by newlines (before the cut), lower-cased,
+    /// for [`hyphen_break`].
     context: String,
     /// `(page number, line index)` of the line that ends the list (an
     /// appendix heading, a caption, a biography, ...); `None` when the list
@@ -1373,7 +1375,8 @@ fn list_body(
         .iter()
         .map(|l| l.text.as_str())
         .collect::<Vec<&str>>()
-        .join("\n");
+        .join("\n")
+        .to_lowercase();
     // The list ends at the first end heading. Everything after it (an
     // appendix, tables, biographies) is set at the entry-start x and must
     // not feed the indent-level statistics of the list itself. A numbered
@@ -1668,12 +1671,34 @@ enum HyphenJoin {
     Separate,
 }
 
+/// Does `piece` (lower case) occur in `context` (the lower-cased section
+/// text) as a whole word or hyphenated pair? The halves of a word broken at
+/// a line end (`noise-` + newline + `regularized`) do not count: an
+/// occurrence right before or after `-` and a newline is not evidence.
+fn attested_in(context: &str, piece: &str) -> bool {
+    if piece.is_empty() {
+        return false;
+    }
+    context.match_indices(piece).any(|(start, _)| {
+        let before = &context[..start];
+        let after = &context[start + piece.len()..];
+        let open = before
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let close = after.chars().next().is_none_or(|c| !c.is_alphanumeric());
+        open && close && !before.ends_with("-\n") && !after.starts_with("-\n")
+    })
+}
+
 /// Resolve the hyphen that ends `previous` against the line `next`.
 ///
-/// Without a dictionary the rule is: keep when the continuation is not
-/// lowercase; keep when the hyphenated form occurs unbroken elsewhere in
-/// `context`; drop when the joined form occurs; else keep for common compound
-/// prefixes and heads; else drop.
+/// A hyphen inside a URL or DOI and one before a continuation that does not
+/// start in lowercase are kept. Otherwise [`hyphen_policy`] decides, with
+/// `context` (the lower-cased section text) as the evidence of which words
+/// and hyphenated pairs occur whole ([`attested_in`]); a join of a word that
+/// does not occur is overridden to keep the hyphen after a
+/// [`COMPOUND_PREFIXES`] entry or before a [`COMPOUND_HEADS`] entry.
 fn hyphen_break(previous: &str, next: &str, context: &str) -> HyphenJoin {
     let Some(head_text) = previous.strip_suffix('-') else {
         return HyphenJoin::Separate;
@@ -1695,22 +1720,23 @@ fn hyphen_break(previous: &str, next: &str, context: &str) -> HyphenJoin {
     if !next.starts_with(|c: char| c.is_lowercase()) {
         return HyphenJoin::Keep;
     }
-    let hyphenated = format!("{first}-{second}");
-    if context.contains(&hyphenated) {
-        return HyphenJoin::Keep;
+    let attested = |piece: &str| attested_in(context, piece);
+    match hyphen_policy(first, second, &attested) {
+        HyphenPolicy::Keep => HyphenJoin::Keep,
+        HyphenPolicy::Join => {
+            let first_lower = first.to_lowercase();
+            let second_lower = second.to_lowercase();
+            let joined_seen = attested(&format!("{first_lower}{second_lower}"));
+            if !joined_seen
+                && (COMPOUND_PREFIXES.contains(&first_lower.as_str())
+                    || COMPOUND_HEADS.contains(&second_lower.as_str()))
+            {
+                HyphenJoin::Keep
+            } else {
+                HyphenJoin::Drop
+            }
+        }
     }
-    let joined = format!("{first}{second}");
-    if context.contains(&joined) {
-        return HyphenJoin::Drop;
-    }
-    let first_lower = first.to_lowercase();
-    let second_lower = second.to_lowercase();
-    if COMPOUND_PREFIXES.contains(&first_lower.as_str())
-        || COMPOUND_HEADS.contains(&second_lower.as_str())
-    {
-        return HyphenJoin::Keep;
-    }
-    HyphenJoin::Drop
 }
 
 /// Append a continuation line to the last entry, resolving a word broken by
@@ -2296,25 +2322,113 @@ fn period_is_abbreviation(text: &str, dot: usize) -> bool {
         )
 }
 
+/// Does `segment`, the text after an initial's period in what should be an
+/// author list, read as a title instead? A colon, a lowercase word of four
+/// or more letters (`Slayer: Spike layer error reassignment in time`, `On
+/// general minimax theorems`) or five or more capitalised words without a
+/// comma (`Structured State Space Model Dynamics and ...`) do; names,
+/// surname particles of any length (`della`, [`is_surname_particle`]),
+/// `and` and `et al` do not.
+fn reads_as_title(segment: &str) -> bool {
+    let text = segment.trim();
+    if text.contains(':') {
+        return true;
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let capitalised = words
+        .iter()
+        .filter(|word| {
+            let core = word.trim_matches(|c: char| !c.is_alphanumeric());
+            core.chars().count() >= 2
+                && core.starts_with(char::is_uppercase)
+                && !initials_re().is_match(core)
+        })
+        .count();
+    if capitalised >= 5 && !text.contains(',') {
+        return true;
+    }
+    words.iter().any(|word| {
+        let core = word.trim_matches(|c: char| !c.is_alphanumeric());
+        core.chars().count() >= 4
+            && core.chars().all(char::is_alphabetic)
+            && core.starts_with(char::is_lowercase)
+            && core != "others"
+            && !is_particle(core)
+            && !is_surname_particle(core)
+    })
+}
+
+/// A lowercase surname particle of any length (`della Porta`, `van der
+/// Berg`, `bin Salman`): part of a name, never a title word.
+fn is_surname_particle(token: &str) -> bool {
+    matches!(
+        token,
+        "della"
+            | "delle"
+            | "dalla"
+            | "degli"
+            | "van"
+            | "von"
+            | "der"
+            | "den"
+            | "de"
+            | "la"
+            | "los"
+            | "las"
+            | "du"
+            | "des"
+            | "ter"
+            | "ten"
+            | "da"
+            | "di"
+            | "do"
+            | "dos"
+            | "das"
+            | "del"
+            | "dela"
+            | "le"
+            | "lo"
+            | "bin"
+            | "ibn"
+            | "al"
+            | "el"
+            | "af"
+            | "av"
+            | "zu"
+            | "zur"
+            | "y"
+            | "e"
+    )
+}
+
 /// True when `segment` reads as an author list only: every `. ` inside it
-/// closes an initial or abbreviation.
+/// closes an initial or abbreviation, and no text after an initial reads as
+/// a title ([`reads_as_title`]): in `Orchard, G. Slayer: Spike layer error
+/// reassignment in time (2018)` the year follows the title, not the
+/// authors. The period of a dotted acronym (`U.S. Food and Drug
+/// Administration`) is not an initial's.
 fn is_author_only(segment: &str) -> bool {
     let trimmed = segment.trim_end();
     let trimmed = trimmed.trim_end_matches(['.', ',', '(', ' ']);
     if trimmed.is_empty() || !trimmed.chars().next().is_some_and(char::is_uppercase) {
         return false;
     }
-    let mut ok = true;
     let mut search = 0usize;
     while let Some(rel) = trimmed[search..].find(". ") {
         let dot = search + rel;
         if !period_is_abbreviation(trimmed, dot) {
-            ok = false;
-            break;
+            return false;
+        }
+        let acronym = trimmed[..dot - word_before(trimmed, dot).len()].ends_with('.');
+        let next = trimmed[dot + 2..]
+            .find(". ")
+            .map_or(trimmed.len(), |found| dot + 2 + found);
+        if !acronym && reads_as_title(&trimmed[dot + 2..next]) {
+            return false;
         }
         search = dot + 2;
     }
-    ok && trimmed.chars().count() <= 400
+    trimmed.chars().count() <= 400
 }
 
 /// Byte offset just past the terminator (`. `, `? `, `! `) that ends the
@@ -2365,30 +2479,152 @@ fn continues_author_list(text: &str, from: usize) -> bool {
     if after_word.starts_with(',') || after_word.starts_with('&') {
         return true;
     }
+    // A lowercase initial is an abbreviated particle (`Casas, D. d. l.,`).
+    let mut chars = word.chars();
+    if matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(c), Some('.'), None) if c.is_lowercase()
+    ) {
+        return true;
+    }
+    // A capital without a period before a lowercase word opens the title
+    // (`Kroer, C. A unified approach`), not another initial.
+    if !word.contains('.') && after_word.starts_with(char::is_lowercase) {
+        return false;
+    }
     is_initials(word)
+}
+
+/// A part marker after a title sentence: ` II.`, ` IV.`, ` Part 2.`,
+/// ` Part II.` (the period closes the marker).
+fn part_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s(?:Part\s+(?:[IVX]{1,4}|\d{1,2})|[IVX]{1,4})\.").expect("valid regex")
+    })
 }
 
 /// End (byte offset, exclusive) of a title that starts at byte 0 of `text`:
 /// the first `. ` that does not close an abbreviation, or a `? ` / `! `
-/// that is not followed by a lowercase continuation (`negotiate? nego-
-/// tiationarena platform`).
+/// after which the title does not go on ([`question_ends_title`]). A part
+/// marker after the period stays in the title (`Orthogonal polynomials.
+/// II. J. Math. Phys.` ends after `II`), and so does a `?` / `!` that venue
+/// words follow (`Resolved? arXiv preprint` ends after the `?`).
 fn title_end(text: &str) -> usize {
     let mut search = 0usize;
     while let Some(rel) = text[search..].find(['.', '?', '!']) {
         let pos = search + rel;
         if text[pos + 1..].starts_with(' ') {
-            let terminal = if text.as_bytes()[pos] == b'.' {
+            let period = text.as_bytes()[pos] == b'.';
+            if !period && venue_lead_re().is_match(text[pos + 2..].trim_start()) {
+                return pos + 1;
+            }
+            let terminal = if period {
                 !period_is_abbreviation(text, pos)
             } else {
-                !text[pos + 2..].starts_with(|c: char| c.is_lowercase())
+                question_ends_title(&text[pos + 2..])
             };
             if terminal {
+                if period && let Some(marker) = part_marker_re().find(&text[pos + 1..]) {
+                    return pos + marker.end();
+                }
                 return pos;
             }
         }
         search = pos + 1;
     }
     text.len()
+}
+
+/// Byte offset of the first `. `, `? ` or `! ` in `text` that ends a
+/// sentence; a period that closes an initial or abbreviation does not.
+fn sentence_end(text: &str) -> Option<usize> {
+    let mut search = 0usize;
+    while let Some(rel) = text[search..].find(['.', '?', '!']) {
+        let pos = search + rel;
+        if text[pos + 1..].starts_with(' ')
+            && (text.as_bytes()[pos] != b'.' || !period_is_abbreviation(text, pos))
+        {
+            return Some(pos);
+        }
+        search = pos + 1;
+    }
+    None
+}
+
+/// Venue words that may follow a subtitle after a `? ` / `! ` title part.
+fn subtitle_venue_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(?i:in\b|proceedings\b|proc\.|arxiv|preprint\b)").expect("valid regex")
+    })
+}
+
+/// A volume, issue or page range: `43(4)`, `106, 3`, `709–722`.
+fn volume_digits_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\d\s*[,(:]|\d[–\-]\d").expect("valid regex"))
+}
+
+/// Venue words inside a clause after a `? ` / `! ` (`Journal of Artificial
+/// Intelligence`): the clause names the venue, not a subtitle.
+fn clause_venue_word_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:Journal|Proceedings|Conference|Transactions|Review|Letters|Annals|Advances|Workshop|Symposium|Press|(?i:arxiv|preprint|vol|pp))\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Does `clause` read as a venue name rather than a subtitle? It holds a
+/// venue word ([`clause_venue_word_re`]) and does not open with an article
+/// (`A Systematic Review` is a subtitle).
+fn clause_names_venue(clause: &str) -> bool {
+    let first = clause.split_whitespace().next().unwrap_or("");
+    !matches!(first, "A" | "An") && clause_venue_word_re().is_match(clause)
+}
+
+/// Does a title end at a `? ` or `! ` that `after` follows (venue words
+/// right after it are handled by [`title_end`])? It ends before a journal
+/// with its volume (`preferences? Marketing Science 43(4):709–722.`) and
+/// before a short or venue-like sentence. It goes on
+/// before a lowercase word (`negotiate? negotiationarena platform`) and
+/// before a subtitle of three or more words that is followed by a venue
+/// (`Search? Investigating Large Language Models as Re-Ranking Agents. In
+/// Proceedings`) or by a masked identifier (`Tests? An Empirical Study.
+/// arXiv:2602.00409`). A masked identifier alone is not enough: a clause
+/// with venue words (`Work? Journal of Artificial Intelligence. https://…`)
+/// or followed by a volume is the venue, and the title ends.
+fn question_ends_title(after: &str) -> bool {
+    if after.trim_start().starts_with(char::is_lowercase) {
+        return false;
+    }
+    let Some(end) = sentence_end(after) else {
+        return true;
+    };
+    let subtitle = &after[..end];
+    if subtitle.split_whitespace().count() < 3
+        || venue_lead_re().is_match(subtitle.trim_start())
+        || volume_digits_re().is_match(subtitle)
+    {
+        return true;
+    }
+    let following = &after[end + 1..];
+    if subtitle_venue_re().is_match(following.trim_start()) {
+        return false;
+    }
+    // An identifier masked to spaces (`Study. arXiv:2602.00409`) follows.
+    let masked_identifier = following.starts_with("  ");
+    if !masked_identifier || subtitle.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // A volume after the identifier (`… (2021), 12(3).`) marks the clause
+    // as the venue; a bare year (`arXiv:2602.00409 (2026).`) does not.
+    let tail = following.trim_start();
+    let tail = &tail[..sentence_end(tail).unwrap_or(tail.len())];
+    clause_names_venue(subtitle) || volume_digits_re().is_match(tail)
 }
 
 fn is_et_al(part: &str) -> bool {
@@ -2465,11 +2701,49 @@ fn split_authors(segment: &str) -> Vec<String> {
             names[0].push_str(part);
             continue;
         }
+        // Surname-first names without a separator (`Rossi, M. della Porta,
+        // A.`): the leading initials close the previous name and the rest
+        // opens the next one.
+        if surname_first
+            && names.last().is_some_and(|last| !last.contains(','))
+            && let Some((initials, rest)) = split_leading_initials(part)
+        {
+            if let Some(last) = names.last_mut() {
+                last.push_str(", ");
+                last.push_str(initials);
+            }
+            names.push(rest.to_string());
+            continue;
+        }
         if looks_like_name(part) {
             names.push(part.to_string());
         }
     }
     names
+}
+
+/// `M. della Porta` → (`M.`, `della Porta`): a leading block of initials
+/// with periods, then a surname that starts with a capital or a surname
+/// particle. `None` when either piece is missing.
+fn split_leading_initials(part: &str) -> Option<(&str, &str)> {
+    let mut end = 0usize;
+    let mut rest = part;
+    loop {
+        let trimmed = rest.trim_start();
+        let token = trimmed.split_whitespace().next()?;
+        if !token.ends_with('.') || !is_initials(token) {
+            break;
+        }
+        end = part.len() - trimmed.len() + token.len();
+        rest = &trimmed[token.len()..];
+    }
+    let rest = rest.trim();
+    let first = rest.split_whitespace().next()?;
+    let surname = first.starts_with(char::is_uppercase) || is_surname_particle(first);
+    if end == 0 || !surname || is_initials(rest) || !looks_like_name(rest) {
+        return None;
+    }
+    Some((part[..end].trim(), rest))
 }
 
 fn dash_range(first: &str, last: Option<&str>) -> String {
@@ -6523,6 +6797,414 @@ mod tests {
             ]);
             assert_eq!(refs.len(), 2);
             assert!(refs.iter().all(|r| !r.raw.contains("Decay")));
+        }
+    }
+
+    /// Loop 9 title fixes (holdout failure taxonomy), each built from the
+    /// raw text of a dev-split entry whose title did not match the truth.
+    mod loop9b_title_tests {
+        use super::*;
+
+        /// `title` without the parenthesised year that some styles print
+        /// after it (stripped by a separate change).
+        fn without_paren_year(title: Option<&str>, year: &str) -> Option<String> {
+            title.map(|t| t.trim_end_matches(year).trim_end().to_string())
+        }
+
+        /// Nature style (arXiv:2509.24852) and `Title. Year.` entries: the
+        /// year follows the title, so the text before the year is not an
+        /// author list only; the title after the last initial is read.
+        #[test]
+        fn titles_before_the_year_are_not_authors() {
+            let slayer = parsed(
+                "[10] Shrestha, S. B. & Orchard, G. Slayer: Spike layer error reassignment in \
+                 time (2018). URL https://arxiv.org/abs/1810.08646. arXiv:1810.08646.",
+                Some("[10]"),
+            );
+            assert_eq!(slayer.authors, vec!["Shrestha, S. B.", "Orchard, G."]);
+            assert_eq!(
+                without_paren_year(slayer.title.as_deref(), "(2018)").as_deref(),
+                Some("Slayer: Spike layer error reassignment in time")
+            );
+            assert_eq!(slayer.year, Some(2018));
+            assert_eq!(slayer.arxiv_id.as_deref(), Some("1810.08646"));
+
+            let fabre = parsed(
+                "[5] Fabre, M., Dudchenko, L. & Neftci, E. Structured State Space Model \
+                 Dynamics and Parametrization for Spiking Neural Networks (2025). \
+                 arXiv:2506.06374.",
+                Some("[5]"),
+            );
+            assert_eq!(
+                fabre.authors,
+                vec!["Fabre, M.", "Dudchenko, L.", "Neftci, E."]
+            );
+            assert_eq!(
+                without_paren_year(fabre.title.as_deref(), "(2025)").as_deref(),
+                Some(
+                    "Structured State Space Model Dynamics and Parametrization for Spiking \
+                     Neural Networks"
+                )
+            );
+
+            let glif = parsed(
+                "[34] Yao, X., Li, F., Mo, Z. & Cheng, J. Glif: A unified gated leaky \
+                 integrate-and-fire neuron for spiking neural networks , Vol. 35, 32160–32171 \
+                 (2022).",
+                Some("[34]"),
+            );
+            assert_eq!(
+                glif.title.as_deref(),
+                Some(
+                    "Glif: A unified gated leaky integrate-and-fire neuron for spiking neural networks"
+                )
+            );
+            assert_eq!(glif.authors.len(), 4);
+            assert_eq!(glif.year, Some(2022));
+
+            let sion = parsed("Sion, M. On general minimax theorems. 1958.", None);
+            assert_eq!(sion.authors, vec!["Sion, M."]);
+            assert_eq!(sion.title.as_deref(), Some("On general minimax theorems"));
+            assert_eq!(sion.year, Some(1958));
+
+            let cui = parsed(
+                "Cui, G., Yuan, L., Ding, N., Yao, G., Zhu, W., Ni, Y., Xie, G., Liu, Z., and \
+                 Sun, M. Ultrafeedback: Boosting language models with high-quality feedback. \
+                 2023.",
+                None,
+            );
+            assert_eq!(
+                cui.title.as_deref(),
+                Some("Ultrafeedback: Boosting language models with high-quality feedback")
+            );
+            assert_eq!(cui.authors.len(), 9);
+            assert_eq!(cui.authors[8], "Sun, M.");
+            assert_eq!(cui.year, Some(2023));
+        }
+
+        /// Author lists that stay author lists: a dotted acronym before an
+        /// organisation name (arXiv:2608.28714 `[50]`), particles and `and
+        /// others` before the year.
+        #[test]
+        fn organisation_and_particle_author_lists_stay_authors() {
+            let fda = parsed(
+                "[50] U.S. Food and Drug Administration, Health Canada, and Medicines and \
+                 Healthcare products Regulatory Agency, “Good machine learning practice for \
+                 medical device development: Guiding principles,” Joint guiding principles, \
+                 October 2021, 2021.",
+                Some("[50]"),
+            );
+            assert_eq!(
+                fda.title.as_deref(),
+                Some(
+                    "Good machine learning practice for medical device development: Guiding principles"
+                )
+            );
+
+            let entry = parsed(
+                "Smith, J., van der Berg, K. and others (2019). A title. Venue.",
+                None,
+            );
+            assert_eq!(entry.authors, vec!["Smith, J.", "van der Berg, K."]);
+            assert_eq!(entry.title.as_deref(), Some("A title"));
+            assert_eq!(entry.year, Some(2019));
+        }
+
+        /// Surname-first lists (arXiv:2503.00030, arXiv:2509.24852): a
+        /// title that opens with the word `A` is not one more initial, and
+        /// a lowercase initial (`Casas, D. d. l.`) is a particle, not the
+        /// title.
+        #[test]
+        fn surname_first_lists_end_before_a_title_word() {
+            let sokota = parsed(
+                "Sokota, S., D’Orazio, R., Kolter, J. Z., Loizou, N., Lanctot, M., \
+                 Mitliagkas, I., Brown, N., and Kroer, C. A unified approach to \
+                 reinforcement learning, quantal response equilibria, and two-player \
+                 zero-sum games. arXiv preprint arXiv:2206.05825, 2022.",
+                None,
+            );
+            assert_eq!(
+                sokota.title.as_deref(),
+                Some(
+                    "A unified approach to reinforcement learning, quantal response \
+                     equilibria, and two-player zero-sum games"
+                )
+            );
+            assert_eq!(sokota.authors.len(), 8);
+            assert_eq!(sokota.authors[7], "Kroer, C.");
+
+            let freund = parsed(
+                "Freund, Y. and Schapire, R. E. A decision-theoretic generalization of \
+                 on-line learning and an application to boosting. Journal of computer and \
+                 system sciences, 55(1):119–139, 1997.",
+                None,
+            );
+            assert_eq!(freund.authors, vec!["Freund, Y.", "Schapire, R. E."]);
+            assert_eq!(
+                freund.title.as_deref(),
+                Some(
+                    "A decision-theoretic generalization of on-line learning and an \
+                     application to boosting"
+                )
+            );
+
+            let murray = parsed(
+                "[44] Murray, J. D. et al. A hierarchy of intrinsic timescales across \
+                 primate cortex. Nature Neuroscience 17 , 1661–1663 (2014). Epub 2014 Nov 10.",
+                Some("[44]"),
+            );
+            assert_eq!(
+                murray.title.as_deref(),
+                Some("A hierarchy of intrinsic timescales across primate cortex")
+            );
+
+            let jiang = parsed(
+                "Jiang, A. Q., Sablayrolles, A., Mensch, A., Bamford, C., Chaplot, D. S., \
+                 Casas, D. d. l., Bressand, F., Lengyel, G., Lample, G., Saulnier, L., et al. \
+                 Mistral 7b. arXiv preprint arXiv:2310.06825, 2023a.",
+                None,
+            );
+            assert_eq!(jiang.title.as_deref(), Some("Mistral 7b"));
+            assert_eq!(jiang.arxiv_id.as_deref(), Some("2310.06825"));
+
+            // An initial with its period still continues the list.
+            let rossi = parsed("Rossi, R. A. and Lee, K. Deep widgets. Venue, 2020.", None);
+            assert_eq!(rossi.authors, vec!["Rossi, R. A.", "Lee, K."]);
+            assert_eq!(rossi.title.as_deref(), Some("Deep widgets"));
+        }
+
+        /// A `?` inside a title (arXiv:2603.03010, arXiv:2506.08311,
+        /// arXiv:2601.12491): the subtitle after it belongs to the title when
+        /// the venue or a masked identifier follows the subtitle; venue words
+        /// or a journal with its volume right after the `?` end the title.
+        #[test]
+        fn question_mark_subtitles() {
+            let search = parsed(
+                "[38] Weiwei Sun, Lingyong Yan, Xinyu Ma, Shuaiqiang Wang, Pengjie Ren, \
+                 Zhumin Chen, Dawei Yin, and Zhaochun Ren. 2023. Is ChatGPT Good at Search? \
+                 Investigating Large Language Models as Re-Ranking Agents. In Proceedings of \
+                 the 2023 Conference on Empirical Methods in Natural Language Processing, \
+                 Houda Bouamor, Juan Pino, and Kalika Bali (Eds.). Association for \
+                 Computational Linguistics, Singapore, 14918–14937. \
+                 doi:10.18653/v1/2023.emnlp-main.923",
+                Some("[38]"),
+            );
+            assert_eq!(
+                search.title.as_deref(),
+                Some(
+                    "Is ChatGPT Good at Search? Investigating Large Language Models as \
+                     Re-Ranking Agents"
+                )
+            );
+
+            let mocked = parsed(
+                "[16] Andre Hora and Romain Robbes. 2026. Are Coding Agents Generating \
+                 Over-Mocked Tests? An Empirical Study. arXiv:2602.00409 [cs.SE] \
+                 https://arxiv.org/abs/2602.00409",
+                Some("[16]"),
+            );
+            assert_eq!(
+                mocked.title.as_deref(),
+                Some("Are Coding Agents Generating Over-Mocked Tests? An Empirical Study")
+            );
+
+            let better = parsed(
+                "Galen Weld, Amy X. Zhang, and Tim Althoff. 2022. What Makes Online \
+                 Communities ‘Better’? Measuring Values, Consensus, and Conflict across \
+                 Thousands of Subreddits. Proceedings of the International AAAI Conference \
+                 on Web and Social Media, 16:1121– 1132.",
+                None,
+            );
+            assert_eq!(
+                better.title.as_deref(),
+                Some(
+                    "What Makes Online Communities ‘Better’? Measuring Values, Consensus, \
+                     and Conflict across Thousands of Subreddits"
+                )
+            );
+
+            let tdd = parsed(
+                "[2] Toufique Ahmed, Martin Hirzel, Rangeet Pan, Avraham Shinnar, and \
+                 Saurabh Sinha. 2024. TDD-Bench Verified: Can LLMs Generate Tests for Issues \
+                 Before They Get Resolved? arXiv preprint arXiv:2412.02883 (2024).",
+                Some("[2]"),
+            );
+            assert_eq!(
+                tdd.title.as_deref(),
+                Some(
+                    "TDD-Bench Verified: Can LLMs Generate Tests for Issues Before They Get \
+                     Resolved?"
+                )
+            );
+
+            let live = parsed(
+                "[12] Carmen J. Branje and Deborah I. Fels. 2012. LiveDescribe: Can Amateur \
+                 Describers Create High-Quality Audio Description? Journal of Visual \
+                 Impairment & Blindness 106, 3 (2012), 154–165. \
+                 doi:10.1177/0145482X1210600304",
+                Some("[12]"),
+            );
+            assert_eq!(
+                live.title.as_deref(),
+                Some("LiveDescribe: Can Amateur Describers Create High-Quality Audio Description")
+            );
+
+            let goli = parsed(
+                "Goli A, Singh A (2024) Frontiers: Can large language models capture human \
+                 preferences? Marketing Science 43(4):709–722.",
+                None,
+            );
+            assert_eq!(
+                goli.title.as_deref(),
+                Some("Frontiers: Can large language models capture human preferences")
+            );
+        }
+
+        /// A masked identifier after a clause is no evidence of a subtitle
+        /// when the clause names a venue (`Journal of …`) or a year or
+        /// volume follows the identifier; a subtitle followed by venue words
+        /// or only a masked identifier still belongs to the title.
+        #[test]
+        fn question_mark_before_a_venue_clause() {
+            let work = parsed(
+                "[16] Andre Hora and Romain Robbes. 2026. Does It Work? Journal of \
+                 Artificial Intelligence. https://example.org/papers/does-it-work",
+                Some("[16]"),
+            );
+            assert_eq!(work.title.as_deref(), Some("Does It Work"));
+            assert_eq!(
+                work.venue.as_deref(),
+                Some("Journal of Artificial Intelligence")
+            );
+
+            let tdd = parsed(
+                "[2] Toufique Ahmed, Martin Hirzel, Rangeet Pan, Avraham Shinnar, and \
+                 Saurabh Sinha. 2024. TDD-Bench Verified: Can LLMs Generate Tests for Issues \
+                 Before They Get Resolved? A Study of Coding Agents. arXiv preprint \
+                 arXiv:2412.02883 (2024).",
+                Some("[2]"),
+            );
+            assert_eq!(
+                tdd.title.as_deref(),
+                Some(
+                    "TDD-Bench Verified: Can LLMs Generate Tests for Issues Before They Get \
+                     Resolved? A Study of Coding Agents"
+                )
+            );
+
+            // The clause and what follows the masked identifier decide.
+            let masked = "Journal of Artificial Intelligence.                 ";
+            assert!(question_ends_title(masked));
+            assert!(question_ends_title(
+                "Deep Widget Models.                  (2021), 12(3)."
+            ));
+            assert!(!question_ends_title(
+                "A Systematic Review.                  [cs.SE]"
+            ));
+            assert!(!question_ends_title(
+                "An Empirical Study.                  [cs.SE]"
+            ));
+            // A bare year after the identifier is no venue evidence.
+            let dated = parsed(
+                "[16] Andre Hora and Romain Robbes. 2026. Are Coding Agents Generating \
+                 Over-Mocked Tests? An Empirical Study. arXiv:2602.00409 (2026).",
+                Some("[16]"),
+            );
+            assert_eq!(
+                dated.title.as_deref(),
+                Some("Are Coding Agents Generating Over-Mocked Tests? An Empirical Study")
+            );
+        }
+
+        /// A lowercase surname particle of four or more letters (`della`)
+        /// in a surname-first list is a name part, not a title word.
+        #[test]
+        fn long_surname_particles_stay_in_the_author_list() {
+            let rossi = parsed(
+                "Rossi, M. della Porta, A. (2020). Deep Learning. Journal of Widgets, 3(1), \
+                 1–10.",
+                None,
+            );
+            assert_eq!(rossi.authors, vec!["Rossi, M.", "della Porta, A."]);
+            assert_eq!(rossi.title.as_deref(), Some("Deep Learning"));
+            assert_eq!(rossi.year, Some(2020));
+
+            let joined = parsed(
+                "Rossi, M. and della Porta, A. (2020). Deep Learning. Journal of Widgets.",
+                None,
+            );
+            assert_eq!(joined.authors, vec!["Rossi, M.", "della Porta, A."]);
+            assert_eq!(joined.title.as_deref(), Some("Deep Learning"));
+
+            assert!(!reads_as_title("della Porta, A"));
+            assert!(!reads_as_title("and van der Berg, K"));
+            assert!(reads_as_title(
+                "Slayer: Spike layer error reassignment in time"
+            ));
+            assert!(reads_as_title("On general minimax theorems"));
+        }
+
+        /// A part marker after the title sentence stays in the title, so
+        /// `Orthogonal polynomials. II` (arXiv:2510.00443 `[7]`) is told
+        /// apart from `Orthogonal Polynomials` (`[55]`).
+        #[test]
+        fn part_markers_stay_in_the_title() {
+            let case = parsed(
+                "[7] K. M. Case. Orthogonal polynomials. II. J. Math. Phys., 16:1435–1440, 1975.",
+                Some("[7]"),
+            );
+            assert_eq!(case.title.as_deref(), Some("Orthogonal polynomials. II"));
+            assert_eq!(case.authors, vec!["K. M. Case"]);
+            assert_eq!(case.year, Some(1975));
+
+            let szego = parsed(
+                "[55] G. Szegő. Orthogonal Polynomials, volume 23. American Mathematical \
+                 Society, 1939.",
+                Some("[55]"),
+            );
+            assert_eq!(szego.title.as_deref(), Some("Orthogonal Polynomials"));
+
+            assert_eq!(
+                title_end("Lectures. Part 2. Springer"),
+                "Lectures. Part 2".len()
+            );
+            assert_eq!(
+                title_end("Graph minors. IV. Journal"),
+                "Graph minors. IV".len()
+            );
+            // A title sentence followed by the journal keeps its end.
+            assert_eq!(title_end("Deep widgets. J. Widgets"), "Deep widgets".len());
+        }
+
+        /// Line-end hyphens in a reference list are decided by
+        /// [`hyphen_policy`] against the words of the whole section:
+        /// `noise-` + `regularized` keeps the hyphen when both halves occur
+        /// elsewhere, `pre-` + `serving` joins, and the broken halves
+        /// themselves are no evidence.
+        #[test]
+        fn line_end_hyphens_follow_the_cleanup_policy() {
+            let refs = refs_from_lines(&[
+                "[1] A. Author. A noise-",
+                "regularized prior for noise removal. In Proc. Venue, 2020.",
+                "[2] B. Author. Structure pre-",
+                "serving and regularized reconstruction. In Proc. Venue, 2021.",
+            ]);
+            assert_eq!(refs.len(), 2);
+            assert!(refs[0].raw.contains("A noise-regularized prior"));
+            assert!(refs[1].raw.contains("Structure preserving and"));
+
+            assert_eq!(
+                hyphen_break(
+                    "a noise-",
+                    "regularized prior",
+                    "a noise-\nregularized prior"
+                ),
+                HyphenJoin::Drop
+            );
+            assert!(attested_in("privacy preserving", "preserving"));
+            assert!(!attested_in("privacy preserving", "serving"));
+            assert!(!attested_in("a noise-\nregularized", "noise"));
+            assert!(attested_in("noise-regularized loss", "noise-regularized"));
         }
     }
 

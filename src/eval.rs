@@ -16,6 +16,7 @@
 //! body). These are diagnostics on real papers, not the
 //! human-checked acceptance protocol.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -1170,8 +1171,25 @@ impl AuthorVenueTruth {
     }
 }
 
+/// Tie-break rank of pairing `truth_ref` with `entry` when several extracted
+/// entries match equally well: (same year, same first-author surname), where
+/// surnames compare folded, so accents and case do not matter. Higher wins,
+/// year first.
+fn tie_rank(truth_ref: &TruthReference, entry: &ReferenceEntry) -> (bool, bool) {
+    let year = truth_ref.year.is_some() && truth_ref.year == entry.year;
+    let author = match (truth_ref.authors.first(), entry.authors.first()) {
+        (Some(t), Some(e)) => {
+            let sur = surname(t);
+            !sur.is_empty() && sur == surname(e)
+        }
+        _ => false,
+    };
+    (year, author)
+}
+
 /// Mutable state of the greedy one-to-one matcher.
 struct Matcher<'a> {
+    truth: &'a [TruthReference],
     extracted: &'a [ReferenceEntry],
     matches: Vec<RefMatch>,
     used: Vec<bool>,
@@ -1232,9 +1250,50 @@ impl Matcher<'_> {
         }
     }
 
+    /// Pairs open truth entries with unused extracted entries of the same
+    /// normalised title, method `"title"`, in two phases: first only pairs
+    /// that also agree on the year, then the remaining title-only pairs, so a
+    /// truth entry whose year matches is not starved by an earlier truth entry
+    /// with the same title (`Orthogonal Polynomials`, Szegő 1939, vs Case's
+    /// `Orthogonal polynomials. II.` 1975 cut to the same title). Among
+    /// several candidates the one agreeing on year, then on first-author
+    /// surname (see [`tie_rank`]), then the earliest one wins.
+    fn exact_title_pass(&mut self, truth_keys: &[Option<String>], ext_keys: &[Option<String>]) {
+        for year_phase in [true, false] {
+            for (truth_pos, key) in truth_keys.iter().enumerate() {
+                let Some(key) = key else {
+                    continue;
+                };
+                if !self.is_open(truth_pos) {
+                    continue;
+                }
+                let truth_ref = &self.truth[truth_pos];
+                // (extracted position, tie rank)
+                let mut best: Option<(usize, (bool, bool))> = None;
+                for (ext_pos, ext_key) in ext_keys.iter().enumerate() {
+                    if self.used[ext_pos] || ext_key.as_deref() != Some(key.as_str()) {
+                        continue;
+                    }
+                    let rank = tie_rank(truth_ref, &self.extracted[ext_pos]);
+                    if year_phase && !rank.0 {
+                        continue;
+                    }
+                    if best.is_none_or(|(_, best_rank)| rank > best_rank) {
+                        best = Some((ext_pos, rank));
+                    }
+                }
+                if let Some((ext_pos, _)) = best {
+                    self.assign(truth_pos, ext_pos, "title", 1.0);
+                }
+            }
+        }
+    }
+
     /// Pairs open truth entries with the unused extracted entry whose title
     /// words have the highest Jaccard similarity, when it reaches the minimum
-    /// and the titles do not name different versions.
+    /// and the titles do not name different versions. On equal similarity the
+    /// entry agreeing on year, then on first-author surname (see
+    /// [`tie_rank`]), then the earliest one wins.
     fn fuzzy_title_pass(
         &mut self,
         truth_words: &[BTreeSet<String>],
@@ -1244,17 +1303,28 @@ impl Matcher<'_> {
             if truth_set.is_empty() || !self.is_open(truth_pos) {
                 continue;
             }
-            let mut best: Option<(usize, f32)> = None;
+            // (extracted position, similarity, tie rank)
+            let mut best: Option<(usize, f32, (bool, bool))> = None;
             for (ext_pos, ext_set) in ext_words.iter().enumerate() {
                 if self.used[ext_pos] || !self.digits_compatible(truth_pos, ext_pos) {
                     continue;
                 }
                 let sim = jaccard(truth_set, ext_set);
-                if sim >= TITLE_JACCARD_MIN && best.is_none_or(|(_, b)| sim > b) {
-                    best = Some((ext_pos, sim));
+                if sim < TITLE_JACCARD_MIN {
+                    continue;
+                }
+                let rank = tie_rank(&self.truth[truth_pos], &self.extracted[ext_pos]);
+                let better =
+                    best.is_none_or(|(_, best_sim, best_rank)| match sim.total_cmp(&best_sim) {
+                        Ordering::Greater => true,
+                        Ordering::Equal => rank > best_rank,
+                        Ordering::Less => false,
+                    });
+                if better {
+                    best = Some((ext_pos, sim, rank));
                 }
             }
-            if let Some((ext_pos, sim)) = best {
+            if let Some((ext_pos, sim, _)) = best {
                 self.assign(truth_pos, ext_pos, "title", sim);
             }
         }
@@ -1455,13 +1525,17 @@ fn duplicate_groups(
 /// truth `text` and the extracted `raw`, method `"text"`). Each extracted
 /// entry is used at most once. The fuzzy title, author-year and text passes
 /// reject a pair whose titles both carry digit runs the other lacks
-/// (`Gemini 3` vs `Gemini 2`; see [`digits_conflict`]). Finally, truth
+/// (`Gemini 3` vs `Gemini 2`; see [`digits_conflict`]). Among entries of
+/// equal title (or equal title similarity), the one agreeing with the truth
+/// on year, then on first-author surname, is preferred, and same-title pairs
+/// that agree on the year are assigned before title-only ones. Finally, truth
 /// entries that are duplicates of
 /// each other (same normalised title or text) take their partners in index
 /// order unless that agrees worse on year and first author, so they are not
 /// paired crosswise. One [`RefMatch`] per truth reference, in order.
 pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) -> Vec<RefMatch> {
     let mut matcher = Matcher {
+        truth,
         extracted,
         matches: truth
             .iter()
@@ -1535,7 +1609,7 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
         .iter()
         .map(|entry| title_key(entry.title.as_ref()))
         .collect();
-    matcher.exact_pass(&truth_title, &ext_title, "title", 1.0, false);
+    matcher.exact_title_pass(&truth_title, &ext_title);
 
     let truth_words: Vec<BTreeSet<String>> = truth_title
         .iter()
@@ -3270,6 +3344,95 @@ mod tests {
         assert_eq!(matches[0].extracted_index, Some(2));
         assert_eq!(matches[1].extracted_index, Some(1));
         assert!(matches.iter().all(|m| m.method == "doi"));
+    }
+
+    fn titled(key: &str, title: &str, author: &str, year: u16) -> TruthReference {
+        let mut r = truth_ref(key);
+        r.title = Some(title.to_string());
+        r.authors = vec![author.to_string()];
+        r.year = Some(year);
+        r
+    }
+
+    fn extracted_titled(index: u32, title: &str, author: &str, year: u16) -> ReferenceEntry {
+        let mut e = extracted(index);
+        e.title = Some(title.to_string());
+        e.authors = vec![author.to_string()];
+        e.year = Some(year);
+        e
+    }
+
+    #[test]
+    fn match_references_exact_title_prefers_same_year() {
+        // arxiv 2510.00443: Szegő's `Orthogonal Polynomials` (1939) took
+        // Case's `Orthogonal polynomials. II.` (1975), whose title was cut to
+        // `Orthogonal polynomials`, because it came first.
+        let szego = titled(
+            "szego1939orthogonal",
+            "Orthogonal Polynomials",
+            "G. Szegő",
+            1939,
+        );
+        let case = titled(
+            "case1975orthogonal",
+            "Orthogonal polynomials",
+            "K. M. Case",
+            1975,
+        );
+        let e7 = extracted_titled(7, "Orthogonal polynomials", "K. M. Case", 1975);
+        let e8 = extracted_titled(8, "Orthogonal polynomials", "G. Szego", 1939);
+
+        let matches = match_references(&[szego, case], &[e7, e8]);
+        assert_eq!(matches[0].extracted_index, Some(8));
+        assert_eq!(matches[0].method, "title");
+        assert_eq!(matches[1].extracted_index, Some(7));
+        assert_eq!(matches[1].method, "title");
+    }
+
+    #[test]
+    fn match_references_exact_title_single_candidate_ignores_year() {
+        let truth = titled("a", "A Study of Things", "J. Smith", 2019);
+        let e3 = extracted_titled(3, "A study of things", "J. Doe", 2021);
+
+        let matches = match_references(&[truth], &[e3]);
+        assert_eq!(matches[0].extracted_index, Some(3));
+        assert_eq!(matches[0].method, "title");
+        assert!(close(matches[0].score, 1.0));
+    }
+
+    #[test]
+    fn match_references_title_year_tie_broken_by_first_author() {
+        let truth = titled("muller", "Neural Networks", "Müller, K.", 2020);
+        let e1 = extracted_titled(1, "Neural networks", "J. Smith", 2020);
+        let e2 = extracted_titled(2, "Neural networks", "K. Muller", 2020);
+
+        let matches = match_references(&[truth], &[e1, e2]);
+        assert_eq!(matches[0].extracted_index, Some(2));
+        assert_eq!(matches[0].method, "title");
+
+        // The same tie in the fuzzy title pass (Jaccard 5/6 on both).
+        let fuzzy = titled(
+            "muller",
+            "Deep neural networks for vision",
+            "Müller, K.",
+            2020,
+        );
+        let f1 = extracted_titled(
+            1,
+            "Deep neural networks for speech vision",
+            "J. Smith",
+            2020,
+        );
+        let f2 = extracted_titled(
+            2,
+            "Deep neural networks for audio vision",
+            "K. Muller",
+            2020,
+        );
+        let matches = match_references(&[fuzzy], &[f1, f2]);
+        assert_eq!(matches[0].extracted_index, Some(2));
+        assert_eq!(matches[0].method, "title");
+        assert!(close(matches[0].score, 5.0 / 6.0));
     }
 
     #[test]
