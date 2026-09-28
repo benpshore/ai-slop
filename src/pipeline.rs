@@ -680,7 +680,12 @@ mod tests {
         let hash = result.document.hash.0.clone();
         let figure = &result.pages[0].figures[0];
         assert_eq!(figure.sha256, Some(sha256_hex(FIGURE_BYTES)));
-        let expected = format!("{hash}/p1-f0.png");
+        let identity = result.backend.clone();
+        let expected = format!(
+            "{hash}/{}-{}/p1-f0.png",
+            identity.name,
+            &identity.config_digest[..8]
+        );
         assert_eq!(figure.file.as_deref(), Some(expected.as_str()));
         let written = std::fs::read(figures.join(&expected)).unwrap();
         assert_eq!(written, FIGURE_BYTES);
