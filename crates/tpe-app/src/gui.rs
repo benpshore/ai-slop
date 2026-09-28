@@ -6,10 +6,10 @@
 //! Ask panel (right). The GUI holds no logic of its own beyond wiring; labels,
 //! numbering and request handling live in the `tpe_app` library.
 //!
-//! # GPUI 0.2.2 items used (file:line in the crate source)
+//! # GPUI 0.2.2 items used (`file:line` in the crate source)
 //!
 //! - `Application::new().run(|cx| ..)`: `src/app.rs:132`, `src/app.rs:174`
-//!   (examples/hello_world.rs:90).
+//!   (`examples/hello_world.rs:90`).
 //! - `App::open_window(WindowOptions, |window, cx| cx.new(..))`: `src/app.rs:943`;
 //!   `WindowOptions` fields and `Default`: `src/platform.rs` (struct at the
 //!   `pub struct WindowOptions` line, `impl Default` at `:1221`); `TitlebarOptions`
