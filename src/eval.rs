@@ -2,15 +2,16 @@
 //! recovered from a paper's `LaTeX` source (see `crate::latex_refs`).
 //!
 //! Measured per paper: exact reference-count match, per-entry recall and
-//! precision (greedy one-to-one matching by DOI, `arXiv` id, title, then
-//! first-author surname plus year), DOI/year/title field accuracy over the
+//! precision (greedy one-to-one matching by DOI, `arXiv` id, title,
+//! first-author surname plus year, then whole-entry text similarity),
+//! DOI/year/title field accuracy over the
 //! matched pairs only (so segmentation recall is not counted twice), in-text
 //! marker resolution and marker recall against the source's `\cite`
 //! commands, and a word-alignment diagnostic
 //! of the body text order. These are diagnostics on real papers, not the
 //! human-checked acceptance protocol.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -34,6 +35,14 @@ pub const MAX_ALIGN_TOKENS: usize = 12_000;
 /// Minimum Jaccard similarity of title words for a fuzzy title match.
 const TITLE_JACCARD_MIN: f32 = 0.8;
 
+/// Minimum Jaccard similarity of whole-entry words for the last-resort text
+/// match, as `(numerator, denominator)` = 0.6 so the test stays in integers.
+const TEXT_JACCARD_MIN: (usize, usize) = (3, 5);
+
+/// Minimum Jaccard similarity of title words for the paper's own title to
+/// count as correct when the normalised titles differ.
+const PAPER_TITLE_JACCARD_MIN: f32 = 0.9;
+
 /// Unmatched truth keys listed per paper in the markdown report.
 const UNMATCHED_KEYS_SHOWN: usize = 10;
 
@@ -50,10 +59,13 @@ pub struct RefMatch {
     pub truth_key: String,
     /// `ReferenceEntry::index` of the paired entry, if any.
     pub extracted_index: Option<u32>,
-    /// `"doi"`, `"arxiv"`, `"title"`, `"author-year"` or `"none"`.
+    /// `"doi"`, `"arxiv"`, `"title"`, `"author-year"`, `"text"` or `"none"`.
+    /// When duplicate truth entries swap partners (see [`match_references`])
+    /// the method and score travel with the extracted entry.
     pub method: String,
     /// 1.0 for exact DOI/`arXiv`/title matches, the Jaccard value for fuzzy
-    /// title matches, 0.75 for author-year matches, 0.0 when unmatched.
+    /// title and text matches, 0.75 for author-year matches, 0.0 when
+    /// unmatched.
     pub score: f32,
 }
 
@@ -128,6 +140,25 @@ pub struct PaperEval {
     /// Document warnings plus page warnings.
     pub warnings: u32,
     pub matches: Vec<RefMatch>,
+    /// Paper title (`metadata.title`) against the `LaTeX` title: equal after
+    /// [`normalize_title`], or title-word Jaccard >= 0.9. `None` when the
+    /// source states no title.
+    #[serde(default)]
+    pub paper_title_correct: Option<bool>,
+    /// Person names in the source's author commands.
+    #[serde(default)]
+    pub authors_truth: u32,
+    /// Entries of `metadata.authors`.
+    #[serde(default)]
+    pub authors_extracted: u32,
+    /// Extracted authors paired one-to-one with truth authors by folded
+    /// surname plus first initial.
+    #[serde(default)]
+    pub authors_correct: u32,
+    /// `metadata.doi` equals the source's DOI after normalisation; `None`
+    /// when the source states no DOI.
+    #[serde(default)]
+    pub paper_doi_correct: Option<bool>,
 }
 
 /// Corpus-level rates; all rates are over non-failed papers.
@@ -173,6 +204,16 @@ pub struct Summary {
     /// Mean `StageTimings::write_ms` per non-failed document.
     #[serde(default)]
     pub mean_write_ms: f64,
+    /// Papers whose extracted title is correct over papers whose source
+    /// states a title.
+    #[serde(default)]
+    pub paper_title_accuracy: f32,
+    /// Correct paper authors over truth paper authors.
+    #[serde(default)]
+    pub paper_author_recall: f32,
+    /// Correct paper authors over extracted paper authors.
+    #[serde(default)]
+    pub paper_author_precision: f32,
 }
 
 /// One evaluation run over the corpus.
@@ -416,6 +457,55 @@ fn jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f32 {
     (inter as f64 / union as f64) as f32
 }
 
+/// Intersection and union sizes of two word sets.
+fn overlap(a: &BTreeSet<String>, b: &BTreeSet<String>) -> (usize, usize) {
+    let inter = a.intersection(b).count();
+    (inter, a.len() + b.len() - inter)
+}
+
+/// Joins words split by a line-break hyphen (`recon- struction` ->
+/// `reconstruction`): a `-` between a letter and whitespace followed by a
+/// letter is dropped together with the whitespace.
+fn join_break_hyphens(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '-' && i > 0 && chars[i - 1].is_alphabetic() {
+            let mut next = i + 1;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if next > i + 1 && next < chars.len() && chars[next].is_alphabetic() {
+                i = next;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// `s` without a leading `[n]` label.
+fn strip_bracket_label(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.find(']').map(|close| &inner[close + 1..]))
+        .unwrap_or(trimmed)
+}
+
+/// Word set of a whole reference text for the last-resort match: NFKC
+/// (ligatures such as `ﬁ`), line-break hyphens joined, a leading `[n]` label
+/// dropped, then lower-case alphanumeric words.
+fn text_tokens(s: &str) -> BTreeSet<String> {
+    let compat: String = s.nfkc().collect();
+    let joined = join_break_hyphens(&compat);
+    words(strip_bracket_label(&joined)).into_iter().collect()
+}
+
 /// Mutable state of the greedy one-to-one matcher.
 struct Matcher<'a> {
     extracted: &'a [ReferenceEntry],
@@ -487,13 +577,178 @@ impl Matcher<'_> {
             }
         }
     }
+
+    /// Last resort: pairs each open truth entry, in order, with the unused
+    /// extracted entry whose whole-text word set is most similar, when the
+    /// Jaccard similarity reaches [`TEXT_JACCARD_MIN`]. On equal similarity the
+    /// entry agreeing with the truth on more of first-author surname and year
+    /// wins, then the earliest one.
+    fn text_pass(
+        &mut self,
+        truth: &[TruthReference],
+        truth_tokens: &[BTreeSet<String>],
+        ext_tokens: &[BTreeSet<String>],
+    ) {
+        let (min_num, min_den) = TEXT_JACCARD_MIN;
+        for (truth_pos, truth_set) in truth_tokens.iter().enumerate() {
+            if truth_set.is_empty() || !self.is_open(truth_pos) {
+                continue;
+            }
+            // (extracted position, intersection, union, surname/year agreements)
+            let mut best: Option<(usize, usize, usize, u32)> = None;
+            for (ext_pos, ext_set) in ext_tokens.iter().enumerate() {
+                if self.used[ext_pos] || ext_set.is_empty() {
+                    continue;
+                }
+                let (inter, union) = overlap(truth_set, ext_set);
+                if inter * min_den < union * min_num {
+                    continue;
+                }
+                let agrees = Self::agreement(&truth[truth_pos], &self.extracted[ext_pos]);
+                let better = best.is_none_or(|(_, best_inter, best_union, best_agrees)| {
+                    let candidate_score = inter * best_union;
+                    let best_score = best_inter * union;
+                    candidate_score > best_score
+                        || (candidate_score == best_score && agrees > best_agrees)
+                });
+                if better {
+                    best = Some((ext_pos, inter, union, agrees));
+                }
+            }
+            if let Some((ext_pos, inter, union, _)) = best {
+                let sim = (inter as f64 / union as f64) as f32;
+                self.assign(truth_pos, ext_pos, "text", sim);
+            }
+        }
+    }
+
+    /// Position in `extracted` of the entry paired with `truth_pos`.
+    fn ext_pos_of(&self, truth_pos: usize) -> Option<usize> {
+        let index = self.matches[truth_pos].extracted_index?;
+        self.extracted.iter().position(|entry| entry.index == index)
+    }
+
+    /// Year and first-author agreements of pairing `truth_ref` with `entry`.
+    fn agreement(truth_ref: &TruthReference, entry: &ReferenceEntry) -> u32 {
+        let year = u32::from(truth_ref.year.is_some() && truth_ref.year == entry.year);
+        let author = match (truth_ref.authors.first(), entry.authors.first()) {
+            (Some(t), Some(e)) => {
+                let sur = surname(t);
+                u32::from(!sur.is_empty() && sur == surname(e))
+            }
+            _ => 0,
+        };
+        year + author
+    }
+
+    /// Duplicate truth entries (see [`duplicate_groups`]) take their paired
+    /// extracted entries in index order, so the earlier truth entry gets the
+    /// earlier extracted entry, unless the current pairing agrees on year and
+    /// first-author surname more often. Each extracted entry keeps the method
+    /// and score it was matched with.
+    fn order_duplicates(&mut self, truth: &[TruthReference], groups: &[Vec<usize>]) {
+        for group in groups {
+            let mut members: Vec<(usize, usize)> = Vec::new();
+            for &truth_pos in group {
+                if let Some(ext_pos) = self.ext_pos_of(truth_pos) {
+                    members.push((truth_pos, ext_pos));
+                }
+            }
+            if members.len() < 2 {
+                continue;
+            }
+            let mut ordered: Vec<usize> = members.iter().map(|&(_, ext_pos)| ext_pos).collect();
+            ordered.sort_by_key(|&ext_pos| self.extracted[ext_pos].index);
+            let unchanged = members
+                .iter()
+                .zip(&ordered)
+                .all(|(&(_, current), &wanted)| current == wanted);
+            if unchanged {
+                continue;
+            }
+            let current_score: u32 = members
+                .iter()
+                .map(|&(truth_pos, ext_pos)| {
+                    Self::agreement(&truth[truth_pos], &self.extracted[ext_pos])
+                })
+                .sum();
+            let ordered_score: u32 = members
+                .iter()
+                .zip(&ordered)
+                .map(|(&(truth_pos, _), &ext_pos)| {
+                    Self::agreement(&truth[truth_pos], &self.extracted[ext_pos])
+                })
+                .sum();
+            if ordered_score < current_score {
+                continue;
+            }
+            let carried: Vec<(usize, String, f32)> = members
+                .iter()
+                .map(|&(truth_pos, ext_pos)| {
+                    let m = &self.matches[truth_pos];
+                    (ext_pos, m.method.clone(), m.score)
+                })
+                .collect();
+            for (&(truth_pos, _), &ext_pos) in members.iter().zip(&ordered) {
+                let Some((_, method, score)) = carried.iter().find(|(pos, _, _)| *pos == ext_pos)
+                else {
+                    continue;
+                };
+                let m = &mut self.matches[truth_pos];
+                m.extracted_index = Some(self.extracted[ext_pos].index);
+                m.method.clone_from(method);
+                m.score = *score;
+            }
+        }
+    }
+}
+
+/// Groups (two or more positions, ascending) of truth entries that describe
+/// the same work: equal normalised title, or equal normalised text when there
+/// is no title, and no two different DOIs or `arXiv` ids among them.
+fn duplicate_groups(
+    truth: &[TruthReference],
+    truth_doi: &[Option<String>],
+    truth_arxiv: &[Option<String>],
+) -> Vec<Vec<usize>> {
+    let mut by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (truth_pos, truth_ref) in truth.iter().enumerate() {
+        let key = title_key(truth_ref.title.as_ref())
+            .map(|title| format!("t|{title}"))
+            .or_else(|| {
+                let text = normalize_title(&truth_ref.text);
+                (!text.is_empty()).then(|| format!("x|{text}"))
+            });
+        if let Some(key) = key {
+            by_key.entry(key).or_default().push(truth_pos);
+        }
+    }
+    by_key
+        .into_values()
+        .filter(|group| {
+            let dois: BTreeSet<&str> = group
+                .iter()
+                .filter_map(|&pos| truth_doi[pos].as_deref())
+                .collect();
+            let arxiv_ids: BTreeSet<&str> = group
+                .iter()
+                .filter_map(|&pos| truth_arxiv[pos].as_deref())
+                .collect();
+            group.len() >= 2 && dois.len() <= 1 && arxiv_ids.len() <= 1
+        })
+        .collect()
 }
 
 /// Greedy one-to-one pairing of truth references with extracted entries, in
 /// priority order: equal DOI (case-insensitive), equal `arXiv` id (version
-/// ignored), equal normalized title or title-word Jaccard >= 0.8, then equal
-/// first-author surname (lower-case, ASCII-folded) plus year. Each extracted
-/// entry is used at most once. One [`RefMatch`] per truth reference, in order.
+/// ignored), equal normalized title or title-word Jaccard >= 0.8, equal
+/// first-author surname (lower-case, ASCII-folded) plus year, then, as a last
+/// resort, the most similar whole entry text (word Jaccard >= 0.6 of the
+/// truth `text` and the extracted `raw`, method `"text"`). Each extracted
+/// entry is used at most once. Finally, truth entries that are duplicates of
+/// each other (same normalised title or text) take their partners in index
+/// order unless that agrees worse on year and first author, so they are not
+/// paired crosswise. One [`RefMatch`] per truth reference, in order.
 pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) -> Vec<RefMatch> {
     let mut matcher = Matcher {
         extracted,
@@ -597,6 +852,33 @@ pub fn match_references(truth: &[TruthReference], extracted: &[ReferenceEntry]) 
         .collect();
     matcher.exact_pass(&truth_ay, &ext_ay, "author-year", 0.75);
 
+    let truth_tokens: Vec<BTreeSet<String>> = truth
+        .iter()
+        .enumerate()
+        .map(|(truth_pos, truth_ref)| {
+            if matcher.is_open(truth_pos) {
+                text_tokens(&truth_ref.text)
+            } else {
+                BTreeSet::new()
+            }
+        })
+        .collect();
+    let ext_tokens: Vec<BTreeSet<String>> = extracted
+        .iter()
+        .enumerate()
+        .map(|(ext_pos, entry)| {
+            if matcher.used[ext_pos] {
+                BTreeSet::new()
+            } else {
+                text_tokens(&entry.raw)
+            }
+        })
+        .collect();
+    matcher.text_pass(truth, &truth_tokens, &ext_tokens);
+
+    let groups = duplicate_groups(truth, &truth_doi, &truth_arxiv);
+    matcher.order_duplicates(truth, &groups);
+
     matcher.matches
 }
 
@@ -617,6 +899,85 @@ fn title_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
         (Some(t), Some(e)) => t == e,
         _ => false,
     }
+}
+
+/// Whether the extracted paper title matches the truth title: equal after
+/// [`normalize_title`], or title-word Jaccard >= 0.9.
+fn paper_title_matches(truth: &str, extracted: Option<&str>) -> bool {
+    let Some(extracted) = extracted else {
+        return false;
+    };
+    let truth_norm = normalize_title(truth);
+    let ext_norm = normalize_title(extracted);
+    if truth_norm.is_empty() || ext_norm.is_empty() {
+        return false;
+    }
+    if truth_norm == ext_norm {
+        return true;
+    }
+    let truth_words: BTreeSet<String> = words(truth).into_iter().collect();
+    let ext_words: BTreeSet<String> = words(extracted).into_iter().collect();
+    jaccard(&truth_words, &ext_words) >= PAPER_TITLE_JACCARD_MIN
+}
+
+/// ASCII-folded lower-case letters of `s` only (digits and marks dropped).
+fn fold_letters(s: &str) -> String {
+    fold_ascii(s)
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .collect()
+}
+
+/// `(surname, first initial)` of a person name for paper-author matching.
+/// Tokens are folded to lower-case letters (so `Gao1` and `GAO` give `gao`);
+/// the surname is the last token of at least two letters before a comma
+/// (`Smith, J.`), else of the whole name; the initial is the first letter of
+/// the first token after the comma, else of the first other token. `None`
+/// without a surname.
+fn person_key(name: &str) -> Option<(String, Option<char>)> {
+    let tokens = |part: &str| -> Vec<String> {
+        part.split_whitespace()
+            .map(fold_letters)
+            .filter(|token| !token.is_empty())
+            .collect()
+    };
+    let (family, after_comma) = name.split_once(',').map_or_else(
+        || (tokens(name), None),
+        |(before, after)| (tokens(before), Some(tokens(after))),
+    );
+    let pos = family.iter().rposition(|token| token.len() >= 2)?;
+    let given: Option<&String> = if let Some(rest) = &after_comma {
+        rest.first()
+    } else {
+        family
+            .iter()
+            .enumerate()
+            .find(|&(k, _)| k != pos)
+            .map(|(_, token)| token)
+    };
+    let initial = given.and_then(|token| token.chars().next());
+    Some((family[pos].clone(), initial))
+}
+
+/// Number of extracted names paired one-to-one with truth names by equal
+/// [`person_key`].
+fn author_matches(truth: &[String], extracted: &[String]) -> u32 {
+    let ext_keys: Vec<Option<(String, Option<char>)>> = extracted
+        .iter()
+        .map(String::as_str)
+        .map(person_key)
+        .collect();
+    let mut used = vec![false; ext_keys.len()];
+    let mut correct = 0_u32;
+    for key in truth.iter().map(String::as_str).filter_map(person_key) {
+        let found =
+            (0..ext_keys.len()).find(|&pos| !used[pos] && ext_keys[pos].as_ref() == Some(&key));
+        if let Some(pos) = found {
+            used[pos] = true;
+            correct += 1;
+        }
+    }
+    correct
 }
 
 /// Concatenated page text, lower-cased, with all whitespace removed.
@@ -735,6 +1096,22 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
 
     let truth_refs = truth.references.len() as u32;
     let extracted_refs = result.references.len() as u32;
+
+    let meta = &result.metadata;
+    let paper_title_correct = truth
+        .paper
+        .title
+        .as_deref()
+        .filter(|title| !normalize_title(title).is_empty())
+        .map(|title| paper_title_matches(title, meta.title.as_deref()));
+    let extracted_names: Vec<String> = meta.authors.iter().map(|a| a.name.clone()).collect();
+    let authors_correct = author_matches(&truth.paper.authors, &extracted_names);
+    let paper_doi_correct = truth
+        .paper
+        .doi
+        .as_ref()
+        .map(|doi| doi_equal(Some(doi), meta.doi.as_ref()));
+
     PaperEval {
         id: id.to_string(),
         status: result.status.as_str().to_string(),
@@ -769,6 +1146,11 @@ pub fn evaluate(id: &str, result: &ExtractionResult, truth: &GroundTruth) -> Pap
         chunks,
         warnings: warnings as u32,
         matches,
+        paper_title_correct,
+        authors_truth: truth.paper.authors.len() as u32,
+        authors_extracted: extracted_names.len() as u32,
+        authors_correct,
+        paper_doi_correct,
     }
 }
 
@@ -808,6 +1190,11 @@ pub fn failed_paper(id: &str, error: &str) -> PaperEval {
         chunks: 0,
         warnings: 0,
         matches: Vec::new(),
+        paper_title_correct: None,
+        authors_truth: 0,
+        authors_extracted: 0,
+        authors_correct: 0,
+        paper_doi_correct: None,
     }
 }
 
@@ -874,6 +1261,10 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         }
     };
 
+    let titled: Vec<bool> = ok.iter().filter_map(|p| p.paper_title_correct).collect();
+    let titles_right = titled.iter().filter(|correct| **correct).count() as u64;
+    let authors_right = sum(|p| p.authors_correct);
+
     Summary {
         papers: papers.len() as u32,
         failed: failed as u32,
@@ -896,6 +1287,9 @@ pub fn summarize(papers: &[PaperEval]) -> Summary {
         mean_metadata_ms: mean_stage(|t| t.metadata_ms),
         mean_citations_ms: mean_stage(|t| t.citations_ms),
         mean_write_ms: mean_stage(|t| t.write_ms),
+        paper_title_accuracy: ratio(titles_right, titled.len() as u64),
+        paper_author_recall: ratio(authors_right, sum(|p| p.authors_truth)),
+        paper_author_precision: ratio(authors_right, sum(|p| p.authors_extracted)),
     }
 }
 
@@ -928,6 +1322,15 @@ fn pct(rate: f32) -> String {
 /// Formats an optional marker recall as a percentage.
 fn recall_cell(recall: Option<f32>) -> String {
     recall.map_or_else(|| "n/a".to_string(), pct)
+}
+
+/// `✓`, `✗` or `n/a` for an optional check.
+fn check_cell(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "✓",
+        Some(false) => "✗",
+        None => "n/a",
+    }
 }
 
 /// Formats an optional alignment score.
@@ -965,6 +1368,21 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     );
     let _ = writeln!(out, "| Year accuracy | {} |", pct(s.year_accuracy));
     let _ = writeln!(out, "| Title accuracy | {} |", pct(s.title_accuracy));
+    let _ = writeln!(
+        out,
+        "| Paper title accuracy | {} |",
+        pct(s.paper_title_accuracy)
+    );
+    let _ = writeln!(
+        out,
+        "| Paper author recall | {} |",
+        pct(s.paper_author_recall)
+    );
+    let _ = writeln!(
+        out,
+        "| Paper author precision | {} |",
+        pct(s.paper_author_precision)
+    );
     let _ = writeln!(
         out,
         "| Marker resolution (precision-like, resolved/extracted) | {} |",
@@ -1010,17 +1428,18 @@ pub fn render_markdown(report: &CorpusReport) -> String {
     out.push_str(
         "| id | status | pages | refs truth/extracted/matched | count exact | ext/truth | \
          doi c/t/printed | year c/t | markers resolved/extracted | truth cites | \
-         marker recall | align | ms/chunk | warnings |\n",
+         marker recall | align | ms/chunk | warnings | title ✓/✗ | authors c/t |\n",
     );
     out.push_str(
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | \
+         --- | --- |\n",
     );
     for p in &report.papers {
         let exact = if p.ref_count_exact { "✓" } else { "✗" };
         let _ = writeln!(
             out,
             "| {} | {} | {} | {}/{}/{} | {} | {:.2} | {}/{}/{} | {}/{} | {}/{} | {} | {} | {} | \
-             {:.1} | {} |",
+             {:.1} | {} | {} | {}/{} |",
             cell(&p.id),
             cell(&p.status),
             p.pages,
@@ -1041,6 +1460,9 @@ pub fn render_markdown(report: &CorpusReport) -> String {
             align_cell(p.body_alignment),
             p.ms_per_chunk,
             p.warnings,
+            check_cell(p.paper_title_correct),
+            p.authors_correct,
+            p.authors_truth,
         );
     }
 
@@ -1256,10 +1678,10 @@ pub fn write_dump(dir: &Path, dump: &PaperDump) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::latex_refs::{TruthCitations, TruthSource};
+    use crate::latex_refs::{TruthCitations, TruthPaper, TruthSource};
     use crate::schema::{
-        BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document, Line, Metadata,
-        PageText, SCHEMA_VERSION, StageTimings, Status,
+        Author, BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document, Line,
+        Metadata, PageText, SCHEMA_VERSION, StageTimings, Status,
     };
 
     fn close(a: f32, b: f32) -> bool {
@@ -1349,6 +1771,7 @@ mod tests {
             },
             method: "bbl".to_string(),
             body_text: body_text.to_string(),
+            paper: TruthPaper::default(),
         }
     }
 
@@ -1514,6 +1937,170 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].method, "none");
         assert!(match_references(&[], &[extracted(1)]).is_empty());
+    }
+
+    #[test]
+    fn match_references_text_pass_leaves_keyed_matches_alone() {
+        // Every truth text is similar enough to every extracted raw for the
+        // text pass (Jaccard 0.8); the keyed passes must still win.
+        let shared = "Shared words that every entry has in common";
+        let mut ref_a = truth_ref("a");
+        ref_a.doi = Some("10.1000/AAA".to_string());
+        let mut ref_b = truth_ref("b");
+        ref_b.arxiv_id = Some("2101.00001".to_string());
+        let mut ref_c = truth_ref("c");
+        ref_c.title = Some("A Study of Things".to_string());
+        let mut ref_d = truth_ref("d");
+        ref_d.authors = vec!["Müller, K.".to_string()];
+        ref_d.year = Some(2020);
+        let mut ref_g = truth_ref("g");
+        ref_g.title = Some("Completely unrelated".to_string());
+        let mut truth = vec![ref_d, ref_c, ref_b, ref_a, ref_g];
+        for truth_ref in &mut truth {
+            truth_ref.text = format!("{shared} {}", truth_ref.key);
+        }
+
+        let mut e1 = extracted(1);
+        e1.doi = Some("https://doi.org/10.1000/aaa".to_string());
+        let mut e2 = extracted(2);
+        e2.arxiv_id = Some("arXiv:2101.00001v3".to_string());
+        let mut e3 = extracted(3);
+        e3.title = Some("A study of things.".to_string());
+        let mut e4 = extracted(4);
+        e4.authors = vec!["K. Muller".to_string()];
+        e4.year = Some(2020);
+        let mut ext = vec![e1, e2, e3, e4];
+        for entry in &mut ext {
+            entry.raw = format!("[{}] {shared}", entry.index);
+        }
+
+        let matches = match_references(&truth, &ext);
+        let got: Vec<(Option<u32>, &str)> = matches
+            .iter()
+            .map(|m| (m.extracted_index, m.method.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Some(4), "author-year"),
+                (Some(3), "title"),
+                (Some(2), "arxiv"),
+                (Some(1), "doi"),
+                (None, "none"),
+            ]
+        );
+    }
+
+    #[test]
+    fn match_references_text_pass_recovers_untitled_truth() {
+        // IEEE `.bbl` truth without `\newblock` used to have no title or
+        // authors; only the entry text can pair it.
+        let mut ref_a = truth_ref("zaitsev2015motion");
+        ref_a.text = "M. Zaitsev, J. Maclaren, and M. Herbst, \"Motion artifacts in MRI: \
+                      A review,\" NMR in Biomedicine, vol. 28, no. 7, pp. 911–935, 2015."
+            .to_string();
+        let mut ref_b = truth_ref("other");
+        ref_b.text = "Q. Nobody, Nothing alike at all, 1999.".to_string();
+        let mut e1 = extracted(1);
+        e1.raw = "[1] K. P. Pruessmann, M. Weiger, and P. Boesiger, “SENSE: Sensitivity \
+                  encoding for fast MRI,” Magnetic Resonance in Medicine, 1999."
+            .to_string();
+        let mut e2 = extracted(2);
+        e2.raw = "[2] M. Zaitsev, J. Maclaren, and M. Herbst, “Motion artifacts in MRI: A \
+                  review,” NMR in Biomed- icine, vol. 28, no. 7, pp. 911– 935, 2015."
+            .to_string();
+
+        let matches = match_references(&[ref_a, ref_b], &[e1, e2]);
+        assert_eq!(matches[0].extracted_index, Some(2));
+        assert_eq!(matches[0].method, "text");
+        // Same words after the label, hyphen and range spacing are normalised.
+        assert!(close(matches[0].score, 1.0));
+        assert_eq!(matches[1].extracted_index, None);
+        assert_eq!(matches[1].method, "none");
+    }
+
+    #[test]
+    fn match_references_text_pass_threshold_and_ties() {
+        let mut ref_a = truth_ref("a");
+        ref_a.text = "alpha beta gamma delta epsilon".to_string();
+        ref_a.authors = vec!["J. Smith".to_string()];
+        ref_a.year = Some(2021);
+        // 3 shared of 7 words: Jaccard 0.43, below the minimum.
+        let mut ref_b = truth_ref("b");
+        ref_b.text = "one two three four five".to_string();
+        let mut e1 = extracted(1);
+        e1.raw = "alpha beta gamma delta epsilon".to_string();
+        e1.authors = vec!["K. Jones".to_string()];
+        e1.year = Some(2020);
+        let mut e2 = extracted(2);
+        e2.raw = "alpha beta gamma delta epsilon".to_string();
+        e2.authors = vec!["J. Smith".to_string()];
+        e2.year = Some(2020);
+        let mut e3 = extracted(3);
+        e3.raw = "one two three six seven".to_string();
+
+        let matches = match_references(&[ref_a, ref_b], &[e1, e2, e3]);
+        // Equal similarity: the entry with the same first-author surname wins.
+        assert_eq!(matches[0].extracted_index, Some(2));
+        assert_eq!(matches[0].method, "text");
+        assert_eq!(matches[1].extracted_index, None);
+    }
+
+    #[test]
+    fn match_references_orders_duplicate_truth_entries() {
+        // Two `.bib` entries for the same paper (2412.06210 `Khan2020Federated`
+        // and `khan2021federated`) and the two printed entries: the DOI of
+        // the first printed one is truncated, so the DOI pass pairs the first
+        // truth entry with the second printed entry and the title pass pairs
+        // them crosswise.
+        let title = "Federated Learning for Internet of Things".to_string();
+        let mut ref_a = truth_ref("Khan2020Federated");
+        ref_a.title = Some(title.clone());
+        ref_a.doi = Some("10.1109/COMST.2021.3090430".to_string());
+        ref_a.authors = vec!["L. U. Khan".to_string()];
+        ref_a.year = Some(2020);
+        let mut ref_b = truth_ref("khan2021federated");
+        ref_b.title = Some(title.clone());
+        ref_b.doi = Some("10.1109/COMST.2021.3090430".to_string());
+        ref_b.authors = vec!["Latif U. Khan".to_string()];
+        ref_b.year = Some(2021);
+        let mut e10 = extracted(10);
+        e10.title = Some(title.clone());
+        e10.doi = Some("10.1109/COMST".to_string());
+        e10.authors = vec!["L. U. Khan".to_string()];
+        e10.year = Some(2020);
+        let mut e11 = extracted(11);
+        e11.title = Some(title);
+        e11.doi = Some("10.1109/COMST.2021.3090430".to_string());
+        e11.authors = vec!["Latif U. Khan".to_string()];
+        e11.year = Some(2021);
+
+        let matches = match_references(&[ref_a, ref_b], &[e10, e11]);
+        assert_eq!(matches[0].extracted_index, Some(10));
+        assert_eq!(matches[0].method, "title");
+        assert_eq!(matches[1].extracted_index, Some(11));
+        assert_eq!(matches[1].method, "doi");
+    }
+
+    #[test]
+    fn match_references_keeps_same_title_entries_with_different_dois() {
+        let mut ref_a = truth_ref("a");
+        ref_a.title = Some("Same Title".to_string());
+        ref_a.doi = Some("10.1/a".to_string());
+        let mut ref_b = truth_ref("b");
+        ref_b.title = Some("Same Title".to_string());
+        ref_b.doi = Some("10.1/b".to_string());
+        let mut e1 = extracted(1);
+        e1.title = Some("Same Title".to_string());
+        e1.doi = Some("10.1/b".to_string());
+        let mut e2 = extracted(2);
+        e2.title = Some("Same Title".to_string());
+        e2.doi = Some("10.1/a".to_string());
+
+        let matches = match_references(&[ref_a, ref_b], &[e1, e2]);
+        assert_eq!(matches[0].extracted_index, Some(2));
+        assert_eq!(matches[1].extracted_index, Some(1));
+        assert!(matches.iter().all(|m| m.method == "doi"));
     }
 
     #[test]
@@ -2065,9 +2652,165 @@ mod tests {
             .collect();
         assert_eq!(table.len(), 4, "{table:?}");
         let columns = table[0].matches('|').count();
-        assert_eq!(columns, 15);
+        assert_eq!(columns, 17);
         for row in &table {
             assert_eq!(row.matches('|').count(), columns, "{row}");
         }
+    }
+
+    fn author(name: &str) -> Author {
+        Author {
+            name: name.to_string(),
+            affiliation: None,
+            orcid: None,
+            email: None,
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    #[test]
+    fn person_key_folds_markers_case_and_comma_form() {
+        let gao = Some(("gao".to_string(), Some('l')));
+        assert_eq!(person_key("Leo Gao"), gao);
+        assert_eq!(person_key("Leo Gao1"), gao);
+        assert_eq!(person_key("LEO GAO*"), gao);
+        assert_eq!(person_key("Gao, Leo"), gao);
+        assert_eq!(person_key("L. Gao"), gao);
+        assert_eq!(
+            person_key("JIE WANG"),
+            Some(("wang".to_string(), Some('j')))
+        );
+        assert_eq!(
+            person_key("Tom Dupré la Tour"),
+            Some(("tour".to_string(), Some('t')))
+        );
+        assert_eq!(person_key("Plato"), Some(("plato".to_string(), None)));
+        assert_eq!(person_key("  "), None);
+        assert_eq!(person_key("1 2"), None);
+    }
+
+    #[test]
+    fn author_matches_is_one_to_one() {
+        let truth = names(&["Leo Gao", "Lisa Gao", "Jie Wang", "Henk Tillman"]);
+        let extracted = names(&["L. Gao", "JIE WANG", "Someone Else"]);
+        // One extracted "L. Gao" can pair with only one of the two L. Gaos.
+        assert_eq!(author_matches(&truth, &extracted), 2);
+        assert_eq!(author_matches(&truth, &[]), 0);
+        assert_eq!(author_matches(&[], &extracted), 0);
+    }
+
+    #[test]
+    fn paper_title_matches_exact_and_fuzzy() {
+        let truth = "Scaling Sparse Autoencoders to Many Features";
+        assert!(paper_title_matches(
+            truth,
+            Some("Scaling sparse autoencoders to many features.")
+        ));
+        assert!(!paper_title_matches(truth, None));
+        assert!(!paper_title_matches(truth, Some("---")));
+        // 10 of 11 distinct words shared: Jaccard 0.909.
+        let long = "one two three four five six seven eight nine ten";
+        assert!(paper_title_matches(
+            long,
+            Some(format!("{long} eleven").as_str())
+        ));
+        // 8 of 10: Jaccard 0.8, below the paper-title threshold.
+        assert!(!paper_title_matches(
+            long,
+            Some("one two three four five six seven eight")
+        ));
+    }
+
+    #[test]
+    fn evaluate_scores_paper_metadata() {
+        let mut result = sample_result(Vec::new(), Vec::new());
+        result.metadata.title = Some("Scaling sparse autoencoders to many features.".to_string());
+        result.metadata.authors = vec![
+            author("Leo Gao1"),
+            author("T. Dupre la Tour"),
+            author("JIE WANG"),
+            author("Someone Else"),
+        ];
+        result.metadata.doi = Some("https://doi.org/10.1145/1.2".to_string());
+        let mut truth = truth_with(Vec::new(), "");
+        truth.paper = TruthPaper {
+            title: Some("Scaling Sparse Autoencoders to Many Features".to_string()),
+            authors: names(&["Leo Gao", "Tom Dupré la Tour", "Henk Tillman", "Jie Wang"]),
+            doi: Some("10.1145/1.2".to_string()),
+            arxiv_id: None,
+        };
+
+        let eval = evaluate("p", &result, &truth);
+        assert_eq!(eval.paper_title_correct, Some(true));
+        assert_eq!(eval.authors_truth, 4);
+        assert_eq!(eval.authors_extracted, 4);
+        assert_eq!(eval.authors_correct, 3);
+        assert_eq!(eval.paper_doi_correct, Some(true));
+
+        result.metadata.title = Some("A different paper".to_string());
+        result.metadata.doi = None;
+        let wrong = evaluate("q", &result, &truth);
+        assert_eq!(wrong.paper_title_correct, Some(false));
+        assert_eq!(wrong.paper_doi_correct, Some(false));
+
+        let unknown = evaluate("r", &result, &truth_with(Vec::new(), ""));
+        assert_eq!(unknown.paper_title_correct, None);
+        assert_eq!(unknown.paper_doi_correct, None);
+        assert_eq!(unknown.authors_truth, 0);
+        assert_eq!(unknown.authors_correct, 0);
+
+        let failed = failed_paper("f", "x");
+        assert_eq!(failed.paper_title_correct, None);
+        assert_eq!(failed.authors_extracted, 0);
+
+        let s = summarize(&[eval, wrong, unknown, failed]);
+        assert!(
+            close(s.paper_title_accuracy, 0.5),
+            "{}",
+            s.paper_title_accuracy
+        );
+        // 6 correct of 8 truth authors (the third paper has none), 6 of 12 extracted.
+        assert!(
+            close(s.paper_author_recall, 0.75),
+            "{}",
+            s.paper_author_recall
+        );
+        assert!(
+            close(s.paper_author_precision, 0.5),
+            "{}",
+            s.paper_author_precision
+        );
+    }
+
+    #[test]
+    fn render_markdown_shows_paper_metadata() {
+        let mut p1 = paper_with("p1", 1.0);
+        p1.paper_title_correct = Some(true);
+        p1.authors_truth = 4;
+        p1.authors_extracted = 5;
+        p1.authors_correct = 3;
+        let mut p2 = paper_with("p2", 1.0);
+        p2.paper_title_correct = Some(false);
+        p2.authors_truth = 2;
+        p2.authors_extracted = 1;
+        p2.authors_correct = 1;
+        let p3 = paper_with("p3", 1.0);
+        let md = render_markdown(&build_report("lopdf", "h", vec![p1, p2, p3]));
+        assert!(md.contains("| warnings | title ✓/✗ | authors c/t |\n"));
+        assert!(md.contains("| Paper title accuracy | 50.0% |"));
+        assert!(md.contains("| Paper author recall | 66.7% |"));
+        assert!(md.contains("| Paper author precision | 66.7% |"));
+        let row = |id: &str| -> String {
+            md.lines()
+                .find(|l| l.starts_with(&format!("| {id} |")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(row("p1").ends_with("| 0 | ✓ | 3/4 |"), "{}", row("p1"));
+        assert!(row("p2").ends_with("| 0 | ✗ | 1/2 |"), "{}", row("p2"));
+        assert!(row("p3").ends_with("| 0 | n/a | 0/0 |"), "{}", row("p3"));
     }
 }

@@ -1,8 +1,27 @@
 //! Pure-Rust backend built on `lopdf` 0.45. It interprets each page's
 //! content stream (text state, graphics state, Form `XObject`s) and yields
 //! one positioned [`Span`] per shown string. Nothing is ordered or repaired.
+//!
+//! Per-document work is cached inside the session: a font dictionary is
+//! resolved (encoding, widths, flags) once per `ObjectId` and shared by
+//! every page and Form `XObject` that references it, and a Form `XObject`'s
+//! content stream is decompressed and parsed once. The caches hold only
+//! owned data, so they never borrow the [`Document`] they were built from.
+//!
+//! Text is normalised, never repaired: every non-ASCII string is put in NFC,
+//! and the Latin presentation-form ligatures U+FB00 to U+FB06 (`ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ
+//! ﬆ`) are expanded to their letters, which NFC alone keeps. Nothing else
+//! gets a compatibility mapping (no general NFKC), so superscripts, vulgar
+//! fractions and mathematical alphanumerics survive as written. A page on
+//! which any ligature was expanded carries the warning
+//! `ligatures expanded: N`. Because the expansion changes the text produced
+//! for the same bytes, it is part of the backend identity: the config map
+//! behind the digest holds `ligatures=expand`, so runs from before the
+//! change never share an identity with runs after it.
 
-use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{
@@ -27,6 +46,8 @@ const DESCENT: f32 = -0.2;
 const ASCENT: f32 = 0.8;
 /// Bound on the `/Parent` walk used for inherited page attributes.
 const MAX_PARENT_DEPTH: u32 = 64;
+/// Recorded in the identity's config map: see the module documentation.
+const LIGATURE_POLICY: &str = "expand";
 
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,13 +65,15 @@ impl Default for LopdfBackend {
 }
 
 impl Extractor for LopdfBackend {
-    /// Name `lopdf`, version [`LOPDF_VERSION`], digest over `max_xobject_depth`.
+    /// Name `lopdf`, version [`LOPDF_VERSION`], digest over `max_xobject_depth`
+    /// and the ligature policy.
     fn identity(&self) -> BackendIdentity {
         let mut config = BTreeMap::new();
         config.insert(
             "max_xobject_depth".to_string(),
             self.max_xobject_depth.to_string(),
         );
+        config.insert("ligatures".to_string(), LIGATURE_POLICY.to_string());
         BackendIdentity {
             name: "lopdf".to_string(),
             version: LOPDF_VERSION.to_string(),
@@ -71,6 +94,7 @@ impl Extractor for LopdfBackend {
             doc,
             pages,
             max_xobject_depth: self.max_xobject_depth,
+            cache: SessionCache::default(),
         }))
     }
 }
@@ -105,10 +129,25 @@ fn map_load_error(err: LopdfError) -> BackendError {
     }
 }
 
+/// Work that is identical for every page of one document, computed on first
+/// use and kept for the life of the session.
+#[derive(Default)]
+struct SessionCache {
+    /// Resolved font dictionaries, keyed by the indirect object they live in.
+    /// Fonts written directly into a resources dictionary have no id and are
+    /// resolved on every use.
+    fonts: HashMap<ObjectId, Rc<LoadedFont>>,
+    /// Decoded content of Form `XObject` streams, keyed by stream id.
+    /// Streams that fail to decode are not cached, so their warning recurs
+    /// exactly as it would without the cache.
+    forms: HashMap<ObjectId, Rc<Vec<Operation>>>,
+}
+
 struct LopdfSession {
     doc: Document,
     pages: BTreeMap<u32, ObjectId>,
     max_xobject_depth: u32,
+    cache: SessionCache,
 }
 
 impl DocumentSession for LopdfSession {
@@ -121,7 +160,13 @@ impl DocumentSession for LopdfSession {
         let Some(&page_id) = self.pages.get(&page) else {
             return Err(BackendError::PageRange { page, count });
         };
-        extract_page(&self.doc, page, page_id, self.max_xobject_depth)
+        extract_page(
+            &self.doc,
+            &mut self.cache,
+            page,
+            page_id,
+            self.max_xobject_depth,
+        )
     }
 
     fn info(&self) -> BTreeMap<String, String> {
@@ -378,22 +423,78 @@ impl Widths {
     }
 }
 
-/// How the bytes of a shown string become text.
-enum Decode<'a> {
-    /// The font's own encoding as resolved by `lopdf`.
-    Encoding(Encoding<'a>),
+/// A single-byte encoding flattened into one entry per byte value.
+///
+/// `lopdf` decodes its `OneByteEncoding` and `Differences` encodings one
+/// byte at a time, each byte independently of its neighbours: the byte maps
+/// to zero or more chars, or the whole string is rejected. Entry `b` is
+/// therefore exactly what `Document::decode_text` produces for the string
+/// `[b]`, and `None` where it fails, so decoding through the table yields
+/// the same text (and the same failures) as decoding through `lopdf`
+/// without touching the encoding's glyph tables or the `Differences` map.
+struct ByteTable {
+    entries: Vec<Option<String>>,
+}
+
+impl ByteTable {
+    fn build(encoding: &Encoding<'_>) -> Self {
+        let mut entries = Vec::with_capacity(256);
+        for byte in 0..=u8::MAX {
+            entries.push(Document::decode_text(encoding, &[byte]).ok());
+        }
+        Self { entries }
+    }
+
+    /// The text for `bytes`, or `None` where `lopdf` would have failed.
+    fn decode(&self, bytes: &[u8]) -> Option<String> {
+        let mut out = String::with_capacity(bytes.len());
+        for &byte in bytes {
+            let Some(Some(piece)) = self.entries.get(usize::from(byte)) else {
+                return None;
+            };
+            out.push_str(piece);
+        }
+        Some(out)
+    }
+}
+
+/// How the bytes of a shown string become text. Owns everything it needs,
+/// so a font can outlive the page it was first seen on.
+enum Decode {
+    /// A single-byte encoding, flattened (see [`ByteTable`]).
+    Table(ByteTable),
+    /// A predefined `CMap` name `lopdf` handles as `SimpleEncoding`; rebuilt
+    /// (a free borrow) for each string.
+    Named(Vec<u8>),
+    /// A parsed `/ToUnicode` `CMap`, wrapped as `Encoding::UnicodeMapEncoding`.
+    UnicodeMap(Encoding<'static>),
     /// No encoding is available (for the given reason); bytes are Latin-1.
     Latin1(&'static str),
     /// The font cannot be decoded at all; every code becomes U+FFFD.
     Replacement,
 }
 
-struct LoadedFont<'a> {
-    /// Resource name, for warnings.
-    label: String,
+/// Turn the encoding `lopdf` resolved (which borrows the document) into an
+/// owned decoder that produces the same text.
+fn own_encoding(encoding: Encoding<'_>) -> Decode {
+    match encoding {
+        Encoding::OneByteEncoding(_) | Encoding::Differences(_) => {
+            Decode::Table(ByteTable::build(&encoding))
+        }
+        Encoding::SimpleEncoding(name) => Decode::Named(name.to_vec()),
+        Encoding::UnicodeMapEncoding(cmap) => {
+            Decode::UnicodeMap(Encoding::UnicodeMapEncoding(cmap))
+        }
+    }
+}
+
+/// A font dictionary resolved once: everything the interpreter needs to show
+/// a string with it. The resource name is not part of it, as one font object
+/// may be reachable under different names on different pages.
+struct LoadedFont {
     /// `/BaseFont` if present.
     base_font: Option<String>,
-    decode: Decode<'a>,
+    decode: Decode,
     /// Two-byte codes (Type0), otherwise single-byte.
     composite: bool,
     /// Decoding yields exactly one char per byte, so dropped bytes are detectable.
@@ -401,10 +502,9 @@ struct LoadedFont<'a> {
     widths: Widths,
 }
 
-impl LoadedFont<'_> {
-    fn missing(resource_name: &[u8]) -> Self {
+impl LoadedFont {
+    fn missing() -> Self {
         Self {
-            label: lossy(resource_name),
             base_font: None,
             decode: Decode::Latin1("not in resources"),
             composite: false,
@@ -414,7 +514,7 @@ impl LoadedFont<'_> {
     }
 }
 
-fn load_font<'a>(doc: &'a Document, resource_name: &[u8], dict: &'a Dictionary) -> LoadedFont<'a> {
+fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
     let subtype = dict.get(b"Subtype").and_then(Object::as_name);
     let composite = subtype.is_ok_and(|name| name == b"Type0");
     let base_font = dict.get(b"BaseFont").and_then(Object::as_name).ok();
@@ -429,7 +529,6 @@ fn load_font<'a>(doc: &'a Document, resource_name: &[u8], dict: &'a Dictionary) 
         Widths::Simple(simple_widths(doc, dict))
     };
     LoadedFont {
-        label: lossy(resource_name),
         base_font: base_font.map(lossy),
         decode,
         composite,
@@ -438,17 +537,17 @@ fn load_font<'a>(doc: &'a Document, resource_name: &[u8], dict: &'a Dictionary) 
     }
 }
 
-fn simple_decode<'a>(doc: &'a Document, dict: &'a Dictionary) -> (Decode<'a>, bool) {
+fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool) {
     match dict.get_font_encoding(doc) {
         Ok(encoding) => {
             let one_to_one = !matches!(encoding, Encoding::UnicodeMapEncoding(_));
-            (Decode::Encoding(encoding), one_to_one)
+            (own_encoding(encoding), one_to_one)
         }
         Err(_) => (Decode::Latin1("no usable encoding"), false),
     }
 }
 
-fn composite_decode<'a>(doc: &'a Document, dict: &'a Dictionary) -> Decode<'a> {
+fn composite_decode(doc: &Document, dict: &Dictionary) -> Decode {
     // `lopdf` maps a CID font through its `/ToUnicode` CMap (for
     // `Identity-H`/`Identity-V`, or when `/Encoding` is absent) or through a
     // predefined UTF-16 CMap named in `/Encoding`. Any other shape silently
@@ -465,7 +564,7 @@ fn composite_decode<'a>(doc: &'a Document, dict: &'a Dictionary) -> Decode<'a> {
         return Decode::Replacement;
     }
     match dict.get_font_encoding(doc) {
-        Ok(encoding) => Decode::Encoding(encoding),
+        Ok(encoding) => own_encoding(encoding),
         Err(_) => Decode::Replacement,
     }
 }
@@ -601,40 +700,69 @@ fn parse_w_array(doc: &Document, array: &[Object]) -> Vec<(u32, u32, f32)> {
 
 /// Fonts and resources visible at one nesting level (page or Form `XObject`).
 struct Context<'a> {
-    fonts: BTreeMap<Vec<u8>, LoadedFont<'a>>,
+    fonts: BTreeMap<Vec<u8>, Rc<LoadedFont>>,
     resources: Vec<&'a Dictionary>,
 }
 
-fn find_font<'c, 'a>(contexts: &'c [Context<'a>], name: &[u8]) -> Option<&'c LoadedFont<'a>> {
+fn find_font<'c>(contexts: &'c [Context<'_>], name: &[u8]) -> Option<&'c LoadedFont> {
     contexts
         .iter()
         .rev()
         .find_map(|layer| layer.fonts.get(name))
+        .map(Rc::as_ref)
 }
 
+/// The stream behind `/XObject name`, with the id of the indirect object
+/// that holds it (`None` for a stream written directly into the resources).
 fn lookup_xobject<'a>(
     doc: &'a Document,
     contexts: &[Context<'a>],
     name: &[u8],
-) -> Option<&'a Stream> {
+) -> Option<(Option<ObjectId>, &'a Stream)> {
     for layer in contexts.iter().rev() {
         for &resources in &layer.resources {
             if let Ok(xobjects) = resources.get_deref(b"XObject", doc)
                 && let Ok(xobjects) = xobjects.as_dict()
-                && let Ok(entry) = xobjects.get_deref(name, doc)
+                && let Ok(entry) = xobjects.get(name)
+                && let Ok((id, entry)) = doc.dereference(entry)
                 && let Ok(stream) = entry.as_stream()
             {
-                return Some(stream);
+                return Some((id, stream));
             }
         }
     }
     None
 }
 
-fn load_fonts_from_resources<'a>(
-    doc: &'a Document,
-    resources: &'a Dictionary,
-    fonts: &mut BTreeMap<Vec<u8>, LoadedFont<'a>>,
+/// The font `value` (an entry of a `/Font` dictionary) denotes, from the
+/// cache when it is an indirect object seen before.
+fn resolve_font(
+    doc: &Document,
+    cache: &mut SessionCache,
+    value: &Object,
+) -> Option<Rc<LoadedFont>> {
+    let (id, entry) = doc.dereference(value).ok()?;
+    let dict = entry.as_dict().ok()?;
+    match id {
+        Some(id) => {
+            let font = cache
+                .fonts
+                .entry(id)
+                .or_insert_with(|| Rc::new(load_font(doc, dict)));
+            Some(Rc::clone(font))
+        }
+        None => Some(Rc::new(load_font(doc, dict))),
+    }
+}
+
+/// Add the fonts of one resources dictionary to `fonts`; a name already
+/// present wins, matching `Document::get_page_fonts` (page resources before
+/// inherited ones).
+fn load_fonts_from_resources(
+    doc: &Document,
+    cache: &mut SessionCache,
+    resources: &Dictionary,
+    fonts: &mut BTreeMap<Vec<u8>, Rc<LoadedFont>>,
 ) {
     let Ok(font_map) = resources.get_deref(b"Font", doc) else {
         return;
@@ -643,10 +771,10 @@ fn load_fonts_from_resources<'a>(
         return;
     };
     for (name, value) in font_map {
-        if let Ok((_, entry)) = doc.dereference(value)
-            && let Ok(font_dict) = entry.as_dict()
+        if let Entry::Vacant(slot) = fonts.entry(name.clone())
+            && let Some(font) = resolve_font(doc, cache, value)
         {
-            fonts.insert(name.clone(), load_font(doc, name, font_dict));
+            slot.insert(font);
         }
     }
 }
@@ -655,8 +783,8 @@ fn load_fonts_from_resources<'a>(
 #[derive(Clone, Debug)]
 struct GState {
     ctm: Matrix,
-    /// Resource name set by `Tf`.
-    font: Option<Vec<u8>>,
+    /// Resource name set by `Tf`; shared so `q` does not copy it.
+    font: Option<Rc<[u8]>>,
     size: f32,
     char_spacing: f32,
     word_spacing: f32,
@@ -681,6 +809,39 @@ impl Default for GState {
     }
 }
 
+/// The letters a Latin presentation-form ligature (U+FB00 to U+FB06) stands
+/// for, as their compatibility decomposition gives them (long s as `s`).
+fn ligature_letters(ch: char) -> Option<&'static str> {
+    match ch {
+        '\u{FB00}' => Some("ff"),
+        '\u{FB01}' => Some("fi"),
+        '\u{FB02}' => Some("fl"),
+        '\u{FB03}' => Some("ffi"),
+        '\u{FB04}' => Some("ffl"),
+        '\u{FB05}' | '\u{FB06}' => Some("st"),
+        _ => None,
+    }
+}
+
+/// `text` with every Latin ligature expanded, and how many were expanded.
+fn expand_ligatures(text: String) -> (String, u32) {
+    if !text.chars().any(|ch| ligature_letters(ch).is_some()) {
+        return (text, 0);
+    }
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut count: u32 = 0;
+    for ch in text.chars() {
+        match ligature_letters(ch) {
+            Some(letters) => {
+                out.push_str(letters);
+                count = count.saturating_add(1);
+            }
+            None => out.push(ch),
+        }
+    }
+    (out, count)
+}
+
 fn replacement_text(composite: bool, bytes: &[u8]) -> String {
     let codes = if composite {
         bytes.len().div_ceil(2)
@@ -692,6 +853,7 @@ fn replacement_text(composite: bool, bytes: &[u8]) -> String {
 
 struct Interpreter<'a> {
     doc: &'a Document,
+    cache: &'a mut SessionCache,
     page: PageText,
     state: GState,
     stack: Vec<GState>,
@@ -701,6 +863,8 @@ struct Interpreter<'a> {
     tlm: Matrix,
     seq: u32,
     max_depth: u32,
+    /// Ligatures expanded so far on this page.
+    ligatures: u32,
 }
 
 impl<'a> Interpreter<'a> {
@@ -708,6 +872,17 @@ impl<'a> Interpreter<'a> {
         if !self.page.warnings.contains(&message) {
             self.page.warnings.push(message);
         }
+    }
+
+    /// The finished page, with the ligature count recorded as one warning.
+    fn finish(mut self) -> PageText {
+        if self.ligatures > 0 {
+            let count = self.ligatures;
+            self.page
+                .warnings
+                .push(format!("ligatures expanded: {count}"));
+        }
+        self.page
     }
 
     fn run(&mut self, operations: &[Operation], contexts: &mut Vec<Context<'a>>, depth: u32) {
@@ -809,7 +984,7 @@ impl<'a> Interpreter<'a> {
 
     fn set_font(&mut self, operands: &[Object]) {
         if let Some(name) = operands.first().and_then(|obj| obj.as_name().ok()) {
-            self.state.font = Some(name.to_vec());
+            self.state.font = Some(Rc::from(name));
         }
         if let Some(size) = float_at(operands, 1) {
             self.state.size = size;
@@ -826,27 +1001,24 @@ impl<'a> Interpreter<'a> {
         self.text_move(0.0, -leading);
     }
 
-    fn current_font<'c>(&self, contexts: &'c [Context<'a>]) -> Option<&'c LoadedFont<'a>> {
-        let name = self.state.font.as_deref()?;
-        find_font(contexts, name)
-    }
-
     fn show(&mut self, bytes: &[u8], contexts: &[Context<'a>]) {
         if bytes.is_empty() {
             return;
         }
-        let fallback: LoadedFont<'a>;
-        let font = if let Some(found) = self.current_font(contexts) {
-            found
-        } else {
-            let name = self.state.font.clone().unwrap_or_default();
-            fallback = LoadedFont::missing(&name);
-            &fallback
+        let font_name = self.state.font.clone();
+        let name: &[u8] = font_name.as_deref().unwrap_or_default();
+        let fallback: LoadedFont;
+        let font = match find_font(contexts, name) {
+            Some(found) => found,
+            None => {
+                fallback = LoadedFont::missing();
+                &fallback
+            }
         };
-        let text = self.decode(font, bytes);
+        let text = self.decode(name, font, bytes);
         let advance = self.advance(font, bytes);
         let base_font = font.base_font.clone();
-        self.emit(&text, advance, base_font);
+        self.emit(text, advance, base_font);
     }
 
     fn show_array(&mut self, operands: &[Object], contexts: &[Context<'a>]) {
@@ -863,39 +1035,72 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn decode(&mut self, font: &LoadedFont<'_>, bytes: &[u8]) -> String {
-        let label = &font.label;
+    /// Decode `bytes` shown with the font resource `name`.
+    fn decode(&mut self, name: &[u8], font: &LoadedFont, bytes: &[u8]) -> String {
         match &font.decode {
-            Decode::Encoding(encoding) => self.decode_with(font, encoding, bytes),
+            Decode::Table(table) => match table.decode(bytes) {
+                Some(text) => self.check_unmapped(name, font, text, bytes),
+                None => self.undecodable(name, font, bytes),
+            },
+            Decode::Named(encoding_name) => {
+                let encoding = Encoding::SimpleEncoding(encoding_name);
+                self.decode_with(name, font, &encoding, bytes)
+            }
+            Decode::UnicodeMap(encoding) => self.decode_with(name, font, encoding, bytes),
             Decode::Latin1(reason) => {
+                let label = lossy(name);
                 self.warn(format!("font {label}: {reason}; decoded as Latin-1"));
                 bytes.iter().copied().map(char::from).collect()
             }
             Decode::Replacement => {
+                let label = lossy(name);
                 self.warn(format!("font {label}: undecodable; U+FFFD substituted"));
                 replacement_text(font.composite, bytes)
             }
         }
     }
 
-    fn decode_with(&mut self, font: &LoadedFont<'_>, enc: &Encoding<'_>, bytes: &[u8]) -> String {
-        let label = &font.label;
-        let Ok(mut text) = Document::decode_text(enc, bytes) else {
-            self.warn(format!(
-                "font {label}: undecodable string; U+FFFD substituted"
-            ));
-            return replacement_text(font.composite, bytes);
-        };
+    fn decode_with(
+        &mut self,
+        name: &[u8],
+        font: &LoadedFont,
+        enc: &Encoding<'_>,
+        bytes: &[u8],
+    ) -> String {
+        match Document::decode_text(enc, bytes) {
+            Ok(text) => self.check_unmapped(name, font, text, bytes),
+            Err(_) => self.undecodable(name, font, bytes),
+        }
+    }
+
+    fn undecodable(&mut self, name: &[u8], font: &LoadedFont, bytes: &[u8]) -> String {
+        let label = lossy(name);
+        self.warn(format!(
+            "font {label}: undecodable string; U+FFFD substituted"
+        ));
+        replacement_text(font.composite, bytes)
+    }
+
+    /// Account for codes the encoding silently dropped or replaced.
+    fn check_unmapped(
+        &mut self,
+        name: &[u8],
+        font: &LoadedFont,
+        mut text: String,
+        bytes: &[u8],
+    ) -> String {
         if font.one_to_one {
             let decoded = text.chars().count();
             if decoded < bytes.len() {
                 let dropped = bytes.len() - decoded;
                 text.extend(std::iter::repeat_n('\u{FFFD}', dropped));
+                let label = lossy(name);
                 self.warn(format!(
                     "font {label}: {dropped} unmapped byte(s); U+FFFD used"
                 ));
             }
         } else if text.contains('\u{FFFD}') {
+            let label = lossy(name);
             self.warn(format!(
                 "font {label}: unmapped code(s); U+FFFD substituted"
             ));
@@ -904,7 +1109,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Horizontal displacement of `bytes` in unscaled text space.
-    fn advance(&self, font: &LoadedFont<'_>, bytes: &[u8]) -> f32 {
+    fn advance(&self, font: &LoadedFont, bytes: &[u8]) -> f32 {
         let size = self.state.size;
         let mut total: f32 = 0.0;
         if font.composite {
@@ -928,7 +1133,7 @@ impl<'a> Interpreter<'a> {
         total * self.state.hscale
     }
 
-    fn emit(&mut self, text: &str, advance: f32, base_font: Option<String>) {
+    fn emit(&mut self, text: String, advance: f32, base_font: Option<String>) {
         let full = self.tm.then(self.state.ctm);
         let rise = self.state.rise;
         let size = self.state.size;
@@ -950,7 +1155,18 @@ impl<'a> Interpreter<'a> {
             bbox.x1 = bbox.x1.max(x);
             bbox.y1 = bbox.y1.max(y);
         }
-        let normalised: String = text.nfc().collect();
+        // NFC and ligature expansion leave pure ASCII untouched, so the
+        // common case skips both and their allocations. Ligatures are
+        // expanded before NFC so the result is still NFC when a combining
+        // mark follows one (`ﬁ` + U+0301 composes to `fí`); NFC itself never
+        // touches them, so the count is the same either way.
+        let normalised = if text.is_ascii() {
+            text
+        } else {
+            let (expanded, count) = expand_ligatures(text);
+            self.ligatures = self.ligatures.saturating_add(count);
+            expanded.nfc().collect()
+        };
         self.page.spans.push(Span {
             text: normalised,
             bbox: Some(bbox),
@@ -968,7 +1184,7 @@ impl<'a> Interpreter<'a> {
             return;
         };
         let label = lossy(name);
-        let Some(stream) = lookup_xobject(doc, contexts, name) else {
+        let Some((stream_id, stream)) = lookup_xobject(doc, contexts, name) else {
             self.warn(format!("XObject {label}: not in resources"));
             return;
         };
@@ -983,13 +1199,24 @@ impl<'a> Interpreter<'a> {
             ));
             return;
         }
-        let content_bytes = match stream.get_plain_content() {
-            Ok(bytes) => bytes,
-            Err(_) => stream.content.clone(),
-        };
-        let Ok(content) = Content::decode(&content_bytes) else {
-            self.warn(format!("XObject {label}: undecodable content stream"));
-            return;
+        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
+        let operations = match cached {
+            Some(operations) => operations,
+            None => {
+                let content_bytes = match stream.get_plain_content() {
+                    Ok(bytes) => bytes,
+                    Err(_) => stream.content.clone(),
+                };
+                let Ok(content) = Content::decode(&content_bytes) else {
+                    self.warn(format!("XObject {label}: undecodable content stream"));
+                    return;
+                };
+                let operations = Rc::new(content.operations);
+                if let Some(id) = stream_id {
+                    self.cache.forms.insert(id, Rc::clone(&operations));
+                }
+                operations
+            }
         };
         let matrix = match stream.dict.get(b"Matrix").and_then(Object::as_array) {
             Ok(array) => matrix_from_operands(array).unwrap_or(Matrix::IDENTITY),
@@ -1003,14 +1230,14 @@ impl<'a> Interpreter<'a> {
             && let Ok(resources) = resources.as_dict()
         {
             form_context.resources.push(resources);
-            load_fonts_from_resources(doc, resources, &mut form_context.fonts);
+            load_fonts_from_resources(doc, self.cache, resources, &mut form_context.fonts);
         }
 
         let saved_state = self.state.clone();
         let saved_depth = self.stack.len();
         self.state.ctm = matrix.then(self.state.ctm);
         contexts.push(form_context);
-        self.run(&content.operations, contexts, depth + 1);
+        self.run(operations.as_slice(), contexts, depth + 1);
         contexts.pop();
         self.stack.truncate(saved_depth);
         self.state = saved_state;
@@ -1019,6 +1246,7 @@ impl<'a> Interpreter<'a> {
 
 fn extract_page(
     doc: &Document,
+    cache: &mut SessionCache,
     page: u32,
     page_id: ObjectId,
     max_depth: u32,
@@ -1048,28 +1276,29 @@ fn extract_page(
         fonts: BTreeMap::new(),
         resources: Vec::new(),
     };
-    match doc.get_page_fonts(page_id) {
-        Ok(fonts) => {
-            for (name, dict) in fonts {
-                let loaded = load_font(doc, &name, dict);
-                page_context.fonts.insert(name, loaded);
+    // Same walk as `Document::get_page_fonts` (the page's direct resources,
+    // then the indirect ones up the `/Parent` chain; first name wins), but
+    // each font dictionary is resolved through the session cache.
+    match doc.get_page_resources(page_id) {
+        Ok((direct, ids)) => {
+            if let Some(dict) = direct {
+                page_context.resources.push(dict);
+            }
+            for id in ids {
+                if let Ok(dict) = doc.get_dictionary(id) {
+                    page_context.resources.push(dict);
+                }
+            }
+            for &resources in &page_context.resources {
+                load_fonts_from_resources(doc, cache, resources, &mut page_context.fonts);
             }
         }
         Err(err) => page_text.warnings.push(format!("fonts: {err}")),
     }
-    if let Ok((direct, ids)) = doc.get_page_resources(page_id) {
-        if let Some(dict) = direct {
-            page_context.resources.push(dict);
-        }
-        for id in ids {
-            if let Ok(dict) = doc.get_dictionary(id) {
-                page_context.resources.push(dict);
-            }
-        }
-    }
 
     let mut interpreter = Interpreter {
         doc,
+        cache,
         page: page_text,
         state: GState::default(),
         stack: Vec::new(),
@@ -1077,15 +1306,16 @@ fn extract_page(
         tlm: Matrix::IDENTITY,
         seq: 0,
         max_depth,
+        ligatures: 0,
     };
     let mut contexts = vec![page_context];
     interpreter.run(&content.operations, &mut contexts, 0);
-    Ok(interpreter.page)
+    Ok(interpreter.finish())
 }
 
 #[cfg(test)]
 mod tests {
-    use lopdf::dictionary;
+    use lopdf::{StringFormat, dictionary};
 
     use super::*;
 
@@ -1185,6 +1415,35 @@ mod tests {
         bytes
     }
 
+    /// A session whose caches the test can inspect.
+    fn open_session(bytes: &[u8]) -> LopdfSession {
+        let doc = load_document(bytes, None).unwrap();
+        let pages = doc.get_pages();
+        LopdfSession {
+            doc,
+            pages,
+            max_xobject_depth: 8,
+            cache: SessionCache::default(),
+        }
+    }
+
+    /// Every byte value once, in order.
+    fn all_bytes() -> Vec<u8> {
+        (0..=u8::MAX).collect()
+    }
+
+    /// The encoding `lopdf` resolves for `font` inside an otherwise empty
+    /// document, and the [`ByteTable`] built from it.
+    fn with_encoding<F>(font: Dictionary, check: F)
+    where
+        F: FnOnce(&Encoding<'_>, &ByteTable),
+    {
+        let doc = Document::with_version("1.5");
+        let encoding = font.get_font_encoding(&doc).unwrap();
+        let table = ByteTable::build(&encoding);
+        check(&encoding, &table);
+    }
+
     #[test]
     fn identity_is_stable() {
         let identity = LopdfBackend::default().identity();
@@ -1192,7 +1451,11 @@ mod tests {
         assert_eq!(identity.version, LOPDF_VERSION);
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
+        config.insert("ligatures".to_string(), "expand".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
+        // The digest before ligature expansion must not be reused.
+        config.remove("ligatures");
+        assert_ne!(identity.config_digest, config_digest(&config));
     }
 
     #[test]
@@ -1431,5 +1694,266 @@ mod tests {
             panic!("expected Malformed for non-PDF bytes");
         };
         assert!(matches!(err, BackendError::Malformed(_)), "{err}");
+    }
+
+    #[test]
+    fn byte_table_matches_lopdf_for_standard_encoding() {
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        };
+        with_encoding(font, |encoding, table| {
+            let bytes = all_bytes();
+            let expected = Document::decode_text(encoding, &bytes).ok();
+            assert_eq!(table.decode(&bytes), expected);
+            assert_eq!(
+                table.decode(b"Hello, world!").as_deref(),
+                Some("Hello, world!")
+            );
+            // Byte 1 has no glyph in StandardEncoding: silently dropped.
+            assert_eq!(table.decode(&[1]).as_deref(), Some(""));
+        });
+    }
+
+    #[test]
+    fn byte_table_matches_lopdf_for_win_ansi_encoding() {
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "Arial",
+            "Encoding" => "WinAnsiEncoding",
+        };
+        with_encoding(font, |encoding, table| {
+            let bytes = all_bytes();
+            let expected = Document::decode_text(encoding, &bytes).ok();
+            assert!(expected.is_some());
+            assert_eq!(table.decode(&bytes), expected);
+            assert_eq!(table.decode(&[0xE9]).as_deref(), Some("\u{E9}"));
+        });
+    }
+
+    #[test]
+    fn byte_table_matches_lopdf_for_differences() {
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Times-Roman",
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => vec![65.into(), "eacute".into(), "germandbls".into()],
+            },
+        };
+        with_encoding(font, |encoding, table| {
+            let bytes = all_bytes();
+            let expected = Document::decode_text(encoding, &bytes).ok();
+            assert!(expected.is_some());
+            assert_eq!(table.decode(&bytes), expected);
+            assert_eq!(table.decode(b"AB").as_deref(), Some("\u{E9}\u{DF}"));
+            // Codes outside the differences fall through to the base.
+            assert_eq!(table.decode(b"C").as_deref(), Some("C"));
+        });
+    }
+
+    #[test]
+    fn byte_table_rejects_what_lopdf_rejects() {
+        // `lopdf` has no table for this predefined CMap on a simple font:
+        // every string fails. The table path is not used for it (the name is
+        // kept and re-decoded), but the table must agree all the same.
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Foo",
+            "Encoding" => "90ms-RKSJ-H",
+        };
+        with_encoding(font, |encoding, table| {
+            assert!(Document::decode_text(encoding, b"x").is_err());
+            assert_eq!(table.decode(b"x"), None);
+        });
+        let named = own_encoding(Encoding::SimpleEncoding(b"90ms-RKSJ-H"));
+        assert!(matches!(named, Decode::Named(_)));
+    }
+
+    #[test]
+    fn differences_font_decodes_through_table_and_flags_unmapped_bytes() {
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new("Td", vec![10.into(), 10.into()]),
+            Operation::new(
+                "Tj",
+                vec![Object::String(vec![65, 1], StringFormat::Hexadecimal)],
+            ),
+            Operation::new("ET", vec![]),
+        ];
+        let bytes = build_pdf_with_font(vec![ops], None, |_| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Times-Roman",
+                "Encoding" => dictionary! {
+                    "Type" => "Encoding",
+                    "Differences" => vec![65.into(), "eacute".into()],
+                },
+            }
+        });
+        let mut session = open_session(&bytes);
+        let page = session.page_text(1).unwrap();
+        assert_eq!(page.spans.len(), 1);
+        // Byte 65 is /eacute; byte 1 has no glyph, so it is dropped by the
+        // encoding and restored as U+FFFD at the end, with a warning.
+        assert_eq!(page.spans[0].text, "\u{E9}\u{FFFD}");
+        assert_eq!(
+            page.warnings,
+            vec!["font F1: 1 unmapped byte(s); U+FFFD used".to_string()]
+        );
+        let font = session.cache.fonts.values().next().unwrap();
+        assert!(matches!(font.decode, Decode::Table(_)));
+        assert!(font.one_to_one);
+    }
+
+    /// Emit each of `texts` as one span on a fresh page and finish it.
+    fn emit_all(texts: &[&str]) -> PageText {
+        let doc = Document::with_version("1.5");
+        let mut cache = SessionCache::default();
+        let mut interpreter = Interpreter {
+            doc: &doc,
+            cache: &mut cache,
+            page: PageText::new(1, 612.0, 792.0, 0),
+            state: GState::default(),
+            stack: Vec::new(),
+            tm: Matrix::IDENTITY,
+            tlm: Matrix::IDENTITY,
+            seq: 0,
+            max_depth: 8,
+            ligatures: 0,
+        };
+        for &text in texts {
+            interpreter.emit(text.to_string(), 1.0, None);
+        }
+        interpreter.finish()
+    }
+
+    fn span_texts(page: &PageText) -> Vec<&str> {
+        page.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    #[test]
+    fn non_ascii_text_is_nfc_normalised() {
+        // The ASCII fast path must leave text alone and everything else
+        // must still go through NFC: U+0065 U+0301 composes to U+00E9.
+        // Compatibility characters other than ligatures are kept as written.
+        let page = emit_all(&["plain ascii", "e\u{301}", "x\u{B2} \u{BD} \u{1D465}"]);
+        assert_eq!(
+            span_texts(&page),
+            vec!["plain ascii", "\u{E9}", "x\u{B2} \u{BD} \u{1D465}"]
+        );
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn ligatures_are_expanded_with_one_page_warning() {
+        let page = emit_all(&[
+            "\u{FB01}nd \u{FB02}ow",
+            "e\u{FB00}ect, o\u{FB03}ce, ba\u{FB04}e, \u{FB05}\u{FB06}",
+            "\u{FB01}\u{301}",
+        ]);
+        assert_eq!(
+            span_texts(&page),
+            vec!["find flow", "effect, office, baffle, stst", "f\u{ED}",]
+        );
+        assert_eq!(page.warnings, vec!["ligatures expanded: 8".to_string()]);
+    }
+
+    #[test]
+    fn page_without_ligatures_has_no_ligature_warning() {
+        let page = emit_all(&["caf\u{E9} fi fl", "plain"]);
+        assert_eq!(span_texts(&page), vec!["caf\u{E9} fi fl", "plain"]);
+        let mentions = page.warnings.iter().any(|w| w.starts_with("ligatures"));
+        assert!(!mentions, "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn font_cache_hit_yields_identical_spans() {
+        // Both pages reference the same indirect font object, so page 2 is
+        // decoded with the cached font that page 1 loaded.
+        let page_one = text_ops(12, 100, 600, "Hello, cache");
+        let page_two = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 9.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("Second page")]),
+            Operation::new("Tf", vec!["F1".into(), 14.into()]),
+            Operation::new("Td", vec![0.into(), (-20).into()]),
+            Operation::new("Tj", vec![Object::string_literal("More text")]),
+            Operation::new("ET", vec![]),
+        ];
+        let bytes = build_pdf(vec![page_one, page_two], None);
+
+        let mut cached = open_session(&bytes);
+        assert!(cached.cache.fonts.is_empty());
+        let first = cached.page_text(1).unwrap();
+        assert_eq!(cached.cache.fonts.len(), 1, "one font object resolved");
+        let second_cached = cached.page_text(2).unwrap();
+        assert_eq!(cached.cache.fonts.len(), 1, "page 2 reused the cached font");
+
+        // A fresh session extracting page 2 first cannot hit the cache.
+        let mut fresh = open_session(&bytes);
+        let second_fresh = fresh.page_text(2).unwrap();
+        assert_eq!(second_cached, second_fresh);
+        assert_eq!(second_cached.spans.len(), 2);
+        assert_eq!(second_cached.spans[0].text, "Second page");
+        assert_eq!(second_cached.spans[1].text, "More text");
+        assert_eq!(second_cached.spans[0].font.as_deref(), Some("Helvetica"));
+        assert!(
+            second_cached.warnings.is_empty(),
+            "{:?}",
+            second_cached.warnings
+        );
+
+        // Re-extracting page 1 from the warm session is also identical.
+        assert_eq!(cached.page_text(1).unwrap(), first);
+    }
+
+    #[test]
+    fn shared_form_xobject_is_decoded_once_and_yields_identical_spans() {
+        let ops = vec![
+            Operation::new("q", vec![]),
+            cm_translate(200, 300),
+            Operation::new("Do", vec!["X1".into()]),
+            Operation::new("Q", vec![]),
+            Operation::new("q", vec![]),
+            cm_translate(20, 30),
+            Operation::new("Do", vec!["X1".into()]),
+            Operation::new("Q", vec![]),
+        ];
+        let form = text_ops(10, 50, 50, "Form");
+        let bytes = build_pdf(vec![ops.clone(), ops], Some(form));
+
+        let mut cached = open_session(&bytes);
+        let first = cached.page_text(1).unwrap();
+        assert_eq!(cached.cache.forms.len(), 1, "the form stream is cached");
+        assert_eq!(cached.cache.fonts.len(), 1, "page and form share /F1");
+        let second_cached = cached.page_text(2).unwrap();
+        assert_eq!(cached.cache.forms.len(), 1);
+
+        let mut fresh = open_session(&bytes);
+        let second_fresh = fresh.page_text(2).unwrap();
+        assert_eq!(second_cached.spans, second_fresh.spans);
+        assert_eq!(second_cached.warnings, second_fresh.warnings);
+        assert_eq!(first.spans, second_cached.spans);
+
+        // Two invocations on one page: both placed through their own `cm`.
+        assert_eq!(first.spans.len(), 2);
+        assert_eq!(first.spans[0].text, "Form");
+        assert_eq!(first.spans[1].text, "Form");
+        let first_box = first.spans[0].bbox.unwrap();
+        let second_box = first.spans[1].bbox.unwrap();
+        assert!(close(first_box.x0, 250.0), "x0 {}", first_box.x0);
+        assert!(close(first_box.y0, 348.0), "y0 {}", first_box.y0);
+        assert!(close(second_box.x0, 70.0), "x0 {}", second_box.x0);
+        assert!(close(second_box.y0, 78.0), "y0 {}", second_box.y0);
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
     }
 }

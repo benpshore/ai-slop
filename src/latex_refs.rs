@@ -111,6 +111,19 @@ pub struct TruthCitations {
     pub nocite_all: bool,
 }
 
+/// Paper-level metadata as the author's source states it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthPaper {
+    /// Detexed `\title{...}` (or `\icmltitle{...}`) without footnotes.
+    pub title: Option<String>,
+    /// Person names from the author commands, in source order, deduplicated.
+    pub authors: Vec<String>,
+    /// DOI from `\doi{..}` / `\acmDOI{..}` or a `doi:` / `doi.org/` on the title page.
+    pub doi: Option<String>,
+    /// `arXiv` identifier from an explicit `\arxiv{..}` / `\arxivid{..}` command.
+    pub arxiv_id: Option<String>,
+}
+
 /// Ground truth for one paper.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroundTruth {
@@ -120,6 +133,9 @@ pub struct GroundTruth {
     pub method: String,
     /// Detexed body for alignment diagnostics; may be empty.
     pub body_text: String,
+    /// Title, authors and identifiers from the title page commands.
+    #[serde(default)]
+    pub paper: TruthPaper,
 }
 
 /// Why no ground truth could be built.
@@ -159,9 +175,18 @@ fn acm_title_re() -> &'static Regex {
     })
 }
 
+/// A `19xx`/`20xx` digit run; digit boundaries are checked by the caller.
 fn year_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?:^|\D)((?:19|20)\d{2})(?:\D|$)").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"(?:19|20)[0-9]{2}").expect("valid regex"))
+}
+
+/// Opening of an italic group: `{\em`, `{\it`, `{\itshape`, `\emph{`, `\textit{`.
+fn italic_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\{\\(?:em|it|itshape)\b|\\(?:emph|textit)\s*\{").expect("valid regex")
+    })
 }
 
 /// URLs, DOIs and `arXiv` identifiers, whose digits must not be read as years.
@@ -771,13 +796,118 @@ fn accent(s: &str, mark: char, from: usize, out: &mut String) -> usize {
 // Field extraction shared by the parsers
 // ---------------------------------------------------------------------------
 
-/// First `19xx`/`20xx` in `text`, ignoring digits inside URLs, DOIs and `arXiv` ids.
+/// Whether `text` ends with `word` and the character before it (if any) is
+/// not alphanumeric.
+fn ends_with_word(text: &str, word: &str) -> bool {
+    text.strip_suffix(word)
+        .is_some_and(|head| !head.chars().next_back().is_some_and(char::is_alphanumeric))
+}
+
+/// Whether the text before a year candidate makes it a page or volume
+/// number: the end of a range (`1877–1901`), after `:` (`17:1923`), or after
+/// `pp.`, `p.`, `pages`, `page`, `pg.`.
+fn page_like_before(before: &str) -> bool {
+    let trimmed = before.trim_end();
+    if trimmed.ends_with(['-', '\u{2013}', '\u{2014}', ':']) {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    ["pp.", "pp", "p.", "pages", "page", "pg."]
+        .iter()
+        .any(|word| ends_with_word(&lower, word))
+}
+
+/// Whether the text after a year candidate makes it a page or volume number:
+/// the start of a range (`1907–1921`) or a `volume:pages` pair (`1952:1–12`).
+fn page_like_after(after: &str) -> bool {
+    let rest = after.trim_start();
+    let Some(first) = rest.chars().next() else {
+        return false;
+    };
+    if !matches!(first, '-' | '\u{2013}' | '\u{2014}' | ':') {
+        return false;
+    }
+    rest[first.len_utf8()..]
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit())
+}
+
+/// A year written as `(2020)` or `(2020a)`.
+fn in_parentheses(before: &str, after: &str) -> bool {
+    if !before.ends_with('(') {
+        return false;
+    }
+    let mut chars = after.chars();
+    match chars.next() {
+        Some(')') => true,
+        Some(c) if c.is_ascii_lowercase() => chars.next() == Some(')'),
+        _ => false,
+    }
+}
+
+/// A year written as a comma field that closes the entry or a clause:
+/// `, 2020.`, `, 2020a,`, `, 2021` at the end.
+fn after_comma_field(before: &str, after: &str) -> bool {
+    if !before.trim_end().ends_with(',') {
+        return false;
+    }
+    let rest = after
+        .strip_prefix(|c: char| c.is_ascii_lowercase())
+        .unwrap_or(after)
+        .trim_start();
+    rest.is_empty() || rest.starts_with(['.', ',', ';'])
+}
+
+/// The publication year of an entry's text, ignoring digits inside URLs,
+/// DOIs and `arXiv` ids.
+///
+/// Candidates are standalone `19xx`/`20xx` numbers. Page and volume numbers
+/// (range ends, `volume:pages`, after `pp.`/`pages`) are skipped. The first
+/// parenthesised candidate wins, else the last comma field (`, 2021.`), else
+/// the first remaining candidate; when every candidate looks like a page
+/// number the first one is used (a `date` such as `2020-05-01`).
 fn first_year(text: &str) -> Option<u16> {
     let masked = year_mask_re().replace_all(text, " ");
-    year_re()
-        .captures(&masked)
-        .and_then(|caps| caps.get(1))
-        .and_then(|m| m.as_str().parse::<u16>().ok())
+    let masked: &str = &masked;
+    let mut first_any: Option<&str> = None;
+    let mut first_plain: Option<&str> = None;
+    let mut first_paren: Option<&str> = None;
+    let mut last_comma: Option<&str> = None;
+    for m in year_re().find_iter(masked) {
+        let before = &masked[..m.start()];
+        let after = &masked[m.end()..];
+        if before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_digit())
+            || after.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        let year = m.as_str();
+        if first_any.is_none() {
+            first_any = Some(year);
+        }
+        if page_like_before(before) || page_like_after(after) {
+            continue;
+        }
+        if first_paren.is_none() && in_parentheses(before, after) {
+            first_paren = Some(year);
+        }
+        if after_comma_field(before, after) {
+            last_comma = Some(year);
+        }
+        if first_plain.is_none() {
+            first_plain = Some(year);
+        }
+    }
+    first_paren
+        .or(last_comma)
+        .or(first_plain)
+        .or(first_any)
+        .and_then(|year| year.parse::<u16>().ok())
 }
 
 /// Detex a DOI candidate and trim trailing punctuation.
@@ -856,12 +986,17 @@ fn compose_text(
 /// `\bibitem`-based files (`plain`, `natbib`, ACM styles): each item is
 /// split on `\bibitem`, the optional `[label]` (nested braces and `\protect`
 /// allowed) and `{key}` are read, `text` is the detexed remainder, `year` is
-/// the first `19xx`/`20xx` outside URLs and identifiers, `doi` comes from
+/// the publication year outside URLs and identifiers, `doi` comes from
 /// `\doi{..}`, `doi:`, `https://doi.org/` or a bare `10.xxxx/..`, `arxiv_id`
 /// from `arXiv:..`, `/abs/` or `\eprint{..}`. When the item has `\newblock`s
 /// the first segment gives the authors and the second the title (ACM's
-/// `\showarticletitle{..}` is preferred when present); otherwise both stay
-/// empty. Files without `\bibitem` are tried as `biblatex` `\entry` blocks.
+/// `\showarticletitle{..}` is preferred when present). Without `\newblock`
+/// (`IEEEtran`, `siam`) the title is the first quoted span (` ``..'' `,
+/// `"..."`, `“..”`) or italic group (`{\em ..}`, `\emph{..}`,
+/// `\textit{..}`), whichever opens first, and the authors are the text
+/// before it; with neither, both stay empty. The year skips page and volume
+/// numbers (see `first_year`). Files without `\bibitem` are tried as
+/// `biblatex` `\entry` blocks.
 pub fn parse_bbl(text: &str) -> Vec<TruthReference> {
     let clean = strip_comments(text);
     if bibitem_re().is_match(&clean) {
@@ -911,6 +1046,8 @@ fn parse_bibitem(item: &str) -> Option<TruthReference> {
             split_bbl_authors(&latex_to_text(segments[0])),
             bbl_title(rest, segments[1]),
         )
+    } else if let Some((inline_authors, inline_title)) = inline_title(rest) {
+        (inline_authors, Some(inline_title))
     } else {
         (Vec::new(), None)
     };
@@ -949,6 +1086,121 @@ fn bbl_title(rest: &str, segment: &str) -> Option<String> {
     } else {
         Some(title.to_owned())
     }
+}
+
+/// Byte index of the first `pat` in `s` at or after `from` that is not
+/// preceded by a backslash.
+fn find_unescaped(s: &str, from: usize, pat: &str) -> Option<usize> {
+    s[from..]
+        .match_indices(pat)
+        .map(|(off, _)| from + off)
+        .find(|&at| at == 0 || s.as_bytes()[at - 1] != b'\\')
+}
+
+/// First quoted span in a raw item: ` ``…'' `, `“…”` or `"…"`. Characters
+/// after a backslash (accents such as `\"`) are skipped. Returns the byte
+/// index of the opening quote and the inner byte range; `None` when there is
+/// no opening quote or it is never closed.
+fn quoted_span(rest: &str) -> Option<(usize, Range<usize>)> {
+    let mut i = 0;
+    while let Some(c) = char_at(rest, i) {
+        let (open_len, closer) = match c {
+            '\\' => {
+                i += 1;
+                if let Some(escaped) = char_at(rest, i) {
+                    i += escaped.len_utf8();
+                }
+                continue;
+            }
+            '`' if rest[i..].starts_with("``") => (2, "''"),
+            '\u{201C}' => ('\u{201C}'.len_utf8(), "\u{201D}"),
+            '"' => (1, "\""),
+            _ => {
+                i += c.len_utf8();
+                continue;
+            }
+        };
+        let inner_start = i + open_len;
+        let close = find_unescaped(rest, inner_start, closer)?;
+        return Some((i, inner_start..close));
+    }
+    None
+}
+
+/// First italic group (`{\em ..}`, `{\it ..}`, `\emph{..}`, `\textit{..}`)
+/// in a raw item whose text is not empty and not just `et al.`. Returns the
+/// byte index where the group's markup starts and the inner byte range.
+fn italic_span(rest: &str) -> Option<(usize, Range<usize>)> {
+    for m in italic_re().find_iter(rest) {
+        let braced_command = rest[m.start()..].starts_with('{');
+        let open = if braced_command {
+            m.start()
+        } else {
+            m.end() - 1
+        };
+        let Some(close) = matching_close(rest, open) else {
+            continue;
+        };
+        let inner_start = if braced_command { m.end() } else { open + 1 };
+        if inner_start > close {
+            continue;
+        }
+        let text = latex_to_text(&rest[inner_start..close]);
+        if text.is_empty() || text.to_lowercase().starts_with("et al") {
+            continue;
+        }
+        return Some((m.start(), inner_start..close));
+    }
+    None
+}
+
+/// Authors from the detexed text before an inline title: trailing
+/// punctuation and a final `et al.` are dropped, then [`split_bbl_authors`].
+fn inline_authors(prefix: &str) -> Vec<String> {
+    let mut text = prefix.trim().trim_end_matches([',', ';', ':']).trim_end();
+    for suffix in ["et al.", "et al"] {
+        if let Some(head) = text.strip_suffix(suffix) {
+            text = head.trim_end().trim_end_matches(',').trim_end();
+            break;
+        }
+    }
+    split_bbl_authors(text)
+}
+
+/// Authors and title of a `\bibitem` without `\newblock` (`IEEEtran`,
+/// `siam`, `plain`-like output): the first quoted span or italic group,
+/// whichever opens first, is the title, and the text before it the author
+/// list. A quote inside an italic title (`{\em ``Direct search'' solution
+/// ..}`) therefore stays part of it. An italic group right after the word
+/// `in` is a book or proceedings title, not the entry's title, so the item
+/// then gets neither. `None` when nothing qualifies.
+fn inline_title(rest: &str) -> Option<(Vec<String>, String)> {
+    let quoted = quoted_span(rest);
+    let italic = italic_span(rest);
+    let (start, inner, is_italic) = match (quoted, italic) {
+        (Some((q_start, q_inner)), Some((i_start, i_inner))) => {
+            if i_start < q_start {
+                (i_start, i_inner, true)
+            } else {
+                (q_start, q_inner, false)
+            }
+        }
+        (Some((q_start, q_inner)), None) => (q_start, q_inner, false),
+        (None, Some((i_start, i_inner))) => (i_start, i_inner, true),
+        (None, None) => return None,
+    };
+    let prefix = latex_to_text(&rest[..start]);
+    if is_italic && ends_with_word(&prefix.to_lowercase(), "in") {
+        return None;
+    }
+    let full = latex_to_text(&rest[inner]);
+    let title = full
+        .trim_end_matches([',', '.', ';', ':', ' '])
+        .trim_start();
+    if title.is_empty() {
+        return None;
+    }
+    Some((inline_authors(&prefix), title.to_owned()))
 }
 
 /// Split a detexed author segment (`A B, C D, and E F.` or `B, A., D, C., and
@@ -1658,6 +1910,492 @@ fn expand_macros(body: &str, macros: &BTreeMap<String, String>) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Paper metadata: title, authors, DOI
+// ---------------------------------------------------------------------------
+
+/// A command rewrite: `(name, brace arguments consumed, argument kept)`.
+type Rewrite = (&'static str, usize, Option<usize>);
+
+/// Commands removed from a title before detexing (footnotes, spacing,
+/// graphics); `\texorpdfstring` keeps its `TeX` argument and `\raisebox`
+/// its content.
+const TITLE_REWRITES: &[Rewrite] = &[
+    ("thanks", 1, None),
+    ("footnote", 1, None),
+    ("footnotemark", 0, None),
+    ("tnoteref", 1, None),
+    ("texorpdfstring", 2, Some(0)),
+    ("raisebox", 2, Some(1)),
+    ("vspace", 1, None),
+    ("hspace", 1, None),
+    ("orcidlink", 1, None),
+    ("includegraphics", 1, None),
+];
+
+/// Commands removed from an author block: footnotes, affiliations, emails,
+/// identifiers and superscript markers.
+const AUTHOR_REWRITES: &[Rewrite] = &[
+    ("thanks", 1, None),
+    ("footnote", 1, None),
+    ("footnotemark", 0, None),
+    ("affiliation", 1, None),
+    ("affil", 1, None),
+    ("institution", 1, None),
+    ("institute", 1, None),
+    ("inst", 1, None),
+    ("address", 1, None),
+    ("textsuperscript", 1, None),
+    ("email", 1, None),
+    ("ead", 1, None),
+    ("texttt", 1, None),
+    ("url", 1, None),
+    ("href", 2, None),
+    ("orcid", 1, None),
+    ("orcidID", 1, None),
+    ("orcidlink", 1, None),
+    ("IEEEauthorblockA", 1, None),
+    ("IEEEauthorrefmark", 1, None),
+    ("IEEEmembership", 1, None),
+    ("authornote", 1, None),
+    ("authornotemark", 0, None),
+    ("corref", 1, None),
+    ("cortext", 1, None),
+    ("fnref", 1, None),
+    ("fntext", 1, None),
+    ("tnoteref", 1, None),
+    ("icmlaffiliation", 2, None),
+];
+
+/// Lower-case surname particles allowed inside a person name.
+const NAME_PARTICLES: &[&str] = &[
+    "van", "von", "der", "den", "de", "del", "della", "di", "da", "dos", "du", "le", "la", "bin",
+    "al", "ter", "y",
+];
+
+/// Words that mark an affiliation, place or note rather than a person.
+const NON_NAME_WORDS: &[&str] = &[
+    "university",
+    "universität",
+    "université",
+    "universidad",
+    "universiteit",
+    "institute",
+    "institut",
+    "department",
+    "dept",
+    "school",
+    "college",
+    "laboratory",
+    "laboratories",
+    "lab",
+    "labs",
+    "research",
+    "center",
+    "centre",
+    "faculty",
+    "inc",
+    "ltd",
+    "corporation",
+    "corp",
+    "company",
+    "group",
+    "academy",
+    "hospital",
+    "foundation",
+    "national",
+    "science",
+    "sciences",
+    "engineering",
+    "technology",
+    "program",
+    "team",
+    "google",
+    "microsoft",
+    "meta",
+    "amazon",
+    "deepmind",
+    "openai",
+    "nvidia",
+    "street",
+    "road",
+    "avenue",
+    "campus",
+    "equal",
+    "contribution",
+    "corresponding",
+    "author",
+    "authors",
+    "anonymous",
+];
+
+/// `{2em}`, `{0.85\textwidth}`, `{-1.7\height}`: a brace group holding only a length.
+fn dimension_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\{\s*-?(?:\d*\.?\d+\s*(?:em|ex|pt|cm|mm|in|bp)|(?:\d*\.?\d+\s*)?\\(?:textwidth|linewidth|columnwidth|textheight|height|width|baselineskip))\s*\}",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// `\and`, `\AND`, `\And`: a boundary between authors.
+fn author_and_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\\(?:and|AND|And)\b").expect("valid regex"))
+}
+
+/// `\\`, `\\*`, `\\[2pt]`, `\newline`, `\par`: a line break inside an author block.
+fn author_line_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\\\\\*?(?:\s*\[[^\]]*\])?|\\(?:newline|linebreak|par)\b").expect("valid regex")
+    })
+}
+
+/// Horizontal gaps that separate names on one line.
+fn author_gap_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\\(?:qquad|quad|hfill|enspace)\b|\\hspace\*?\s*\{[^}]*\}")
+            .expect("valid regex")
+    })
+}
+
+/// A DOI after `doi:` or in a `doi.org/` URL.
+fn doi_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)(?:\bdoi\s*:\s*|doi\.org/)(10\.\d{4,9}/[^\s"<>{}]+)"#)
+            .expect("valid regex")
+    })
+}
+
+/// Index after any `[...]` optional arguments starting at or after `i`.
+fn skip_optional(s: &str, mut i: usize) -> usize {
+    loop {
+        let j = skip_ws(s, i);
+        if s.as_bytes().get(j) != Some(&b'[') {
+            return i;
+        }
+        let Some(close) = matching_close(s, j) else {
+            return i;
+        };
+        i = close + 1;
+    }
+}
+
+/// Inner range of brace argument `index` (0-based, after any optional
+/// arguments) of every `\name` command in `s`.
+fn command_args(s: &str, name: &str, index: usize) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    for caps in command_re().captures_iter(s) {
+        let Some(whole) = caps.get(0) else { continue };
+        if &caps[1] != name {
+            continue;
+        }
+        let mut i = skip_optional(s, whole.end());
+        for n in 0..=index {
+            let Some((inner, past_group)) = brace_group(s, skip_ws(s, i)) else {
+                break;
+            };
+            if n == index {
+                found.push(inner);
+            }
+            i = past_group;
+        }
+    }
+    found
+}
+
+/// Remove every `\name` with its optional arguments and `args` brace groups;
+/// when `keep` is `Some(k)` the contents of group `k` stay, in braces.
+fn rewrite_command(s: &str, name: &str, args: usize, keep: Option<usize>) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for caps in command_re().captures_iter(s) {
+        let Some(whole) = caps.get(0) else { continue };
+        if whole.start() < last || &caps[1] != name {
+            continue;
+        }
+        let mut i = skip_optional(s, whole.end());
+        let mut retained: Option<Range<usize>> = None;
+        for n in 0..args {
+            let Some((inner, past_group)) = brace_group(s, skip_ws(s, i)) else {
+                break;
+            };
+            if keep == Some(n) {
+                retained = Some(inner);
+            }
+            i = past_group;
+        }
+        out.push_str(&s[last..whole.start()]);
+        if let Some(range) = retained {
+            out.push('{');
+            out.push_str(&s[range]);
+            out.push('}');
+        }
+        out.push(' ');
+        last = i;
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+fn apply_rewrites(s: &str, rewrites: &[Rewrite]) -> String {
+    let mut text = s.to_owned();
+    for &(name, args, keep) in rewrites {
+        text = rewrite_command(&text, name, args, keep);
+    }
+    text
+}
+
+/// Remove `$...$` inline math (affiliation markers such as `$^{1,2}$`).
+fn strip_inline_math(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_math = false;
+    let mut i = 0;
+    while let Some(c) = char_at(s, i) {
+        let escaped = if c == '\\' { char_at(s, i + 1) } else { None };
+        if let Some(escaped) = escaped {
+            if !in_math {
+                out.push(c);
+                out.push(escaped);
+            }
+            i += 1 + escaped.len_utf8();
+            continue;
+        }
+        if c == '$' {
+            in_math = !in_math;
+            out.push(' ');
+        } else if !in_math {
+            out.push(c);
+        }
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Comment-free source up to the first sectioning command, bibliography,
+/// `\appendix` or `\end{document}` after `\begin{document}` (the whole
+/// source when there is none of these), and the part
+/// of it before `\begin{abstract}` (where a DOI line may be printed).
+fn front_matter(clean: &str) -> (&str, &str) {
+    let begin_tag = "\\begin{document}";
+    let start = clean.find(begin_tag).map_or(0, |pos| pos + begin_tag.len());
+    let mut stop = heading_re()
+        .find_at(clean, start)
+        .map_or(clean.len(), |m| m.start());
+    for tag in [
+        "\\begin{thebibliography}",
+        "\\bibliography{",
+        "\\printbibliography",
+        "\\appendix",
+        "\\end{document}",
+    ] {
+        if let Some(pos) = clean[start..].find(tag) {
+            stop = stop.min(start + pos);
+        }
+    }
+    let front = &clean[..stop];
+    let before_abstract = front
+        .find("\\begin{abstract}")
+        .map_or(front, |pos| &front[..pos]);
+    (front, before_abstract)
+}
+
+/// Detexed title from `\title{...}`, else `\icmltitle{...}`.
+fn paper_title(front: &str, macros: &BTreeMap<String, String>) -> Option<String> {
+    for name in ["title", "icmltitle"] {
+        for range in command_args(front, name, 0) {
+            let raw = expand_macros(&expand_macros(&front[range], macros), macros);
+            let rewritten = apply_rewrites(&raw, TITLE_REWRITES);
+            let without_lengths = dimension_re().replace_all(&rewritten, " ");
+            let title = latex_to_text(&without_lengths);
+            if !title.is_empty() {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+/// A person name made of 2–4 capitalised words (initials and hyphens
+/// allowed, lower-case particles such as `van der` inside); `None` for
+/// affiliations, places, emails and anything with digits.
+fn person_name(piece: &str) -> Option<String> {
+    let trimmed = piece.trim_matches(|c: char| !c.is_alphabetic());
+    if trimmed.contains(['@', '(', ')', '/', ':', '[', ']']) || trimmed.contains(char::is_numeric) {
+        return None;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if !(2..=6).contains(&tokens.len()) {
+        return None;
+    }
+    let mut capitalised = 0_usize;
+    for (k, token) in tokens.iter().enumerate() {
+        let lower = token.to_lowercase();
+        let bare = lower.trim_matches(|c: char| !c.is_alphabetic());
+        if NON_NAME_WORDS.contains(&bare) {
+            return None;
+        }
+        let letters = token.chars().filter(|c| c.is_alphabetic()).count();
+        let starts_upper = token.chars().next().is_some_and(char::is_uppercase);
+        if starts_upper {
+            let name_chars = token
+                .chars()
+                .all(|c| c.is_alphabetic() || matches!(c, '.' | '-' | '\'' | '\u{2019}'));
+            let acronym = letters >= 3 && !token.chars().any(char::is_lowercase);
+            if !name_chars || acronym {
+                return None;
+            }
+            capitalised += 1;
+        } else if k == 0 || k + 1 == tokens.len() || !NAME_PARTICLES.contains(&bare) {
+            return None;
+        }
+    }
+    if (2..=4).contains(&capitalised) {
+        Some(tokens.join(" "))
+    } else {
+        None
+    }
+}
+
+/// Comma, semicolon, ampersand and `and` separated pieces of one detexed line
+/// that contain at least one letter.
+fn line_pieces(line: &str) -> Vec<String> {
+    let joined = and_sep_re().replace_all(line, ",");
+    joined
+        .split([',', ';', '&', '\u{b7}', '\u{2022}'])
+        .map(str::trim)
+        .filter(|piece| piece.chars().any(char::is_alphabetic))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Names in one author (one `\and`-separated piece): the first line with at
+/// least one name-looking piece gives its names, and following lines are
+/// added only while every piece on them looks like a name, so affiliation,
+/// address and email lines after the names are skipped.
+fn piece_names(piece: &str, names: &mut Vec<String>) {
+    let mut started = false;
+    for raw_line in piece.split('\n') {
+        let pieces = line_pieces(&latex_to_text(raw_line));
+        if pieces.is_empty() {
+            continue;
+        }
+        let found: Vec<String> = pieces
+            .iter()
+            .map(String::as_str)
+            .filter_map(person_name)
+            .collect();
+        if !started {
+            if !found.is_empty() {
+                started = true;
+                names.extend(found);
+            }
+        } else if found.len() == pieces.len() {
+            names.extend(found);
+        } else {
+            break;
+        }
+    }
+}
+
+/// Person names in one author block (`\author{...}`, `\name{...}` or
+/// `\icmlauthor{...}` argument).
+fn block_names(raw: &str, macros: &BTreeMap<String, String>, names: &mut Vec<String>) {
+    let expanded = expand_macros(&expand_macros(raw, macros), macros);
+    let one_line = expanded.replace(['\n', '\r'], " ");
+    let split_ieee = one_line.replace("\\IEEEauthorblockN", "\\and\\IEEEauthorblockN");
+    let rewritten = apply_rewrites(&split_ieee, AUTHOR_REWRITES);
+    let text = strip_inline_math(&rewritten);
+    let text = author_gap_re().replace_all(&text, ",");
+    let text = author_line_re().replace_all(&text, "\n");
+    let text = author_and_re().replace_all(&text, "\u{1e}");
+    for piece in text.split('\u{1e}') {
+        piece_names(piece, names);
+    }
+}
+
+/// Author names from `\icmlauthor{..}{..}` when present, else every
+/// `\author[..]{..}` (`article`, `revtex`, `acmart`, `elsarticle`,
+/// `IEEEtran` blocks), else `\name{..}`; deduplicated in source order.
+fn paper_authors(front: &str, macros: &BTreeMap<String, String>) -> Vec<String> {
+    let mut blocks = command_args(front, "icmlauthor", 0);
+    if blocks.is_empty() {
+        blocks = command_args(front, "author", 0);
+    }
+    if blocks.is_empty() {
+        blocks = command_args(front, "name", 0);
+    }
+    let mut names: Vec<String> = Vec::new();
+    for range in blocks {
+        block_names(&front[range], macros, &mut names);
+    }
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    names.retain(|name| seen.insert(name.clone()));
+    names
+}
+
+/// DOI from `\doi{..}`, `\acmDOI{..}` or `\DOI{..}`, else a `doi:` or
+/// `doi.org/` DOI, all before the abstract (so cited DOIs never count).
+fn paper_doi(before_abstract: &str) -> Option<String> {
+    for name in ["doi", "acmDOI", "DOI"] {
+        for range in command_args(before_abstract, name, 0) {
+            if let Some(doi) = find_doi(&before_abstract[range]) {
+                return Some(doi);
+            }
+        }
+    }
+    doi_label_re()
+        .captures(before_abstract)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| tidy_doi(m.as_str()))
+}
+
+/// `arXiv` id from `\arxiv{..}`, `\arxivid{..}` or `\arXiv{..}` before the abstract.
+fn paper_arxiv(front: &str) -> Option<String> {
+    for name in ["arxiv", "arxivid", "arXiv"] {
+        for range in command_args(front, name, 0) {
+            if let Some(id) = arxiv_from_eprint(&front[range]) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Title, authors and identifiers of a paper from its merged `.tex` source.
+///
+/// Only the front matter is read: everything before the first sectioning
+/// command, bibliography, `\appendix` or `\end{document}` after
+/// `\begin{document}`. Zero-argument macros are expanded.
+/// The title is the first `\title[..]{..}` (else `\icmltitle{..}`) with
+/// `\thanks`, `\footnote`, spacing, graphics and length arguments removed,
+/// then detexed. Authors come from `\icmlauthor{name}{..}`, else every
+/// `\author[..]{..}` (split on `\and`, `\AND` and `\IEEEauthorblockN`),
+/// else `\name{..}`; affiliation, email, ORCID, footnote and superscript
+/// commands and inline math are removed, each author is cut at line breaks
+/// (`\\`) and pieces are split on `,`, `;`, `&` and `and`; only pieces that
+/// look like person names (2–4 capitalised words) are kept. The DOI comes
+/// from `\doi{..}`/`\acmDOI{..}` or a `doi:`/`doi.org/` DOI, and the
+/// `arXiv` id only from an explicit `\arxiv{..}` command, both searched
+/// before the abstract so a cited work's identifier is never taken.
+/// Fields stay empty when the source does not state them.
+pub fn paper_truth(main_tex_merged: &str) -> TruthPaper {
+    let clean = strip_comments(main_tex_merged);
+    let macros = collect_macros(&clean);
+    let (front, before_abstract) = front_matter(&clean);
+    TruthPaper {
+        title: paper_title(front, &macros),
+        authors: paper_authors(front, &macros),
+        doi: paper_doi(before_abstract),
+        arxiv_id: paper_arxiv(before_abstract),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // \input resolution and ground truth
 // ---------------------------------------------------------------------------
 
@@ -1746,6 +2484,7 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
     let merged = resolve_inputs(root, &main_text, 0);
     let citations = parse_cites(&merged);
     let body = body_text(&merged);
+    let paper = paper_truth(&merged);
 
     let mut references = Vec::new();
     for path in &files.bbl {
@@ -1792,6 +2531,7 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
         citations,
         method: method.to_owned(),
         body_text: body,
+        paper,
     })
 }
 
@@ -2078,6 +2818,193 @@ Text \cite{k1}.
         assert_eq!(refs[0].label.as_deref(), Some("Aamand et al., 2021"));
     }
 
+    /// `IEEEtran` output without `\newblock` (entries from 2608.28714).
+    const IEEE_BBL: &str = r"\begin{thebibliography}{10}
+\bibitem[Zaitsev et~al.(2015)Zaitsev, Maclaren, and Herbst]{zaitsev2015motion}
+M.~Zaitsev, J.~Maclaren, and M.~Herbst, ``Motion artifacts in {MRI}: A
+  review,'' \emph{NMR in Biomedicine}, vol.~28, no.~7, pp. 911--935, 2015.
+
+\bibitem[Chen et~al.(2025)]{chen2025mri}
+G.~Chen, H.~Xie, and C.~Liu, ``{MRI} motion correction through disentangled
+  {CycleGAN} based on multi-mask k-space subsampling,'' \emph{IEEE Transactions
+  on Medical Imaging}, vol.~44, pp. 1907--1921, 2025.
+
+\bibitem[Page et~al.(2021)]{prisma2020}
+M.~J. Page, J.~E. McKenzie, and C.~D. Mulrow \emph{et~al.}, ``The {PRISMA}
+  2020 statement: An updated guideline for reporting systematic reviews,''
+  \emph{BMJ}, vol. 372, p. n71, 2021.
+
+\bibitem[Barrett and Myers(2004)]{barrett2004foundations}
+H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
+  plus 0.5em minus 0.4em\relax Hoboken, NJ: Wiley, 2004.
+\end{thebibliography}
+";
+
+    /// `siamplain` output without `\newblock` (entries from 2504.09409 and
+    /// 2603.21379; the raw markup is reconstructed from the detexed truth).
+    const SIAM_BBL: &str = r"\begin{thebibliography}{10}
+\bibitem{BG22}
+{\sc K.~Balasubramanian and S.~Ghadimi}, {\em Zeroth-order nonconvex stochastic
+  optimization: Handling constraints, high-dimensionality and saddle-points},
+  Found. Comput. Math., 22 (2022), pp.~35--76.
+
+\bibitem{beck2017first}
+{\sc A.~Beck}, {\em First-order methods in optimization}, SIAM, 2017.
+
+\bibitem{hooke1961direct}
+{\sc R.~Hooke and T.~A. Jeeves}, {\em ``{D}irect search'' solution of numerical
+  and statistical problems}, J. ACM, 8 (1961), pp.~212--229.
+
+\bibitem{Bou2017}
+{\sc C.~Boutsidis and D.~P. Woodruff}, {\em Optimal {CUR} Matrix
+  Decompositions}, SIAM Journal on Computing, 46 (2017), pp.~543--589,
+  \url{https://doi.org/10.1137/140977898}.
+
+\bibitem{Coherence2}
+{\sc Y.~Chen and Y.~Chi}, {\em Spectral Compressed Sensing via Structured
+  Matrix Completion}, in Proceedings of the 30th International Conference on
+  Machine Learning - Volume 28, JMLR.org, 2013.
+
+\bibitem{bookonly}
+{\sc A.~Author}, in {\em Proceedings of Something}, 2019.
+\end{thebibliography}
+";
+
+    #[test]
+    fn parse_bbl_ieee_without_newblock() {
+        let refs = parse_bbl(IEEE_BBL);
+        assert_eq!(refs.len(), 4);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("Motion artifacts in MRI: A review")
+        );
+        assert_eq!(refs[0].authors, ["M. Zaitsev", "J. Maclaren", "M. Herbst"]);
+        assert_eq!(refs[0].year, Some(2015));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some(
+                "MRI motion correction through disentangled CycleGAN based on multi-mask \
+                 k-space subsampling"
+            )
+        );
+        assert_eq!(refs[1].authors, ["G. Chen", "H. Xie", "C. Liu"]);
+        // `pp. 1907--1921` is a page range, not the year.
+        assert_eq!(refs[1].year, Some(2025));
+        assert_eq!(
+            refs[2].title.as_deref(),
+            Some(
+                "The PRISMA 2020 statement: An updated guideline for reporting systematic \
+                 reviews"
+            )
+        );
+        assert_eq!(
+            refs[2].authors,
+            ["M. J. Page", "J. E. McKenzie", "C. D. Mulrow"]
+        );
+        // The `2020` in the title is not the year.
+        assert_eq!(refs[2].year, Some(2021));
+        // No quotes: the italic book title.
+        assert_eq!(
+            refs[3].title.as_deref(),
+            Some("Foundations of Image Science")
+        );
+        assert_eq!(refs[3].authors, ["H. H. Barrett", "K. J. Myers"]);
+        assert_eq!(refs[3].year, Some(2004));
+    }
+
+    #[test]
+    fn parse_bbl_siam_without_newblock() {
+        let refs = parse_bbl(SIAM_BBL);
+        assert_eq!(refs.len(), 6);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some(
+                "Zeroth-order nonconvex stochastic optimization: Handling constraints, \
+                 high-dimensionality and saddle-points"
+            )
+        );
+        assert_eq!(refs[0].authors, ["K. Balasubramanian", "S. Ghadimi"]);
+        assert_eq!(refs[0].year, Some(2022));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("First-order methods in optimization")
+        );
+        assert_eq!(refs[1].authors, ["A. Beck"]);
+        assert_eq!(refs[1].year, Some(2017));
+        // A quote inside the italic title belongs to the title.
+        assert_eq!(
+            refs[2].title.as_deref(),
+            Some("\"Direct search\" solution of numerical and statistical problems")
+        );
+        assert_eq!(refs[2].authors, ["R. Hooke", "T. A. Jeeves"]);
+        assert_eq!(refs[2].year, Some(1961));
+        assert_eq!(
+            refs[3].title.as_deref(),
+            Some("Optimal CUR Matrix Decompositions")
+        );
+        assert_eq!(refs[3].authors, ["C. Boutsidis", "D. P. Woodruff"]);
+        assert_eq!(refs[3].year, Some(2017));
+        assert_eq!(refs[3].doi.as_deref(), Some("10.1137/140977898"));
+        assert_eq!(
+            refs[4].title.as_deref(),
+            Some("Spectral Compressed Sensing via Structured Matrix Completion")
+        );
+        assert_eq!(refs[4].authors, ["Y. Chen", "Y. Chi"]);
+        assert_eq!(refs[4].year, Some(2013));
+        // An italic group after `in` is a proceedings title: nothing is guessed.
+        assert_eq!(refs[5].title, None);
+        assert!(refs[5].authors.is_empty());
+        assert_eq!(refs[5].year, Some(2019));
+    }
+
+    #[test]
+    fn first_year_skips_page_and_volume_numbers() {
+        let cases: [(&str, Option<u16>); 12] = [
+            (
+                "T. B. Brown, and D. Amodei. Language models are few-shot learners. In H. \
+                 Larochelle et al., editors, Advances in Neural Information Processing \
+                 Systems, volume 33, pages 1877–1901. Curran Associates, Inc., 2020.",
+                Some(2020),
+            ),
+            (
+                "G. Chen, and C. Liu, \"MRI motion correction,\" IEEE Transactions on \
+                 Medical Imaging, vol. 44, pp. 1907–1921, 2025.",
+                Some(2025),
+            ),
+            (
+                "M. J. Page et al., \"The PRISMA 2020 statement: An updated guideline,\" \
+                 BMJ, vol. 372, p. n71, 2021.",
+                Some(2021),
+            ),
+            (
+                "J. Lee, \"Lesion-aware post-training,\" in Medical Image Computing and \
+                 Computer Assisted Intervention – MICCAI 2025.1em plus 0.5em minus \
+                 0.4emSpringer, 2026.",
+                Some(2026),
+            ),
+            ("X. Y. Z. RFC, 1952:1–12, 1996.", Some(1996)),
+            ("IEEE Access, vol. 8, pp. 2087– 2098, 2024.", Some(2024)),
+            (
+                "Y. Zhang, Q. Yang, An overview, National Science Review 5 (2018) 30–43.",
+                Some(2018),
+            ),
+            (
+                "Smith, J. (2020a). Title. In Proc. 2019 Workshop.",
+                Some(2020),
+            ),
+            ("2020-05-01", Some(2020)),
+            ("1998", Some(1998)),
+            (
+                "Report 19201, see https://example.org/2019/x and arXiv:2001.01234.",
+                None,
+            ),
+            ("No year here.", None),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(first_year(text), expected, "text: {text}");
+        }
+    }
+
     #[test]
     fn parse_bbl_biblatex_entries() {
         let refs = parse_bbl(BIBLATEX_BBL);
@@ -2249,10 +3176,240 @@ Text \cite{k1}.
         assert_eq!(truth.references.len(), 1);
         assert_eq!(truth.references[0].key, "k1");
         assert_eq!(truth.references[0].year, Some(1999));
+        assert_eq!(truth.paper, TruthPaper::default());
         assert!(
             !truth.body_text.contains("Some Author"),
             "{}",
             truth.body_text
         );
+    }
+
+    const ARTICLE_TEX: &str = r"\documentclass{article}
+\newcommand{\sys}{FooNet}
+\title{\sys: Fast Things\thanks{Accepted at X. Published version doi:10.1234/abcd.5678.}}
+\date{}
+\author{Mikkel Abrahamsen\thanks{University of Copenhagen, Denmark.} \and
+Bartosz Walczak\thanks{Jagiellonian University, Krak\'ow, Poland.}}
+\begin{document}
+\maketitle
+\begin{abstract}
+We study things, see doi:10.9999/not.this.one.
+\end{abstract}
+\section{Introduction}
+\author{Not An Author}
+\end{document}
+";
+
+    const IEEE_TEX: &str = r"\documentclass[conference]{IEEEtran}
+\begin{document}
+\title{Robust Sensing with\\ Sparse Arrays}
+\author{\IEEEauthorblockN{Alice M. Smith\IEEEauthorrefmark{1}, Bob Jones\IEEEauthorrefmark{2}}
+\IEEEauthorblockA{\IEEEauthorrefmark{1}\textit{Dept. of Electrical Engineering},
+Stanford University, CA, USA\\ alice@stanford.edu}
+\and
+\IEEEauthorblockN{Carlos de la Cruz}
+\IEEEauthorblockA{\textit{Google Research}\\ Mountain View, USA}}
+\maketitle
+\begin{abstract}
+Abstract text.
+\end{abstract}
+\section{Introduction}
+";
+
+    const ACM_TEX: &str = r"\documentclass[sigconf]{acmart}
+\acmDOI{10.1145/3580305.3599999}
+\begin{document}
+\title{H-FedSN: Personalized Sparse Networks for Hierarchical Federated Learning}
+\author{Jiechao Gao}
+\authornote{Both authors contributed equally.}
+\affiliation{%
+  \institution{Stanford University}
+  \city{Stanford}
+  \country{USA}}
+\email{jiechao@stanford.edu}
+\author{Yuangang Li\textsuperscript{*}}
+\authornotemark[1]
+\affiliation{\institution{University of California, Irvine}\country{USA}}
+\email{yuanganl@uci.edu}
+\author{Jie Wang}
+\orcid{0000-0002-1825-0097}
+\affiliation{\institution{Stanford University}}
+\begin{abstract}
+Abstract text.
+\end{abstract}
+\maketitle
+\section{Introduction}
+";
+
+    const ELSARTICLE_TEX: &str = r"\documentclass[preprint,12pt]{elsarticle}
+\begin{document}
+\begin{frontmatter}
+\title{Graph Neural Networks for Traffic Forecasting\tnoteref{t1}}
+\tnotetext[t1]{This work was funded by the Agency.}
+\author[inst1]{Jane Q. Doe\corref{cor1}}
+\ead{jane.doe@example.org}
+\cortext[cor1]{Corresponding author}
+\author[inst1,inst2]{Richard van der Berg}
+\author[inst2]{Li Wei\fnref{fn1}}
+\fntext[fn1]{Now at Tsinghua University.}
+\affiliation[inst1]{organization={Delft University of Technology}, city={Delft}}
+\address[inst2]{Tsinghua University, Beijing, China}
+\begin{abstract}
+Abstract text.
+\end{abstract}
+\end{frontmatter}
+\section{Introduction}
+";
+
+    const ICML_TEX: &str = r"\documentclass{article}
+\usepackage{icml2024}
+\icmltitlerunning{Scaling Sparse Autoencoders}
+\begin{document}
+\twocolumn[
+\icmltitle{Scaling Sparse Autoencoders to Many Features}
+\begin{icmlauthorlist}
+\icmlauthor{Leo Gao}{oai}
+\icmlauthor{Tom Dupr\'e la Tour}{oai}
+\icmlauthor{Henk Tillman}{oai}
+\end{icmlauthorlist}
+\icmlaffiliation{oai}{OpenAI, San Francisco, USA}
+\icmlcorrespondingauthor{Leo Gao}{lg@openai.com}
+\vskip 0.3in
+]
+\printAffiliationsAndNotice{}
+\begin{abstract}
+Abstract text.
+\end{abstract}
+\section{Introduction}
+";
+
+    const INLINE_AFFIL_TEX: &str = r"\documentclass{article}
+\newcommand{\JMorcid}{\orcidlink{0000-0003-4850-9239}}
+\title{
+    \begin{minipage}{0.85\textwidth}
+        \centering
+        \raisebox{-1.7\height}{\shortstack{HintEval: A Toolkit for Hint Generation \\ and Evaluation}}
+    \end{minipage}
+}
+\author{Jamshid Mozafari\thanks{\, Corresponding Author.}\JMorcid, Bhawna Piryani$^{1}$, Adam Jatowt \\
+  University of Innsbruck, Innsbruck, Austria \\
+  \texttt{\{jamshid.mozafari, adam.jatowt\}@uibk.ac.at} \\
+}
+\begin{document}
+\maketitle
+\end{document}
+";
+
+    #[test]
+    fn paper_truth_article_with_and() {
+        let paper = paper_truth(ARTICLE_TEX);
+        assert_eq!(paper.title.as_deref(), Some("FooNet: Fast Things"));
+        assert_eq!(paper.authors, ["Mikkel Abrahamsen", "Bartosz Walczak"]);
+        assert_eq!(paper.doi.as_deref(), Some("10.1234/abcd.5678"));
+        assert_eq!(paper.arxiv_id, None);
+    }
+
+    #[test]
+    fn paper_truth_ieeetran_author_blocks() {
+        let paper = paper_truth(IEEE_TEX);
+        assert_eq!(
+            paper.title.as_deref(),
+            Some("Robust Sensing with Sparse Arrays")
+        );
+        assert_eq!(
+            paper.authors,
+            ["Alice M. Smith", "Bob Jones", "Carlos de la Cruz"]
+        );
+        assert_eq!(paper.doi, None);
+    }
+
+    #[test]
+    fn paper_truth_acm_author_and_affiliation() {
+        let paper = paper_truth(ACM_TEX);
+        assert_eq!(
+            paper.title.as_deref(),
+            Some("H-FedSN: Personalized Sparse Networks for Hierarchical Federated Learning")
+        );
+        assert_eq!(paper.authors, ["Jiechao Gao", "Yuangang Li", "Jie Wang"]);
+        assert_eq!(paper.doi.as_deref(), Some("10.1145/3580305.3599999"));
+    }
+
+    #[test]
+    fn paper_truth_elsarticle_frontmatter() {
+        let paper = paper_truth(ELSARTICLE_TEX);
+        assert_eq!(
+            paper.title.as_deref(),
+            Some("Graph Neural Networks for Traffic Forecasting")
+        );
+        assert_eq!(
+            paper.authors,
+            ["Jane Q. Doe", "Richard van der Berg", "Li Wei"]
+        );
+        assert_eq!(paper.doi, None);
+    }
+
+    #[test]
+    fn paper_truth_icml_author_list() {
+        let paper = paper_truth(ICML_TEX);
+        assert_eq!(
+            paper.title.as_deref(),
+            Some("Scaling Sparse Autoencoders to Many Features")
+        );
+        assert_eq!(
+            paper.authors,
+            ["Leo Gao", "Tom Dupré la Tour", "Henk Tillman"]
+        );
+        assert_eq!(paper.doi, None);
+        assert_eq!(paper.arxiv_id, None);
+    }
+
+    #[test]
+    fn paper_truth_inline_affiliation_lines_and_layout_title() {
+        let paper = paper_truth(INLINE_AFFIL_TEX);
+        assert_eq!(
+            paper.title.as_deref(),
+            Some("HintEval: A Toolkit for Hint Generation and Evaluation")
+        );
+        assert_eq!(
+            paper.authors,
+            ["Jamshid Mozafari", "Bhawna Piryani", "Adam Jatowt"]
+        );
+        assert_eq!(paper_truth("no title here"), TruthPaper::default());
+    }
+
+    #[test]
+    fn paper_truth_ignores_cited_dois_in_sectionless_papers() {
+        let tex = r"\documentclass{revtex4-2}
+\begin{document}
+\title{A Short Letter}
+\author{Ada Lovelace}
+\affiliation{Analytical Society}
+\maketitle
+Body text \cite{k}.
+\begin{thebibliography}{1}
+\bibitem{k} C. Babbage, \doi{10.1000/cited.work}; arXiv:\arxiv{2101.00001}.
+\end{thebibliography}
+\end{document}
+";
+        let paper = paper_truth(tex);
+        assert_eq!(paper.title.as_deref(), Some("A Short Letter"));
+        assert_eq!(paper.authors, ["Ada Lovelace"]);
+        assert_eq!(paper.doi, None);
+        assert_eq!(paper.arxiv_id, None);
+    }
+
+    #[test]
+    fn person_name_heuristic() {
+        assert_eq!(person_name("Jane Q. Doe").as_deref(), Some("Jane Q. Doe"));
+        assert_eq!(person_name(" Gao* ").as_deref(), None);
+        assert_eq!(
+            person_name("Richard van der Berg").as_deref(),
+            Some("Richard van der Berg")
+        );
+        assert_eq!(person_name("Stanford University"), None);
+        assert_eq!(person_name("alice@stanford.edu"), None);
+        assert_eq!(person_name("Firstname1 Lastname1"), None);
+        assert_eq!(person_name("MIT CSAIL"), None);
+        assert_eq!(person_name("van Gogh"), None);
     }
 }
