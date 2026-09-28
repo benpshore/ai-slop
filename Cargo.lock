@@ -1009,9 +1009,9 @@ dependencies = [
 
 [[package]]
 name = "docling-asr"
-version = "1.69.2"
+version = "1.70.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c161b3674ae00aa74076b96e41b6a1ec82c0fbd95dcbab9e9b65a7dddf58728"
+checksum = "7f9c9eb37437372085daf3f4b4bd838f297417b7b4f82c87fc2e6beccbaa84f2"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -1022,9 +1022,9 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "1.69.2"
+version = "1.70.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5cb745538bcdccbd71a6aab23870fb019b76aa8c12e2b2e0f776eccf89743dd"
+checksum = "9860123de6ec157b93a258c34495aad5c2b04cd276a6c5769461861dea76ba9b"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1032,9 +1032,9 @@ dependencies = [
 
 [[package]]
 name = "docling-onnx"
-version = "1.69.2"
+version = "1.70.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d582d6ba220477f0878113379dc5f4fab1f4fbd2f7111cfbbf78f9508ec170ad"
+checksum = "d439fc860ea4537552cfb68fce71ec7374547c1d6cc9aece27b458ebbb9dfe9c"
 dependencies = [
  "docling-core",
  "ort",
@@ -3976,6 +3976,19 @@ dependencies = [
  "objc2-foundation",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "tpe-zotero"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tpe-common",
+ "ureq",
 ]
 
 [[package]]

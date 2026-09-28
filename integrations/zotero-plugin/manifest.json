@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "Text Processing Engine",
+  "version": "0.0.0",
+  "description": "Send selected Zotero items (metadata and attachment paths) to the local Text Processing Engine app.",
+  "author": "Ben Shore",
+  "homepage_url": "https://github.com/benpshore/text-processing-engine",
+  "applications": {
+    "zotero": {
+      "id": "tpe-zotero@benpshore.github.io",
+      "update_url": "https://raw.githubusercontent.com/benpshore/text-processing-engine/main/integrations/zotero-plugin/updates.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "7.*"
+    }
+  }
+}
