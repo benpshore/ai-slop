@@ -340,10 +340,14 @@ fn series_suffix_re() -> &'static Regex {
     })
 }
 
+/// Matches `\input{f}`, `\include{f}` and `\subfile{f}` (group 1), plus the
+/// brace-free plain-`TeX` form `\input f` that only `\input` accepts, where
+/// `f` runs until whitespace, `{`, `}` or `\` (group 2).
 fn input_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\\(?:input|include|subfile)\s*\{([^}]*)\}").expect("valid regex")
+        Regex::new(r"\\(?:input|include|subfile)\s*\{([^}]*)\}|\\input\s+([^\s{}\\]+)")
+            .expect("valid regex")
     })
 }
 
@@ -2895,10 +2899,13 @@ pub fn paper_truth(main_tex_merged: &str) -> TruthPaper {
 // ---------------------------------------------------------------------------
 
 /// Inline `\input{f}`, `\include{f}` and `\subfile{f}` relative to `root`
-/// (`.tex` is added when the name has no extension), recursively while
-/// `depth <= 5`. Missing files are left as they are. Comments, `comment`
-/// environments and `\iffalse ... \fi` blocks are removed from every file
-/// before its own inputs are expanded, so nothing inside them is inlined.
+/// (`.tex` is appended unless `f` already has that extension), recursively
+/// while `depth <= 5`. `\input` also accepts the brace-free plain-`TeX` form
+/// (`\input f`, `f` running until whitespace, `{`, `}` or `\`); `\include`
+/// and `\subfile` always require braces. Missing files are left as they
+/// are. Comments, `comment` environments and `\iffalse ... \fi` blocks are
+/// removed from every file before its own inputs are expanded, so nothing
+/// inside them is inlined.
 pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
     let clean = remove_disabled(&strip_comments(main_tex));
     if depth > MAX_INPUT_DEPTH {
@@ -2908,7 +2915,8 @@ pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
     let mut last = 0;
     for caps in input_re().captures_iter(&clean) {
         let Some(whole) = caps.get(0) else { continue };
-        let name = caps[1].trim().trim_matches('"');
+        let raw = caps.get(1).or(caps.get(2)).map_or("", |m| m.as_str());
+        let name = raw.trim().trim_matches('"');
         let Some(content) = read_input(root, name) else {
             continue;
         };
@@ -2922,16 +2930,27 @@ pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
     out
 }
 
+/// Resolves an `\input`/`\include`/`\subfile` argument to file bytes under
+/// `root`. When `name` already has a `.tex` extension it is used as written
+/// (no second `.tex` is appended); otherwise `<name>.tex` is tried first by
+/// plain string concatenation (so a dotted basename like `3.1_method` is
+/// never mistaken for an extension), then `name` as written, then
+/// `Path::with_extension("tex")` as a last resort.
 fn read_input(root: &Path, name: &str) -> Option<String> {
     if name.is_empty() || Path::new(name).is_absolute() || name.contains("..") {
         return None;
     }
-    let direct = root.join(name);
-    let with_tex = direct.with_extension("tex");
-    let candidates: [&Path; 2] = if Path::new(name).extension().is_some() {
-        [&direct, &with_tex]
+    let has_tex_extension = Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tex"));
+    let candidates: Vec<PathBuf> = if has_tex_extension {
+        vec![root.join(name)]
     } else {
-        [&with_tex, &direct]
+        vec![
+            root.join(format!("{name}.tex")),
+            root.join(name),
+            root.join(name).with_extension("tex"),
+        ]
     };
     candidates
         .iter()
@@ -4311,6 +4330,35 @@ Plain body words.
         assert!(merged.contains("World"), "{merged}");
         assert!(merged.contains("\\include{missing}"), "{merged}");
         assert_eq!(merged.matches("World").count(), 1);
+    }
+
+    #[test]
+    fn resolve_inputs_handles_dotted_basename() {
+        // `Path::with_extension` would turn `3.1_method` into `3.tex`; the
+        // `.tex` suffix must be appended by string concatenation instead.
+        let dir = tempfile::tempdir().unwrap();
+        let sections = dir.path().join("sections");
+        fs::create_dir_all(&sections).unwrap();
+        fs::write(sections.join("3.1_method.tex"), "Method body").unwrap();
+        let merged = resolve_inputs(dir.path(), "A \\input{sections/3.1_method} B", 0);
+        assert!(merged.contains("Method body"), "{merged}");
+    }
+
+    #[test]
+    fn resolve_inputs_accepts_explicit_tex_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("intro.tex"), "Intro body").unwrap();
+        let merged = resolve_inputs(dir.path(), "A \\input{intro.tex} B", 0);
+        assert!(merged.contains("Intro body"), "{merged}");
+    }
+
+    #[test]
+    fn resolve_inputs_accepts_brace_free_input() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("intro.tex"), "Bare intro body").unwrap();
+        let merged = resolve_inputs(dir.path(), "A \\input intro END", 0);
+        assert!(merged.contains("Bare intro body"), "{merged}");
+        assert!(merged.contains("END"), "{merged}");
     }
 
     #[test]

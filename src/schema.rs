@@ -67,7 +67,8 @@ pub struct Line {
     /// (running text, the default), `heading`, `caption`, `figure` (text
     /// inside a figure), `table` (table cells), `algorithm`, `toc` (table of
     /// contents), `front` (page-1 title, authors and affiliations before the
-    /// abstract) or `furniture` (running heads, page numbers, stamps; these
+    /// abstract), `math` (display-equation fragments), `footnote` (page-foot
+    /// notes) or `furniture` (running heads, page numbers, stamps; these
     /// lines are not in `PageText::text`). Tags never remove text by
     /// themselves.
     #[serde(default = "default_line_role")]

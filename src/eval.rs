@@ -10,7 +10,7 @@
 //! correct when its extracted entry is matched to a key the source's `\cite`
 //! commands cite), and a word-alignment diagnostic
 //! of the body text order. The alignment is reported twice: over body text
-//! only (extracted text before the reference section with citation markers,
+//! only (extracted text without the reference lists, with citation markers,
 //! caption paragraphs and math-heavy lines removed, against the truth body
 //! with math-heavy lines removed) and raw (all page text against the truth
 //! body). These are diagnostics on real papers, not the
@@ -27,7 +27,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::citations::find_reference_section;
+use crate::citations::{find_reference_section, find_reference_sections, segment_entries};
 use crate::latex_refs::{GroundTruth, TruthPaper, TruthReference};
 use crate::schema::{
     CitationMarker, ExtractionResult, Metadata, PageText, ReferenceEntry, StageTimings,
@@ -36,9 +36,10 @@ use crate::schema::{
 /// Product target: warm service time per 20-page chunk, in milliseconds.
 pub const TARGET_MS_PER_CHUNK: f64 = 30.0;
 
-/// Maximum tokens per side considered by [`word_alignment`]; longer inputs are
-/// sampled evenly down to this many tokens so the quadratic DP stays bounded.
-pub const MAX_ALIGN_TOKENS: usize = 12_000;
+/// Safety cap on the tokens per side considered by [`word_alignment`], far
+/// above any paper: a longer side is cut to its first this many tokens (with
+/// a warning), which bounds the bit-parallel LCS memory.
+pub const MAX_ALIGN_TOKENS: usize = 200_000;
 
 /// Minimum Jaccard similarity of title words for a fuzzy title match.
 const TITLE_JACCARD_MIN: f32 = 0.8;
@@ -194,9 +195,9 @@ pub struct PaperEval {
     pub marker_keys_cited: u32,
     /// [`word_alignment`] of the extracted body text against the detexed
     /// body, both prepared by `alignment_texts`: the extracted side is the
-    /// page text before the reference section with lines tagged with a
-    /// non-body role, citation markers, caption paragraphs and math-heavy
-    /// lines removed, the truth side has math-heavy lines removed. `None`
+    /// page text without the reference lists (text after a list, such as
+    /// an appendix, is kept), with lines tagged with a non-body role,
+    /// citation markers, caption paragraphs and math-heavy lines removed, the truth side has math-heavy lines removed. `None`
     /// when the truth has no body text.
     pub body_alignment: Option<f32>,
     /// [`word_alignment`] of all extracted page text (pages joined by `\n`)
@@ -204,12 +205,12 @@ pub struct PaperEval {
     /// when the truth has no body text.
     #[serde(default)]
     pub body_alignment_raw: Option<f32>,
-    /// Extracted-side word tokens in the `body_alignment` comparison (after
-    /// sampling to at most [`MAX_ALIGN_TOKENS`], so not a raw word total).
+    /// Extracted-side word tokens in the `body_alignment` comparison (the
+    /// whole side, up to the [`MAX_ALIGN_TOKENS`] safety cap).
     #[serde(default)]
     pub body_words_extracted: u32,
-    /// Truth-side word tokens in the `body_alignment` comparison (after
-    /// sampling to at most [`MAX_ALIGN_TOKENS`]).
+    /// Truth-side word tokens in the `body_alignment` comparison (the whole
+    /// side, up to the [`MAX_ALIGN_TOKENS`] safety cap).
     #[serde(default)]
     pub body_words_truth: u32,
     /// Longest common subsequence of the two token sequences behind
@@ -393,16 +394,14 @@ fn intern_tokens<'a>(words: &'a [String], table: &mut HashMap<&'a str, u32>) -> 
         .collect()
 }
 
-/// Keeps at most `cap` tokens, evenly spaced over the input when it is longer.
-fn sample_evenly(tokens: Vec<u32>, cap: usize) -> Vec<u32> {
-    if tokens.len() <= cap {
-        return tokens;
-    }
-    (0..cap).map(|i| tokens[i * tokens.len() / cap]).collect()
-}
-
-/// Length of the longest common subsequence using two DP rows over the
-/// shorter side (memory `O(min(n, m))`, time `O(n * m)`).
+/// Length of the longest common subsequence, exact, by the bit-parallel
+/// algorithm of Allison and Dix (in Hyyrö's form): one bit per token of the
+/// shorter side, one `u64` word per 64 of them, and a match bitset per
+/// distinct shorter-side token. Each token of the longer side updates the
+/// row as `V' = (V + U) | (V - U)` with `U = V & M[token]`; since `U` is a
+/// subset of `V`, `V - U` is `V & !U` and only the addition carries across
+/// words. The result is the number of zero bits among the `short.len()`
+/// low bits. Time `O(n * m / 64)`, memory `O(distinct * m / 64)` words.
 fn lcs_len(left: &[u32], right: &[u32]) -> usize {
     let (long, short) = if left.len() >= right.len() {
         (left, right)
@@ -412,25 +411,56 @@ fn lcs_len(left: &[u32], right: &[u32]) -> usize {
     if short.is_empty() {
         return 0;
     }
-    let mut prev = vec![0_usize; short.len() + 1];
-    let mut cur = vec![0_usize; short.len() + 1];
-    for &token in long {
-        for (j, &other) in short.iter().enumerate() {
-            cur[j + 1] = if token == other {
-                prev[j] + 1
-            } else {
-                cur[j].max(prev[j + 1])
-            };
+    let words_per_row = short.len().div_ceil(64);
+    let max_id = short.iter().copied().max().unwrap_or(0) as usize;
+    // Row of each token id in `masks`; `usize::MAX` when the id is not in
+    // the shorter side (its tokens never change the row).
+    let mut row_of: Vec<usize> = vec![usize::MAX; max_id + 1];
+    let mut masks: Vec<u64> = Vec::new();
+    for (bit, &token) in short.iter().enumerate() {
+        let slot = &mut row_of[token as usize];
+        if *slot == usize::MAX {
+            *slot = masks.len() / words_per_row;
+            masks.resize(masks.len() + words_per_row, 0);
         }
-        std::mem::swap(&mut prev, &mut cur);
+        masks[*slot * words_per_row + bit / 64] |= 1_u64 << (bit % 64);
     }
-    prev[short.len()]
+    let mut row: Vec<u64> = vec![u64::MAX; words_per_row];
+    for &token in long {
+        let Some(&mask_row) = row_of.get(token as usize) else {
+            continue;
+        };
+        if mask_row == usize::MAX {
+            continue;
+        }
+        let mask = &masks[mask_row * words_per_row..(mask_row + 1) * words_per_row];
+        let mut carry = 0_u64;
+        for (word, &matches) in row.iter_mut().zip(mask) {
+            let hits = *word & matches;
+            let (sum, overflow_hits) = word.overflowing_add(hits);
+            let (sum, overflow_carry) = sum.overflowing_add(carry);
+            carry = u64::from(overflow_hits | overflow_carry);
+            *word = sum | (*word & !hits);
+        }
+    }
+    let mut zeros = 0_usize;
+    for (index, word) in row.iter().enumerate() {
+        let used = short.len() - index * 64;
+        let valid = if used >= 64 {
+            u64::MAX
+        } else {
+            (1_u64 << used) - 1
+        };
+        zeros += (!word & valid).count_ones() as usize;
+    }
+    zeros
 }
 
 /// Order-sensitive similarity of two texts: `2 * lcs / (n + m)` over
-/// lower-case alphanumeric word tokens, each side capped at
-/// [`MAX_ALIGN_TOKENS`] by even sampling. Returns 1.0 when both sides have no
-/// tokens and 0.0 when exactly one side has none.
+/// lower-case alphanumeric word tokens, with the exact longest common
+/// subsequence ([`lcs_len`]); each side is cut to its first
+/// [`MAX_ALIGN_TOKENS`] tokens only past that safety cap. Returns 1.0 when
+/// both sides have no tokens and 0.0 when exactly one side has none.
 pub fn word_alignment(a: &str, b: &str) -> f32 {
     alignment_score(align_counts(a, b))
 }
@@ -438,29 +468,40 @@ pub fn word_alignment(a: &str, b: &str) -> f32 {
 /// Word tokens and their matches behind [`word_alignment`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AlignCounts {
-    /// Tokens of the left text, after sampling to [`MAX_ALIGN_TOKENS`].
+    /// Tokens of the left text (at most [`MAX_ALIGN_TOKENS`]).
     left: usize,
-    /// Tokens of the right text, after sampling to [`MAX_ALIGN_TOKENS`].
+    /// Tokens of the right text (at most [`MAX_ALIGN_TOKENS`]).
     right: usize,
     /// Longest common subsequence of the two token sequences.
     matched: usize,
 }
 
 /// Token counts and LCS length of `a` against `b`, as [`word_alignment`]
-/// computes them.
+/// computes them. A side longer than [`MAX_ALIGN_TOKENS`] is cut to its
+/// first `MAX_ALIGN_TOKENS` tokens, with a warning on stderr.
 fn align_counts(a: &str, b: &str) -> AlignCounts {
-    let left_words = words(a);
-    let right_words = words(b);
+    let mut left_words = words(a);
+    let mut right_words = words(b);
+    if left_words.len() > MAX_ALIGN_TOKENS || right_words.len() > MAX_ALIGN_TOKENS {
+        eprintln!(
+            "warning: word alignment input over {MAX_ALIGN_TOKENS} tokens ({} and {}); \
+             each side cut to its first {MAX_ALIGN_TOKENS}",
+            left_words.len(),
+            right_words.len()
+        );
+        left_words.truncate(MAX_ALIGN_TOKENS);
+        right_words.truncate(MAX_ALIGN_TOKENS);
+    }
     if left_words.is_empty() || right_words.is_empty() {
         return AlignCounts {
-            left: left_words.len().min(MAX_ALIGN_TOKENS),
-            right: right_words.len().min(MAX_ALIGN_TOKENS),
+            left: left_words.len(),
+            right: right_words.len(),
             matched: 0,
         };
     }
     let mut table: HashMap<&str, u32> = HashMap::new();
-    let left = sample_evenly(intern_tokens(&left_words, &mut table), MAX_ALIGN_TOKENS);
-    let right = sample_evenly(intern_tokens(&right_words, &mut table), MAX_ALIGN_TOKENS);
+    let left = intern_tokens(&left_words, &mut table);
+    let right = intern_tokens(&right_words, &mut table);
     let matched = lcs_len(&left, &right);
     AlignCounts {
         left: left.len(),
@@ -496,24 +537,63 @@ fn citation_marker_re() -> &'static Regex {
 
 /// A figure or table caption's first line: `Figure N`, `Fig. N` or
 /// `Table N` (any case, `N` possibly dotted like `2.1`, optional letter)
-/// followed by `:`, `.` or `|` and then whitespace or the line end, so prose
-/// such as "Table 2 shows" or "Table 1.5 lists" is kept.
+/// followed either by `:`, `.` or `|` and then whitespace or the line end,
+/// or (Springer/RSC style, `Fig. 3 Overview of ...`) by whitespace and a
+/// capitalised word (an upper-case letter then a lower-case one). Prose
+/// such as "Table 2 shows", "Table 1.5 lists" or "Figure 3 and 4 show" is
+/// kept.
 fn caption_start_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^\s*(?i:figure|fig\.|table)\s*\d+(?:\.\d+)*[a-z]?\s*[:.|](?:\s|$)")
-            .expect("valid regex")
+        Regex::new(
+            r"^\s*(?i:figure|fig\.|table)\s*\d+(?:\.\d+)*[a-z]?(?:\s*[:.|](?:\s|$)|\s+\p{Lu}\p{Ll})",
+        )
+        .expect("valid regex")
     })
 }
 
+/// Whether `c` is a math symbol that `char::is_alphabetic` would count as a
+/// letter or that often stands in for math: Greek letters (U+0370–U+03FF),
+/// Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) and common
+/// operators and brackets.
+fn is_math_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0370}'..='\u{03FF}'
+            | '\u{1D400}'..='\u{1D7FF}'
+            | '∈'
+            | '∑'
+            | '∏'
+            | '∫'
+            | '≤'
+            | '≥'
+            | '≠'
+            | '≈'
+            | '∀'
+            | '∃'
+            | '∇'
+            | '∂'
+            | '⊆'
+            | '⊂'
+            | '∪'
+            | '∩'
+            | '→'
+            | '↦'
+            | '‖'
+            | '⟨'
+            | '⟩'
+    )
+}
+
 /// Whether at least half of the line's non-whitespace characters are not
-/// letters (display math, table rows, bare page numbers). Blank lines are
-/// not math-heavy.
+/// letters (display math, table rows, bare page numbers); Greek letters,
+/// math-alphanumeric symbols and operators ([`is_math_char`]) count as
+/// math, not letters. Blank lines are not math-heavy.
 fn is_math_heavy(line: &str) -> bool {
     let mut letters = 0_usize;
     let mut other = 0_usize;
     for c in line.chars().filter(|c| !c.is_whitespace()) {
-        if c.is_alphabetic() {
+        if !is_math_char(c) && c.is_alphabetic() {
             letters += 1;
         } else {
             other += 1;
@@ -676,19 +756,35 @@ fn dropped_lines(page: &PageText) -> Vec<DroppedLine> {
     dropped
 }
 
-/// `page.text` up to byte `cut` (the whole text when `None`), without the
-/// lines tagged with a non-body role (see [`dropped_lines`]) and with each
-/// verified citation marker replaced by one space.
-fn page_body_text(page: &PageText, markers: &[CitationMarker], cut: Option<usize>) -> String {
+/// `page.text` without the byte ranges `skips` (reference lists; sorted,
+/// not overlapping), without the lines tagged with a non-body role (see
+/// [`dropped_lines`]) and with each verified citation marker replaced by one
+/// space. Text kept after a skipped range starts after a blank line, so it
+/// does not run into the text before the range.
+fn page_body_text(page: &PageText, markers: &[CitationMarker], skips: &[(usize, usize)]) -> String {
     let ranges = marker_char_ranges(page, markers);
     let dropped = dropped_lines(page);
-    let limit = cut.unwrap_or(page.text.len());
     let mut out = String::with_capacity(page.text.len());
     let mut next = 0_usize;
     let mut next_drop = 0_usize;
+    let mut next_skip = 0_usize;
+    let mut after_skip = false;
     for (char_index, (byte_index, c)) in page.text.char_indices().enumerate() {
-        if byte_index >= limit {
-            break;
+        while next_skip < skips.len() && skips[next_skip].1 <= byte_index {
+            next_skip += 1;
+        }
+        if skips
+            .get(next_skip)
+            .is_some_and(|&(start, _)| start <= byte_index)
+        {
+            after_skip = true;
+            continue;
+        }
+        if after_skip {
+            after_skip = false;
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
         }
         while next_drop < dropped.len() && dropped[next_drop].end <= byte_index {
             next_drop += 1;
@@ -737,26 +833,284 @@ fn alignment_texts(
 /// `heading` (figure and table text, captions, algorithms, table of
 /// contents, front matter, furniture) are left out, found in `page.text` by
 /// [`dropped_lines`]; untagged pages keep their whole text. Second pass,
-/// the heuristics for untagged backends: page texts up to the start of the
-/// reference section (the last reference heading, as in
-/// [`reference_section_text`]; every page when there is none), joined by
+/// the heuristics for untagged backends: page texts without the reference
+/// lists (each from its heading to its end, see [`reference_extents`]), so
+/// appendices and supplements printed after a list are kept, joined by
 /// `separator`, with the `markers` found at their char offsets and any
 /// remaining [`citation_marker_re`] match removed, then caption paragraphs
-/// and math-heavy lines dropped.
+/// and math-heavy lines dropped. A page wholly inside a list is left out.
 fn body_only_text(pages: &[PageText], markers: &[CitationMarker], separator: &str) -> String {
-    let start = reference_start(pages);
+    let extents = reference_extents(pages);
     let mut parts: Vec<String> = Vec::new();
     for (pos, page) in pages.iter().enumerate() {
-        let cut = match start {
-            Some((ref_pos, _)) if pos > ref_pos => break,
-            Some((ref_pos, offset)) if pos == ref_pos => Some(offset),
-            _ => None,
-        };
-        parts.push(page_body_text(page, markers, cut));
+        let skips = page_skips(pos, page.text.len(), &extents);
+        let whole = !page.text.is_empty()
+            && skips
+                .iter()
+                .any(|&(start, end)| start == 0 && end >= page.text.len());
+        if whole {
+            continue;
+        }
+        parts.push(page_body_text(page, markers, &skips));
     }
     let joined = parts.join(separator);
     let unmarked = citation_marker_re().replace_all(&joined, " ");
     drop_caption_and_math_lines(&unmarked)
+}
+
+/// Where one reference list sits in the page texts: from `start` up to
+/// `end` (exclusive), each a `(position in pages, byte offset in its text)`
+/// pair; `end` is `(pages.len(), 0)` when the list runs to the document end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReferenceExtent {
+    start: (usize, usize),
+    end: (usize, usize),
+}
+
+/// Byte ranges of the page at `pos` (with `len` bytes of text) that lie
+/// inside one of the `extents`, in order.
+fn page_skips(pos: usize, len: usize, extents: &[ReferenceExtent]) -> Vec<(usize, usize)> {
+    let mut skips: Vec<(usize, usize)> = Vec::new();
+    for extent in extents {
+        if pos < extent.start.0 || pos > extent.end.0 {
+            continue;
+        }
+        let start = if pos == extent.start.0 {
+            extent.start.1.min(len)
+        } else {
+            0
+        };
+        let end = if pos == extent.end.0 {
+            extent.end.1.min(len)
+        } else {
+            len
+        };
+        if start < end {
+            skips.push((start, end));
+        }
+    }
+    skips
+}
+
+/// Every reference list of the document as a [`ReferenceExtent`]. Starts
+/// come from `citations::find_reference_sections` (each heading's line in
+/// `page.text`), else from the text-line fallback of [`reference_start`].
+/// A list ends as [`reference_end`] finds: at an `Appendix`,
+/// `Supplementary`, `Acknowledgments` or caption line, or a short line set
+/// clearly larger than the list, on the page of its last segmented entry;
+/// else at the page after that one, at the next list's heading, or at the
+/// document end, whichever comes first.
+fn reference_extents(pages: &[PageText]) -> Vec<ReferenceExtent> {
+    // `(start, position of the page of the last segmented entry)`.
+    let mut starts: Vec<((usize, usize), Option<usize>)> = Vec::new();
+    for section in find_reference_sections(pages) {
+        let Some(pos) = pages.iter().position(|p| p.page == section.first_page) else {
+            continue;
+        };
+        let offset = line_byte_offset(&pages[pos], section.first_line)
+            .or_else(|| pages[pos].text.find(section.heading.as_str()))
+            .unwrap_or(0);
+        let last_entry = segment_entries(pages, &section)
+            .last()
+            .and_then(|entry| pages.iter().position(|p| p.page == entry.page));
+        starts.push(((pos, offset), last_entry));
+    }
+    if starts.is_empty()
+        && let Some(start) = reference_start(pages)
+    {
+        starts.push((start, None));
+    }
+    starts.sort_unstable();
+    starts.dedup_by_key(|entry| entry.0);
+    let doc_end = (pages.len(), 0_usize);
+    let mut extents: Vec<ReferenceExtent> = Vec::new();
+    for (k, &(start, last_entry)) in starts.iter().enumerate() {
+        let limit = starts.get(k + 1).map_or(doc_end, |next| next.0);
+        let end = reference_end(pages, start, limit, last_entry);
+        extents.push(ReferenceExtent { start, end });
+    }
+    extents
+}
+
+/// Where the reference list that starts at `start` ends (see
+/// [`reference_extents`]): the first [`is_reference_end`] line after
+/// `start` that is on or after the page of the last segmented entry
+/// (`last_entry`, a position in `pages`) and that no numbered entry
+/// ([`entry_label_re`]) follows within [`LIST_RESUME_LINES`] lines (a list
+/// interrupted by a caption or table resumes, as in `citations`); else the
+/// start of the page after `last_entry`, or `limit`, whichever comes first.
+fn reference_end(
+    pages: &[PageText],
+    start: (usize, usize),
+    limit: (usize, usize),
+    last_entry: Option<usize>,
+) -> (usize, usize) {
+    let bound = last_entry
+        .map(|entry| (entry + 1, 0_usize))
+        .filter(|&resume| resume > start)
+        .map_or(limit, |resume| resume.min(limit));
+    let list_last_page = last_entry.unwrap_or(start.0).max(start.0);
+    let median = list_median_size(pages, start, list_last_page.min(bound.0));
+    let mut lines: Vec<(usize, TextLine<'_>)> = Vec::new();
+    for (pos, page) in pages.iter().enumerate().take(bound.0 + 1).skip(start.0) {
+        for line in page_line_starts(page) {
+            let at = (pos, line.offset);
+            if at > start && at < bound {
+                lines.push((pos, line));
+            }
+        }
+    }
+    for (k, (pos, line)) in lines.iter().enumerate() {
+        // `segment_entries` ends a list at the same kind of line, so a line
+        // before the page of the last entry it found does not end the list.
+        if last_entry.is_some_and(|entry| *pos < entry) {
+            continue;
+        }
+        if is_reference_end(line.text, line.size, median) && !list_resumes(&lines[k + 1..]) {
+            return (*pos, line.offset);
+        }
+    }
+    bound
+}
+
+/// Non-blank lines after a candidate list end within which a numbered entry
+/// means the list resumes.
+const LIST_RESUME_LINES: usize = 30;
+
+/// A numbered reference entry's first line: `[12] ...` or `12. ...`.
+fn entry_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(?:\[\d+\]|\d+\.)\s+\S").expect("valid regex"))
+}
+
+/// Whether a numbered entry ([`entry_label_re`]) starts one of the first
+/// [`LIST_RESUME_LINES`] non-blank `lines`.
+fn list_resumes(lines: &[(usize, TextLine<'_>)]) -> bool {
+    lines
+        .iter()
+        .filter(|(_, line)| !line.text.trim().is_empty())
+        .take(LIST_RESUME_LINES)
+        .any(|(_, line)| entry_label_re().is_match(line.text))
+}
+
+/// A line of `page.text` as [`reference_end`] scans it.
+struct TextLine<'a> {
+    /// Byte offset of the line's first character in `page.text`.
+    offset: usize,
+    text: &'a str,
+    /// Largest span font size of the line, when known.
+    size: Option<f32>,
+}
+
+/// The lines of `page` with their byte offsets: the body-role lines of
+/// `page.lines` found in `page.text` in order (as whole lines, see
+/// [`find_whole_line`]; a line not found is skipped), or the `\n`-separated
+/// lines of `page.text` when the page has no `lines`.
+fn page_line_starts(page: &PageText) -> Vec<TextLine<'_>> {
+    let mut out: Vec<TextLine<'_>> = Vec::new();
+    let text = page.text.as_str();
+    if page.lines.is_empty() {
+        let mut offset = 0_usize;
+        for line in text.split('\n') {
+            out.push(TextLine {
+                offset,
+                text: line,
+                size: None,
+            });
+            offset += line.len() + 1;
+        }
+        return out;
+    }
+    let mut cursor = 0_usize;
+    for line in &page.lines {
+        let needle = line.text.trim();
+        if needle.is_empty() {
+            continue;
+        }
+        let Some(found) = find_whole_line(text, needle, cursor) else {
+            continue;
+        };
+        cursor = found + needle.len();
+        if !is_body_role(&line.role) {
+            continue;
+        }
+        let mut size: Option<f32> = None;
+        for index in &line.spans {
+            if let Some(span_size) = page.spans.get(*index as usize).and_then(|span| span.size) {
+                size = Some(size.map_or(span_size, |best: f32| best.max(span_size)));
+            }
+        }
+        out.push(TextLine {
+            offset: found,
+            text: &text[found..cursor],
+            size,
+        });
+    }
+    out
+}
+
+/// Median font size of the lines of a reference list: those after `start`
+/// on its page and on the following pages up to position `last_page`.
+fn list_median_size(pages: &[PageText], start: (usize, usize), last_page: usize) -> Option<f32> {
+    let mut sizes: Vec<f32> = Vec::new();
+    for (pos, page) in pages
+        .iter()
+        .enumerate()
+        .take(last_page.saturating_add(1))
+        .skip(start.0)
+    {
+        for line in page_line_starts(page) {
+            if (pos, line.offset) > start
+                && let Some(size) = line.size
+            {
+                sizes.push(size);
+            }
+        }
+    }
+    if sizes.is_empty() {
+        return None;
+    }
+    sizes.sort_by(f32::total_cmp);
+    Some(sizes[sizes.len() / 2])
+}
+
+/// A heading that ends a reference list: `Appendix`, `Appendices`,
+/// `Supplementary`, `Supporting information`, `Acknowledgments` or an
+/// author biography, optionally numbered (`A`, `7.`, `IV`), as
+/// `citations` ends a list.
+fn reference_end_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^\s*[-–—\s]*(?:(?:\d+|[A-Z]|[IVX]+)[.:]?\s+)?(?:(?:technical|online)\s+)?(?:appendix|appendices|supplementary|supplemental|supporting information|acknowledg\w*|author biograph\w*|biograph\w*)\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Whether a line after a reference heading starts the text that follows
+/// the list: a short line (at most 80 characters) that is a
+/// [`reference_end_re`] heading or a [`caption_start_re`] caption, or that
+/// is set at least 1.15 times the list's `median` size, starts with an
+/// upper-case letter or a digit and does not end like an entry (`.` or
+/// `,`).
+fn is_reference_end(text: &str, size: Option<f32>, median: Option<f32>) -> bool {
+    let line = text.trim();
+    if line.is_empty() || line.chars().count() > 80 {
+        return false;
+    }
+    if reference_end_re().is_match(line) || caption_start_re().is_match(line) {
+        return true;
+    }
+    let (Some(size), Some(typical)) = (size, median) else {
+        return false;
+    };
+    size >= typical * 1.15
+        && line
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
+        && !line.ends_with(['.', ','])
 }
 
 /// `10.NNNN/`: where a DOI starts inside a longer string.
@@ -3022,20 +3376,86 @@ mod tests {
     }
 
     #[test]
-    fn lcs_len_two_row_dp() {
+    fn lcs_len_small_cases() {
         assert_eq!(lcs_len(&[1, 2, 3, 4], &[2, 4]), 2);
         assert_eq!(lcs_len(&[1, 2, 3], &[3, 2, 1]), 1);
         assert_eq!(lcs_len(&[], &[1]), 0);
         assert_eq!(lcs_len(&[7, 8, 9], &[7, 8, 9]), 3);
+        assert_eq!(lcs_len(&[5, 6], &[7, 8]), 0);
+    }
+
+    /// Reference LCS: the two-row dynamic programme, `O(n * m)`.
+    fn dp_lcs_len(left: &[u32], right: &[u32]) -> usize {
+        let mut prev = vec![0_usize; right.len() + 1];
+        let mut cur = vec![0_usize; right.len() + 1];
+        for &token in left {
+            for (j, &other) in right.iter().enumerate() {
+                cur[j + 1] = if token == other {
+                    prev[j] + 1
+                } else {
+                    cur[j].max(prev[j + 1])
+                };
+            }
+            std::mem::swap(&mut prev, &mut cur);
+        }
+        prev[right.len()]
+    }
+
+    /// `len` pseudo-random tokens below `alphabet` from a fixed LCG seed.
+    fn lcg_tokens(seed: u64, len: usize, alphabet: u64) -> Vec<u32> {
+        let mut state = seed;
+        let mut out: Vec<u32> = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            out.push(((state >> 33) % alphabet) as u32);
+        }
+        out
     }
 
     #[test]
-    fn sample_evenly_caps_length_and_keeps_order() {
-        let tokens: Vec<u32> = (0..100).collect();
-        let sampled = sample_evenly(tokens.clone(), 10);
-        assert_eq!(sampled, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
-        assert_eq!(sample_evenly(tokens.clone(), 100), tokens);
-        assert_eq!(sample_evenly(vec![1, 2, 3], 5), vec![1, 2, 3]);
+    fn lcs_len_bit_parallel_matches_dp() {
+        // A full carry chain across four words.
+        let same = vec![3_u32; 200];
+        assert_eq!(lcs_len(&same, &same), 200);
+        assert_eq!(lcs_len(&same, &same[..130]), 130);
+        let mut seed = 1_u64;
+        for len in [1_usize, 2, 63, 64, 65, 127, 128, 129, 200] {
+            for other in [1_usize, 31, 64, 65, 129, 190] {
+                for alphabet in [2_u64, 3, 4, 50] {
+                    seed += 1;
+                    let left = lcg_tokens(seed, len, alphabet);
+                    let right = lcg_tokens(seed * 7 + 3, other, alphabet);
+                    let expected = dp_lcs_len(&left, &right);
+                    assert_eq!(lcs_len(&left, &right), expected, "{len} {other} {alphabet}");
+                    assert_eq!(lcs_len(&right, &left), expected, "{other} {len} {alphabet}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn align_counts_is_exact_above_the_old_sampling_cap() {
+        // 13,000 words against the same words with one extra word inserted
+        // after every 100th: every original word stays matched in order.
+        let original: Vec<String> = (0..13_000).map(|i| format!("w{}", i % 997)).collect();
+        let mut edited: Vec<String> = Vec::new();
+        for (i, word) in original.iter().enumerate() {
+            edited.push(word.clone());
+            if i % 100 == 99 {
+                edited.push("inserted".to_string());
+            }
+        }
+        let counts = align_counts(&original.join(" "), &edited.join(" "));
+        assert_eq!(
+            counts,
+            AlignCounts {
+                left: 13_000,
+                right: 13_130,
+                matched: 13_000,
+            }
+        );
     }
 
     #[test]
@@ -4817,6 +5237,164 @@ mod tests {
         assert!(is_math_heavy("12"));
         assert!(!is_math_heavy("In 2019, 45 of the 1234 runs failed"));
         assert!(!is_math_heavy(""));
+    }
+
+    #[test]
+    fn math_symbols_count_as_math_not_letters() {
+        assert!(is_math_heavy("𝑄𝑛 (𝑋) 𝜏"));
+        assert!(is_math_heavy("αβγ δε"));
+        assert!(is_math_heavy("∀x ∈ X"));
+        assert!(!is_math_heavy("The parameter α controls the rate"));
+        assert!(is_math_char('∑'));
+        assert!(is_math_char('𝐼'));
+        assert!(!is_math_char('a'));
+    }
+
+    #[test]
+    fn caption_start_accepts_number_then_capitalised_word() {
+        for caption in [
+            "Fig. 3 Overview of the judge and extractor choice",
+            "Figure 3 The overall framework of CoFiRec",
+            "Table 2 Results on the test split",
+            "Figure 2: A caption here",
+            "Table 1. Results of the run",
+        ] {
+            assert!(caption_start_re().is_match(caption), "{caption}");
+        }
+        for prose in [
+            "Table 2 shows the body two.",
+            "Table 1.5 lists the runs.",
+            "Figure 3 and 4 show the trend.",
+            "Table 3 GPT-4 outperforms the rest.",
+        ] {
+            assert!(!caption_start_re().is_match(prose), "{prose}");
+        }
+    }
+
+    #[test]
+    fn body_keeps_appendix_after_reference_list() {
+        let pages = vec![
+            lined_page(1, &["Intro words here."]),
+            lined_page(
+                2,
+                &[
+                    "Closing words.",
+                    "References",
+                    "[1] A. Author. First title. 2020.",
+                    "[2] B. Author. Second title. 2021.",
+                ],
+            ),
+            lined_page(3, &["Appendix A", "Appendix proof text."]),
+        ];
+        assert_eq!(
+            words(&body_text_extracted(&pages)),
+            vec![
+                "intro", "words", "here", "closing", "words", "appendix", "a", "appendix", "proof",
+                "text"
+            ]
+        );
+    }
+
+    #[test]
+    fn body_resumes_at_appendix_heading_on_the_reference_page() {
+        let pages = vec![lined_page(
+            1,
+            &[
+                "Closing words.",
+                "References",
+                "[1] A. Author. First title. 2020.",
+                "[2] B. Author. Second title. 2021.",
+                "Appendix A",
+                "Proof text here.",
+            ],
+        )];
+        let body = body_text_extracted(&pages);
+        assert_eq!(
+            words(&body),
+            vec!["closing", "words", "appendix", "a", "proof", "text", "here"]
+        );
+        // The kept text on either side of the cut does not run together.
+        assert!(body.contains("Closing words.\n"), "{body:?}");
+        assert!(
+            body.contains("\n\nAppendix A\nProof text here."),
+            "{body:?}"
+        );
+    }
+
+    #[test]
+    fn body_cuts_every_reference_list_and_keeps_text_between() {
+        let pages = vec![
+            lined_page(
+                1,
+                &[
+                    "Body text.",
+                    "References",
+                    "[1] A. Author. First title. 2020.",
+                    "[2] B. Author. Second title. 2021.",
+                ],
+            ),
+            lined_page(2, &["Appendix A", "More appendix text."]),
+            lined_page(
+                3,
+                &[
+                    "Supplementary References",
+                    "[3] C. Author. Third title. 2019.",
+                    "[4] D. Author. Fourth title. 2018.",
+                ],
+            ),
+        ];
+        assert_eq!(
+            words(&body_text_extracted(&pages)),
+            vec!["body", "text", "appendix", "a", "more", "appendix", "text"]
+        );
+    }
+
+    #[test]
+    fn body_resumes_on_the_page_after_the_last_reference_entry() {
+        let pages = vec![
+            lined_page(
+                1,
+                &[
+                    "Body text.",
+                    "References",
+                    "[1] A. Author. First title. 2020.",
+                    "[2] B. Author. Second title. 2021.",
+                    "[3] C. Author. Third title. 2019.",
+                ],
+            ),
+            lined_page(2, &["Proof details continue here."]),
+        ];
+        assert_eq!(
+            words(&body_text_extracted(&pages)),
+            vec!["body", "text", "proof", "details", "continue", "here"]
+        );
+    }
+
+    #[test]
+    fn caption_inside_reference_list_does_not_end_it() {
+        let pages = vec![lined_page(
+            1,
+            &[
+                "Body words.",
+                "References",
+                "[1] A. Author. First title. 2020.",
+                "Table 3: Results of the run",
+                "[2] B. Author. Second title. 2021.",
+            ],
+        )];
+        assert_eq!(words(&body_text_extracted(&pages)), vec!["body", "words"]);
+    }
+
+    #[test]
+    fn body_keeps_appendix_after_text_only_reference_heading() {
+        let pages = vec![page(
+            1,
+            "Body text.\nReferences\n[1] X. Author. Title. 2020.\nAppendix A\nMore text.",
+        )];
+        assert_eq!(
+            words(&body_text_extracted(&pages)),
+            vec!["body", "text", "appendix", "a", "more", "text"]
+        );
     }
 
     /// A page whose `text` is given and whose lines are `(text, role)`.
