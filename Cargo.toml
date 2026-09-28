@@ -3,6 +3,8 @@ members = [".", "crates/*"]
 resolver = "3"
 
 [workspace.package]
+# Mirrors the root package version; tag-derived Rust versions are tracked separately.
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
