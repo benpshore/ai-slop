@@ -3723,7 +3723,8 @@ mod tests {
     /// `[13]` with four accents).
     #[test]
     fn floating_accents_do_not_hide_numbered_labels() {
-        let rows: Vec<(&str, f32, Vec<(&str, f32)>)> = vec![
+        type Row<'a> = (&'a str, f32, Vec<(&'a str, f32)>);
+        let rows: Vec<Row<'_>> = vec![
             (
                 "[1] Y. Polyanskiy, H. V. Poor, and S. Verdu, “Channel coding rate in the finite",
                 72.0,

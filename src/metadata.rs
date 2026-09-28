@@ -548,10 +548,7 @@ fn find_doi(text: &str) -> Option<String> {
     let found = doi_start_re().find(text)?;
     let start = found.start();
     let mut end = found.end() + id_token_len(&text[found.end()..]);
-    loop {
-        let Some(rest) = text[end..].strip_prefix(' ') else {
-            break;
-        };
+    while let Some(rest) = text[end..].strip_prefix(' ') {
         let token_len = id_token_len(rest);
         if token_len == 0 {
             break;
@@ -564,12 +561,10 @@ fn find_doi(text: &str) -> Option<String> {
         {
             break;
         }
+        // Only a DOI cut right after a separator continues on the next token;
+        // a complete DOI followed by a page or article number stays as it is.
         let after_separator = consumed.ends_with(['/', '.', '-', '_']);
-        let digit_run = token
-            .trim_end_matches(DOI_TRAILING)
-            .bytes()
-            .all(|b| b.is_ascii_digit());
-        if !(after_separator || digit_run) || !doi_wrap_token(token) {
+        if !after_separator || !doi_wrap_token(token) {
             break;
         }
         end += 1 + token_len;
@@ -630,17 +625,22 @@ fn page1_doi(page: &PageText) -> Option<(String, &'static str)> {
     let found: Vec<(usize, String)> = (0..page.lines.len())
         .filter_map(|i| line_doi(page, i).map(|doi| (i, doi)))
         .collect();
-    if let Some((_, doi)) = found
-        .iter()
-        .find(|(i, _)| in_header_footer(page, &page.lines[*i]))
-    {
+    let labelled = |i: usize| page.lines[i].text.to_lowercase().contains("doi");
+    // Publisher furniture: a short line (no running sentence) in the margin
+    // band. A cited DOI inside a paragraph that merely reaches the band must
+    // not outrank the paper's labelled DOI.
+    let furniture = |i: usize| {
+        in_header_footer(page, &page.lines[i])
+            && page.lines[i].text.split_whitespace().count() <= 12
+    };
+    if let Some((_, doi)) = found.iter().find(|(i, _)| furniture(*i) && labelled(*i)) {
         return Some((doi.clone(), "first_page:doi-header-footer"));
     }
-    if let Some((_, doi)) = found
-        .iter()
-        .find(|(i, _)| page.lines[*i].text.to_lowercase().contains("doi"))
-    {
+    if let Some((_, doi)) = found.iter().find(|(i, _)| labelled(*i)) {
         return Some((doi.clone(), "first_page:doi"));
+    }
+    if let Some((_, doi)) = found.iter().find(|(i, _)| furniture(*i)) {
+        return Some((doi.clone(), "first_page:doi-header-footer"));
     }
     found
         .into_iter()
