@@ -551,9 +551,18 @@ impl ZoteroClient {
             next = raw.header("Link").and_then(link_next);
             if let Some(link) = &next {
                 self.check_same_origin(link)?;
+                self.honor_backoff(&raw);
             }
         }
         Ok(out)
+    }
+
+    /// Sleep for the server-requested `Backoff` (seconds, capped at
+    /// [`MAX_BACKOFF_SECS`]) before the next request of a multi-page read.
+    fn honor_backoff(&self, raw: &RawResponse) {
+        if let Some(secs) = parse_u64(raw.header("Backoff")).filter(|s| *s > 0) {
+            std::thread::sleep(std::time::Duration::from_secs(secs.min(MAX_BACKOFF_SECS)));
+        }
     }
 
     /// All collections in the library (all pages).
@@ -570,6 +579,7 @@ impl ZoteroClient {
             next = raw.header("Link").and_then(link_next);
             if let Some(link) = &next {
                 self.check_same_origin(link)?;
+                self.honor_backoff(&raw);
             }
         }
         Ok(out)
