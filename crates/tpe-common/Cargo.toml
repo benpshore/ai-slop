@@ -1,0 +1,13 @@
+[package]
+name = "tpe-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared record types for the text-processing-engine workbench tracks"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[lints]
+workspace = true
