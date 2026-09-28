@@ -107,8 +107,16 @@ jobs:
       - name: Evaluate the docling backend (full layout + OCR)
         if: ${{ !cancelled() }}
         run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native/docling --dump-dir eval-native/docling/dumps
-      - name: Publish the report in the job summary
-        run: cat eval-native/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the reports in the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          for b in pdfium docling-text docling; do
+            if [ -f "eval-native/$b/report.md" ]; then
+              { echo "# $b"; cat "eval-native/$b/report.md"; echo; } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "# $b: no report" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-eval-${{ matrix.os }}
