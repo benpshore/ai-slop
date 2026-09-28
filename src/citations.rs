@@ -1619,7 +1619,6 @@ fn is_name_part(part: &str) -> bool {
 fn initials_first(part: &str) -> bool {
     let tokens: Vec<&str> = part.split_whitespace().collect();
     match tokens.as_slice() {
-        [] => false,
         [first, ..] if initial_token_re().is_match(first) => true,
         [surname, initials] => {
             cap_word_re().is_match(surname)

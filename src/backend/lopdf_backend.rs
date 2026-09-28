@@ -1008,12 +1008,11 @@ impl<'a> Interpreter<'a> {
         let font_name = self.state.font.clone();
         let name: &[u8] = font_name.as_deref().unwrap_or_default();
         let fallback: LoadedFont;
-        let font = match find_font(contexts, name) {
-            Some(found) => found,
-            None => {
-                fallback = LoadedFont::missing();
-                &fallback
-            }
+        let font = if let Some(found) = find_font(contexts, name) {
+            found
+        } else {
+            fallback = LoadedFont::missing();
+            &fallback
         };
         let text = self.decode(name, font, bytes);
         let advance = self.advance(font, bytes);
@@ -1200,23 +1199,22 @@ impl<'a> Interpreter<'a> {
             return;
         }
         let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
-        let operations = match cached {
-            Some(operations) => operations,
-            None => {
-                let content_bytes = match stream.get_plain_content() {
-                    Ok(bytes) => bytes,
-                    Err(_) => stream.content.clone(),
-                };
-                let Ok(content) = Content::decode(&content_bytes) else {
-                    self.warn(format!("XObject {label}: undecodable content stream"));
-                    return;
-                };
-                let operations = Rc::new(content.operations);
-                if let Some(id) = stream_id {
-                    self.cache.forms.insert(id, Rc::clone(&operations));
-                }
-                operations
+        let operations = if let Some(operations) = cached {
+            operations
+        } else {
+            let content_bytes = match stream.get_plain_content() {
+                Ok(bytes) => bytes,
+                Err(_) => stream.content.clone(),
+            };
+            let Ok(content) = Content::decode(&content_bytes) else {
+                self.warn(format!("XObject {label}: undecodable content stream"));
+                return;
+            };
+            let operations = Rc::new(content.operations);
+            if let Some(id) = stream_id {
+                self.cache.forms.insert(id, Rc::clone(&operations));
             }
+            operations
         };
         let matrix = match stream.dict.get(b"Matrix").and_then(Object::as_array) {
             Ok(array) => matrix_from_operands(array).unwrap_or(Matrix::IDENTITY),
@@ -1434,7 +1432,7 @@ mod tests {
 
     /// The encoding `lopdf` resolves for `font` inside an otherwise empty
     /// document, and the [`ByteTable`] built from it.
-    fn with_encoding<F>(font: Dictionary, check: F)
+    fn with_encoding<F>(font: &Dictionary, check: F)
     where
         F: FnOnce(&Encoding<'_>, &ByteTable),
     {
@@ -1703,7 +1701,7 @@ mod tests {
             "Subtype" => "Type1",
             "BaseFont" => "Helvetica",
         };
-        with_encoding(font, |encoding, table| {
+        with_encoding(&font, |encoding, table| {
             let bytes = all_bytes();
             let expected = Document::decode_text(encoding, &bytes).ok();
             assert_eq!(table.decode(&bytes), expected);
@@ -1724,7 +1722,7 @@ mod tests {
             "BaseFont" => "Arial",
             "Encoding" => "WinAnsiEncoding",
         };
-        with_encoding(font, |encoding, table| {
+        with_encoding(&font, |encoding, table| {
             let bytes = all_bytes();
             let expected = Document::decode_text(encoding, &bytes).ok();
             assert!(expected.is_some());
@@ -1745,7 +1743,7 @@ mod tests {
                 "Differences" => vec![65.into(), "eacute".into(), "germandbls".into()],
             },
         };
-        with_encoding(font, |encoding, table| {
+        with_encoding(&font, |encoding, table| {
             let bytes = all_bytes();
             let expected = Document::decode_text(encoding, &bytes).ok();
             assert!(expected.is_some());
@@ -1767,7 +1765,7 @@ mod tests {
             "BaseFont" => "Foo",
             "Encoding" => "90ms-RKSJ-H",
         };
-        with_encoding(font, |encoding, table| {
+        with_encoding(&font, |encoding, table| {
             assert!(Document::decode_text(encoding, b"x").is_err());
             assert_eq!(table.decode(b"x"), None);
         });
