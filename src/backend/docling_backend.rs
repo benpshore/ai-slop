@@ -1010,11 +1010,11 @@ mod tests {
     #[test]
     fn grid_denormalisation_matches_docling_json() {
         // Full grid over US Letter: docling divides by 512, so 511 lands at
-        // 511*612/512 = 610.79 and 792 - 511*792/512 = 1.55 (2-decimal rounding).
+        // 511*612/512 = 610.80 and 792 - 511*792/512 = 1.55 (2-decimal rounding).
         let full = grid_to_bbox([0, 0, 511, 511], 612.0, 792.0).unwrap();
         assert!(close(full.x0, 0.0), "x0 {}", full.x0);
         assert!(close(full.y1, 792.0), "y1 {}", full.y1);
-        assert!(close(full.x1, 610.79), "x1 {}", full.x1);
+        assert!(close(full.x1, 610.80), "x1 {}", full.x1);
         assert!(close(full.y0, 1.55), "y0 {}", full.y0);
 
         let quarter = grid_to_bbox([0, 0, 255, 255], 612.0, 792.0).unwrap();
