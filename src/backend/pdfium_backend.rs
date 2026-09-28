@@ -105,11 +105,11 @@ fn version_string() -> String {
     format!("{PDFIUM_BINARY_VERSION}-binding-{PDFIUM_RENDER_VERSION}")
 }
 
-/// The `pdfium` extractor.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
 /// Upper bound on distinct image bytes retained by one session (256 MiB).
 const FIGURE_BYTES_CAP: usize = 256 * 1024 * 1024;
 
+/// The `pdfium` extractor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PdfiumBackend {
     /// Directory holding `libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`.
     /// `None` tries `$PDFIUM_DYNAMIC_LIB_PATH` (a directory or the file
