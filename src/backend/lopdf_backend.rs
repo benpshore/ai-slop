@@ -31,6 +31,16 @@
 //! for the same bytes, it is part of the backend identity: the config map
 //! behind the digest holds `ligatures=expand`, so runs from before the
 //! change never share an identity with runs after it.
+//!
+//! A simple font's `/Encoding` dictionary is resolved here, not by `lopdf`
+//! (which replaces the whole encoding with `StandardEncoding` when one
+//! `/Differences` name is unknown to it), and so is a font with neither
+//! `/Encoding` nor `/ToUnicode`, whose built-in encoding is the one inside
+//! its font program: the Computer Modern and AMS fonts `TeX` embeds that way
+//! have their encodings tabulated (`CMSY` code 50 is `∈`, not `2`), other
+//! embedded Type1 programs are read for their encoding array. Glyph names
+//! resolve through [`GLYPH_NAMES`], `uniXXXX`/`uXXXX`, then `lopdf`'s own
+//! glyph list. The policy is in the identity as `encodings=1`.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -68,6 +78,11 @@ const LIGATURE_POLICY: &str = "expand";
 /// stack per Form.
 const CONTENT_POLICY: &str = "2";
 
+/// Revision of the simple-font encoding policy, part of the backend identity:
+/// 1 = the TeX built-in encodings, embedded Type1 encodings and a
+/// `/Differences` parse that tolerates unknown glyph names.
+const ENCODING_POLICY: &str = "1";
+
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LopdfBackend {
@@ -85,7 +100,7 @@ impl Default for LopdfBackend {
 
 impl Extractor for LopdfBackend {
     /// Name `lopdf`, version [`LOPDF_VERSION`], digest over `max_xobject_depth`
-    /// and the ligature policy.
+    /// and the ligature, content and encoding policies.
     fn identity(&self) -> BackendIdentity {
         let mut config = BTreeMap::new();
         config.insert(
@@ -94,6 +109,7 @@ impl Extractor for LopdfBackend {
         );
         config.insert("ligatures".to_string(), LIGATURE_POLICY.to_string());
         config.insert("content".to_string(), CONTENT_POLICY.to_string());
+        config.insert("encodings".to_string(), ENCODING_POLICY.to_string());
         BackendIdentity {
             name: "lopdf".to_string(),
             version: LOPDF_VERSION.to_string(),
@@ -553,6 +569,462 @@ fn own_encoding(encoding: Encoding<'_>) -> Decode {
     }
 }
 
+/// The four named base encodings a simple font's `/Encoding` dictionary may
+/// give as `/BaseEncoding`; `lopdf` has a table for each.
+const BASE_ENCODINGS: [&[u8]; 4] = [
+    b"StandardEncoding",
+    b"MacRomanEncoding",
+    b"MacExpertEncoding",
+    b"WinAnsiEncoding",
+];
+
+/// Decompression bound for an embedded Type1 font program read for its
+/// built-in encoding.
+const MAX_FONT_PROGRAM: usize = 8 * 1024 * 1024;
+
+/// The built-in encodings of the Computer Modern and AMS symbol fonts, which
+/// `pdfTeX` embeds without `/Encoding` (and usually without `/ToUnicode`): a
+/// viewer must use the encoding inside the font program, which `lopdf`
+/// replaces with `StandardEncoding`, so `∈` (`CMSY` code 50) came out as `2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TexEncoding {
+    /// `OT1` text fonts (`CMR`, `CMBX`, `CMSS`, ...).
+    Ot1,
+    /// `OT1` text italics, whose code 36 is `sterling` rather than `dollar`.
+    Ot1Italic,
+    /// `OML` math italic (`CMMI`, `CMMIB`).
+    Oml,
+    /// `OMS` math symbols (`CMSY`, `CMBSY`).
+    Oms,
+    /// `OMX` math extension (`CMEX`).
+    Omx,
+    /// Typewriter text (`CMTT`), `OT1` with ASCII in place of some glyphs.
+    Typewriter,
+    /// AMS symbols A.
+    Msam,
+    /// AMS symbols B.
+    Msbm,
+}
+
+/// Font families by name without the size digits, for [`tex_encoding`].
+const TEX_FAMILIES: &[(&str, TexEncoding)] = &[
+    ("CMB", TexEncoding::Ot1),
+    ("CMBSY", TexEncoding::Oms),
+    ("CMBX", TexEncoding::Ot1),
+    ("CMBXSL", TexEncoding::Ot1),
+    ("CMBXTI", TexEncoding::Ot1Italic),
+    ("CMCSC", TexEncoding::Ot1),
+    ("CMDUNH", TexEncoding::Ot1),
+    ("CMEX", TexEncoding::Omx),
+    ("CMFF", TexEncoding::Ot1),
+    ("CMFIB", TexEncoding::Ot1),
+    ("CMITT", TexEncoding::Typewriter),
+    ("CMMI", TexEncoding::Oml),
+    ("CMMIB", TexEncoding::Oml),
+    ("CMR", TexEncoding::Ot1),
+    ("CMSL", TexEncoding::Ot1),
+    ("CMSLTT", TexEncoding::Typewriter),
+    ("CMSS", TexEncoding::Ot1),
+    ("CMSSBX", TexEncoding::Ot1),
+    ("CMSSDC", TexEncoding::Ot1),
+    ("CMSSI", TexEncoding::Ot1),
+    ("CMSSQ", TexEncoding::Ot1),
+    ("CMSSQI", TexEncoding::Ot1),
+    ("CMSY", TexEncoding::Oms),
+    ("CMTI", TexEncoding::Ot1Italic),
+    ("CMTT", TexEncoding::Typewriter),
+    ("MSAM", TexEncoding::Msam),
+    ("MSBM", TexEncoding::Msbm),
+];
+
+/// `name` without a subset tag (`ABCDEF+`).
+fn strip_subset(name: &[u8]) -> &[u8] {
+    match name.get(..7) {
+        Some([tag @ .., b'+']) if tag.iter().all(u8::is_ascii_uppercase) => &name[7..],
+        _ => name,
+    }
+}
+
+/// The TeX built-in encoding of the font named `base_font`: a known family
+/// name (any case) followed by the design size in digits, as `CMSY10`.
+fn tex_encoding(base_font: &[u8]) -> Option<TexEncoding> {
+    let name = strip_subset(base_font);
+    let digits = name.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let family = &name[..name.len() - digits];
+    TEX_FAMILIES
+        .iter()
+        .find(|(known, _)| known.as_bytes().eq_ignore_ascii_case(family))
+        .map(|&(_, encoding)| encoding)
+}
+
+/// The code 0 to 127 a code above 127 duplicates in the Type1 versions of
+/// the Computer Modern fonts (the remapping of the control range in the
+/// AMS Type1 fonts, as their embedded programs list it); 160 is the space.
+fn tex_high_alias(code: u8) -> Option<u8> {
+    match code {
+        128 => Some(32),
+        161..=170 => Some(code - 161),
+        173..=195 => Some(code - 163),
+        196 => Some(127),
+        _ => None,
+    }
+}
+
+/// Per-byte text of a simple font; every entry holds zero chars (the code
+/// has no glyph, or one that no table resolves) or exactly one, which keeps
+/// the font `one_to_one` so dropped codes are counted and warned about.
+fn unmapped_entries() -> Vec<Option<String>> {
+    vec![Some(String::new()); 256]
+}
+
+fn set_entry(entries: &mut [Option<String>], code: u8, ch: Option<char>) {
+    if let Some(slot) = entries.get_mut(usize::from(code)) {
+        *slot = Some(ch.map(String::from).unwrap_or_default());
+    }
+}
+
+/// The glyph named `name` in the table built into `lopdf` (the Adobe Glyph
+/// List plus TeX names), which `lopdf` does not export: it is queried
+/// through a one-entry `/Differences` encoding. An unknown name makes `lopdf`
+/// fall back to `StandardEncoding`, which has no glyph at code 0, so the
+/// empty result reads as "unknown".
+fn lopdf_glyph(doc: &Document, name: &[u8]) -> Option<char> {
+    let mut encoding = Dictionary::new();
+    encoding.set("Type", Object::Name(b"Encoding".to_vec()));
+    encoding.set(
+        "Differences",
+        Object::Array(vec![Object::Integer(0), Object::Name(name.to_vec())]),
+    );
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Encoding", Object::Dictionary(encoding));
+    let resolved = font.get_font_encoding(doc).ok()?;
+    let text = Document::decode_text(&resolved, &[0]).ok()?;
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(ch)
+}
+
+/// `uniXXXX` (exactly four hex digits) or `uXXXX` to `uXXXXXX`, the Adobe
+/// Glyph List forms that name a code point directly. Control characters and
+/// surrogates are refused.
+fn uni_glyph(name: &[u8]) -> Option<char> {
+    let hex = if let Some(rest) = name.strip_prefix(b"uni") {
+        if rest.len() != 4 {
+            return None;
+        }
+        rest
+    } else {
+        let rest = name.strip_prefix(b"u")?;
+        if !(4..=6).contains(&rest.len()) {
+            return None;
+        }
+        rest
+    };
+    if !hex.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let text = std::str::from_utf8(hex).ok()?;
+    let value = u32::from_str_radix(text, 16).ok()?;
+    char::from_u32(value).filter(|ch| !ch.is_control())
+}
+
+/// An opaque glyph name that identifies a glyph by number only (`g37`,
+/// `cid1024`): it says nothing about the character.
+fn opaque_glyph(name: &[u8]) -> bool {
+    [b"g".as_slice(), b"cid".as_slice()].iter().any(|prefix| {
+        name.strip_prefix(*prefix)
+            .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+    })
+}
+
+/// The character a glyph name stands for: [`GLYPH_NAMES`] first, then the
+/// `uniXXXX`/`uXXXX` forms, then `lopdf`'s own glyph list. A suffix after a
+/// period (`a.sc`, `one.oldstyle`) is dropped first, as the Adobe Glyph List
+/// specification says; `.notdef` and opaque names give `None`.
+fn glyph_char(doc: &Document, name: &[u8]) -> Option<char> {
+    let base = match name.iter().position(|&byte| byte == b'.') {
+        Some(0) => return None,
+        Some(period) => &name[..period],
+        None => name,
+    };
+    if let Ok(index) = GLYPH_NAMES.binary_search_by(|(known, _)| known.as_bytes().cmp(base)) {
+        return GLYPH_NAMES.get(index).map(|&(_, ch)| ch);
+    }
+    if let Some(ch) = uni_glyph(base) {
+        return Some(ch);
+    }
+    if opaque_glyph(base) {
+        return None;
+    }
+    lopdf_glyph(doc, base)
+}
+
+/// The per-byte text of one of `lopdf`'s named single-byte encodings
+/// (`StandardEncoding` when `name` is `None`).
+fn named_entries(doc: &Document, name: Option<&[u8]>) -> Option<Vec<Option<String>>> {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    if let Some(name) = name {
+        font.set("Encoding", Object::Name(name.to_vec()));
+    }
+    let encoding = font.get_font_encoding(doc).ok()?;
+    Some(ByteTable::build(&encoding).entries)
+}
+
+/// Split `PostScript` source into tokens: runs of non-whitespace, with a
+/// name's `/` always starting a new token (`50/element` is two tokens).
+fn ps_tokens(source: &[u8]) -> Vec<&[u8]> {
+    let mut tokens = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, &byte) in source.iter().enumerate() {
+        if is_pdf_space(byte) || byte == b'/' {
+            if let Some(first) = start.take() {
+                tokens.push(&source[first..index]);
+            }
+            if byte == b'/' {
+                start = Some(index);
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(first) = start {
+        tokens.push(&source[first..]);
+    }
+    tokens
+}
+
+/// The built-in encoding in the clear-text part of a Type1 font program:
+/// `(code, glyph name)` for every `dup <code> /<name> put` of its
+/// `/Encoding` array. `None` when the program uses `StandardEncoding` or has
+/// no encoding array.
+fn type1_encoding(program: &[u8]) -> Option<Vec<(u8, Vec<u8>)>> {
+    let clear_end = program
+        .windows(5)
+        .position(|window| window == b"eexec")
+        .unwrap_or(program.len());
+    let clear = &program[..clear_end];
+    let start = clear.windows(9).position(|window| window == b"/Encoding")?;
+    let tokens = ps_tokens(&clear[start + 9..]);
+    if tokens.first() == Some(&b"StandardEncoding".as_slice()) {
+        return None;
+    }
+    let mut found = Vec::new();
+    for (index, &token) in tokens.iter().enumerate() {
+        if token == b"def" {
+            break;
+        }
+        if token != b"dup" {
+            continue;
+        }
+        let (Some(code), Some(name), Some(put)) = (
+            tokens.get(index + 1),
+            tokens.get(index + 2),
+            tokens.get(index + 3),
+        ) else {
+            continue;
+        };
+        if *put != b"put" {
+            continue;
+        }
+        let Some(glyph) = name.strip_prefix(b"/") else {
+            continue;
+        };
+        let parsed = std::str::from_utf8(code)
+            .ok()
+            .and_then(|text| text.parse::<u8>().ok());
+        if let Some(code) = parsed {
+            found.push((code, glyph.to_vec()));
+        }
+    }
+    if found.is_empty() { None } else { Some(found) }
+}
+
+/// The resolved built-in encoding of the embedded Type1 font program
+/// (`/FontFile`), if the font has one with its own encoding array.
+fn embedded_encoding(doc: &Document, dict: &Dictionary) -> Option<Vec<(u8, Option<char>)>> {
+    let descriptor = dict
+        .get_deref(b"FontDescriptor", doc)
+        .and_then(Object::as_dict)
+        .ok()?;
+    let stream = descriptor
+        .get_deref(b"FontFile", doc)
+        .and_then(Object::as_stream)
+        .ok()?;
+    let program = stream.get_plain_content_with_limit(MAX_FONT_PROGRAM).ok()?;
+    let listed = type1_encoding(&program)?;
+    Some(
+        listed
+            .into_iter()
+            .map(|(code, name)| (code, glyph_char(doc, &name)))
+            .collect(),
+    )
+}
+
+/// The per-byte text of a TeX font's built-in encoding. The `OT1`, `OML`
+/// and `OMS` tables list every code from 0 to 127 and are used alone (with
+/// the codes above 127 that duplicate them). For the partly known tables,
+/// codes the table lacks come from the embedded font program, else
+/// (typewriter text only) from `StandardEncoding`.
+fn tex_entries(
+    doc: &Document,
+    dict: &Dictionary,
+    encoding: TexEncoding,
+) -> Option<Vec<Option<String>>> {
+    let (partial, symbolic): (&[(u8, &str)], bool) = match encoding {
+        TexEncoding::Ot1 | TexEncoding::Ot1Italic => {
+            return Some(full_tex_entries(doc, &OT1_NAMES, encoding));
+        }
+        TexEncoding::Oml => return Some(full_tex_entries(doc, &OML_NAMES, encoding)),
+        TexEncoding::Oms => return Some(full_tex_entries(doc, &OMS_NAMES, encoding)),
+        TexEncoding::Omx => (OMX_NAMES, true),
+        TexEncoding::Typewriter => (TYPEWRITER_NAMES, false),
+        TexEncoding::Msam => (MSAM_NAMES, true),
+        TexEncoding::Msbm => (MSBM_NAMES, true),
+    };
+    let mut entries = if symbolic {
+        unmapped_entries()
+    } else {
+        named_entries(doc, None)?
+    };
+    if let Some(embedded) = embedded_encoding(doc, dict) {
+        for (code, ch) in embedded {
+            set_entry(&mut entries, code, ch);
+        }
+    }
+    for &(code, name) in partial {
+        set_entry(&mut entries, code, glyph_char(doc, name.as_bytes()));
+    }
+    Some(entries)
+}
+
+/// The per-byte text of a TeX font whose table `names` covers codes 0 to
+/// 127 (an empty name has no glyph).
+fn full_tex_entries(
+    doc: &Document,
+    names: &[&str; 128],
+    encoding: TexEncoding,
+) -> Vec<Option<String>> {
+    let mut entries = unmapped_entries();
+    for code in 0..=u8::MAX {
+        let low = if code < 128 {
+            Some(code)
+        } else {
+            tex_high_alias(code)
+        };
+        let Some(name) = low.and_then(|low| names.get(usize::from(low))) else {
+            continue;
+        };
+        if !name.is_empty() {
+            set_entry(&mut entries, code, glyph_char(doc, name.as_bytes()));
+        }
+    }
+    set_entry(&mut entries, 160, Some(' '));
+    if encoding == TexEncoding::Ot1Italic {
+        set_entry(&mut entries, 36, glyph_char(doc, b"sterling"));
+    }
+    entries
+}
+
+/// The per-byte text of a simple font's built-in encoding, when it is not
+/// `StandardEncoding`: a TeX font's known table, else the encoding array of
+/// the embedded Type1 program. An embedded array in which fewer than half
+/// the names resolve is not trusted (its names are likely opaque, and the
+/// codes likely ASCII), so the caller keeps `StandardEncoding`.
+fn builtin_entries(doc: &Document, dict: &Dictionary) -> Option<Vec<Option<String>>> {
+    let subtype = dict.get(b"Subtype").and_then(Object::as_name);
+    if subtype.is_ok_and(|name| name == b"Type3") {
+        return None;
+    }
+    let base_font = dict.get(b"BaseFont").and_then(Object::as_name).ok();
+    if let Some(encoding) = base_font.and_then(tex_encoding) {
+        return tex_entries(doc, dict, encoding);
+    }
+    let embedded = embedded_encoding(doc, dict)?;
+    let resolved = embedded.iter().filter(|(_, ch)| ch.is_some()).count();
+    if resolved * 2 < embedded.len() {
+        return None;
+    }
+    let mut entries = unmapped_entries();
+    for (code, ch) in embedded {
+        set_entry(&mut entries, code, ch);
+    }
+    Some(entries)
+}
+
+/// Overlay an `/Encoding` dictionary's `/Differences` on `entries`. Unlike
+/// `lopdf`, which drops the whole encoding for `StandardEncoding` when one
+/// name is unknown, only that code becomes unmapped; out-of-range codes and
+/// items of the wrong type are skipped.
+fn apply_differences(doc: &Document, encoding: &Dictionary, entries: &mut [Option<String>]) {
+    let Ok(items) = encoding
+        .get_deref(b"Differences", doc)
+        .and_then(Object::as_array)
+    else {
+        return;
+    };
+    let mut code: Option<u8> = None;
+    for item in items {
+        match item {
+            Object::Integer(value) => code = u8::try_from(*value).ok(),
+            Object::Name(name) => {
+                if let Some(current) = code {
+                    set_entry(entries, current, glyph_char(doc, name));
+                    code = current.checked_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The byte table of a simple font whose encoding this backend resolves
+/// itself rather than through `lopdf`: an `/Encoding` dictionary (base, then
+/// `/Differences`), or no `/Encoding` and no `/ToUnicode` with a non-standard
+/// built-in encoding. `None` leaves the font to `lopdf` (a named
+/// `/Encoding`, a `/ToUnicode` `CMap`, or `StandardEncoding`).
+///
+/// The base under `/Differences` is the named `/BaseEncoding`, else the
+/// font's built-in encoding (a Type3 font has none), else
+/// `StandardEncoding`.
+fn own_table(doc: &Document, dict: &Dictionary) -> Option<ByteTable> {
+    match dict.get_deref(b"Encoding", doc) {
+        Ok(Object::Dictionary(encoding)) => {
+            let base_name = encoding
+                .get_deref(b"BaseEncoding", doc)
+                .and_then(Object::as_name)
+                .ok()
+                .filter(|name| BASE_ENCODINGS.contains(name));
+            let mut entries = match base_name {
+                Some(name) => named_entries(doc, Some(name))?,
+                None => match builtin_entries(doc, dict) {
+                    Some(entries) => entries,
+                    None => named_entries(doc, None)?,
+                },
+            };
+            apply_differences(doc, encoding, &mut entries);
+            Some(ByteTable { entries })
+        }
+        Ok(_) => None,
+        Err(_) => {
+            let to_unicode = dict
+                .get_deref(b"ToUnicode", doc)
+                .and_then(Object::as_stream);
+            if to_unicode.is_ok() {
+                return None;
+            }
+            builtin_entries(doc, dict).map(|entries| ByteTable { entries })
+        }
+    }
+}
+
 /// A font dictionary resolved once: everything the interpreter needs to show
 /// a string with it. The resource name is not part of it, as one font object
 /// may be reachable under different names on different pages.
@@ -603,6 +1075,9 @@ fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
 }
 
 fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool) {
+    if let Some(table) = own_table(doc, dict) {
+        return (Decode::Table(table), true);
+    }
     match dict.get_font_encoding(doc) {
         Ok(encoding) => {
             let one_to_one = !matches!(encoding, Encoding::UnicodeMapEncoding(_));
@@ -2036,6 +2511,1778 @@ fn extract_page(
     Ok(interpreter.finish())
 }
 
+/// Glyph names and the characters they stand for, sorted by name (bytes)
+/// for binary search in [`glyph_char`]. Generated from the glyph list built
+/// into `lopdf` 0.45 (the Adobe Glyph List plus the TeX names), restricted
+/// to Latin, Greek, combining marks, punctuation, super- and subscripts,
+/// letterlike symbols, arrows, mathematical operators, technical and
+/// geometric shapes, and the Latin ligatures, without private-use targets;
+/// plus the TeX glyph names `lopdf` lacks (`phi1`, `mapsto`, `vextendsingle`,
+/// the AMS symbol names, ...), and these deliberate changes: `bardbl` is
+/// U+2016, `Delta` and `mu` are the Greek letters, `triangleleft` and
+/// `triangleright` point the way their `CMMI` glyphs do, the old-style
+/// digits are digits, `circlecopyrt` is U+25EF, and the `CMEX` delimiter
+/// pieces (`parenlefttp`, `braceex`, ...) are the U+239B to U+23AD pieces.
+static GLYPH_NAMES: &[(&str, char)] = &[
+    ("A", '\u{0041}'),
+    ("AE", '\u{00C6}'),
+    ("Aacute", '\u{00C1}'),
+    ("Abreve", '\u{0102}'),
+    ("Acircumflex", '\u{00C2}'),
+    ("Adieresis", '\u{00C4}'),
+    ("Agrave", '\u{00C0}'),
+    ("Alpha", '\u{0391}'),
+    ("Amacron", '\u{0100}'),
+    ("Aogonek", '\u{0104}'),
+    ("Aring", '\u{00C5}'),
+    ("Atilde", '\u{00C3}'),
+    ("B", '\u{0042}'),
+    ("Beta", '\u{0392}'),
+    ("C", '\u{0043}'),
+    ("Cacute", '\u{0106}'),
+    ("Ccaron", '\u{010C}'),
+    ("Ccedilla", '\u{00C7}'),
+    ("Ccircumflex", '\u{0108}'),
+    ("Cdot", '\u{010A}'),
+    ("Cdotaccent", '\u{010A}'),
+    ("Chi", '\u{03A7}'),
+    ("D", '\u{0044}'),
+    ("Dbar", '\u{0110}'),
+    ("Dcaron", '\u{010E}'),
+    ("Dcroat", '\u{0110}'),
+    ("Deicoptic", '\u{03EE}'),
+    ("Delta", '\u{0394}'),
+    ("Deltagreek", '\u{0394}'),
+    ("Digammagreek", '\u{03DC}'),
+    ("Dslash", '\u{0110}'),
+    ("E", '\u{0045}'),
+    ("Eacute", '\u{00C9}'),
+    ("Ebreve", '\u{0114}'),
+    ("Ecaron", '\u{011A}'),
+    ("Ecircumflex", '\u{00CA}'),
+    ("Edieresis", '\u{00CB}'),
+    ("Edot", '\u{0116}'),
+    ("Edotaccent", '\u{0116}'),
+    ("Egrave", '\u{00C8}'),
+    ("Emacron", '\u{0112}'),
+    ("Eng", '\u{014A}'),
+    ("Eogonek", '\u{0118}'),
+    ("Epsilon", '\u{0395}'),
+    ("Eta", '\u{0397}'),
+    ("Eth", '\u{00D0}'),
+    ("Euro", '\u{20AC}'),
+    ("F", '\u{0046}'),
+    ("Feicoptic", '\u{03E4}'),
+    ("G", '\u{0047}'),
+    ("Gamma", '\u{0393}'),
+    ("Gangiacoptic", '\u{03EA}'),
+    ("Gbreve", '\u{011E}'),
+    ("Gcedilla", '\u{0122}'),
+    ("Gcircumflex", '\u{011C}'),
+    ("Gcommaaccent", '\u{0122}'),
+    ("Gdot", '\u{0120}'),
+    ("Gdotaccent", '\u{0120}'),
+    ("Germandbls", '\u{0053}'),
+    ("H", '\u{0048}'),
+    ("H18533", '\u{25CF}'),
+    ("H18543", '\u{25AA}'),
+    ("H18551", '\u{25AB}'),
+    ("H22073", '\u{25A1}'),
+    ("Hbar", '\u{0126}'),
+    ("Hcircumflex", '\u{0124}'),
+    ("Horicoptic", '\u{03E8}'),
+    ("I", '\u{0049}'),
+    ("IJ", '\u{0132}'),
+    ("Iacute", '\u{00CD}'),
+    ("Ibreve", '\u{012C}'),
+    ("Icircumflex", '\u{00CE}'),
+    ("Idieresis", '\u{00CF}'),
+    ("Idot", '\u{0130}'),
+    ("Idotaccent", '\u{0130}'),
+    ("Ifractur", '\u{2111}'),
+    ("Ifraktur", '\u{2111}'),
+    ("Igrave", '\u{00CC}'),
+    ("Imacron", '\u{012A}'),
+    ("Iogonek", '\u{012E}'),
+    ("Iota", '\u{0399}'),
+    ("Iotadieresis", '\u{03AA}'),
+    ("Itilde", '\u{0128}'),
+    ("J", '\u{004A}'),
+    ("Jcircumflex", '\u{0134}'),
+    ("K", '\u{004B}'),
+    ("Kappa", '\u{039A}'),
+    ("Kcedilla", '\u{0136}'),
+    ("Kcommaaccent", '\u{0136}'),
+    ("Kheicoptic", '\u{03E6}'),
+    ("Koppagreek", '\u{03DE}'),
+    ("L", '\u{004C}'),
+    ("Lacute", '\u{0139}'),
+    ("Lambda", '\u{039B}'),
+    ("Lcaron", '\u{013D}'),
+    ("Lcedilla", '\u{013B}'),
+    ("Lcommaaccent", '\u{013B}'),
+    ("Ldot", '\u{013F}'),
+    ("Ldotaccent", '\u{013F}'),
+    ("Lslash", '\u{0141}'),
+    ("M", '\u{004D}'),
+    ("Mu", '\u{039C}'),
+    ("N", '\u{004E}'),
+    ("Nacute", '\u{0143}'),
+    ("Ncaron", '\u{0147}'),
+    ("Ncedilla", '\u{0145}'),
+    ("Ncommaaccent", '\u{0145}'),
+    ("Ng", '\u{014A}'),
+    ("Ntilde", '\u{00D1}'),
+    ("Nu", '\u{039D}'),
+    ("O", '\u{004F}'),
+    ("OE", '\u{0152}'),
+    ("Oacute", '\u{00D3}'),
+    ("Obreve", '\u{014E}'),
+    ("Ocircumflex", '\u{00D4}'),
+    ("Odblacute", '\u{0150}'),
+    ("Odieresis", '\u{00D6}'),
+    ("Ograve", '\u{00D2}'),
+    ("Ohm", '\u{2126}'),
+    ("Ohungarumlaut", '\u{0150}'),
+    ("Omacron", '\u{014C}'),
+    ("Omega", '\u{2126}'),
+    ("Omegagreek", '\u{03A9}'),
+    ("Omicron", '\u{039F}'),
+    ("Oslash", '\u{00D8}'),
+    ("Otilde", '\u{00D5}'),
+    ("P", '\u{0050}'),
+    ("Phi", '\u{03A6}'),
+    ("Pi", '\u{03A0}'),
+    ("Psi", '\u{03A8}'),
+    ("Q", '\u{0051}'),
+    ("R", '\u{0052}'),
+    ("Racute", '\u{0154}'),
+    ("Rcaron", '\u{0158}'),
+    ("Rcedilla", '\u{0156}'),
+    ("Rcommaaccent", '\u{0156}'),
+    ("Rfractur", '\u{211C}'),
+    ("Rfraktur", '\u{211C}'),
+    ("Rho", '\u{03A1}'),
+    ("S", '\u{0053}'),
+    ("SS", '\u{0053}'),
+    ("Sacute", '\u{015A}'),
+    ("Sampigreek", '\u{03E0}'),
+    ("Scaron", '\u{0160}'),
+    ("Scedilla", '\u{015E}'),
+    ("Scircumflex", '\u{015C}'),
+    ("Scommaaccent", '\u{0218}'),
+    ("Sheicoptic", '\u{03E2}'),
+    ("Shimacoptic", '\u{03EC}'),
+    ("Sigma", '\u{03A3}'),
+    ("Stigmagreek", '\u{03DA}'),
+    ("T", '\u{0054}'),
+    ("Tau", '\u{03A4}'),
+    ("Tbar", '\u{0166}'),
+    ("Tcaron", '\u{0164}'),
+    ("Tcedilla", '\u{0162}'),
+    ("Tcommaaccent", '\u{0162}'),
+    ("Theta", '\u{0398}'),
+    ("Thorn", '\u{00DE}'),
+    ("U", '\u{0055}'),
+    ("Uacute", '\u{00DA}'),
+    ("Ubreve", '\u{016C}'),
+    ("Ucircumflex", '\u{00DB}'),
+    ("Udblacute", '\u{0170}'),
+    ("Udieresis", '\u{00DC}'),
+    ("Ugrave", '\u{00D9}'),
+    ("Uhungarumlaut", '\u{0170}'),
+    ("Umacron", '\u{016A}'),
+    ("Uogonek", '\u{0172}'),
+    ("Upsilon", '\u{03A5}'),
+    ("Upsilon1", '\u{03D2}'),
+    ("Upsilonacutehooksymbolgreek", '\u{03D3}'),
+    ("Upsilondieresis", '\u{03AB}'),
+    ("Upsilondieresishooksymbolgreek", '\u{03D4}'),
+    ("Upsilonhooksymbol", '\u{03D2}'),
+    ("Uring", '\u{016E}'),
+    ("Utilde", '\u{0168}'),
+    ("V", '\u{0056}'),
+    ("W", '\u{0057}'),
+    ("Wcircumflex", '\u{0174}'),
+    ("X", '\u{0058}'),
+    ("Xi", '\u{039E}'),
+    ("Y", '\u{0059}'),
+    ("Yacute", '\u{00DD}'),
+    ("Ycircumflex", '\u{0176}'),
+    ("Ydieresis", '\u{0178}'),
+    ("Z", '\u{005A}'),
+    ("Zacute", '\u{0179}'),
+    ("Zcaron", '\u{017D}'),
+    ("Zdot", '\u{017B}'),
+    ("Zdotaccent", '\u{017B}'),
+    ("Zeta", '\u{0396}'),
+    ("a", '\u{0061}'),
+    ("aacute", '\u{00E1}'),
+    ("abreve", '\u{0103}'),
+    ("acircumflex", '\u{00E2}'),
+    ("acute", '\u{00B4}'),
+    ("acutebelowcmb", '\u{0317}'),
+    ("acutecmb", '\u{0301}'),
+    ("acutecomb", '\u{0301}'),
+    ("acutelowmod", '\u{02CF}'),
+    ("adieresis", '\u{00E4}'),
+    ("ae", '\u{00E6}'),
+    ("afii00208", '\u{2015}'),
+    ("afii61248", '\u{2105}'),
+    ("afii61289", '\u{2113}'),
+    ("afii61352", '\u{2116}'),
+    ("afii61573", '\u{202C}'),
+    ("afii61574", '\u{202D}'),
+    ("afii61575", '\u{202E}'),
+    ("agrave", '\u{00E0}'),
+    ("aleph", '\u{2135}'),
+    ("allequal", '\u{224C}'),
+    ("alpha", '\u{03B1}'),
+    ("alphatonos", '\u{03AC}'),
+    ("amacron", '\u{0101}'),
+    ("ampersand", '\u{0026}'),
+    ("angbracketleft", '\u{27E8}'),
+    ("angbracketleftBig", '\u{27E8}'),
+    ("angbracketleftBigg", '\u{27E8}'),
+    ("angbracketleftbig", '\u{27E8}'),
+    ("angbracketleftbigg", '\u{27E8}'),
+    ("angbracketright", '\u{27E9}'),
+    ("angbracketrightBig", '\u{27E9}'),
+    ("angbracketrightBigg", '\u{27E9}'),
+    ("angbracketrightbig", '\u{27E9}'),
+    ("angbracketrightbigg", '\u{27E9}'),
+    ("angle", '\u{2220}'),
+    ("angleleft", '\u{2329}'),
+    ("angleleftBig", '\u{2329}'),
+    ("angleleftBigg", '\u{2329}'),
+    ("angleleftbig", '\u{2329}'),
+    ("angleleftbigg", '\u{2329}'),
+    ("angleright", '\u{232A}'),
+    ("anglerightBig", '\u{232A}'),
+    ("anglerightBigg", '\u{232A}'),
+    ("anglerightbig", '\u{232A}'),
+    ("anglerightbigg", '\u{232A}'),
+    ("angstrom", '\u{212B}'),
+    ("aogonek", '\u{0105}'),
+    ("approaches", '\u{2250}'),
+    ("approxequal", '\u{2248}'),
+    ("approxequalorimage", '\u{2252}'),
+    ("approximatelyequal", '\u{2245}'),
+    ("arc", '\u{2312}'),
+    ("aring", '\u{00E5}'),
+    ("arrowboth", '\u{2194}'),
+    ("arrowbothv", '\u{2195}'),
+    ("arrowbt", '\u{2193}'),
+    ("arrowdashdown", '\u{21E3}'),
+    ("arrowdashleft", '\u{21E0}'),
+    ("arrowdashright", '\u{21E2}'),
+    ("arrowdashup", '\u{21E1}'),
+    ("arrowdblboth", '\u{21D4}'),
+    ("arrowdblbothv", '\u{21D5}'),
+    ("arrowdbldown", '\u{21D3}'),
+    ("arrowdblleft", '\u{21D0}'),
+    ("arrowdblright", '\u{21D2}'),
+    ("arrowdbltp", '\u{21D1}'),
+    ("arrowdblup", '\u{21D1}'),
+    ("arrowdblvertex", '\u{21D5}'),
+    ("arrowdown", '\u{2193}'),
+    ("arrowdownleft", '\u{2199}'),
+    ("arrowdownright", '\u{2198}'),
+    ("arrowdownwhite", '\u{21E9}'),
+    ("arrowhookleft", '\u{21AA}'),
+    ("arrowhookright", '\u{21A9}'),
+    ("arrowleft", '\u{2190}'),
+    ("arrowleftbothalf", '\u{21BD}'),
+    ("arrowleftdbl", '\u{21D0}'),
+    ("arrowleftdblstroke", '\u{21CD}'),
+    ("arrowleftoverright", '\u{21C6}'),
+    ("arrowlefttophalf", '\u{21BC}'),
+    ("arrowleftwhite", '\u{21E6}'),
+    ("arrownortheast", '\u{2197}'),
+    ("arrownorthwest", '\u{2196}'),
+    ("arrowright", '\u{2192}'),
+    ("arrowrightbothalf", '\u{21C1}'),
+    ("arrowrightdblstroke", '\u{21CF}'),
+    ("arrowrightoverleft", '\u{21C4}'),
+    ("arrowrighttophalf", '\u{21C0}'),
+    ("arrowrightwhite", '\u{21E8}'),
+    ("arrowsoutheast", '\u{2198}'),
+    ("arrowsouthwest", '\u{2199}'),
+    ("arrowtableft", '\u{21E4}'),
+    ("arrowtabright", '\u{21E5}'),
+    ("arrowtp", '\u{2191}'),
+    ("arrowup", '\u{2191}'),
+    ("arrowupdn", '\u{2195}'),
+    ("arrowupdnbse", '\u{21A8}'),
+    ("arrowupdownbase", '\u{21A8}'),
+    ("arrowupleft", '\u{2196}'),
+    ("arrowupleftofdown", '\u{21C5}'),
+    ("arrowupright", '\u{2197}'),
+    ("arrowupwhite", '\u{21E7}'),
+    ("arrowvertex", '\u{2195}'),
+    ("asciicircum", '\u{005E}'),
+    ("asciitilde", '\u{007E}'),
+    ("asterisk", '\u{002A}'),
+    ("asteriskcentered", '\u{2217}'),
+    ("asteriskmath", '\u{2217}'),
+    ("asterism", '\u{2042}'),
+    ("asymptoticallyequal", '\u{2243}'),
+    ("at", '\u{0040}'),
+    ("atilde", '\u{00E3}'),
+    ("b", '\u{0062}'),
+    ("backslash", '\u{005C}'),
+    ("backslashBig", '\u{005C}'),
+    ("backslashBigg", '\u{005C}'),
+    ("backslashbig", '\u{005C}'),
+    ("backslashbigg", '\u{005C}'),
+    ("bar", '\u{007C}'),
+    ("bardbl", '\u{2016}'),
+    ("bardblex", '\u{2016}'),
+    ("barex", '\u{007C}'),
+    ("beamedsixteenthnotes", '\u{266C}'),
+    ("because", '\u{2235}'),
+    ("beta", '\u{03B2}'),
+    ("betasymbolgreek", '\u{03D0}'),
+    ("blackcircle", '\u{25CF}'),
+    ("blackdiamond", '\u{25C6}'),
+    ("blackdownpointingtriangle", '\u{25BC}'),
+    ("blackleftpointingpointer", '\u{25C4}'),
+    ("blackleftpointingtriangle", '\u{25C0}'),
+    ("blacklowerlefttriangle", '\u{25E3}'),
+    ("blacklowerrighttriangle", '\u{25E2}'),
+    ("blackrectangle", '\u{25AC}'),
+    ("blackrightpointingpointer", '\u{25BA}'),
+    ("blackrightpointingtriangle", '\u{25B6}'),
+    ("blacksmallsquare", '\u{25AA}'),
+    ("blacksmilingface", '\u{263B}'),
+    ("blacksquare", '\u{25A0}'),
+    ("blackstar", '\u{2605}'),
+    ("blackupperlefttriangle", '\u{25E4}'),
+    ("blackupperrighttriangle", '\u{25E5}'),
+    ("blackuppointingsmalltriangle", '\u{25B4}'),
+    ("blackuppointingtriangle", '\u{25B2}'),
+    ("braceex", '\u{23AA}'),
+    ("braceleft", '\u{007B}'),
+    ("braceleftBig", '\u{007B}'),
+    ("braceleftBigg", '\u{007B}'),
+    ("braceleftbig", '\u{007B}'),
+    ("braceleftbigg", '\u{007B}'),
+    ("braceleftbt", '\u{23A9}'),
+    ("braceleftmid", '\u{23A8}'),
+    ("bracelefttp", '\u{23A7}'),
+    ("braceright", '\u{007D}'),
+    ("bracerightBig", '\u{007D}'),
+    ("bracerightBigg", '\u{007D}'),
+    ("bracerightbig", '\u{007D}'),
+    ("bracerightbigg", '\u{007D}'),
+    ("bracerightbt", '\u{23AD}'),
+    ("bracerightmid", '\u{23AC}'),
+    ("bracerighttp", '\u{23AB}'),
+    ("bracketleft", '\u{005B}'),
+    ("bracketleftBig", '\u{005B}'),
+    ("bracketleftBigg", '\u{005B}'),
+    ("bracketleftbig", '\u{005B}'),
+    ("bracketleftbigg", '\u{005B}'),
+    ("bracketleftbt", '\u{23A3}'),
+    ("bracketleftex", '\u{23A2}'),
+    ("bracketlefttp", '\u{23A1}'),
+    ("bracketright", '\u{005D}'),
+    ("bracketrightBig", '\u{005D}'),
+    ("bracketrightBigg", '\u{005D}'),
+    ("bracketrightbig", '\u{005D}'),
+    ("bracketrightbigg", '\u{005D}'),
+    ("bracketrightbt", '\u{23A6}'),
+    ("bracketrightex", '\u{23A5}'),
+    ("bracketrighttp", '\u{23A4}'),
+    ("breve", '\u{02D8}'),
+    ("brevebelowcmb", '\u{032E}'),
+    ("brevecmb", '\u{0306}'),
+    ("breveinvertedbelowcmb", '\u{032F}'),
+    ("breveinvertedcmb", '\u{0311}'),
+    ("bridgebelowcmb", '\u{032A}'),
+    ("brokenbar", '\u{00A6}'),
+    ("bullet", '\u{2022}'),
+    ("bulletinverse", '\u{25D8}'),
+    ("bulletoperator", '\u{2219}'),
+    ("bullseye", '\u{25CE}'),
+    ("c", '\u{0063}'),
+    ("cacute", '\u{0107}'),
+    ("candrabinducmb", '\u{0310}'),
+    ("capslock", '\u{21EA}'),
+    ("careof", '\u{2105}'),
+    ("caron", '\u{02C7}'),
+    ("caronbelowcmb", '\u{032C}'),
+    ("caroncmb", '\u{030C}'),
+    ("carriagereturn", '\u{21B5}'),
+    ("ccaron", '\u{010D}'),
+    ("ccedilla", '\u{00E7}'),
+    ("ccircumflex", '\u{0109}'),
+    ("cdot", '\u{010B}'),
+    ("cdotaccent", '\u{010B}'),
+    ("cedilla", '\u{00B8}'),
+    ("cedillacmb", '\u{0327}'),
+    ("ceilingleft", '\u{2308}'),
+    ("ceilingleftBig", '\u{2308}'),
+    ("ceilingleftBigg", '\u{2308}'),
+    ("ceilingleftbig", '\u{2308}'),
+    ("ceilingleftbigg", '\u{2308}'),
+    ("ceilingright", '\u{2309}'),
+    ("ceilingrightBig", '\u{2309}'),
+    ("ceilingrightBigg", '\u{2309}'),
+    ("ceilingrightbig", '\u{2309}'),
+    ("ceilingrightbigg", '\u{2309}'),
+    ("cent", '\u{00A2}'),
+    ("centigrade", '\u{2103}'),
+    ("check", '\u{2713}'),
+    ("checkmark", '\u{2713}'),
+    ("chi", '\u{03C7}'),
+    ("circle", '\u{25CB}'),
+    ("circlecopyrt", '\u{25EF}'),
+    ("circledivide", '\u{2298}'),
+    ("circledot", '\u{2299}'),
+    ("circledotdisplay", '\u{2299}'),
+    ("circledottext", '\u{2299}'),
+    ("circleminus", '\u{2296}'),
+    ("circlemultiply", '\u{2297}'),
+    ("circlemultiplydisplay", '\u{2297}'),
+    ("circlemultiplytext", '\u{2297}'),
+    ("circleot", '\u{2299}'),
+    ("circleplus", '\u{2295}'),
+    ("circleplusdisplay", '\u{2295}'),
+    ("circleplustext", '\u{2295}'),
+    ("circlewithlefthalfblack", '\u{25D0}'),
+    ("circlewithrighthalfblack", '\u{25D1}'),
+    ("circumflex", '\u{02C6}'),
+    ("circumflexbelowcmb", '\u{032D}'),
+    ("circumflexcmb", '\u{0302}'),
+    ("clear", '\u{2327}'),
+    ("club", '\u{2663}'),
+    ("clubsuitblack", '\u{2663}'),
+    ("clubsuitwhite", '\u{2667}'),
+    ("colon", '\u{003A}'),
+    ("colontriangularhalfmod", '\u{02D1}'),
+    ("colontriangularmod", '\u{02D0}'),
+    ("comma", '\u{002C}'),
+    ("commaabovecmb", '\u{0313}'),
+    ("commaaboverightcmb", '\u{0315}'),
+    ("commareversedabovecmb", '\u{0314}'),
+    ("commaturnedabovecmb", '\u{0312}'),
+    ("compass", '\u{263C}'),
+    ("congruent", '\u{2245}'),
+    ("contintegraldisplay", '\u{222E}'),
+    ("contintegraltext", '\u{222E}'),
+    ("contourintegral", '\u{222E}'),
+    ("control", '\u{2303}'),
+    ("coproduct", '\u{2A3F}'),
+    ("coproductdisplay", '\u{2210}'),
+    ("coproducttext", '\u{2210}'),
+    ("copyright", '\u{00A9}'),
+    ("curlyand", '\u{22CF}'),
+    ("curlyor", '\u{22CE}'),
+    ("currency", '\u{00A4}'),
+    ("d", '\u{0064}'),
+    ("dagger", '\u{2020}'),
+    ("daggerdbl", '\u{2021}'),
+    ("dbar", '\u{0111}'),
+    ("dblarchinvertedbelowcmb", '\u{032B}'),
+    ("dblarrowleft", '\u{21D4}'),
+    ("dblarrowright", '\u{21D2}'),
+    ("dblgravecmb", '\u{030F}'),
+    ("dblintegral", '\u{222C}'),
+    ("dbllowline", '\u{2017}'),
+    ("dbllowlinecmb", '\u{0333}'),
+    ("dblverticalbar", '\u{2016}'),
+    ("dblverticallineabovecmb", '\u{030E}'),
+    ("dcaron", '\u{010F}'),
+    ("dcroat", '\u{0111}'),
+    ("defines", '\u{225C}'),
+    ("degree", '\u{00B0}'),
+    ("deicoptic", '\u{03EF}'),
+    ("deleteleft", '\u{232B}'),
+    ("deleteright", '\u{2326}'),
+    ("delta", '\u{03B4}'),
+    ("diamond", '\u{2662}'),
+    ("diamond2", '\u{2666}'),
+    ("diamondmath", '\u{22C4}'),
+    ("diamondsuitwhite", '\u{2662}'),
+    ("dieresis", '\u{00A8}'),
+    ("dieresisbelowcmb", '\u{0324}'),
+    ("dieresiscmb", '\u{0308}'),
+    ("divide", '\u{00F7}'),
+    ("divides", '\u{2223}'),
+    ("divisionslash", '\u{2215}'),
+    ("dmacron", '\u{0111}'),
+    ("dollar", '\u{0024}'),
+    ("dotacc", '\u{02D9}'),
+    ("dotaccent", '\u{02D9}'),
+    ("dotaccentcmb", '\u{0307}'),
+    ("dotbelowcmb", '\u{0323}'),
+    ("dotbelowcomb", '\u{0323}'),
+    ("dotlessi", '\u{0131}'),
+    ("dotlessj", '\u{0237}'),
+    ("dotmath", '\u{22C5}'),
+    ("dottedcircle", '\u{25CC}'),
+    ("downslope", '\u{2572}'),
+    ("downtackbelowcmb", '\u{031E}'),
+    ("downtackmod", '\u{02D5}'),
+    ("e", '\u{0065}'),
+    ("eacute", '\u{00E9}'),
+    ("earth", '\u{2641}'),
+    ("ebreve", '\u{0115}'),
+    ("ecaron", '\u{011B}'),
+    ("ecircumflex", '\u{00EA}'),
+    ("edieresis", '\u{00EB}'),
+    ("edot", '\u{0117}'),
+    ("edotaccent", '\u{0117}'),
+    ("egrave", '\u{00E8}'),
+    ("eight", '\u{0038}'),
+    ("eighthnotebeamed", '\u{266B}'),
+    ("eightinferior", '\u{2088}'),
+    ("eightoldstyle", '\u{0038}'),
+    ("eightsuperior", '\u{2078}'),
+    ("element", '\u{2208}'),
+    ("ellipsis", '\u{2026}'),
+    ("ellipsisvertical", '\u{22EE}'),
+    ("emacron", '\u{0113}'),
+    ("emdash", '\u{2014}'),
+    ("emptyset", '\u{2205}'),
+    ("endash", '\u{2013}'),
+    ("eng", '\u{014B}'),
+    ("eogonek", '\u{0119}'),
+    ("epsilon", '\u{03B5}'),
+    ("epsilon1", '\u{03F5}'),
+    ("epsiloninv", '\u{03F6}'),
+    ("epsilontonos", '\u{03AD}'),
+    ("equal", '\u{003D}'),
+    ("equalsuperior", '\u{207C}'),
+    ("equivalence", '\u{2261}'),
+    ("equivasymptotic", '\u{224D}'),
+    ("estimated", '\u{212E}'),
+    ("eta", '\u{03B7}'),
+    ("etatonos", '\u{03AE}'),
+    ("eth", '\u{00F0}'),
+    ("euro", '\u{20AC}'),
+    ("exclam", '\u{0021}'),
+    ("exclamdbl", '\u{203C}'),
+    ("exclamdown", '\u{00A1}'),
+    ("existential", '\u{2203}'),
+    ("f", '\u{0066}'),
+    ("f_f", '\u{FB00}'),
+    ("f_f_i", '\u{FB03}'),
+    ("f_f_l", '\u{FB04}'),
+    ("f_i", '\u{FB01}'),
+    ("f_l", '\u{FB02}'),
+    ("fahrenheit", '\u{2109}'),
+    ("feicoptic", '\u{03E5}'),
+    ("female", '\u{2640}'),
+    ("ff", '\u{FB00}'),
+    ("ffi", '\u{FB03}'),
+    ("ffl", '\u{FB04}'),
+    ("fi", '\u{FB01}'),
+    ("figuredash", '\u{2012}'),
+    ("filledbox", '\u{25A0}'),
+    ("filledrect", '\u{25AC}'),
+    ("firsttonechinese", '\u{02C9}'),
+    ("fisheye", '\u{25C9}'),
+    ("five", '\u{0035}'),
+    ("fiveinferior", '\u{2085}'),
+    ("fiveoldstyle", '\u{0035}'),
+    ("fivesuperior", '\u{2075}'),
+    ("fl", '\u{FB02}'),
+    ("flat", '\u{266D}'),
+    ("floorleft", '\u{230A}'),
+    ("floorleftBig", '\u{230A}'),
+    ("floorleftBigg", '\u{230A}'),
+    ("floorleftbig", '\u{230A}'),
+    ("floorleftbigg", '\u{230A}'),
+    ("floorright", '\u{230B}'),
+    ("floorrightBig", '\u{230B}'),
+    ("floorrightBigg", '\u{230B}'),
+    ("floorrightbig", '\u{230B}'),
+    ("floorrightbigg", '\u{230B}'),
+    ("florin", '\u{0192}'),
+    ("follows", '\u{227B}'),
+    ("followsequal", '\u{227D}'),
+    ("forall", '\u{2200}'),
+    ("four", '\u{0034}'),
+    ("fourinferior", '\u{2084}'),
+    ("fouroldstyle", '\u{0034}'),
+    ("foursuperior", '\u{2074}'),
+    ("fourthtonechinese", '\u{02CB}'),
+    ("fraction", '\u{2044}'),
+    ("g", '\u{0067}'),
+    ("gamma", '\u{03B3}'),
+    ("gangiacoptic", '\u{03EB}'),
+    ("gbreve", '\u{011F}'),
+    ("gcedilla", '\u{0123}'),
+    ("gcircumflex", '\u{011D}'),
+    ("gcommaaccent", '\u{0123}'),
+    ("gdot", '\u{0121}'),
+    ("gdotaccent", '\u{0121}'),
+    ("geometricallyequal", '\u{2251}'),
+    ("germandbls", '\u{00DF}'),
+    ("gradient", '\u{2207}'),
+    ("grave", '\u{0060}'),
+    ("gravebelowcmb", '\u{0316}'),
+    ("gravecmb", '\u{0300}'),
+    ("gravecomb", '\u{0300}'),
+    ("gravelowmod", '\u{02CE}'),
+    ("greater", '\u{003E}'),
+    ("greaterequal", '\u{2265}'),
+    ("greaterequalorless", '\u{22DB}'),
+    ("greatermuch", '\u{226B}'),
+    ("greaterorequalslant", '\u{2A7E}'),
+    ("greaterorequivalent", '\u{2273}'),
+    ("greaterorless", '\u{2277}'),
+    ("greaterorsimilar", '\u{2273}'),
+    ("greateroverequal", '\u{2267}'),
+    ("guillemotleft", '\u{00AB}'),
+    ("guillemotright", '\u{00BB}'),
+    ("guilsinglleft", '\u{2039}'),
+    ("guilsinglright", '\u{203A}'),
+    ("h", '\u{0068}'),
+    ("harpoonleftbarbup", '\u{21BC}'),
+    ("harpoonleftdown", '\u{21BD}'),
+    ("harpoonleftright", '\u{21CC}'),
+    ("harpoonleftup", '\u{21BC}'),
+    ("harpoonrightbarbup", '\u{21C0}'),
+    ("harpoonrightdown", '\u{21C1}'),
+    ("harpoonrightup", '\u{21C0}'),
+    ("hatwide", '\u{0302}'),
+    ("hatwider", '\u{0302}'),
+    ("hatwiderr", '\u{0302}'),
+    ("hatwidest", '\u{0302}'),
+    ("hbar", '\u{0127}'),
+    ("hcircumflex", '\u{0125}'),
+    ("heart", '\u{2661}'),
+    ("heart2", '\u{2665}'),
+    ("heartsuitblack", '\u{2665}'),
+    ("heartsuitwhite", '\u{2661}'),
+    ("hookabovecomb", '\u{0309}'),
+    ("hookcmb", '\u{0309}'),
+    ("hookleftchar", '\u{21A9}'),
+    ("hookpalatalizedbelowcmb", '\u{0321}'),
+    ("hookretroflexbelowcmb", '\u{0322}'),
+    ("hookrightchar", '\u{21AA}'),
+    ("horicoptic", '\u{03E9}'),
+    ("horizontalbar", '\u{2015}'),
+    ("horncmb", '\u{031B}'),
+    ("hotsprings", '\u{2668}'),
+    ("house", '\u{2302}'),
+    ("hungarumlaut", '\u{02DD}'),
+    ("hungarumlautcmb", '\u{030B}'),
+    ("hyphen", '\u{002D}'),
+    ("hyphen_alt", '\u{2010}'),
+    ("hyphenchar", '\u{002D}'),
+    ("hyphentwo", '\u{2010}'),
+    ("i", '\u{0069}'),
+    ("iacute", '\u{00ED}'),
+    ("ibreve", '\u{012D}'),
+    ("icircumflex", '\u{00EE}'),
+    ("idieresis", '\u{00EF}'),
+    ("igrave", '\u{00EC}'),
+    ("ij", '\u{0133}'),
+    ("ilde", '\u{02DC}'),
+    ("imacron", '\u{012B}'),
+    ("imageorapproximatelyequal", '\u{2253}'),
+    ("increment", '\u{2206}'),
+    ("infinity", '\u{221E}'),
+    ("integerdivide", '\u{2216}'),
+    ("integral", '\u{222B}'),
+    ("integralbottom", '\u{2321}'),
+    ("integralbt", '\u{2321}'),
+    ("integraldisplay", '\u{222B}'),
+    ("integraltext", '\u{222B}'),
+    ("integraltop", '\u{2320}'),
+    ("integraltp", '\u{2320}'),
+    ("intercal", '\u{22BA}'),
+    ("interrobang", '\u{203D}'),
+    ("intersection", '\u{2229}'),
+    ("intersectiondisplay", '\u{22C2}'),
+    ("intersectionsq", '\u{2293}'),
+    ("intersectiontext", '\u{22C2}'),
+    ("invbullet", '\u{25D8}'),
+    ("invcircle", '\u{25D9}'),
+    ("invsmileface", '\u{263B}'),
+    ("iogonek", '\u{012F}'),
+    ("iota", '\u{03B9}'),
+    ("iotadieresis", '\u{03CA}'),
+    ("iotatonos", '\u{03AF}'),
+    ("itilde", '\u{0129}'),
+    ("j", '\u{006A}'),
+    ("jcircumflex", '\u{0135}'),
+    ("k", '\u{006B}'),
+    ("kappa", '\u{03BA}'),
+    ("kappasymbolgreek", '\u{03F0}'),
+    ("kcedilla", '\u{0137}'),
+    ("kcommaaccent", '\u{0137}'),
+    ("kgreenlandic", '\u{0138}'),
+    ("kheicoptic", '\u{03E7}'),
+    ("l", '\u{006C}'),
+    ("lacute", '\u{013A}'),
+    ("lambda", '\u{03BB}'),
+    ("largecircle", '\u{25EF}'),
+    ("latticetop", '\u{22A4}'),
+    ("lcaron", '\u{013E}'),
+    ("lcedilla", '\u{013C}'),
+    ("lcommaaccent", '\u{013C}'),
+    ("ldot", '\u{0140}'),
+    ("ldotaccent", '\u{0140}'),
+    ("leftangleabovecmb", '\u{031A}'),
+    ("lefttackbelowcmb", '\u{0318}'),
+    ("less", '\u{003C}'),
+    ("lessequal", '\u{2264}'),
+    ("lessequalorgreater", '\u{22DA}'),
+    ("lessmuch", '\u{226A}'),
+    ("lessorequalslant", '\u{2A7D}'),
+    ("lessorequivalent", '\u{2272}'),
+    ("lessorgreater", '\u{2276}'),
+    ("lessorsimilar", '\u{2272}'),
+    ("lessoverequal", '\u{2266}'),
+    ("logicaland", '\u{2227}'),
+    ("logicalanddisplay", '\u{22C0}'),
+    ("logicalandtext", '\u{22C0}'),
+    ("logicalnot", '\u{00AC}'),
+    ("logicalnotreversed", '\u{2310}'),
+    ("logicalor", '\u{2228}'),
+    ("logicalordisplay", '\u{22C1}'),
+    ("logicalortext", '\u{22C1}'),
+    ("longs", '\u{017F}'),
+    ("lowlinecmb", '\u{0332}'),
+    ("lozenge", '\u{25CA}'),
+    ("lscript", '\u{2113}'),
+    ("lslash", '\u{0142}'),
+    ("lsquare", '\u{2113}'),
+    ("m", '\u{006D}'),
+    ("macron", '\u{00AF}'),
+    ("macronbelowcmb", '\u{0331}'),
+    ("macroncmb", '\u{0304}'),
+    ("macronlowmod", '\u{02CD}'),
+    ("male", '\u{2642}'),
+    ("mapsto", '\u{21A6}'),
+    ("mars", '\u{2642}'),
+    ("middot", '\u{00B7}'),
+    ("minus", '\u{2212}'),
+    ("minusbelowcmb", '\u{0320}'),
+    ("minuscircle", '\u{2296}'),
+    ("minusmod", '\u{02D7}'),
+    ("minusplus", '\u{2213}'),
+    ("minute", '\u{2032}'),
+    ("mu", '\u{03BC}'),
+    ("mu1", '\u{00B5}'),
+    ("muchgreater", '\u{226B}'),
+    ("muchless", '\u{226A}'),
+    ("mugreek", '\u{03BC}'),
+    ("multicloseleft", '\u{22C9}'),
+    ("multicloseright", '\u{22CA}'),
+    ("multiply", '\u{00D7}'),
+    ("musicalnote", '\u{266A}'),
+    ("musicalnotedbl", '\u{266B}'),
+    ("musicflatsign", '\u{266D}'),
+    ("musicsharpsign", '\u{266F}'),
+    ("n", '\u{006E}'),
+    ("nabla", '\u{2207}'),
+    ("nacute", '\u{0144}'),
+    ("napostrophe", '\u{0149}'),
+    ("natural", '\u{266E}'),
+    ("nbspace", '\u{00A0}'),
+    ("ncaron", '\u{0148}'),
+    ("ncedilla", '\u{0146}'),
+    ("ncommaaccent", '\u{0146}'),
+    ("negationslash", '\u{0338}'),
+    ("ng", '\u{014B}'),
+    ("nine", '\u{0039}'),
+    ("nineinferior", '\u{2089}'),
+    ("nineoldstyle", '\u{0039}'),
+    ("ninesuperior", '\u{2079}'),
+    ("nonbreakingspace", '\u{00A0}'),
+    ("notcontains", '\u{220C}'),
+    ("notelement", '\u{2209}'),
+    ("notelementof", '\u{2209}'),
+    ("notequal", '\u{2260}'),
+    ("notfollows", '\u{2281}'),
+    ("notgreater", '\u{226F}'),
+    ("notgreaterequal", '\u{2271}'),
+    ("notgreaternorequal", '\u{2271}'),
+    ("notgreaternorless", '\u{2279}'),
+    ("notidentical", '\u{2262}'),
+    ("notless", '\u{226E}'),
+    ("notlessequal", '\u{2270}'),
+    ("notlessnorequal", '\u{2270}'),
+    ("notparallel", '\u{2226}'),
+    ("notprecedes", '\u{2280}'),
+    ("notsimilar", '\u{2241}'),
+    ("notsubset", '\u{2284}'),
+    ("notsubsetoreql", '\u{2288}'),
+    ("notsucceeds", '\u{2281}'),
+    ("notsuperset", '\u{2285}'),
+    ("nsuperior", '\u{207F}'),
+    ("ntilde", '\u{00F1}'),
+    ("nu", '\u{03BD}'),
+    ("numbersign", '\u{0023}'),
+    ("numero", '\u{2116}'),
+    ("o", '\u{006F}'),
+    ("oacute", '\u{00F3}'),
+    ("obreve", '\u{014F}'),
+    ("ocircumflex", '\u{00F4}'),
+    ("odblacute", '\u{0151}'),
+    ("odieresis", '\u{00F6}'),
+    ("oe", '\u{0153}'),
+    ("ogonek", '\u{02DB}'),
+    ("ogonekcmb", '\u{0328}'),
+    ("ograve", '\u{00F2}'),
+    ("ohungarumlaut", '\u{0151}'),
+    ("omacron", '\u{014D}'),
+    ("omega", '\u{03C9}'),
+    ("omega1", '\u{03D6}'),
+    ("omegatonos", '\u{03CE}'),
+    ("omicron", '\u{03BF}'),
+    ("omicrontonos", '\u{03CC}'),
+    ("one", '\u{0031}'),
+    ("onedotenleader", '\u{2024}'),
+    ("onehalf", '\u{00BD}'),
+    ("oneinferior", '\u{2081}'),
+    ("oneoldstyle", '\u{0031}'),
+    ("onequarter", '\u{00BC}'),
+    ("onesuperior", '\u{00B9}'),
+    ("openbullet", '\u{25E6}'),
+    ("option", '\u{2325}'),
+    ("ordfeminine", '\u{00AA}'),
+    ("ordmasculine", '\u{00BA}'),
+    ("orthogonal", '\u{221F}'),
+    ("oslash", '\u{00F8}'),
+    ("otilde", '\u{00F5}'),
+    ("overline", '\u{203E}'),
+    ("overlinecmb", '\u{0305}'),
+    ("overscore", '\u{00AF}'),
+    ("owner", '\u{220B}'),
+    ("p", '\u{0070}'),
+    ("pagedown", '\u{21DF}'),
+    ("pageup", '\u{21DE}'),
+    ("paragraph", '\u{00B6}'),
+    ("parallel", '\u{2225}'),
+    ("parenleft", '\u{0028}'),
+    ("parenleftBig", '\u{0028}'),
+    ("parenleftBigg", '\u{0028}'),
+    ("parenleftbig", '\u{0028}'),
+    ("parenleftbigg", '\u{0028}'),
+    ("parenleftbt", '\u{239D}'),
+    ("parenleftex", '\u{239C}'),
+    ("parenleftinferior", '\u{208D}'),
+    ("parenleftsuperior", '\u{207D}'),
+    ("parenlefttp", '\u{239B}'),
+    ("parenright", '\u{0029}'),
+    ("parenrightBig", '\u{0029}'),
+    ("parenrightBigg", '\u{0029}'),
+    ("parenrightbig", '\u{0029}'),
+    ("parenrightbigg", '\u{0029}'),
+    ("parenrightbt", '\u{23A0}'),
+    ("parenrightex", '\u{239F}'),
+    ("parenrightinferior", '\u{208E}'),
+    ("parenrightsuperior", '\u{207E}'),
+    ("parenrighttp", '\u{239E}'),
+    ("partialdiff", '\u{2202}'),
+    ("percent", '\u{0025}'),
+    ("period", '\u{002E}'),
+    ("periodcentered", '\u{00B7}'),
+    ("perpendicular", '\u{22A5}'),
+    ("pertenthousand", '\u{2031}'),
+    ("perthousand", '\u{2030}'),
+    ("phi", '\u{03C6}'),
+    ("phi1", '\u{03C6}'),
+    ("phi2", '\u{03D5}'),
+    ("phisymbolgreek", '\u{03D5}'),
+    ("pi", '\u{03C0}'),
+    ("pi1", '\u{03D6}'),
+    ("pisymbolgreek", '\u{03D6}'),
+    ("plus", '\u{002B}'),
+    ("plusbelowcmb", '\u{031F}'),
+    ("pluscircle", '\u{2295}'),
+    ("plusminus", '\u{00B1}'),
+    ("plusmod", '\u{02D6}'),
+    ("plussuperior", '\u{207A}'),
+    ("pointingindexdownwhite", '\u{261F}'),
+    ("pointingindexleftwhite", '\u{261C}'),
+    ("pointingindexrightwhite", '\u{261E}'),
+    ("pointingindexupwhite", '\u{261D}'),
+    ("precedes", '\u{227A}'),
+    ("precedesequal", '\u{227C}'),
+    ("prescription", '\u{211E}'),
+    ("prime", '\u{2032}'),
+    ("primereversed", '\u{2035}'),
+    ("product", '\u{220F}'),
+    ("productdisplay", '\u{220F}'),
+    ("producttext", '\u{220F}'),
+    ("projective", '\u{2305}'),
+    ("propellor", '\u{2318}'),
+    ("propersubset", '\u{2282}'),
+    ("propersuperset", '\u{2283}'),
+    ("proportion", '\u{2237}'),
+    ("proportional", '\u{221D}'),
+    ("psi", '\u{03C8}'),
+    ("punctdash", '\u{2014}'),
+    ("q", '\u{0071}'),
+    ("quarternote", '\u{2669}'),
+    ("question", '\u{003F}'),
+    ("questiondown", '\u{00BF}'),
+    ("quotedbl", '\u{0022}'),
+    ("quotedblbase", '\u{201E}'),
+    ("quotedblleft", '\u{201C}'),
+    ("quotedblright", '\u{201D}'),
+    ("quoteleft", '\u{2018}'),
+    ("quoteleftreversed", '\u{201B}'),
+    ("quotereversed", '\u{201B}'),
+    ("quoteright", '\u{2019}'),
+    ("quoterightn", '\u{0149}'),
+    ("quotesinglbase", '\u{201A}'),
+    ("quotesingle", '\u{0027}'),
+    ("r", '\u{0072}'),
+    ("racute", '\u{0155}'),
+    ("radical", '\u{221A}'),
+    ("radicalBig", '\u{221A}'),
+    ("radicalBigg", '\u{221A}'),
+    ("radicalbig", '\u{221A}'),
+    ("radicalbigg", '\u{221A}'),
+    ("radicalbt", '\u{221A}'),
+    ("rangedash", '\u{2013}'),
+    ("ratio", '\u{2236}'),
+    ("rcaron", '\u{0159}'),
+    ("rcedilla", '\u{0157}'),
+    ("rcommaaccent", '\u{0157}'),
+    ("referencemark", '\u{203B}'),
+    ("reflexsubset", '\u{2286}'),
+    ("reflexsuperset", '\u{2287}'),
+    ("registered", '\u{00AE}'),
+    ("reversedtilde", '\u{223D}'),
+    ("revlogicalnot", '\u{2310}'),
+    ("rho", '\u{03C1}'),
+    ("rho1", '\u{03F1}'),
+    ("rhosymbolgreek", '\u{03F1}'),
+    ("rightangle", '\u{221F}'),
+    ("righttackbelowcmb", '\u{0319}'),
+    ("righttriangle", '\u{22BF}'),
+    ("ring", '\u{02DA}'),
+    ("ringbelowcmb", '\u{0325}'),
+    ("ringcmb", '\u{030A}'),
+    ("ringhalfleftbelowcmb", '\u{031C}'),
+    ("ringhalfleftcentered", '\u{02D3}'),
+    ("ringhalfrightcentered", '\u{02D2}'),
+    ("s", '\u{0073}'),
+    ("sacute", '\u{015B}'),
+    ("scaron", '\u{0161}'),
+    ("scedilla", '\u{015F}'),
+    ("scircumflex", '\u{015D}'),
+    ("scommaaccent", '\u{0219}'),
+    ("second", '\u{2033}'),
+    ("secondtonechinese", '\u{02CA}'),
+    ("section", '\u{00A7}'),
+    ("semicolon", '\u{003B}'),
+    ("seven", '\u{0037}'),
+    ("seveninferior", '\u{2087}'),
+    ("sevenoldstyle", '\u{0037}'),
+    ("sevensuperior", '\u{2077}'),
+    ("sfthyphen", '\u{00AD}'),
+    ("sharp", '\u{266F}'),
+    ("sheicoptic", '\u{03E3}'),
+    ("shimacoptic", '\u{03ED}'),
+    ("sigma", '\u{03C3}'),
+    ("sigma1", '\u{03C2}'),
+    ("sigmafinal", '\u{03C2}'),
+    ("sigmalunatesymbolgreek", '\u{03F2}'),
+    ("similar", '\u{223C}'),
+    ("similarequal", '\u{2243}'),
+    ("six", '\u{0036}'),
+    ("sixinferior", '\u{2086}'),
+    ("sixoldstyle", '\u{0036}'),
+    ("sixsuperior", '\u{2076}'),
+    ("slash", '\u{002F}'),
+    ("slashBig", '\u{2215}'),
+    ("slashBigg", '\u{2215}'),
+    ("slashbig", '\u{2215}'),
+    ("slashbigg", '\u{2215}'),
+    ("slong", '\u{017F}'),
+    ("slurabove", '\u{2322}'),
+    ("slurbelow", '\u{2323}'),
+    ("smileface", '\u{263A}'),
+    ("softhyphen", '\u{00AD}'),
+    ("soliduslongoverlaycmb", '\u{0338}'),
+    ("solidusshortoverlaycmb", '\u{0337}'),
+    ("space", '\u{0020}'),
+    ("spacehackarabic", '\u{0020}'),
+    ("spade", '\u{2660}'),
+    ("spadesuitblack", '\u{2660}'),
+    ("spadesuitwhite", '\u{2664}'),
+    ("square", '\u{25A1}'),
+    ("squarediagonalcrosshatchfill", '\u{25A9}'),
+    ("squarehorizontalfill", '\u{25A4}'),
+    ("squareorthogonalcrosshatchfill", '\u{25A6}'),
+    ("squareplus", '\u{229E}'),
+    ("squaresolid", '\u{25A0}'),
+    ("squareupperlefttolowerrightfill", '\u{25A7}'),
+    ("squareupperrighttolowerleftfill", '\u{25A8}'),
+    ("squareverticalfill", '\u{25A5}'),
+    ("squarewhitewithsmallblack", '\u{25A3}'),
+    ("squiggleright", '\u{21DD}'),
+    ("star", '\u{22C6}'),
+    ("sterling", '\u{00A3}'),
+    ("strokelongoverlaycmb", '\u{0336}'),
+    ("strokeshortoverlaycmb", '\u{0335}'),
+    ("subset", '\u{2282}'),
+    ("subsetnoteql", '\u{228A}'),
+    ("subsetnotequal", '\u{228A}'),
+    ("subsetorequal", '\u{2286}'),
+    ("subsetsqequal", '\u{2291}'),
+    ("succeeds", '\u{227B}'),
+    ("suchthat", '\u{220B}'),
+    ("summation", '\u{2211}'),
+    ("summationdisplay", '\u{2211}'),
+    ("summationtext", '\u{2211}'),
+    ("sun", '\u{263C}'),
+    ("superset", '\u{2283}'),
+    ("supersetnotequal", '\u{228B}'),
+    ("supersetorequal", '\u{2287}'),
+    ("supersetsqequal", '\u{2292}'),
+    ("t", '\u{0074}'),
+    ("tackdown", '\u{22A4}'),
+    ("tackleft", '\u{22A3}'),
+    ("tau", '\u{03C4}'),
+    ("tbar", '\u{0167}'),
+    ("tcaron", '\u{0165}'),
+    ("tcedilla", '\u{0163}'),
+    ("tcommaaccent", '\u{0163}'),
+    ("telephone", '\u{2121}'),
+    ("telephoneblack", '\u{260E}'),
+    ("thereexists", '\u{2203}'),
+    ("therefore", '\u{2234}'),
+    ("theta", '\u{03B8}'),
+    ("theta1", '\u{03D1}'),
+    ("thetasymbolgreek", '\u{03D1}'),
+    ("thorn", '\u{00FE}'),
+    ("three", '\u{0033}'),
+    ("threeinferior", '\u{2083}'),
+    ("threeoldstyle", '\u{0033}'),
+    ("threequarters", '\u{00BE}'),
+    ("threesuperior", '\u{00B3}'),
+    ("tie", '\u{2040}'),
+    ("tilde", '\u{02DC}'),
+    ("tildebelowcmb", '\u{0330}'),
+    ("tildecmb", '\u{0303}'),
+    ("tildecomb", '\u{0303}'),
+    ("tildeoperator", '\u{223C}'),
+    ("tildeoverlaycmb", '\u{0334}'),
+    ("tildewide", '\u{0303}'),
+    ("tildewider", '\u{0303}'),
+    ("tildewiderr", '\u{0303}'),
+    ("tildewidest", '\u{0303}'),
+    ("timescircle", '\u{2297}'),
+    ("trademark", '\u{2122}'),
+    ("triagdn", '\u{25BC}'),
+    ("triaglf", '\u{25C4}'),
+    ("triagrt", '\u{25BA}'),
+    ("triagup", '\u{25B2}'),
+    ("triangle", '\u{25B3}'),
+    ("triangleinv", '\u{25BD}'),
+    ("triangleleft", '\u{25C3}'),
+    ("triangleleftsld", '\u{25C0}'),
+    ("triangleright", '\u{25B9}'),
+    ("turnstileleft", '\u{22A2}'),
+    ("turnstileright", '\u{22A3}'),
+    ("two", '\u{0032}'),
+    ("twodotenleader", '\u{2025}'),
+    ("twodotleader", '\u{2025}'),
+    ("twoinferior", '\u{2082}'),
+    ("twooldstyle", '\u{0032}'),
+    ("twosuperior", '\u{00B2}'),
+    ("u", '\u{0075}'),
+    ("uacute", '\u{00FA}'),
+    ("ubreve", '\u{016D}'),
+    ("ucircumflex", '\u{00FB}'),
+    ("udblacute", '\u{0171}'),
+    ("udieresis", '\u{00FC}'),
+    ("ugrave", '\u{00F9}'),
+    ("uhungarumlaut", '\u{0171}'),
+    ("umacron", '\u{016B}'),
+    ("underscore", '\u{005F}'),
+    ("underscoredbl", '\u{2017}'),
+    ("union", '\u{222A}'),
+    ("uniondisplay", '\u{22C3}'),
+    ("unionmulti", '\u{228E}'),
+    ("unionmultidisplay", '\u{228E}'),
+    ("unionmultitext", '\u{228E}'),
+    ("unionsq", '\u{2294}'),
+    ("unionsqdisplay", '\u{2294}'),
+    ("unionsqtext", '\u{2294}'),
+    ("uniontext", '\u{22C3}'),
+    ("universal", '\u{2200}'),
+    ("uogonek", '\u{0173}'),
+    ("upsilon", '\u{03C5}'),
+    ("upsilondieresis", '\u{03CB}'),
+    ("upsilondieresistonos", '\u{03B0}'),
+    ("upsilontonos", '\u{03CD}'),
+    ("upslope", '\u{2571}'),
+    ("uptackbelowcmb", '\u{031D}'),
+    ("uptackmod", '\u{02D4}'),
+    ("uring", '\u{016F}'),
+    ("utilde", '\u{0169}'),
+    ("v", '\u{0076}'),
+    ("vector", '\u{20D7}'),
+    ("venus", '\u{2640}'),
+    ("verticalbar", '\u{007C}'),
+    ("verticallineabovecmb", '\u{030D}'),
+    ("verticallinebelowcmb", '\u{0329}'),
+    ("verticallinelowmod", '\u{02CC}'),
+    ("verticallinemod", '\u{02C8}'),
+    ("vextenddouble", '\u{2225}'),
+    ("vextendsingle", '\u{2223}'),
+    ("w", '\u{0077}'),
+    ("wcircumflex", '\u{0175}'),
+    ("weierstrass", '\u{2118}'),
+    ("whitebullet", '\u{25E6}'),
+    ("whitecircle", '\u{25CB}'),
+    ("whitecircleinverse", '\u{25D9}'),
+    ("whitediamond", '\u{25C7}'),
+    ("whitediamondcontainingblacksmalldiamond", '\u{25C8}'),
+    ("whitedownpointingsmalltriangle", '\u{25BF}'),
+    ("whitedownpointingtriangle", '\u{25BD}'),
+    ("whiteleftpointingsmalltriangle", '\u{25C3}'),
+    ("whiteleftpointingtriangle", '\u{25C1}'),
+    ("whiterightpointingsmalltriangle", '\u{25B9}'),
+    ("whiterightpointingtriangle", '\u{25B7}'),
+    ("whitesmallsquare", '\u{25AB}'),
+    ("whitesmilingface", '\u{263A}'),
+    ("whitesquare", '\u{25A1}'),
+    ("whitestar", '\u{2606}'),
+    ("whitetelephone", '\u{260F}'),
+    ("whiteuppointingsmalltriangle", '\u{25B5}'),
+    ("whiteuppointingtriangle", '\u{25B3}'),
+    ("wreathproduct", '\u{2240}'),
+    ("x", '\u{0078}'),
+    ("xi", '\u{03BE}'),
+    ("y", '\u{0079}'),
+    ("yacute", '\u{00FD}'),
+    ("ycircumflex", '\u{0177}'),
+    ("ydieresis", '\u{00FF}'),
+    ("yen", '\u{00A5}'),
+    ("yinyang", '\u{262F}'),
+    ("yotgreek", '\u{03F3}'),
+    ("z", '\u{007A}'),
+    ("zacute", '\u{017A}'),
+    ("zcaron", '\u{017E}'),
+    ("zdot", '\u{017C}'),
+    ("zdotaccent", '\u{017C}'),
+    ("zero", '\u{0030}'),
+    ("zeroinferior", '\u{2080}'),
+    ("zerooldstyle", '\u{0030}'),
+    ("zerosuperior", '\u{2070}'),
+    ("zeta", '\u{03B6}'),
+];
+/// `OT1` (`CMR`, `CMBX`, ...): glyph names by code, as the embedded `CMR`,
+/// `CMSS` and `CMBX` font programs of the dev corpus list them.
+static OT1_NAMES: [&str; 128] = [
+    "Gamma",
+    "Delta",
+    "Theta",
+    "Lambda",
+    "Xi",
+    "Pi",
+    "Sigma",
+    "Upsilon",
+    "Phi",
+    "Psi",
+    "Omega",
+    "ff",
+    "fi",
+    "fl",
+    "ffi",
+    "ffl",
+    "dotlessi",
+    "dotlessj",
+    "grave",
+    "acute",
+    "caron",
+    "breve",
+    "macron",
+    "ring",
+    "cedilla",
+    "germandbls",
+    "ae",
+    "oe",
+    "oslash",
+    "AE",
+    "OE",
+    "Oslash",
+    "suppress",
+    "exclam",
+    "quotedblright",
+    "numbersign",
+    "dollar",
+    "percent",
+    "ampersand",
+    "quoteright",
+    "parenleft",
+    "parenright",
+    "asterisk",
+    "plus",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "exclamdown",
+    "equal",
+    "questiondown",
+    "question",
+    "at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "bracketleft",
+    "quotedblleft",
+    "bracketright",
+    "circumflex",
+    "dotaccent",
+    "quoteleft",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "endash",
+    "emdash",
+    "hungarumlaut",
+    "tilde",
+    "dieresis",
+];
+/// `OML` (`CMMI`, `CMMIB`): glyph names by code, from the embedded programs.
+static OML_NAMES: [&str; 128] = [
+    "Gamma",
+    "Delta",
+    "Theta",
+    "Lambda",
+    "Xi",
+    "Pi",
+    "Sigma",
+    "Upsilon",
+    "Phi",
+    "Psi",
+    "Omega",
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon1",
+    "zeta",
+    "eta",
+    "theta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "chi",
+    "psi",
+    "omega",
+    "epsilon",
+    "theta1",
+    "pi1",
+    "rho1",
+    "sigma1",
+    "phi1",
+    "arrowlefttophalf",
+    "arrowleftbothalf",
+    "arrowrighttophalf",
+    "arrowrightbothalf",
+    "arrowhookleft",
+    "arrowhookright",
+    "triangleright",
+    "triangleleft",
+    "zerooldstyle",
+    "oneoldstyle",
+    "twooldstyle",
+    "threeoldstyle",
+    "fouroldstyle",
+    "fiveoldstyle",
+    "sixoldstyle",
+    "sevenoldstyle",
+    "eightoldstyle",
+    "nineoldstyle",
+    "period",
+    "comma",
+    "less",
+    "slash",
+    "greater",
+    "star",
+    "partialdiff",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "flat",
+    "natural",
+    "sharp",
+    "slurbelow",
+    "slurabove",
+    "lscript",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "dotlessi",
+    "dotlessj",
+    "weierstrass",
+    "vector",
+    "tie",
+];
+/// `OMS` (`CMSY`, `CMBSY`): glyph names by code, from the embedded programs.
+static OMS_NAMES: [&str; 128] = [
+    "minus",
+    "periodcentered",
+    "multiply",
+    "asteriskmath",
+    "divide",
+    "diamondmath",
+    "plusminus",
+    "minusplus",
+    "circleplus",
+    "circleminus",
+    "circlemultiply",
+    "circledivide",
+    "circledot",
+    "circlecopyrt",
+    "openbullet",
+    "bullet",
+    "equivasymptotic",
+    "equivalence",
+    "reflexsubset",
+    "reflexsuperset",
+    "lessequal",
+    "greaterequal",
+    "precedesequal",
+    "followsequal",
+    "similar",
+    "approxequal",
+    "propersubset",
+    "propersuperset",
+    "lessmuch",
+    "greatermuch",
+    "precedes",
+    "follows",
+    "arrowleft",
+    "arrowright",
+    "arrowup",
+    "arrowdown",
+    "arrowboth",
+    "arrownortheast",
+    "arrowsoutheast",
+    "similarequal",
+    "arrowdblleft",
+    "arrowdblright",
+    "arrowdblup",
+    "arrowdbldown",
+    "arrowdblboth",
+    "arrownorthwest",
+    "arrowsouthwest",
+    "proportional",
+    "prime",
+    "infinity",
+    "element",
+    "owner",
+    "triangle",
+    "triangleinv",
+    "negationslash",
+    "mapsto",
+    "universal",
+    "existential",
+    "logicalnot",
+    "emptyset",
+    "Rfractur",
+    "Ifractur",
+    "latticetop",
+    "perpendicular",
+    "aleph",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "union",
+    "intersection",
+    "unionmulti",
+    "logicaland",
+    "logicalor",
+    "turnstileleft",
+    "turnstileright",
+    "floorleft",
+    "floorright",
+    "ceilingleft",
+    "ceilingright",
+    "braceleft",
+    "braceright",
+    "angbracketleft",
+    "angbracketright",
+    "bar",
+    "bardbl",
+    "arrowbothv",
+    "arrowdblbothv",
+    "backslash",
+    "wreathproduct",
+    "radical",
+    "coproduct",
+    "nabla",
+    "integral",
+    "unionsq",
+    "intersectionsq",
+    "subsetsqequal",
+    "supersetsqequal",
+    "section",
+    "dagger",
+    "daggerdbl",
+    "paragraph",
+    "club",
+    "diamond",
+    "heart",
+    "spade",
+];
+/// `OMX` (`CMEX`): the codes the embedded programs of the dev corpus list.
+static OMX_NAMES: &[(u8, &str)] = &[
+    (0, "parenleftbig"),
+    (1, "parenrightbig"),
+    (2, "bracketleftbig"),
+    (3, "bracketrightbig"),
+    (4, "floorleftbig"),
+    (5, "floorrightbig"),
+    (6, "ceilingleftbig"),
+    (7, "ceilingrightbig"),
+    (8, "braceleftbig"),
+    (9, "bracerightbig"),
+    (10, "angbracketleftbig"),
+    (11, "angbracketrightbig"),
+    (12, "vextendsingle"),
+    (13, "vextenddouble"),
+    (14, "slashbig"),
+    (16, "parenleftBig"),
+    (17, "parenrightBig"),
+    (18, "parenleftbigg"),
+    (19, "parenrightbigg"),
+    (20, "bracketleftbigg"),
+    (21, "bracketrightbigg"),
+    (26, "braceleftbigg"),
+    (27, "bracerightbigg"),
+    (32, "parenleftBigg"),
+    (33, "parenrightBigg"),
+    (34, "bracketleftBigg"),
+    (35, "bracketrightBigg"),
+    (40, "braceleftBigg"),
+    (41, "bracerightBigg"),
+    (48, "parenlefttp"),
+    (49, "parenrighttp"),
+    (50, "bracketlefttp"),
+    (51, "bracketrighttp"),
+    (52, "bracketleftbt"),
+    (53, "bracketrightbt"),
+    (54, "bracketleftex"),
+    (55, "bracketrightex"),
+    (56, "bracelefttp"),
+    (57, "bracerighttp"),
+    (58, "braceleftbt"),
+    (59, "bracerightbt"),
+    (60, "braceleftmid"),
+    (61, "bracerightmid"),
+    (62, "braceex"),
+    (64, "parenleftbt"),
+    (65, "parenrightbt"),
+    (66, "parenleftex"),
+    (67, "parenrightex"),
+    (68, "angbracketleftBig"),
+    (69, "angbracketrightBig"),
+    (80, "summationtext"),
+    (81, "producttext"),
+    (82, "integraltext"),
+    (83, "uniontext"),
+    (87, "logicalortext"),
+    (88, "summationdisplay"),
+    (89, "productdisplay"),
+    (90, "integraldisplay"),
+    (91, "uniondisplay"),
+    (92, "intersectiondisplay"),
+    (95, "logicalordisplay"),
+    (96, "coproducttext"),
+    (97, "coproductdisplay"),
+    (98, "hatwide"),
+    (99, "hatwider"),
+    (100, "hatwidest"),
+    (101, "tildewide"),
+    (102, "tildewider"),
+    (104, "bracketleftBig"),
+    (105, "bracketrightBig"),
+    (106, "floorleftBig"),
+    (107, "floorrightBig"),
+    (108, "ceilingleftBig"),
+    (109, "ceilingrightBig"),
+    (110, "braceleftBig"),
+    (111, "bracerightBig"),
+    (112, "radicalbig"),
+    (113, "radicalBig"),
+    (114, "radicalbigg"),
+    (115, "radicalBigg"),
+    (116, "radicalbt"),
+    (117, "radicalvertex"),
+    (118, "radicaltp"),
+    (122, "bracehtipdownleft"),
+    (123, "bracehtipdownright"),
+    (124, "bracehtipupleft"),
+    (125, "bracehtipupright"),
+];
+/// `CMTT` codes whose glyph differs from `StandardEncoding` or was observed,
+/// from the embedded programs of the dev corpus.
+static TYPEWRITER_NAMES: &[(u8, &str)] = &[
+    (13, "quotesingle"),
+    (34, "quotedbl"),
+    (35, "numbersign"),
+    (37, "percent"),
+    (39, "quoteright"),
+    (40, "parenleft"),
+    (41, "parenright"),
+    (43, "plus"),
+    (44, "comma"),
+    (45, "hyphen"),
+    (46, "period"),
+    (47, "slash"),
+    (48, "zero"),
+    (49, "one"),
+    (50, "two"),
+    (51, "three"),
+    (52, "four"),
+    (53, "five"),
+    (54, "six"),
+    (55, "seven"),
+    (56, "eight"),
+    (57, "nine"),
+    (58, "colon"),
+    (60, "less"),
+    (61, "equal"),
+    (62, "greater"),
+    (63, "question"),
+    (64, "at"),
+    (65, "A"),
+    (66, "B"),
+    (67, "C"),
+    (68, "D"),
+    (69, "E"),
+    (70, "F"),
+    (71, "G"),
+    (72, "H"),
+    (73, "I"),
+    (74, "J"),
+    (75, "K"),
+    (76, "L"),
+    (77, "M"),
+    (78, "N"),
+    (79, "O"),
+    (80, "P"),
+    (82, "R"),
+    (83, "S"),
+    (84, "T"),
+    (85, "U"),
+    (86, "V"),
+    (87, "W"),
+    (89, "Y"),
+    (91, "bracketleft"),
+    (93, "bracketright"),
+    (95, "underscore"),
+    (97, "a"),
+    (98, "b"),
+    (99, "c"),
+    (100, "d"),
+    (101, "e"),
+    (102, "f"),
+    (103, "g"),
+    (104, "h"),
+    (105, "i"),
+    (106, "j"),
+    (107, "k"),
+    (108, "l"),
+    (109, "m"),
+    (110, "n"),
+    (111, "o"),
+    (112, "p"),
+    (113, "q"),
+    (114, "r"),
+    (115, "s"),
+    (116, "t"),
+    (117, "u"),
+    (118, "v"),
+    (119, "w"),
+    (120, "x"),
+    (121, "y"),
+    (122, "z"),
+];
+/// `MSAM`: the codes the embedded programs of the dev corpus list.
+static MSAM_NAMES: &[(u8, &str)] = &[
+    (1, "squareplus"),
+    (3, "square"),
+    (4, "squaresolid"),
+    (10, "harpoonleftright"),
+    (32, "squiggleright"),
+    (38, "greaterorsimilar"),
+    (44, "defines"),
+    (46, "lessorsimilar"),
+    (54, "lessorequalslant"),
+    (62, "greaterorequalslant"),
+    (70, "star"),
+    (74, "triangleleftsld"),
+    (88, "check"),
+    (124, "intercal"),
+];
+/// `MSBM`: the codes the embedded programs of the dev corpus list.
+static MSBM_NAMES: &[(u8, &str)] = &[
+    (40, "subsetnoteql"),
+    (63, "emptyset"),
+    (65, "A"),
+    (67, "C"),
+    (68, "D"),
+    (69, "E"),
+    (73, "I"),
+    (76, "L"),
+    (78, "N"),
+    (80, "P"),
+    (82, "R"),
+    (83, "S"),
+    (84, "T"),
+    (90, "Z"),
+    (92, "hatwider"),
+    (110, "multicloseleft"),
+    (111, "multicloseright"),
+    (114, "integerdivide"),
+];
+
 #[cfg(test)]
 mod tests {
     use lopdf::content::{Content, Operation};
@@ -2177,7 +4424,12 @@ mod tests {
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
         config.insert("content".to_string(), "2".to_string());
+        config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
+        // Nor the digest from before the TeX encodings.
+        config.remove("encodings");
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("encodings".to_string(), "1".to_string());
         // The digests before ligature expansion and before the streaming
         // lexer must not be reused.
         config.insert("content".to_string(), "1".to_string());
@@ -2540,6 +4792,227 @@ mod tests {
         let font = session.cache.fonts.values().next().unwrap();
         assert!(matches!(font.decode, Decode::Table(_)));
         assert!(font.one_to_one);
+    }
+
+    /// The page produced by showing `shown` (one hex string) with the font
+    /// `make_font` returns as `/F1`.
+    fn show_with_font<F>(shown: &[u8], make_font: F) -> PageText
+    where
+        F: FnOnce(&mut Document) -> Dictionary,
+    {
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new("Td", vec![10.into(), 10.into()]),
+            Operation::new(
+                "Tj",
+                vec![Object::String(shown.to_vec(), StringFormat::Hexadecimal)],
+            ),
+            Operation::new("ET", vec![]),
+        ];
+        let bytes = build_pdf_with_font(vec![ops], None, make_font);
+        let mut session = open_session(&bytes);
+        session.page_text(1).unwrap()
+    }
+
+    /// The clear-text start of a Type1 font program whose built-in encoding
+    /// puts `/element` at 50 and `/bardbl` at 107.
+    const TYPE1_PROGRAM: &[u8] = b"%!PS-AdobeFont-1.0: Foo 1.0\n/FontName /Foo def\n\
+        /Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n\
+        dup 50 /element put\ndup 107/bardbl put\nreadonly def\ncurrentdict end\n\
+        currentfile eexec\ndup 51 /A put\n";
+
+    #[test]
+    fn tex_symbol_font_without_encoding_uses_its_builtin_encoding() {
+        for base_font in ["CMSY10", "ABCDEF+CMSY10", "cmsy7"] {
+            let page = show_with_font(&[0x32, 0x6B, 0x00, 0x66, 0x67, 0xA1], |_| {
+                dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => base_font,
+                }
+            });
+            assert_eq!(page.spans.len(), 1);
+            // Not "2k" and a dropped byte, as `StandardEncoding` gives.
+            assert_eq!(page.spans[0].text, "\u{2208}\u{2016}\u{2212}{}\u{2212}");
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+        }
+    }
+
+    #[test]
+    fn tex_math_italic_and_extension_fonts_use_their_builtin_encodings() {
+        let page = show_with_font(&[0x0B, 0x15, 0x40, 0x61], |_| {
+            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "CMMI10" }
+        });
+        assert_eq!(page.spans[0].text, "\u{3B1}\u{3BB}\u{2202}a");
+        let page = show_with_font(&[0x58, 0x5A, 0x08], |_| {
+            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "CMEX10" }
+        });
+        assert_eq!(page.spans[0].text, "\u{2211}\u{222B}{");
+    }
+
+    #[test]
+    fn differences_resolve_tex_glyph_names_over_the_base() {
+        let page = show_with_font(&[50, 51, 52], |_| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Times-Roman",
+                "Encoding" => dictionary! {
+                    "Type" => "Encoding",
+                    "Differences" => vec![50.into(), "element".into(), "bardbl".into()],
+                },
+            }
+        });
+        assert_eq!(page.spans[0].text, "\u{2208}\u{2016}4");
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn differences_over_a_tex_font_keep_its_builtin_base() {
+        // No `/BaseEncoding`: codes outside `/Differences` use the font's
+        // built-in (`OMS`) encoding, not `StandardEncoding`.
+        let page = show_with_font(&[0x32, 0x41], |_| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "CMSY10",
+                "Encoding" => dictionary! {
+                    "Differences" => vec![65.into(), "infinity".into()],
+                },
+            }
+        });
+        assert_eq!(page.spans[0].text, "\u{2208}\u{221E}");
+    }
+
+    #[test]
+    fn unknown_glyph_name_is_unmapped_and_warned_without_losing_the_rest() {
+        let page = show_with_font(&[66, 65], |_| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Times-Roman",
+                "Encoding" => dictionary! {
+                    "Type" => "Encoding",
+                    "Differences" => vec![65.into(), "eacute".into(), "zzunknownglyph".into()],
+                },
+            }
+        });
+        // `lopdf` would have dropped the whole encoding for
+        // `StandardEncoding` and read "BA".
+        assert_eq!(page.spans[0].text, "\u{E9}\u{FFFD}");
+        assert_eq!(
+            page.warnings,
+            vec!["font F1: 1 unmapped byte(s); U+FFFD used".to_string()]
+        );
+    }
+
+    #[test]
+    fn tex_text_font_ligatures_are_still_expanded() {
+        let page = show_with_font(&[12, 0x6E, 0x64, 0x7B, 0x7C], |_| {
+            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "CMR10" }
+        });
+        assert_eq!(page.spans[0].text, "find\u{2013}\u{2014}");
+        assert_eq!(page.warnings, vec!["ligatures expanded: 1".to_string()]);
+    }
+
+    #[test]
+    fn embedded_type1_program_supplies_the_builtin_encoding() {
+        let page = show_with_font(&[50, 107], |doc| {
+            let program = Stream::new(
+                dictionary! { "Length1" => i64::try_from(TYPE1_PROGRAM.len()).unwrap() },
+                TYPE1_PROGRAM.to_vec(),
+            );
+            let program_id = doc.add_object(program);
+            let descriptor_id = doc.add_object(dictionary! {
+                "Type" => "FontDescriptor",
+                "FontName" => "Foo",
+                "FontFile" => program_id,
+            });
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Foo",
+                "FontDescriptor" => descriptor_id,
+            }
+        });
+        assert_eq!(page.spans[0].text, "\u{2208}\u{2016}");
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn type1_encoding_reads_the_clear_text_array_only() {
+        let codes = type1_encoding(TYPE1_PROGRAM).unwrap();
+        assert_eq!(
+            codes,
+            vec![(50, b"element".to_vec()), (107, b"bardbl".to_vec())]
+        );
+        let standard = b"/FontName /Foo def\n/Encoding StandardEncoding def\ncurrentfile eexec\n";
+        assert_eq!(type1_encoding(standard), None);
+        assert_eq!(type1_encoding(b"/FontName /Foo def\n"), None);
+    }
+
+    #[test]
+    fn glyph_names_table_is_sorted_and_unique() {
+        for pair in GLYPH_NAMES.windows(2) {
+            assert!(
+                pair[0].0.as_bytes() < pair[1].0.as_bytes(),
+                "{} >= {}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+        for names in [&OT1_NAMES, &OML_NAMES, &OMS_NAMES] {
+            let doc = Document::with_version("1.5");
+            let resolved = names
+                .iter()
+                .filter(|name| glyph_char(&doc, name.as_bytes()).is_some())
+                .count();
+            // Only `OT1` code 32 (`suppress`, the Polish L stroke) is left.
+            assert!(resolved >= 127, "{resolved}");
+        }
+    }
+
+    #[test]
+    fn glyph_names_resolve_through_every_form() {
+        let doc = Document::with_version("1.5");
+        let cases: [(&[u8], Option<char>); 13] = [
+            (b"element", Some('\u{2208}')),
+            (b"bardbl", Some('\u{2016}')),
+            (b"summationdisplay", Some('\u{2211}')),
+            (b"fi", Some('\u{FB01}')),
+            (b"uni2208", Some('\u{2208}')),
+            (b"u1D400", Some('\u{1D400}')),
+            (b"a.sc", Some('a')),
+            // Outside the static table: `lopdf`'s own glyph list.
+            (b"afii10017", Some('\u{410}')),
+            (b"uni0003", None),
+            (b"g37", None),
+            (b"cid1024", None),
+            (b".notdef", None),
+            (b"zzunknownglyph", None),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                glyph_char(&doc, name),
+                expected,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
+    fn tex_fonts_are_recognised_by_family_and_size() {
+        assert_eq!(tex_encoding(b"CMSY10"), Some(TexEncoding::Oms));
+        assert_eq!(tex_encoding(b"XYZABC+cmmi7"), Some(TexEncoding::Oml));
+        assert_eq!(tex_encoding(b"CMSSBX10"), Some(TexEncoding::Ot1));
+        assert_eq!(tex_encoding(b"CMTI12"), Some(TexEncoding::Ot1Italic));
+        assert_eq!(tex_encoding(b"CMTT10"), Some(TexEncoding::Typewriter));
+        assert_eq!(tex_encoding(b"MSBM10"), Some(TexEncoding::Msbm));
+        assert_eq!(tex_encoding(b"CMSY"), None);
+        assert_eq!(tex_encoding(b"CMUSerif-Roman"), None);
+        assert_eq!(tex_encoding(b"Helvetica"), None);
     }
 
     /// Emit each of `texts` as one span on a fresh page and finish it.
