@@ -94,15 +94,43 @@ pub fn round_trip(tts: &dyn Tts, text: &str, voice: &str) -> Result<RoundTrip, S
     if audio.is_silent() {
         return Err(SpeechError::SilentOutput);
     }
-    let transcript = transcribe(&audio)?;
+    let language = voice_language(tts, voice);
+    let transcript = transcribe_with_language(&audio, language.as_deref())?;
     score(text, &transcript, audio.duration_secs())
 }
 
-/// Transcribe mono audio with docling's Whisper (English, default preset).
+/// The primary language subtag (lower-case, e.g. `en` from `en-US`) of the
+/// voice named `voice`, when the engine lists it.
+pub fn voice_language(tts: &dyn Tts, voice: &str) -> Option<String> {
+    let voices = tts.voices().ok()?;
+    let info = voices.iter().find(|v| v.id == voice || v.name == voice)?;
+    let primary = info
+        .language
+        .split(['-', '_'])
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    if primary.is_empty() {
+        None
+    } else {
+        Some(primary)
+    }
+}
+
+/// Transcribe mono audio with docling's Whisper, letting it detect the language.
 ///
 /// The audio is resampled to 16 kHz and handed to docling as WAV bytes.
-#[cfg(feature = "asr")]
 pub fn transcribe(audio: &Audio) -> Result<String, SpeechError> {
+    transcribe_with_language(audio, None)
+}
+
+/// Transcribe with an optional language hint (primary subtag such as `en`);
+/// `None` lets Whisper detect the language.
+#[cfg(feature = "asr")]
+pub fn transcribe_with_language(
+    audio: &Audio,
+    language: Option<&str>,
+) -> Result<String, SpeechError> {
     if !docling_asr::models_available() {
         return Err(SpeechError::ModelsMissing(
             "docling Whisper files .models/asr/{encoder_model.onnx,decoder_model.onnx,vocab.json} \
@@ -111,7 +139,7 @@ pub fn transcribe(audio: &Audio) -> Result<String, SpeechError> {
         ));
     }
     let bytes = crate::wav::encode(&crate::audio::resample_to_16k(audio))?;
-    let segments = docling_asr::transcribe_with_options(&bytes, "tts.wav", None, Some("en"))
+    let segments = docling_asr::transcribe_with_options(&bytes, "tts.wav", None, language)
         .map_err(|e| SpeechError::Asr(e.0))?;
     let texts: Vec<String> = segments
         .iter()
@@ -123,7 +151,10 @@ pub fn transcribe(audio: &Audio) -> Result<String, SpeechError> {
 
 /// Transcription needs the `asr` feature.
 #[cfg(not(feature = "asr"))]
-pub fn transcribe(_audio: &Audio) -> Result<String, SpeechError> {
+pub fn transcribe_with_language(
+    _audio: &Audio,
+    _language: Option<&str>,
+) -> Result<String, SpeechError> {
     Err(SpeechError::Unsupported(
         "built without the `asr` feature (docling Whisper)".to_string(),
     ))

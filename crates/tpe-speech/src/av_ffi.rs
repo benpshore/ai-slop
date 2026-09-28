@@ -228,16 +228,13 @@ pub fn synthesize(text: &str, voice: &str, timeout: Duration) -> Result<Audio, S
             }
         }
         if started.elapsed() > timeout {
-            let state = shared
-                .lock()
-                .map_err(|_| SpeechError::Engine("capture state poisoned".to_string()))?;
-            if state.samples.is_empty() {
-                return Err(SpeechError::Timeout(format!(
-                    "no audio from AVSpeechSynthesizer within {} s",
-                    timeout.as_secs()
-                )));
-            }
-            break;
+            // A timeout is a failure even when some buffers arrived: returning
+            // the partial samples would pass truncated audio off as complete.
+            let received = shared.lock().map(|state| state.samples.len()).unwrap_or(0);
+            return Err(SpeechError::Timeout(format!(
+                "AVSpeechSynthesizer did not finish within {} s ({received} samples received)",
+                timeout.as_secs()
+            )));
         }
     }
     // Keep the synthesizer, utterance and block alive until capture ends.
