@@ -1452,7 +1452,7 @@ mod tests {
     #[test]
     fn no_reference_section_gives_empty_vectors() {
         let page = column_page(1, &["Introduction", "Some text [1] here.", "1 Method"]);
-        assert_eq!(find_reference_section(&[page.clone()]), None);
+        assert_eq!(find_reference_section(std::slice::from_ref(&page)), None);
         let (refs, markers) = extract_citations(&[page]);
         assert!(refs.is_empty());
         assert!(markers.is_empty());
@@ -1621,7 +1621,7 @@ mod tests {
                 bare_line("Jones, B. (2019). Title two. Venue."),
             ],
         );
-        let section = find_reference_section(&[page.clone()]).expect("section");
+        let section = find_reference_section(std::slice::from_ref(&page)).expect("section");
         let refs = segment_entries(&[page], &section);
         assert_eq!(refs.len(), 2);
         assert_eq!(
@@ -1676,7 +1676,7 @@ mod tests {
                 "2. B. Author. Two. Venue, 2021.",
             ],
         );
-        let section = find_reference_section(&[dot.clone()]).expect("section");
+        let section = find_reference_section(std::slice::from_ref(&dot)).expect("section");
         let refs = segment_entries(&[dot], &section);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].label.as_deref(), Some("1."));
@@ -1692,7 +1692,7 @@ mod tests {
                 "2) B. Author. Two. Venue, 2021.",
             ],
         );
-        let section = find_reference_section(&[paren.clone()]).expect("section");
+        let section = find_reference_section(std::slice::from_ref(&paren)).expect("section");
         let refs = segment_entries(&[paren], &section);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].label.as_deref(), Some("1)"));

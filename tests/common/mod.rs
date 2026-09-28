@@ -201,7 +201,7 @@ fn standard_font(doc: &mut Document, base_font: &str) -> ObjectId {
 #[must_use]
 pub fn synthetic_paper() -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
-    let pages_id = doc.new_object_id();
+    let pages_root_id = doc.new_object_id();
     let regular_id = standard_font(&mut doc, "Helvetica");
     let bold_id = standard_font(&mut doc, "Helvetica-Bold");
     let resources_id = doc.add_object(dictionary! {
@@ -224,7 +224,7 @@ pub fn synthetic_paper() -> Vec<u8> {
         let content_id = doc.add_object(Stream::new(dictionary! {}, encoded));
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page",
-            "Parent" => pages_id,
+            "Parent" => pages_root_id,
             "MediaBox" => media_box.clone(),
             "Resources" => resources_id,
             "Contents" => content_id,
@@ -239,10 +239,10 @@ pub fn synthetic_paper() -> Vec<u8> {
         "Resources" => resources_id,
         "MediaBox" => media_box,
     };
-    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    doc.objects.insert(pages_root_id, Object::Dictionary(pages));
     let catalog_id = doc.add_object(dictionary! {
         "Type" => "Catalog",
-        "Pages" => pages_id,
+        "Pages" => pages_root_id,
     });
     let info_id = doc.add_object(dictionary! {
         "Producer" => Object::string_literal("tpe synthetic fixture"),
