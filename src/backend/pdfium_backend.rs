@@ -6,30 +6,64 @@
 //!
 //! # Binding and threading
 //!
-//! `Pdfium` is neither `Send` nor `Sync`: with the crate's default
-//! `thread_safe` feature its bindings hold a `RefCell<Option<MutexGuard>>`,
-//! and the crate only adds `unsafe impl Send + Sync` under its non-default
-//! `sync` feature. Worse for a per-thread cache, that `thread_safe` wrapper
-//! takes a process-wide mutex in `FPDF_InitLibrary` and releases it in
-//! `FPDF_DestroyLibrary`, i.e. for the whole life of a `Pdfium` value, so a
-//! second `Pdfium::new` on another thread blocks until the first is dropped.
-//! A `thread_local!` cache would therefore stall every worker but one.
+//! The crate is built with its `thread_safe` feature (`Cargo.toml`), whose
+//! wrapper (`bindings/thread_safe.rs`) takes one process-wide mutex,
+//! `PDFIUM_THREAD_MARSHALL`, inside `FPDF_InitLibrary` (lines 120-128) and
+//! releases it inside `FPDF_DestroyLibrary` (lines 138-146). `Pdfium::new`
+//! calls the former (`pdfium.rs:151-155`) and `Drop for Pdfium` the latter
+//! (`pdfium.rs:427-433`), so the lock is held **per instance, for the whole
+//! life of a `Pdfium` value**, not per call. Two consequences:
 //!
-//! Instead each [`DocumentSession`] owns its own `Pdfium` (one `dlopen` and
-//! `FPDF_InitLibrary` per opened document) and holds `SESSION_GATE` for its
-//! lifetime, which serialises `pdfium` use across worker threads whatever the
-//! crate features are. Consequence: a thread must drop one `pdfium` session
-//! before opening another, or the second `open` blocks.
+//! * The crate already serialises every `Pdfium` in the process: a second
+//!   `Pdfium::new`, on any thread, blocks until the first value is dropped.
+//!   No gate of our own is needed on top of that.
+//! * A long-lived `Pdfium` (a `thread_local!` cache, a static, a dedicated
+//!   thread) would keep that mutex locked. `docling-pdf` binds its own
+//!   `Pdfium` inside every document open (`docling-pdf/src/pdfium_backend.rs`
+//!   `bind()`, lines 224-239, called from `PdfDocument::open`, 247-249), and
+//!   `tpe backends` probes `pdfium` and then `docling` on the same thread.
+//!   Re-locking a `std::sync::Mutex` from the thread that holds it deadlocks
+//!   or panics, and other threads would block for as long as the caching
+//!   thread lived. So the binding is deliberately **not** cached: each
+//!   [`Extractor::open`] binds the library (`dlopen` plus `FPDF_InitLibrary`),
+//!   extracts everything, and drops the binding before returning. Nothing
+//!   `pdfium`-related outlives `open`, so sessions are plain data and any
+//!   number of them may coexist on any threads. (Caching would only become
+//!   safe with the crate's `thread_safe` feature off and a gate of our own,
+//!   which is a `Cargo.toml` decision shared with `docling-pdf`.)
 //!
-//! # Document ownership
+//! # Document ownership and eager extraction
 //!
 //! `PdfDocument<'a>` borrows both the `Pdfium` and the byte slice it was
-//! loaded from, so it cannot live next to its owners without a
-//! self-referential struct. The session keeps the bytes and re-opens the
-//! document from memory on every [`DocumentSession::page_text`] call.
-//! `FPDF_LoadMemDocument64` parses only the trailer and xref (pages are parsed
-//! on demand anyway), so the per-call cost is small; measure before
-//! optimising this.
+//! loaded from, so it cannot be stored next to its owners without a
+//! self-referential struct. Re-opening the document for every page (the
+//! previous design) made `pdfium` re-parse the xref, page tree and every
+//! font used by the page on each call, which measured at about 259 ms of
+//! parse time per document against 45 ms for `lopdf`. Instead `open` walks
+//! all pages once, while the document is alive, and the session keeps only
+//! the results: one [`PageText`] of spans per page plus the raw figure
+//! streams. [`DocumentSession::page_text`] clones from that cache.
+//!
+//! Memory is bounded by what is kept: spans (text and geometry only) and
+//! figure streams copied as stored in the file, so at most about the size of
+//! the PDF itself, never bitmaps or `pdfium`'s page caches, which die with
+//! the document at the end of `open`. The trade-off is that a very long
+//! document is extracted in full up front even when the job asks for a page
+//! range, and all its spans stay resident for the session. A future
+//! refinement is streaming: extract a window of pages per binding and
+//! re-open for the next window when `page_text` moves past it.
+//!
+//! # Text granularity
+//!
+//! `pdfium` yields one text object per `Tj`/`TJ` operator, so a span here
+//! covers a whole kerned run (`lopdf` emits one span per `TJ` string piece).
+//! That is coarser, never finer: the reading order joins spans on a
+//! baseline and re-inserts word spaces from geometry, so both granularities
+//! assemble the same line text. The text of an object comes from the page's
+//! text layer (`FPDFTextObj_GetText`), which may carry the `\r`/`\n`
+//! separators that layer inserts between runs; they are not glyphs and are
+//! replaced by a space (see `clean_object_text`). Spaces are kept exactly
+//! as reported.
 //!
 //! # Library compatibility
 //!
@@ -39,7 +73,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use pdfium_render::prelude::{
     PdfDocument, PdfDocumentMetadataTagType, PdfMatrix, PdfPageImageObject, PdfPageObject,
@@ -64,13 +97,6 @@ const ENV_LIBRARY_PATH: &str = "PDFIUM_DYNAMIC_LIB_PATH";
 const DEFAULT_LIBRARY_DIR: &str = ".pdfium/lib";
 /// Bound on nested Form `XObject` traversal.
 const MAX_FORM_DEPTH: u32 = 8;
-
-/// Process-wide serialisation of `pdfium` use; see the module docs.
-static SESSION_GATE: Mutex<()> = Mutex::new(());
-
-fn acquire_gate() -> MutexGuard<'static, ()> {
-    SESSION_GATE.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// Version recorded in the [`BackendIdentity`]:
 /// `<binary release>-binding-<pdfium-render release>`.
@@ -107,36 +133,62 @@ impl Extractor for PdfiumBackend {
         false
     }
 
-    /// Bind the library, load the bytes once to validate them, count pages
-    /// and read `/Info`, then keep bytes and binding for per-page re-opens.
-    /// Blocks while another session is alive (see the module docs).
+    /// Bind the library, load the bytes, count pages, read `/Info` and
+    /// extract every page's spans and figures, then drop the document and
+    /// the binding before returning (see the module docs). A page whose
+    /// extraction fails is recorded and reported by `page_text` for that
+    /// page only. Blocks while another `Pdfium` is alive anywhere in the
+    /// process.
     fn open(
         &self,
         bytes: &[u8],
         password: Option<&str>,
     ) -> Result<Box<dyn DocumentSession>, BackendError> {
-        let gate = acquire_gate();
         let pdfium = bind(self.library_dir.as_deref())?;
-        let owned: Vec<u8> = bytes.to_vec();
-        let (page_count, info) = {
-            let doc = load(&pdfium, &owned, password)?;
-            (u32::from(doc.pages().len()), read_info(&doc))
-        };
+        // `doc` borrows `pdfium` and `bytes`; locals drop in reverse order,
+        // so the document is closed before the library is destroyed.
+        let doc = load(&pdfium, bytes, password)?;
+        let page_count = u32::from(doc.pages().len());
+        let info = read_info(&doc);
+        let mut pages: Vec<Result<PageText, String>> = Vec::new();
+        let mut figure_bytes: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
+        for page in 1..=page_count {
+            match extract_numbered(&doc, page) {
+                Ok(extracted) => {
+                    for (figure_index, data) in extracted.figures {
+                        figure_bytes.insert((page, figure_index), data);
+                    }
+                    pages.push(Ok(extracted.page));
+                }
+                Err(message) => pages.push(Err(message)),
+            }
+        }
         Ok(Box::new(PdfiumSession {
-            pdfium,
-            bytes: owned,
-            password: password.map(str::to_owned),
             page_count,
             info,
-            figure_bytes: HashMap::new(),
-            _gate: gate,
+            pages,
+            figure_bytes,
         }))
     }
 }
 
+/// Extract 1-based `page` from an open document, reducing any failure to
+/// the message `page_text` will later wrap in [`BackendError::Page`].
+fn extract_numbered(doc: &PdfDocument<'_>, page: u32) -> Result<Extracted, String> {
+    let Ok(index) = u16::try_from(page - 1) else {
+        return Err("page index beyond pdfium's 16-bit range".to_string());
+    };
+    extract_page(doc, page, index).map_err(|err| match err {
+        BackendError::Page { message, .. } => message,
+        other => other.to_string(),
+    })
+}
+
 /// Bind `libpdfium` following the search order documented on
 /// [`PdfiumBackend::library_dir`]. An explicit directory is strict: the
-/// system fallback is only tried when nothing was configured.
+/// system fallback is only tried when nothing was configured. Each call is
+/// one `dlopen` and one `FPDF_InitLibrary`, and it blocks until no other
+/// `Pdfium` exists in the process (module docs).
 fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = library_dir {
@@ -228,17 +280,15 @@ fn read_info(doc: &PdfDocument<'_>) -> BTreeMap<String, String> {
     info
 }
 
+/// Everything `open` extracted; holds no `pdfium` state (module docs).
 struct PdfiumSession {
-    pdfium: Pdfium,
-    bytes: Vec<u8>,
-    password: Option<String>,
     page_count: u32,
     info: BTreeMap<String, String>,
+    /// One entry per page in order: the spans and figures, or the message
+    /// of the failure that page hit.
+    pages: Vec<Result<PageText, String>>,
     /// Raw image bytes keyed by `(page, figure index)`, handed out once.
     figure_bytes: HashMap<(u32, u32), Vec<u8>>,
-    /// Declared last so it is released after `pdfium` has been dropped
-    /// (fields drop in declaration order).
-    _gate: MutexGuard<'static, ()>,
 }
 
 impl DocumentSession for PdfiumSession {
@@ -246,23 +296,20 @@ impl DocumentSession for PdfiumSession {
         self.page_count
     }
 
+    /// A clone of the cached page; the same page may be asked for again.
     fn page_text(&mut self, page: u32) -> Result<PageText, BackendError> {
         let count = self.page_count;
         if page == 0 || page > count {
             return Err(BackendError::PageRange { page, count });
         }
-        let Ok(index) = u16::try_from(page - 1) else {
-            return Err(BackendError::PageRange { page, count });
-        };
-        let extracted = {
-            let doc = load(&self.pdfium, &self.bytes, self.password.as_deref())
-                .map_err(|err| page_error(page, format!("reopen: {err}")))?;
-            extract_page(&doc, page, index)?
-        };
-        for (figure_index, bytes) in extracted.figures {
-            self.figure_bytes.insert((page, figure_index), bytes);
+        let entry = usize::try_from(page - 1)
+            .ok()
+            .and_then(|index| self.pages.get(index));
+        match entry {
+            Some(Ok(text)) => Ok(text.clone()),
+            Some(Err(message)) => Err(page_error(page, message.clone())),
+            None => Err(BackendError::PageRange { page, count }),
         }
-        Ok(extracted.page)
     }
 
     fn info(&self) -> BTreeMap<String, String> {
@@ -398,8 +445,12 @@ impl Collector {
             );
             std::iter::repeat_n('\u{FFFD}', glyphs).collect()
         } else {
-            raw.nfc().collect()
+            clean_object_text(&raw)
         };
+        if content.is_empty() {
+            // Only text-layer separators: nothing to place.
+            return;
+        }
 
         let matrix = compose(text.matrix().ok(), placement);
         let scaled = text.unscaled_font_size().value * matrix.map_or(1.0, y_scale);
@@ -490,6 +541,32 @@ impl Collector {
     }
 }
 
+/// An object's text-layer string NFC-normalised, with the `\r`/`\n`
+/// separators the `pdfium` text page inserts around runs of other objects
+/// turned into one space (dropped at either end, and not doubled next to
+/// an existing space). Every other character, spaces included, is kept as
+/// reported. Pure ASCII without separators is returned unchanged.
+fn clean_object_text(raw: &str) -> String {
+    let has_break = raw.contains(|ch: char| ch == '\r' || ch == '\n');
+    if !has_break {
+        return raw.nfc().collect();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut pending_break = false;
+    for ch in raw.nfc() {
+        if ch == '\r' || ch == '\n' {
+            pending_break = !out.is_empty();
+        } else {
+            if pending_break && ch != ' ' && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            pending_break = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// `/BaseFont` when `pdfium` knows it, else the substituted family name.
 fn font_name(text: &PdfPageTextObject<'_>) -> Option<String> {
     let font = text.font();
@@ -556,6 +633,7 @@ mod tests {
     use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 
     use super::*;
+    use crate::reading_order::group_lines;
 
     /// 2x2 8-bit gray samples of the test image.
     const IMAGE_SAMPLES: [u8; 4] = [0, 255, 128, 64];
@@ -752,8 +830,8 @@ mod tests {
         ];
         let bytes = build_pdf(vec![ops, text_ops(10, 72, 700, "Page two")], None, false);
 
-        // Gather everything, drop the session, then assert: a panic while the
-        // session is alive would poison the process-wide pdfium locks.
+        // Gather everything, then assert: a panic inside `open` (while a
+        // `Pdfium` is alive) would poison the crate's process-wide lock.
         let (count, first, second) = {
             let mut session = PdfiumBackend::default().open(&bytes, None).unwrap();
             let count = session.page_count();
@@ -922,6 +1000,68 @@ mod tests {
         );
         assert!(form_box.y1 > 355.0, "y1 {}", form_box.y1);
         assert!(close(page.spans[0].size.unwrap(), 10.0, 0.01));
+    }
+
+    #[test]
+    fn adjacent_text_objects_on_one_baseline_form_one_line() {
+        if !pdfium_available() {
+            return;
+        }
+        // Three `Tj` objects on one baseline in 12 pt Helvetica: "lo" starts
+        // exactly where the advance of "Hel" (18 pt) ends, and "world"
+        // follows the advance of "lo" (9.3 pt) after a word-sized gap.
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new("Td", vec![100.into(), 600.into()]),
+            Operation::new("Tj", vec![Object::string_literal("Hel")]),
+            Operation::new("Td", vec![18.into(), 0.into()]),
+            Operation::new("Tj", vec![Object::string_literal("lo")]),
+            Operation::new("Td", vec![14.into(), 0.into()]),
+            Operation::new("Tj", vec![Object::string_literal("world")]),
+            Operation::new("ET", vec![]),
+        ];
+        let bytes = build_pdf(vec![ops], None, false);
+        let page = {
+            let mut session = PdfiumBackend::default().open(&bytes, None).unwrap();
+            session.page_text(1).unwrap()
+        };
+
+        // One span per text object, in content-stream order; the text layer
+        // may attach a boundary space, never other objects' glyphs.
+        let texts: Vec<&str> = page.spans.iter().map(|span| span.text.trim()).collect();
+        assert_eq!(texts, vec!["Hel", "lo", "world"]);
+        let boxes: Vec<BBox> = page
+            .spans
+            .iter()
+            .map(|span| span.bbox.expect("positioned"))
+            .collect();
+        assert!(close(boxes[0].x0, 100.0, 1.0), "x0 {}", boxes[0].x0);
+        assert!(close(boxes[1].x0, 118.0, 1.0), "x0 {}", boxes[1].x0);
+        assert!(close(boxes[2].x0, 132.0, 1.0), "x0 {}", boxes[2].x0);
+        for (span, bbox) in page.spans.iter().zip(&boxes) {
+            assert!(close(span.size.unwrap(), 12.0, 0.01), "{:?}", span.size);
+            assert!(close(bbox.y0, 600.0, 0.5), "baseline {}", bbox.y0);
+        }
+
+        // The engine joins the touching pieces without a space and inserts
+        // one across the word gap, exactly as it does for lopdf's pieces.
+        let lines = group_lines(&page.spans);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].text, "Hello world");
+        assert_eq!(lines[0].spans, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn text_layer_separators_become_single_spaces() {
+        assert_eq!(clean_object_text("plain"), "plain");
+        assert_eq!(clean_object_text("\r\nHello\r\nworld\r\n"), "Hello world");
+        assert_eq!(clean_object_text("a \r\nb"), "a b");
+        assert_eq!(clean_object_text("a\r\n b"), "a b");
+        assert_eq!(clean_object_text("\n"), "");
+        assert_eq!(clean_object_text("keep  spaces "), "keep  spaces ");
+        // NFC composes a combining acute onto its base.
+        assert_eq!(clean_object_text("e\u{0301}\r\nx"), "\u{00E9} x");
     }
 
     #[test]
