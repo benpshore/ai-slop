@@ -108,6 +108,9 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONTENT_OPS: usize = 250_000;
 /// Most retained operands in one content stream.
 const MAX_CONTENT_OPERANDS: usize = 1_000_000;
+/// Most memory charged to decoded Form programs retained for a document.
+/// Forms beyond this budget are still interpreted, but are not cached.
+const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Most rule and raster figures retained on one page. Vector shapes have the
 /// tighter [`MAX_CLUSTER_BOXES`] bound because clustering is quadratic.
 const MAX_PAGE_FIGURES: usize = 50_000;
@@ -212,6 +215,37 @@ struct SessionCache {
     /// to lex are not cached, so their warning recurs exactly as it would
     /// without the cache.
     forms: HashMap<ObjectId, Rc<TextProgram>>,
+    /// Approximate allocated bytes retained by `forms`. The decoded stream
+    /// length is included in each charge to cover allocations inside operands.
+    form_bytes: usize,
+}
+
+impl SessionCache {
+    fn cache_form(&mut self, id: ObjectId, program: Rc<TextProgram>, decoded_bytes: usize) {
+        let charge = decoded_bytes
+            .saturating_add(
+                program
+                    .ops
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TextOp>()),
+            )
+            .saturating_add(
+                program
+                    .operands
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Object>()),
+            )
+            .saturating_add(
+                program
+                    .paths
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[f32; 4]>()),
+            );
+        if self.form_bytes.saturating_add(charge) <= MAX_FORM_CACHE_BYTES {
+            self.forms.insert(id, program);
+            self.form_bytes += charge;
+        }
+    }
 }
 
 struct LopdfSession {
@@ -2088,6 +2122,9 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
         loop {
             match lex_object(bytes, at, MAX_NESTING, false, false) {
                 Ok((end, _)) => {
+                    if starts.len() >= MAX_CONTENT_OPERANDS {
+                        return Err(invalid_content());
+                    }
                     starts.push(at);
                     at = skip_content_space(bytes, end);
                 }
@@ -2119,7 +2156,7 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
                 end: last,
             });
         } else if let Some(op) = path_op(operator) {
-            record_path(&mut program, &mut path, op, bytes, &starts);
+            record_path(&mut program, &mut path, op, bytes, &starts)?;
         }
         pos = skip_content_space(bytes, end);
     }
@@ -2168,12 +2205,12 @@ fn record_path(
     op: PathOp,
     bytes: &[u8],
     starts: &[usize],
-) {
+) -> Result<(), LopdfError> {
     let mut values: [f32; 6] = [0.0; 6];
     match op {
         PathOp::Points(count) => {
             let Some(slots) = values.get_mut(..count * 2) else {
-                return;
+                return Ok(());
             };
             if read_numbers(bytes, starts, slots) {
                 for &[x, y] in slots.as_chunks::<2>().0 {
@@ -2190,6 +2227,9 @@ fn record_path(
         }
         PathOp::Paint { stroke } => {
             if let Some(bounds) = path.take() {
+                if program.ops.len() >= MAX_CONTENT_OPS {
+                    return Err(invalid_content());
+                }
                 let kind = if stroke {
                     OpKind::StrokePath
                 } else {
@@ -2206,6 +2246,7 @@ fn record_path(
         }
         PathOp::Discard => *path = None,
     }
+    Ok(())
 }
 
 /// The smallest box holding every one of `corners`.
@@ -2781,7 +2822,8 @@ impl<'a> Interpreter<'a> {
             };
             let program = Rc::new(program);
             if let Some(id) = stream_id {
-                self.cache.forms.insert(id, Rc::clone(&program));
+                self.cache
+                    .cache_form(id, Rc::clone(&program), content_bytes.len());
             }
             program
         };
@@ -5928,6 +5970,31 @@ mod tests {
             ]
         );
         assert!(program.operands.is_empty());
+    }
+
+    #[test]
+    fn lexer_limits_painted_paths_and_pending_operands() {
+        let paths = b"0 0 1 1 re f ".repeat(MAX_CONTENT_OPS + 1);
+        assert!(lex_content(&paths).is_err());
+
+        // The limit is enforced while collecting offsets, even if no
+        // operator ever arrives to consume the operands.
+        let pending = b"0 ".repeat(MAX_CONTENT_OPERANDS + 1);
+        assert!(lex_content(&pending).is_err());
+    }
+
+    #[test]
+    fn form_cache_has_one_document_wide_budget() {
+        let mut cache = SessionCache::default();
+        cache.cache_form(
+            (1, 0),
+            Rc::new(TextProgram::default()),
+            MAX_FORM_CACHE_BYTES,
+        );
+        cache.cache_form((2, 0), Rc::new(TextProgram::default()), 1);
+        assert_eq!(cache.forms.len(), 1);
+        assert!(cache.forms.contains_key(&(1, 0)));
+        assert_eq!(cache.form_bytes, MAX_FORM_CACHE_BYTES);
     }
 
     #[test]
