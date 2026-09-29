@@ -29,6 +29,49 @@ use crate::schema::{
 };
 use crate::text_cleanup;
 
+/// A bounded reference to a figure emitted by extraction and suitable for a
+/// later, explicit multimodal-analysis selection. No bytes are uploaded here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnalysisArtifact {
+    pub page: u32,
+    pub figure: u32,
+    pub media_type: String,
+    pub file: String,
+    pub width_px: Option<u32>,
+    pub height_px: Option<u32>,
+}
+
+/// Select exported figure artifacts only from requested pages and cap both
+/// page and image counts before a consumer reads any bytes. Consumers render
+/// whole pages separately at their own bounded resolution.
+pub fn analysis_artifacts(
+    result: &ExtractionResult,
+    selected_pages: &[u32],
+    max_pages: usize,
+    max_images: usize,
+) -> Vec<AnalysisArtifact> {
+    let pages: std::collections::BTreeSet<_> =
+        selected_pages.iter().copied().take(max_pages).collect();
+    result
+        .pages
+        .iter()
+        .filter(|p| pages.contains(&p.page))
+        .flat_map(|page| {
+            page.figures.iter().filter_map(move |figure| {
+                Some(AnalysisArtifact {
+                    page: page.page,
+                    figure: figure.index,
+                    media_type: figure.mime.clone()?,
+                    file: figure.file.clone()?,
+                    width_px: figure.width_px,
+                    height_px: figure.height_px,
+                })
+            })
+        })
+        .take(max_images)
+        .collect()
+}
+
 /// Failure of a whole job. Per-page backend failures are not errors: they
 /// become warnings and a `Partial` status instead.
 #[derive(Debug, Error)]
