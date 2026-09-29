@@ -1154,7 +1154,11 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
     let mut tails: Vec<(usize, usize, String)> = Vec::new();
     for (i, bbox) in &candidates {
         let text = &spans[*i].text;
-        if compose_accents && let Some(marks) = accent_marks(text) {
+        // Keep accent-only spans out of ordinary line grouping even when
+        // composition is disabled. Feeding them to `find_line` can make an
+        // accent-only page quadratic when every mark shares a baseline but
+        // is too far from all the lines before it.
+        if let Some(marks) = accent_marks(text) {
             accents.push((*i, *bbox, marks));
             continue;
         }
@@ -1214,6 +1218,16 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
     let mut unattached: usize = 0;
     for (i, bbox, marks) in accents {
         let size = span_size(&spans[i], fallback);
+        if !compose_accents {
+            builds.push(LineBuild {
+                baseline: bbox.y0,
+                size,
+                bbox,
+                spans: vec![(i, bbox)],
+                accents: Vec::new(),
+            });
+            continue;
+        }
         let below = is_below_mark(&marks);
         if let Some((k, base)) = find_base_line(&builds[..glyph_lines], bbox, size, largest, below)
         {
@@ -2705,6 +2719,26 @@ mod tests {
 
         assert_eq!(page.text.matches('^').count(), 1_000);
         assert_eq!(page.text.matches('\u{302}').count(), 0);
+        assert_eq!(
+            page.warnings,
+            ["accent composition skipped at page 1: work limit exceeded"]
+        );
+    }
+
+    #[test]
+    fn excessive_accent_work_keeps_separated_accent_spans_linear() {
+        let spans: Vec<_> = (0..1_000)
+            .map(|seq| {
+                let x = seq as f32 * 100.0;
+                span("^", x, 700.0, x + 2.0, 710.0, seq)
+            })
+            .collect();
+        let mut page = page_with(spans);
+
+        order_page(&mut page);
+
+        assert_eq!(page.lines.len(), 1_000);
+        assert!(page.lines.iter().all(|line| line.text == "^"));
         assert_eq!(
             page.warnings,
             ["accent composition skipped at page 1: work limit exceeded"]
