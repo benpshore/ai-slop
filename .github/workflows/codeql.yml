@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
@@ -28,7 +32,7 @@ jobs:
           - { language: python, build-mode: none, os: ubuntu-latest }
           - { language: rust, build-mode: none, os: ubuntu-latest }
           - { language: c-cpp, build-mode: none, os: ubuntu-latest }
-          - { language: swift, build-mode: autobuild, os: macos-latest }
+          # Swift analysis needs a macOS runner; no macOS runners in Actions.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
