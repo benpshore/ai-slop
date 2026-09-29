@@ -13,6 +13,21 @@ tpe ingest paper.pdf report.docx workbook.xlsx page.html notes.txt > records.jso
 Python runtime, PDFium, ONNX, OCR/ASR models, browser, or HTTP image fetching.
 The default build supports PDF and UTF-8 text; Office/HTML needs `formats`.
 
+For a password-protected PDF, provide an already-set environment variable:
+
+```sh
+tpe ingest --password-env TPE_PDF_PASSWORD locked.pdf > records.jsonl
+```
+
+The CLI passes its value directly to the PDF backend without putting the secret
+in command arguments, output, policy or policy digest. The same credential
+applies to all PDFs in that invocation; non-PDF inputs ignore it. A missing or
+non-UTF-8 credential variable fails before ingestion. Wrong credentials produce
+a normal failed document record. Library callers can use
+`ingest::run_with_password(path, options, Some(password))`; credentials are
+deliberately separate from serializable `Options`. The batch supervisor does
+not yet forward credentials; use this command for encrypted inputs.
+
 ## Routing and fidelity
 
 | Input | Extractor | Stored evidence | Limitations |
@@ -27,6 +42,10 @@ The default build supports PDF and UTF-8 text; Office/HTML needs `formats`.
 | Scanned PDF / image | Routing only | Available PDF text, candidate page numbers and detection evidence | `needs_ocr` for empty text or sparse text with a dominant raster. This heuristic can miss scans; blank pages and captioned photographs can trigger it. |
 | Audio | Routing only | Source identity | `needs_transcription`; no ASR has been invoked. |
 | Other | None | Source identity where readable | Explicit `unsupported`. |
+
+Non-worksheet Excel sheets retain their name, type and visibility (`visible`,
+`hidden` or `very_hidden`). Their `cells` is null and the record requires review;
+this preserves metadata without claiming that charts were extracted.
 
 PDF header lines precede extension detection. A header must have the form
 `%PDF-1.x` or `%PDF-2.x` followed by a line ending, at the start or after a short
@@ -168,6 +187,9 @@ empty caches, errors, hidden sheets, merged ranges, format spoofing, scans with
 digital page numbers, omitted Word side parts with exact checksums, CSV quoted
 headers and ragged rows, parser-limit provenance, duplicate ZIP entries and
 visible limit failures.
+Encrypted-PDF checks cover absent, incorrect and correct credentials through
+both the library and CLI, source hashes, and exclusion of secrets from records
+and policy digests. Chart-sheet checks cover all three visibility states.
 The duplicate-member regression deliberately changes the two equal-length ZIP
 filenames in local and central headers because the normal ZIP writer refuses
 to create duplicates. The test asserts exactly two replacements; member data,

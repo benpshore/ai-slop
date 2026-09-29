@@ -74,6 +74,9 @@ enum Cmd {
 struct IngestArgs {
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
+    /// Read the PDF password from this environment variable (never from arguments).
+    #[arg(long, value_name = "NAME")]
+    password_env: Option<String>,
     /// Maximum source bytes per input.
     #[arg(long, default_value_t = 64 * 1024 * 1024)]
     max_bytes: u64,
@@ -93,6 +96,15 @@ struct IngestArgs {
 
 fn run_ingest(args: &IngestArgs) -> anyhow::Result<ExitCode> {
     use std::io::Write;
+    let password = args
+        .password_env
+        .as_ref()
+        .map(|name| {
+            std::env::var(name).map_err(|_| {
+                anyhow!("PDF password environment variable is missing or not valid UTF-8")
+            })
+        })
+        .transpose()?;
     let options = tpe::ingest::Options {
         max_bytes: args.max_bytes,
         max_expanded_bytes: args.max_expanded_bytes,
@@ -103,7 +115,7 @@ fn run_ingest(args: &IngestArgs) -> anyhow::Result<ExitCode> {
     let mut stdout = std::io::stdout().lock();
     let mut success = true;
     for path in &args.paths {
-        let record = tpe::ingest::run(path, &options);
+        let record = tpe::ingest::run_with_password(path, &options, password.as_deref());
         success &= record.outcome == tpe::ingest::Outcome::Extracted;
         serde_json::to_writer(&mut stdout, &record)?;
         writeln!(stdout)?;

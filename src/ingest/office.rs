@@ -279,13 +279,18 @@ fn extract_xlsx(bytes: &[u8], options: &Options, record: &mut Record) -> Result<
     let mut sheets = Vec::new();
     let mut total_cells = 0_usize;
     for sheet in metadata {
+        let visibility = match sheet.visible {
+            SheetVisible::Visible => "visible",
+            SheetVisible::Hidden => "hidden",
+            SheetVisible::VeryHidden => "very_hidden",
+        };
         if sheet.typ != SheetType::WorkSheet {
             record.outcome = Outcome::ReviewRequired;
             record.warnings.push(format!(
                 "sheet {:?} is {:?}; cell extraction does not cover this sheet type",
                 sheet.name, sheet.typ
             ));
-            sheets.push(json!({"name": sheet.name, "sheet_type": format!("{:?}", sheet.typ), "cells": null}));
+            sheets.push(json!({"name": sheet.name, "sheet_type": format!("{:?}", sheet.typ), "visibility": visibility, "cells": null}));
             continue;
         }
         let merges = workbook.merge_cells_by_sheet_name(&sheet.name)?;
@@ -321,11 +326,6 @@ fn extract_xlsx(bytes: &[u8], options: &Options, record: &mut Record) -> Result<
                 "formula": cell.formula.as_ref().map(formula_value).transpose()?,
             }));
         }
-        let visibility = match sheet.visible {
-            SheetVisible::Visible => "visible",
-            SheetVisible::Hidden => "hidden",
-            SheetVisible::VeryHidden => "very_hidden",
-        };
         sheets.push(json!({"name": sheet.name, "visibility": visibility, "cells": cells, "merged_ranges": merged_ranges}));
     }
     record.content = Some(json!({"coordinate_origin": 1, "sheets": sheets}));

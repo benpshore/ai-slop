@@ -98,7 +98,7 @@ impl Record {
     /// a result. Missing source identity stays null, never a guessed hash.
     pub fn failure(path: &Path, options: &Options, message: String) -> Self {
         let mut policy = BTreeMap::from([
-            ("ingest_revision".to_owned(), "2".to_owned()),
+            ("ingest_revision".to_owned(), "3".to_owned()),
             (
                 "formats_enabled".to_owned(),
                 cfg!(feature = "formats").to_string(),
@@ -170,6 +170,13 @@ fn parser_limits() -> &'static BTreeMap<String, String> {
 /// Read and hash once, then route the immutable bytes. Each failure produces
 /// a record. Panics are contained here; process aborts need a supervisor.
 pub fn run(path: &Path, options: &Options) -> Record {
+    run_with_password(path, options, None)
+}
+
+/// Extract with an optional PDF credential. The password remains separate from
+/// serializable options and never enters source records or policy digests.
+/// Non-PDF adapters ignore it. Other failure semantics match [`run`].
+pub fn run_with_password(path: &Path, options: &Options, password: Option<&str>) -> Record {
     let start = Instant::now();
     let mut record = Record::failure(path, options, String::new());
     record.warnings.clear();
@@ -178,7 +185,7 @@ pub fn run(path: &Path, options: &Options) -> Record {
         record.sha256 = Some(snapshot.hash.0);
         record.source = Some(snapshot.source);
         record.format = detect(path, &snapshot.bytes, options)?;
-        extract(snapshot.bytes, options, &mut record)
+        extract(snapshot.bytes, options, password, &mut record)
     }));
     match result {
         Ok(Ok(())) => {}
@@ -269,7 +276,12 @@ fn identity(name: &str, version: &str, policy_digest: &str) -> BackendIdentity {
     }
 }
 
-fn extract(bytes: Vec<u8>, options: &Options, record: &mut Record) -> Result<()> {
+fn extract(
+    bytes: Vec<u8>,
+    options: &Options,
+    password: Option<&str>,
+    record: &mut Record,
+) -> Result<()> {
     #[cfg(feature = "formats")]
     if environment_limits() != *parser_limits() {
         bail!(
@@ -278,7 +290,7 @@ fn extract(bytes: Vec<u8>, options: &Options, record: &mut Record) -> Result<()>
     }
     record.outcome = Outcome::Extracted;
     match record.format {
-        Format::Pdf => extract_pdf(&bytes, options, record)?,
+        Format::Pdf => extract_pdf(&bytes, options, password, record)?,
         Format::Text => {
             let text = String::from_utf8(bytes)?;
             if text.contains('\0') {
@@ -320,10 +332,15 @@ fn extract(bytes: Vec<u8>, options: &Options, record: &mut Record) -> Result<()>
     Ok(())
 }
 
-fn extract_pdf(bytes: &[u8], options: &Options, record: &mut Record) -> Result<()> {
+fn extract_pdf(
+    bytes: &[u8],
+    options: &Options,
+    password: Option<&str>,
+    record: &mut Record,
+) -> Result<()> {
     let extractor = LopdfBackend::default();
     record.extractor = Some(extractor.identity());
-    let mut session = extractor.open(bytes, None)?;
+    let mut session = extractor.open(bytes, password)?;
     if session.page_count() == 0 {
         bail!("PDF contains no pages");
     }

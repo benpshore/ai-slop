@@ -59,6 +59,83 @@ fn prose_mentioning_pdf_magic_remains_exact_text() {
     assert_eq!(record.content.unwrap()["text"], text);
 }
 
+#[test]
+fn encrypted_pdf_credentials_reach_backend_without_entering_records_or_policy() {
+    const PASSWORD: &str = "fixture-only-pdf-password";
+    let mut document = lopdf::Document::load_mem(&common::synthetic_paper()).unwrap();
+    document.trailer.set(
+        "ID",
+        vec![
+            lopdf::Object::string_literal("ingest-test-id-01"),
+            lopdf::Object::string_literal("ingest-test-id-01"),
+        ],
+    );
+    let encryption = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V2 {
+        document: &document,
+        owner_password: "fixture-only-owner-password",
+        user_password: PASSWORD,
+        key_length: 128,
+        permissions: lopdf::Permissions::all(),
+    })
+    .unwrap();
+    document.encrypt(&encryption).unwrap();
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    let (_dir, path) = common::write_temp_pdf(&bytes);
+    let options = Options::default();
+    let missing = run(&path, &options);
+    let wrong = tpe::ingest::run_with_password(&path, &options, Some("wrong-fixture-password"));
+    let correct = tpe::ingest::run_with_password(&path, &options, Some(PASSWORD));
+    assert_eq!(missing.outcome, Outcome::Failed);
+    assert_eq!(wrong.outcome, Outcome::Failed);
+    assert_eq!(
+        correct.outcome,
+        Outcome::Extracted,
+        "{:?}",
+        correct.warnings
+    );
+    assert!(
+        correct.content.as_ref().unwrap()["pages"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(common::TITLE)
+    );
+    assert_eq!(
+        correct.sha256.as_deref(),
+        Some(tpe::schema::sha256_hex(&bytes).as_str())
+    );
+    assert_eq!(correct.policy, wrong.policy);
+    assert_eq!(correct.policy_digest, wrong.policy_digest);
+    assert_eq!(correct.policy_digest, missing.policy_digest);
+    for record in [&correct, &wrong, &missing] {
+        let json = serde_json::to_string(record).unwrap();
+        assert!(!json.contains(PASSWORD));
+        assert!(!json.contains("wrong-fixture-password"));
+    }
+    for (password, succeeds) in [(PASSWORD, true), ("wrong-fixture-password", false)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+            .args(["ingest", "--password-env", "INGEST_TEST_PDF_PASSWORD"])
+            .arg(&path)
+            .env("INGEST_TEST_PDF_PASSWORD", password)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), succeeds, "{:?}", output.stderr);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(password));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(password));
+        let record: tpe::ingest::Record = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record.outcome == Outcome::Extracted, succeeds);
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["ingest", "--password-env", "INGEST_TEST_PDF_PASSWORD"])
+        .arg(&path)
+        .env_remove("INGEST_TEST_PDF_PASSWORD")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing or not valid UTF-8"));
+}
+
 fn raster_with_text(image_height: i64, text: &[u8], font: bool) -> Vec<u8> {
     use lopdf::{Document, Stream, dictionary};
     let mut doc = Document::load_mem(&common::raster::scanned_fixture()).unwrap();
@@ -362,6 +439,47 @@ mod office {
             serde_json::json!([2023, 3, 15, 12, 0, 0, 0])
         );
         assert_eq!(date.get("timezone"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn chart_sheets_keep_visibility_without_claiming_cell_extraction() {
+        for (state, expected) in [
+            ("visible", "visible"),
+            ("hidden", "hidden"),
+            ("veryHidden", "very_hidden"),
+        ] {
+            let workbook = format!(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Chart evidence" sheetId="1" state="{state}" r:id="rChart"/></sheets></workbook>"#
+            );
+            let parts = [
+                ("[Content_Types].xml", TYPES),
+                (
+                    "_rels/.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rBook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+                ),
+                ("xl/workbook.xml", workbook.as_str()),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#,
+                ),
+                (
+                    "xl/chartsheets/sheet1.xml",
+                    r#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#,
+                ),
+            ];
+            let record = process("chart.xlsx", &package(&parts), &Options::default());
+            assert_eq!(
+                record.outcome,
+                Outcome::ReviewRequired,
+                "{:?}",
+                record.warnings
+            );
+            let content = record.content.unwrap();
+            assert_eq!(content["sheets"][0]["name"], "Chart evidence");
+            assert_eq!(content["sheets"][0]["sheet_type"], "ChartSheet");
+            assert_eq!(content["sheets"][0]["visibility"], expected);
+            assert_eq!(content["sheets"][0]["cells"], Value::Null);
+        }
     }
 
     #[test]
