@@ -27,6 +27,7 @@ use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, PipelineError};
+use tpe::resource::{ResourceMonitor, ResourcePolicy, ResourceProfile};
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
 /// Service-time target per 20-page chunk, in milliseconds.
@@ -39,8 +40,42 @@ const USER_AGENT: &str =
 #[derive(Parser)]
 #[command(name = "tpe", version, about)]
 struct Cli {
+    #[command(flatten)]
+    resources: ResourceArgs,
     #[command(subcommand)]
     command: Cmd,
+}
+
+#[derive(Args)]
+struct ResourceArgs {
+    /// Resource/storage preset. Every resolved setting is printed at startup.
+    #[arg(long, value_enum, default_value_t = ResourceProfile::Balanced, global = true)]
+    resource_profile: ResourceProfile,
+    /// Override the maximum number of simultaneous heavyweight jobs.
+    #[arg(long, value_name = "N", global = true)]
+    max_heavy_jobs: Option<usize>,
+    /// Override the write-rate budget in bytes per second (0 disables it).
+    #[arg(long, value_name = "BYTES", global = true)]
+    max_write_bytes_per_second: Option<u64>,
+    /// Override the write budget in bytes per day (0 disables it).
+    #[arg(long, value_name = "BYTES", global = true)]
+    max_write_bytes_per_day: Option<u64>,
+}
+
+impl ResourceArgs {
+    fn resolve(&self) -> ResourcePolicy {
+        let mut p = ResourcePolicy::for_profile(self.resource_profile);
+        if let Some(n) = self.max_heavy_jobs {
+            p.max_heavy_jobs = n.max(1);
+        }
+        if let Some(n) = self.max_write_bytes_per_second {
+            p.max_write_bytes_per_second = (n != 0).then_some(n);
+        }
+        if let Some(n) = self.max_write_bytes_per_day {
+            p.max_write_bytes_per_day = (n != 0).then_some(n);
+        }
+        p
+    }
 }
 
 #[derive(Subcommand)]
@@ -234,8 +269,10 @@ struct EvalArgs {
 
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
+    let policy = cli.resources.resolve();
+    eprintln!("resource_policy={}", serde_json::to_string(&policy)?);
     match cli.command {
-        Cmd::Extract(args) => run_extract(&args),
+        Cmd::Extract(args) => run_extract(&args, &policy),
         Cmd::Bibliography(args) => run_bibliography(&args),
         Cmd::Stats { db } => {
             run_stats(&db)?;
@@ -246,14 +283,14 @@ fn main() -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Bench(args) => {
-            run_bench(&args)?;
+            run_bench(&args, &policy)?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Corpus { command } => match command {
-            CorpusCmd::Fetch(args) => run_corpus_fetch(&args),
+            CorpusCmd::Fetch(args) => run_corpus_fetch(&args, &policy),
         },
         Cmd::Eval(args) => {
-            run_eval(&args)?;
+            run_eval(&args, &policy)?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Backends => {
@@ -390,17 +427,22 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
     }
 }
 
-fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
+fn run_extract(args: &ExtractArgs, policy: &ResourcePolicy) -> anyhow::Result<ExitCode> {
+    let mut monitor = ResourceMonitor::start(args.out.as_deref());
     check_backend(&args.backend)?;
     pipeline::warm_up();
     let mut ledger = open_ledger(&args.db)?;
+    ledger.set_synchronous(&policy.ledger_synchronous)?;
     if let Some(dir) = &args.out {
         fs::create_dir_all(dir)
             .with_context(|| format!("creating output directory {}", dir.display()))?;
     }
 
     let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
-    let workers = args.jobs.clamp(1, args.paths.len().max(1));
+    let workers = args
+        .jobs
+        .min(policy.max_heavy_jobs)
+        .clamp(1, args.paths.len().max(1));
     let (sender, receiver) = mpsc::channel::<Outcome>();
 
     let any_failed = thread::scope(|scope| -> anyhow::Result<bool> {
@@ -420,13 +462,19 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
 
         let mut any_failed = false;
         for outcome in receiver {
-            if publish(&mut ledger, args, outcome)? {
+            if publish(&mut ledger, args, policy, &mut monitor, outcome)? {
                 any_failed = true;
             }
         }
         Ok(any_failed)
     })?;
 
+    let headroom = args.out.as_deref().unwrap_or(&args.db);
+    let metrics = monitor.finish(args.out.as_deref(), headroom);
+    println!(
+        "{}",
+        serde_json::json!({"resource_policy": policy, "resource_metrics": metrics})
+    );
     Ok(exit_code(any_failed))
 }
 
@@ -498,7 +546,13 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
 
 /// Record one outcome in the ledger (main thread only), write the optional
 /// output files and print its line. Returns `true` when the file failed.
-fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow::Result<bool> {
+fn publish(
+    ledger: &mut Ledger,
+    args: &ExtractArgs,
+    policy: &ResourcePolicy,
+    monitor: &mut ResourceMonitor,
+    outcome: Outcome,
+) -> anyhow::Result<bool> {
     let Outcome {
         path,
         wall_ms,
@@ -507,6 +561,8 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
     let path_display = path.display().to_string();
     match result {
         Ok(mut result) => {
+            let logical = serde_json::to_vec(&result)?.len() as u64;
+            monitor.account_write(logical, policy)?;
             let write_start = Instant::now();
             let run = store_result(ledger, &result, &path_display)?;
             result.timings.write_ms = elapsed_ms(write_start);
@@ -514,7 +570,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
                 .update_timings(run, &result.timings)
                 .with_context(|| format!("recording write time for {path_display}"))?;
             if let Some(dir) = &args.out {
-                write_outputs(dir, &result)?;
+                write_outputs(dir, &result, policy, monitor)?;
             }
             if args.json {
                 println!("{}", serde_json::to_string(&result)?);
@@ -557,14 +613,20 @@ fn summary_line(result: &ExtractionResult, path: &str) -> String {
 }
 
 /// Write `<hash>.json` and `<hash>.txt` for one result into `dir`.
-fn write_outputs(dir: &Path, result: &ExtractionResult) -> anyhow::Result<()> {
+fn write_outputs(
+    dir: &Path,
+    result: &ExtractionResult,
+    policy: &ResourcePolicy,
+    monitor: &mut ResourceMonitor,
+) -> anyhow::Result<()> {
     let hash = result.document.hash.0.as_str();
     let json_path = dir.join(format!("{hash}.json"));
     let json = serde_json::to_string_pretty(result)?;
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    tpe::resource::write_if_changed(&json_path, json.as_bytes(), policy, monitor)
+        .with_context(|| format!("writing {}", json_path.display()))?;
     let text_path = dir.join(format!("{hash}.txt"));
     let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    fs::write(&text_path, texts.join("\u{c}"))
+    tpe::resource::write_if_changed(&text_path, texts.join("\u{c}").as_bytes(), policy, monitor)
         .with_context(|| format!("writing {}", text_path.display()))?;
     Ok(())
 }
@@ -743,7 +805,8 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
     sorted[rank.min(last)]
 }
 
-fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
+fn run_bench(args: &BenchArgs, policy: &ResourcePolicy) -> anyhow::Result<()> {
+    let monitor = ResourceMonitor::start(None);
     check_backend(&args.backend)?;
     pipeline::warm_up();
     let iterations = args.iterations.max(1);
@@ -786,6 +849,11 @@ fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
     all_samples.sort_by(f64::total_cmp);
     let gap = percentile(&all_samples, 0.95) - TARGET_MS_PER_CHUNK;
     println!("target 30 ms/chunk: p95 gap = {gap:.2} ms");
+    let metrics = monitor.finish(None, Path::new("."));
+    println!(
+        "{}",
+        serde_json::json!({"resource_policy": policy, "resource_metrics": metrics})
+    );
     Ok(())
 }
 
@@ -805,7 +873,8 @@ fn modified_since(path: &Path, since: SystemTime) -> bool {
         .is_ok_and(|modified| modified >= since)
 }
 
-fn run_corpus_fetch(args: &FetchArgs) -> anyhow::Result<ExitCode> {
+fn run_corpus_fetch(args: &FetchArgs, policy: &ResourcePolicy) -> anyhow::Result<ExitCode> {
+    let monitor = ResourceMonitor::start(Some(&args.cache));
     let mut manifest = load_corpus(&args.manifest, &args.cache)?;
     let selected: Vec<ManifestItem> = manifest
         .items
@@ -849,6 +918,11 @@ fn run_corpus_fetch(args: &FetchArgs) -> anyhow::Result<ExitCode> {
             .with_context(|| format!("saving manifest {}", args.manifest.display()))?;
         println!("manifest updated: {}", args.manifest.display());
     }
+    let metrics = monitor.finish(Some(&args.cache), &args.cache);
+    println!(
+        "{}",
+        serde_json::json!({"resource_policy": policy, "resource_metrics": metrics})
+    );
     Ok(exit_code(any_failed))
 }
 
@@ -968,13 +1042,17 @@ fn print_summary(report: &CorpusReport) {
     println!("target_ms_per_chunk: {:.1}", s.target_ms_per_chunk);
 }
 
-fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
+fn run_eval(args: &EvalArgs, policy: &ResourcePolicy) -> anyhow::Result<()> {
+    let monitor = ResourceMonitor::start(Some(&args.cache));
     check_backend(&args.backend)?;
     pipeline::warm_up();
     let manifest = load_corpus(&args.manifest, &args.cache)?;
     fs::create_dir_all(&args.out)
         .with_context(|| format!("creating output directory {}", args.out.display()))?;
     let mut ledger: Option<Ledger> = args.db.as_deref().map(open_ledger).transpose()?;
+    if let Some(ledger) = ledger.as_mut() {
+        ledger.set_synchronous(&policy.ledger_synchronous)?;
+    }
     let mut papers: Vec<PaperEval> = Vec::new();
     for item in manifest
         .items
@@ -998,7 +1076,9 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
         println!("{}", paper_line(&evaluated.paper));
         papers.push(evaluated.paper);
     }
-    let report = eval::build_report(&args.backend, &host_label(), papers);
+    let mut report = eval::build_report(&args.backend, &host_label(), papers);
+    report.resource_policy = Some(policy.clone());
+    report.resource_metrics = monitor.finish(Some(&args.cache), &args.out);
     write_report(&args.out, &report)?;
     print_summary(&report);
     Ok(())

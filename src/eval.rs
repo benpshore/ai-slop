@@ -29,6 +29,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::citations::{find_reference_section, find_reference_sections, segment_entries};
 use crate::latex_refs::{GroundTruth, TruthPaper, TruthReference};
+use crate::resource::{ResourceMetrics, ResourcePolicy};
 use crate::schema::{
     CitationMarker, ExtractionResult, Metadata, PageText, ReferenceEntry, StageTimings,
 };
@@ -364,6 +365,10 @@ pub struct CorpusReport {
     pub host: String,
     pub papers: Vec<PaperEval>,
     pub summary: Summary,
+    #[serde(default)]
+    pub resource_policy: Option<ResourcePolicy>,
+    #[serde(default)]
+    pub resource_metrics: ResourceMetrics,
 }
 
 /// Lower-cases `s` and keeps only Unicode letters and digits, with runs of
@@ -3123,6 +3128,8 @@ pub fn build_report(backend: &str, host: &str, papers: Vec<PaperEval>) -> Corpus
         host: host.to_string(),
         papers,
         summary,
+        resource_policy: None,
+        resource_metrics: ResourceMetrics::default(),
     }
 }
 
