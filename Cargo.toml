@@ -51,6 +51,7 @@ docling-pdf = { version = "=1.69.2", optional = true }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 hex = "0.4"
 lopdf = "0.45"
+libc = "0.2"
 # Same major as docling-pdf (0.8) so one pdfium-render instance links libpdfium.
 # No `image` feature here; docling-pdf turns it on for itself under `docling`.
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }

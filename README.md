@@ -12,6 +12,23 @@ The engine is the root crate `tpe` ([Engine](docs/ENGINE.md)):
 
 - `tpe extract` writes page text with span geometry, reading order, metadata, references, citation markers, chunks and figures to one SQLite ledger. Runs are keyed by input hash and backend identity.
 - `tpe bibliography` scans backward for the final reference list and emits one JSON record per PDF without populating the full-document ledger ([behavior and limits](docs/BIBLIOGRAPHY.md)).
+
+### Cloud placeholders and acquisition limits
+
+Acquisition is local-only by default. On macOS, `tpe extract`, `tpe bibliography`,
+and `tpe bench` inspect non-materializing filesystem metadata and report an
+iCloud/File Provider `UF_DATALESS` input as **deferred** before opening or
+reading its contents. This keeps an ordinary extraction from silently starting
+a download; corrupt and unsupported PDFs continue to be reported as failures.
+
+Pass `--hydrate` to those commands only when downloading placeholders is
+intended. A hydrating multi-path batch reserves every input's logical size
+against one aggregate materialization budget before that input starts. By
+default the budget is the filesystem's currently available space less a safety
+margin (the larger of 5% or 64 MiB); `--materialization-budget N` can impose a
+smaller byte limit. Inputs that would exceed the remaining aggregate allowance
+are deferred. This batch limit is independent of `--max-bytes`, which remains
+the per-file size limit.
 - Backends: `lopdf` (pure Rust, the default and only backend in the default build), `pdfium` behind feature `pdfium`, and `docling-text` / `docling` behind feature `docling`. Provisioning of the native libraries and models is in [Native](docs/NATIVE.md).
 - Figures: images never enter page text. Each page lists its figures, and `--figures-dir` writes their bytes.
 - Scanned-page fixture (`tests/scanned_fixture.rs`): a synthetic image-only page. `lopdf` must find no text, `pdfium` must report one raster figure, and docling OCR must read the text back.

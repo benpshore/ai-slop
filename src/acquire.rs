@@ -9,6 +9,47 @@ use thiserror::Error;
 
 use crate::schema::{ContentHash, SourceObservation, sha256_hex};
 
+/// Whether acquisition may materialize an on-demand cloud placeholder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcquisitionPolicy {
+    /// Never trigger an implicit download while opening an input.
+    #[default]
+    LocalOnly,
+    /// Permit the operating system to hydrate an on-demand input.
+    AllowHydration,
+}
+
+/// Platform-independent interpretation of filesystem flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Materialization {
+    Local,
+    Dataless,
+}
+
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+const UF_DATALESS: u32 = 0x4000_0000;
+
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn classify_flags(flags: u32) -> Materialization {
+    if flags & UF_DATALESS == 0 {
+        Materialization::Local
+    } else {
+        Materialization::Dataless
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn materialization(meta: &fs::Metadata) -> Materialization {
+    use std::os::macos::fs::MetadataExt;
+    classify_flags(meta.st_flags())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn materialization(_meta: &fs::Metadata) -> Materialization {
+    Materialization::Local
+}
+
 /// Why a file could not be snapshotted.
 #[derive(Debug, Error)]
 pub enum AcquireError {
@@ -22,6 +63,80 @@ pub enum AcquireError {
     ChangedDuringRead,
     #[error("not a regular file")]
     NotAFile,
+    #[error("cloud placeholder is not materialized (hydration was not requested)")]
+    Dataless,
+    #[error(
+        "materialization deferred: {size} bytes would exceed the remaining batch budget of {remaining} bytes"
+    )]
+    MaterializationBudget { size: u64, remaining: u64 },
+}
+
+/// Batch-wide allowance for inputs that may need local materialization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterializationBudget {
+    remaining: u64,
+}
+
+impl MaterializationBudget {
+    pub const fn new(bytes: u64) -> Self {
+        Self { remaining: bytes }
+    }
+    pub const fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    /// Reserve one input's logical size before acquisition begins.
+    pub fn reserve(&mut self, size: u64) -> Result<(), AcquireError> {
+        if size > self.remaining {
+            return Err(AcquireError::MaterializationBudget {
+                size,
+                remaining: self.remaining,
+            });
+        }
+        self.remaining -= size;
+        Ok(())
+    }
+}
+
+/// Return the logical size without opening or reading file contents.
+pub fn logical_size(path: &Path) -> Result<u64, AcquireError> {
+    let meta = fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(AcquireError::NotAFile);
+    }
+    Ok(meta.len())
+}
+
+/// Bytes currently available on the filesystem containing `path`.
+#[cfg(unix)]
+pub fn available_space(path: &Path) -> Result<u64, AcquireError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let probe = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(Path::new("."))
+    };
+    let path = CString::new(probe.as_os_str().as_bytes()).map_err(|_| {
+        AcquireError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains NUL",
+        ))
+    })?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stats` points to writable storage.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(AcquireError::Io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: a successful `statvfs` initialized the output structure.
+    let stats = unsafe { stats.assume_init() };
+    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
+}
+
+#[cfg(not(unix))]
+pub fn available_space(_path: &Path) -> Result<u64, AcquireError> {
+    Ok(u64::MAX)
 }
 
 /// The bytes of one file at one instant, plus their identity and origin.
@@ -107,7 +222,15 @@ fn observe(meta: &fs::Metadata) -> Observed {
 /// [`AcquireError::ChangedDuringRead`]. `max_bytes` bounds the size accepted
 /// before anything is read.
 pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, AcquireError> {
-    let read = read_verified(path, max_bytes)?;
+    snapshot_with_policy(path, max_bytes, AcquisitionPolicy::LocalOnly)
+}
+
+pub fn snapshot_with_policy(
+    path: &Path,
+    max_bytes: Option<u64>,
+    policy: AcquisitionPolicy,
+) -> Result<Snapshot, AcquireError> {
+    let read = read_verified_with_policy(path, max_bytes, policy)?;
     let hash = ContentHash(sha256_hex(&read.bytes));
     Ok(read.into_snapshot(hash))
 }
@@ -115,6 +238,14 @@ pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, Acquire
 /// [`snapshot`] without the hash: read `path` completely with the same
 /// checks, and leave hashing to the caller.
 pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, AcquireError> {
+    read_verified_with_policy(path, max_bytes, AcquisitionPolicy::LocalOnly)
+}
+
+pub fn read_verified_with_policy(
+    path: &Path,
+    max_bytes: Option<u64>,
+    policy: AcquisitionPolicy,
+) -> Result<Unhashed, AcquireError> {
     let before_meta = fs::metadata(path)?;
     if !before_meta.is_file() {
         return Err(AcquireError::NotAFile);
@@ -130,6 +261,14 @@ pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, Ac
             size: before.size,
             max,
         });
+    }
+
+    // On macOS metadata does not materialize a File Provider placeholder.
+    // This guard must remain before every operation that opens file contents.
+    if materialization(&before_meta) == Materialization::Dataless
+        && policy == AcquisitionPolicy::LocalOnly
+    {
+        return Err(AcquireError::Dataless);
     }
 
     let bytes = fs::read(path)?;
@@ -228,5 +367,57 @@ mod tests {
         let dir = tempdir().unwrap();
         let err = snapshot(&dir.path().join("missing.pdf"), None).unwrap_err();
         assert!(matches!(err, AcquireError::Io(_)), "{err:?}");
+    }
+
+    #[test]
+    fn dataless_flag_classification_is_platform_independent() {
+        assert_eq!(classify_flags(0), Materialization::Local);
+        assert_eq!(classify_flags(0x20), Materialization::Local);
+        assert_eq!(classify_flags(UF_DATALESS), Materialization::Dataless);
+        assert_eq!(
+            classify_flags(UF_DATALESS | 0x20),
+            Materialization::Dataless
+        );
+    }
+
+    #[test]
+    fn policy_defaults_to_refusing_hydration() {
+        assert_eq!(AcquisitionPolicy::default(), AcquisitionPolicy::LocalOnly);
+        assert_eq!(
+            serde_json::to_string(&AcquisitionPolicy::AllowHydration).unwrap(),
+            "\"allow_hydration\""
+        );
+    }
+
+    #[test]
+    fn aggregate_budget_defers_before_exhaustion() {
+        let mut budget = MaterializationBudget::new(10);
+        budget.reserve(6).unwrap();
+        let err = budget.reserve(5).unwrap_err();
+        assert!(matches!(
+            err,
+            AcquireError::MaterializationBudget {
+                size: 5,
+                remaining: 4
+            }
+        ));
+        assert_eq!(budget.remaining(), 4);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dataless_fixture_is_rejected_before_read_when_available() {
+        // CI may provide a genuine File Provider placeholder. Merely creating
+        // a sparse file does not set UF_DATALESS, so absence is a valid skip.
+        let Some(path) = std::env::var_os("TPE_DATALESS_FIXTURE") else {
+            return;
+        };
+        let path = Path::new(&path);
+        let meta = fs::metadata(path).unwrap();
+        assert_eq!(materialization(&meta), Materialization::Dataless);
+        assert!(matches!(
+            read_verified(path, None),
+            Err(AcquireError::Dataless)
+        ));
     }
 }
