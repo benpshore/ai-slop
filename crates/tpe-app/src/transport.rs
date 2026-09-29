@@ -6,10 +6,12 @@
 
 use std::fmt;
 use std::io::Read;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use thiserror::Error;
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 use url::{Host, Url};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,6 +73,8 @@ pub struct ValidatedEndpoint {
     provider: ProviderPolicy,
     url: Url,
     origin: String,
+    /// Ollama addresses are retained so sending cannot perform a second DNS lookup.
+    resolved_addresses: Option<Vec<SocketAddr>>,
 }
 
 impl fmt::Debug for ValidatedEndpoint {
@@ -103,7 +107,7 @@ impl ValidatedEndpoint {
         let host = url.host().ok_or(PolicyError::InvalidEndpoint)?;
         let origin = url.origin().ascii_serialization();
 
-        if let Some(fixed) = provider.fixed_origin() {
+        let resolved_addresses = if let Some(fixed) = provider.fixed_origin() {
             if url.scheme() != "https" || origin != fixed {
                 return Err(if url.scheme() == "https" {
                     PolicyError::Origin
@@ -111,6 +115,7 @@ impl ValidatedEndpoint {
                     PolicyError::Scheme
                 });
             }
+            None
         } else {
             let port = url
                 .port_or_known_default()
@@ -132,12 +137,49 @@ impl ValidatedEndpoint {
             } else if ips.iter().any(|ip| !is_public(*ip)) {
                 return Err(PolicyError::NonPublic);
             }
-        }
+            // ureq's resolver has a fixed capacity of 16 addresses. Resolve only
+            // once, then retain exactly the validated destinations for sending.
+            let mut addresses: Vec<_> = ips
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect();
+            addresses.sort_unstable();
+            addresses.dedup();
+            addresses.truncate(16);
+            Some(addresses)
+        };
         Ok(Self {
             provider,
             url,
             origin,
+            resolved_addresses,
         })
+    }
+}
+
+#[derive(Debug)]
+enum EndpointResolver {
+    Default(DefaultResolver),
+    Pinned(Vec<SocketAddr>),
+}
+
+impl Resolver for EndpointResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        match self {
+            Self::Default(resolver) => resolver.resolve(uri, config, timeout),
+            Self::Pinned(addresses) => {
+                let mut resolved = self.empty();
+                for address in addresses {
+                    resolved.push(*address);
+                }
+                Ok(resolved)
+            }
+        }
     }
 }
 
@@ -250,14 +292,25 @@ fn post_json_with_timeouts(
         return Err(PolicyError::RequestTooLarge.to_string());
     }
     let headers = auth_headers(endpoint, credential).map_err(|e| e.to_string())?;
-    let config = ureq::Agent::config_builder()
+    let config_builder = ureq::Agent::config_builder()
         .timeout_connect(Some(timeouts.connect))
         .timeout_per_call(Some(timeouts.request))
         .timeout_global(Some(timeouts.total))
         .max_redirects(0)
-        .http_status_as_error(false)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
+        .http_status_as_error(false);
+    let (config, resolver) = match &endpoint.resolved_addresses {
+        Some(addresses) => (
+            // Environment proxies would receive plaintext Ollama prompts and
+            // resolve the hostname themselves, bypassing destination validation.
+            config_builder.proxy(None).build(),
+            EndpointResolver::Pinned(addresses.clone()),
+        ),
+        None => (
+            config_builder.build(),
+            EndpointResolver::Default(DefaultResolver::default()),
+        ),
+    };
+    let agent = ureq::Agent::with_parts(config, DefaultConnector::default(), resolver);
     let mut request = agent
         .post(endpoint.url.as_str())
         .header("content-type", "application/json");
@@ -330,6 +383,38 @@ mod tests {
             .unwrap_err(),
             PolicyError::NonPublic
         );
+
+        let endpoint = ValidatedEndpoint::parse_with(
+            ProviderPolicy::Ollama,
+            "http://model.test:11434/api/chat",
+            resolved(&["127.0.0.1".parse().unwrap()]),
+        )
+        .unwrap();
+        assert_eq!(
+            endpoint.resolved_addresses,
+            Some(vec!["127.0.0.1:11434".parse().unwrap()])
+        );
+    }
+
+    #[test]
+    fn pinned_resolver_returns_only_validated_addresses() {
+        let pinned: SocketAddr = "127.0.0.1:11434".parse().unwrap();
+        let resolver = EndpointResolver::Pinned(vec![pinned]);
+        let uri = "http://attacker-controlled.test:11434/api/chat"
+            .parse()
+            .unwrap();
+        let config = ureq::config::Config::default();
+        let addresses = resolver
+            .resolve(
+                &uri,
+                &config,
+                NextTimeout {
+                    after: ureq::unversioned::transport::time::Duration::NotHappening,
+                    reason: ureq::Timeout::Connect,
+                },
+            )
+            .unwrap();
+        assert_eq!(addresses.iter().copied().collect::<Vec<_>>(), vec![pinned]);
     }
 
     #[test]
