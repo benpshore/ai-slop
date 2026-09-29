@@ -27,6 +27,7 @@ use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, PipelineError};
+use tpe::resources::{Budget, Limits, Reservation};
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
 /// Service-time target per 20-page chunk, in milliseconds.
@@ -128,6 +129,18 @@ struct ExtractArgs {
     /// Reject inputs larger than this many bytes.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Hard process-memory ceiling (automatic conservative value when omitted).
+    #[arg(long, value_name = "N")]
+    max_memory_bytes: Option<u64>,
+    /// Maximum combined metadata size of admitted documents.
+    #[arg(long, value_name = "N")]
+    max_inflight_bytes: Option<u64>,
+    /// Reject documents whose page count exceeds this limit.
+    #[arg(long, value_name = "N")]
+    max_pages: Option<u32>,
+    /// Maximum number of concurrently active backend sessions.
+    #[arg(long, value_name = "N")]
+    max_backend_sessions: Option<usize>,
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
@@ -343,10 +356,12 @@ fn store_result(
 }
 
 /// Outcome of one worker job, sent to the main thread over the channel.
-struct Outcome {
+struct Outcome<'a> {
     path: PathBuf,
     wall_ms: f64,
     result: Result<ExtractionResult, String>,
+    resource_limited: bool,
+    _reservation: Option<Reservation<'a>>,
 }
 
 /// Human-readable text of a panic payload.
@@ -367,13 +382,19 @@ fn next_path(queue: &Mutex<VecDeque<PathBuf>>) -> Option<PathBuf> {
 }
 
 /// Run the pipeline for one path on a worker thread.
-fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
+fn extract_one<'a>(
+    args: &ExtractArgs,
+    path: PathBuf,
+    reservation: Reservation<'a>,
+    max_pages: u32,
+) -> Outcome<'a> {
     let job = Job {
         path: path.to_string_lossy().into_owned(),
         backend: args.backend.clone(),
         pages: args.pages,
         password: args.password.clone(),
         max_bytes: args.max_bytes,
+        max_pages: Some(max_pages),
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let start = Instant::now();
@@ -383,10 +404,15 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
             |payload| Err(format!("panic: {}", panic_message(&*payload))),
             |outcome| outcome.map_err(|err| err.to_string()),
         );
+    let resource_limited = result
+        .as_ref()
+        .is_err_and(|message| message.starts_with("resource limit:"));
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
         result,
+        resource_limited,
+        _reservation: Some(reservation),
     }
 }
 
@@ -400,16 +426,62 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
     }
 
     let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
+    let limits = Limits::resolve(
+        args.max_memory_bytes,
+        args.max_inflight_bytes,
+        args.max_pages,
+        args.max_backend_sessions,
+    );
+    let budget = Budget::new(limits);
+    eprintln!("resource_policy\t{}", serde_json::to_string(&limits)?);
     let workers = args.jobs.clamp(1, args.paths.len().max(1));
-    let (sender, receiver) = mpsc::channel::<Outcome>();
+    let (sender, receiver) = mpsc::channel();
 
     let any_failed = thread::scope(|scope| -> anyhow::Result<bool> {
         for _ in 0..workers {
             let sender = sender.clone();
             let queue = &queue;
+            let budget = &budget;
             scope.spawn(move || {
                 while let Some(path) = next_path(queue) {
-                    let outcome = extract_one(args, path);
+                    let size = match fs::metadata(&path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(err) => {
+                            let outcome = Outcome {
+                                path,
+                                wall_ms: 0.0,
+                                result: Err(format!("resource admission metadata: {err}")),
+                                resource_limited: true,
+                                _reservation: None,
+                            };
+                            if sender.send(outcome).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    let reservation = match budget.reserve(size) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            eprintln!(
+                                "resource_admission\treject\t{}\t{size}\t{err}",
+                                path.display()
+                            );
+                            let outcome = Outcome {
+                                path,
+                                wall_ms: 0.0,
+                                result: Err(err.to_string()),
+                                resource_limited: true,
+                                _reservation: None,
+                            };
+                            if sender.send(outcome).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    eprintln!("resource_admission\tadmit\t{}\t{size}", path.display());
+                    let outcome = extract_one(args, path, reservation, limits.max_pages);
                     if sender.send(outcome).is_err() {
                         break;
                     }
@@ -424,6 +496,10 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
                 any_failed = true;
             }
         }
+        eprintln!(
+            "resource_usage\t{}",
+            serde_json::to_string(&tpe::resources::usage())?
+        );
         Ok(any_failed)
     })?;
 
@@ -498,11 +574,13 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
 
 /// Record one outcome in the ledger (main thread only), write the optional
 /// output files and print its line. Returns `true` when the file failed.
-fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow::Result<bool> {
+fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome<'_>) -> anyhow::Result<bool> {
     let Outcome {
         path,
         wall_ms,
         result,
+        resource_limited,
+        _reservation,
     } = outcome;
     let path_display = path.display().to_string();
     match result {
@@ -527,14 +605,19 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
             eprintln!("{path_display}: {err}");
             if args.json {
                 let line = serde_json::json!({
-                    "status": Status::Failed.as_str(),
+                    "status": if resource_limited { "resource_limit" } else { Status::Failed.as_str() },
                     "path": path_display,
                     "error": err.clone(),
                     "ms": wall_ms,
                 });
                 println!("{line}");
             } else {
-                println!("failed\t-\t0p\t0 refs\t0 cites\t{wall_ms:.1} ms\t{path_display}");
+                let status = if resource_limited {
+                    "resource_limit"
+                } else {
+                    "failed"
+                };
+                println!("{status}\t-\t0p\t0 refs\t0 cites\t{wall_ms:.1} ms\t{path_display}");
             }
             Ok(true)
         }
@@ -755,6 +838,7 @@ fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
             pages: None,
             password: None,
             max_bytes: None,
+            max_pages: None,
             figures_dir: None,
         };
         match bench_file(&job, iterations) {
@@ -893,6 +977,7 @@ fn eval_item(args: &EvalArgs, item: &ManifestItem) -> Evaluated {
         pages: None,
         password: None,
         max_bytes: None,
+        max_pages: None,
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let result = match pipeline::run_job(&job) {

@@ -299,6 +299,9 @@ pub struct Job {
     pub pages: Option<(u32, u32)>,
     pub password: Option<String>,
     pub max_bytes: Option<u64>,
+    /// Maximum document page count; checked immediately after backend open.
+    #[serde(default)]
+    pub max_pages: Option<u32>,
     /// Directory that receives exported figure bytes as
     /// `<dir>/<document hash>/p<page>-f<index>.<ext>`; `None` exports nothing
     /// (figure hashes are still recorded when the backend supplies bytes).

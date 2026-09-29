@@ -39,6 +39,8 @@ pub enum PipelineError {
     Backend(#[from] BackendError),
     #[error("unknown backend: {0}")]
     UnknownBackend(String),
+    #[error("resource limit: document has {pages} pages, maximum is {limit}")]
+    ResourceLimit { pages: u32, limit: u32 },
 }
 
 /// Milliseconds elapsed since `start`.
@@ -221,6 +223,14 @@ fn parse_while_hashing(
 
         let mut session = extractor.open(bytes, job.password.as_deref())?;
         let page_count = session.page_count();
+        if let Some(limit) = job.max_pages
+            && page_count > limit
+        {
+            return Err(PipelineError::ResourceLimit {
+                pages: page_count,
+                limit,
+            });
+        }
         let (first, last) = resolve_page_range(job.pages, page_count)?;
         let covers_all_pages = first <= 1 && last >= page_count;
 
@@ -547,6 +557,7 @@ mod tests {
             pages: None,
             password: None,
             max_bytes: None,
+            max_pages: None,
             figures_dir: figures_dir.map(|dir| dir.to_string_lossy().into_owned()),
         }
     }
@@ -615,6 +626,7 @@ mod tests {
             pages,
             password: None,
             max_bytes: None,
+            max_pages: None,
             figures_dir: None,
         }
     }
@@ -692,6 +704,7 @@ mod tests {
             pages: None,
             password: None,
             max_bytes: None,
+            max_pages: None,
             figures_dir: None,
         };
         match run_job(&job) {

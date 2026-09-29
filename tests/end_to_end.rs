@@ -20,6 +20,7 @@ fn job_for(path: &Path, pages: Option<(u32, u32)>) -> Job {
         pages,
         password: None,
         max_bytes: None,
+        max_pages: None,
         figures_dir: None,
     }
 }
@@ -149,6 +150,66 @@ fn bibliography_acquisition_failure_keeps_schema_without_fabricating_hash() {
     assert!(value["elapsed_ms"].is_number());
     assert!(value["warnings"].is_array());
     assert!(value["references"].is_array());
+}
+
+#[test]
+fn extract_cli_reports_explicit_byte_budget_rejection() {
+    let (dir, path) = write_temp_pdf(&synthetic_paper());
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["extract", path.to_str().unwrap(), "--db"])
+        .arg(dir.path().join("ledger.db"))
+        .args([
+            "--json",
+            "--max-memory-bytes",
+            "64",
+            "--max-inflight-bytes",
+            "1",
+            "--max-pages",
+            "10",
+            "--max-backend-sessions",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "resource_limit");
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("budget is 1 bytes")
+    );
+}
+
+#[test]
+fn extract_cli_reports_explicit_page_limit() {
+    let (dir, path) = write_temp_pdf(&synthetic_paper());
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["extract", path.to_str().unwrap(), "--db"])
+        .arg(dir.path().join("ledger.db"))
+        .args([
+            "--json",
+            "--max-memory-bytes",
+            "1048576",
+            "--max-inflight-bytes",
+            "1048576",
+            "--max-pages",
+            "1",
+            "--max-backend-sessions",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "resource_limit");
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("document has 2 pages")
+    );
 }
 
 #[test]

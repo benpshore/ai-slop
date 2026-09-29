@@ -28,6 +28,7 @@ fn job_for(path: &Path, backend: &str) -> Job {
         pages: None,
         password: None,
         max_bytes: None,
+        max_pages: None,
         figures_dir: None,
     }
 }
