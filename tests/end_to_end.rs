@@ -110,6 +110,84 @@ fn bibliography_cli_emits_one_json_record_without_a_ledger() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
+/// Parse every stderr line of a `--progress` run as a JSON object.
+fn progress_events(stderr: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|err| panic!("{line}: {err}")))
+        .collect()
+}
+
+#[test]
+fn extract_cli_progress_reports_the_open_and_every_page() {
+    let (dir, path) = write_temp_pdf(&synthetic_paper());
+    let db = dir.path().join("ledger.sqlite");
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["extract", "--progress", "--db"])
+        .arg(&db)
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let file = path.to_string_lossy();
+    let events = progress_events(&output.stderr);
+    assert_eq!(
+        events,
+        [
+            serde_json::json!({"event": "opened", "path": file, "pages": 2, "total": 2}),
+            serde_json::json!({"event": "page", "path": file, "page": 1, "done": 1, "total": 2}),
+            serde_json::json!({"event": "page", "path": file, "page": 2, "done": 2, "total": 2}),
+        ]
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("complete\t"), "{stdout}");
+}
+
+#[test]
+fn extract_cli_is_silent_on_stderr_without_progress() {
+    let (dir, path) = write_temp_pdf(&synthetic_paper());
+    let db = dir.path().join("ledger.sqlite");
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["extract", "--db"])
+        .arg(&db)
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bibliography_cli_progress_counts_pages_from_the_end() {
+    let (_dir, path) = write_temp_pdf(&synthetic_paper());
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["bibliography", "--progress"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let file = path.to_string_lossy();
+    assert_eq!(
+        progress_events(&output.stderr),
+        [
+            serde_json::json!({"event": "opened", "path": file, "pages": 2, "total": 2}),
+            serde_json::json!({"event": "page", "path": file, "page": 2, "done": 1, "total": 2}),
+        ]
+    );
+}
+
 #[test]
 fn bibliography_cli_reports_invalid_pdf_as_json_failure() {
     let (_dir, path) = write_temp_pdf(b"not a PDF");

@@ -26,7 +26,7 @@ use tpe::corpus::{self, Manifest, ManifestItem};
 use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
 use tpe::ledger::Ledger;
-use tpe::pipeline::{self, PipelineError};
+use tpe::pipeline::{self, PipelineError, Progress};
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
 /// Service-time target per 20-page chunk, in milliseconds.
@@ -131,6 +131,9 @@ struct ExtractArgs {
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
+    /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page.
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(Args)]
@@ -147,6 +150,9 @@ struct BibliographyArgs {
     /// Reject inputs larger than this many bytes.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page read.
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(Args)]
@@ -289,6 +295,28 @@ fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// One `--progress` line: a JSON object naming the file and the event.
+/// `opened` carries `pages` (the document's page count) and `total` (pages
+/// this run will process); `page` carries the finished `page`, `done` and
+/// `total`. Each line is written with one locked `stderr` write, so worker
+/// threads never interleave within a line.
+fn progress_line(path: &str, event: Progress) -> String {
+    let value = match event {
+        Progress::Opened { pages, total } => serde_json::json!({
+            "event": "opened", "path": path, "pages": pages, "total": total,
+        }),
+        Progress::Page { page, done, total } => serde_json::json!({
+            "event": "page", "path": path, "page": page, "done": done, "total": total,
+        }),
+    };
+    value.to_string()
+}
+
+/// Print a `--progress` line to stderr.
+fn report_progress(path: &str, event: Progress) {
+    eprintln!("{}", progress_line(path, event));
+}
+
 /// Open the ledger at `db`, naming the path in any error.
 fn open_ledger(db: &Path) -> anyhow::Result<Ledger> {
     Ledger::open(db).with_context(|| format!("opening ledger {}", db.display()))
@@ -377,12 +405,19 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let start = Instant::now();
+    let mut observe = |event: Progress| {
+        if args.progress {
+            report_progress(&job.path, event);
+        }
+    };
     // A panic inside a backend must fail this file only, not the whole batch.
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| pipeline::run_job(&job)))
-        .map_or_else(
-            |payload| Err(format!("panic: {}", panic_message(&*payload))),
-            |outcome| outcome.map_err(|err| err.to_string()),
-        );
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        pipeline::run_job_observed(&job, &mut observe)
+    }))
+    .map_or_else(
+        |payload| Err(format!("panic: {}", panic_message(&*payload))),
+        |outcome| outcome.map_err(|err| err.to_string()),
+    );
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
@@ -442,18 +477,24 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
     let mut any_failed = false;
     for path in &args.paths {
         let started = Instant::now();
+        let file = path.to_string_lossy();
         let mut hash = None;
+        let mut observe = |event: Progress| {
+            if args.progress {
+                report_progress(&file, event);
+            }
+        };
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
             hash = Some(snapshot.hash.0);
-            let scan = bibliography::scan_backward(
+            let scan = bibliography::scan_backward_observed(
                 extractor.as_ref(),
                 &snapshot.bytes,
                 args.password.as_deref(),
+                &mut observe,
             )?;
             Ok::<_, anyhow::Error>(scan)
         }));
-        let file = path.to_string_lossy();
         let elapsed = elapsed_ms(started);
         let mut record = serde_json::json!({
             "path": file, "sha256": hash, "backend": extractor.identity(),
