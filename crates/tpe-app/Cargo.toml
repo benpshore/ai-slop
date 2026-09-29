@@ -26,7 +26,10 @@ ureq = "3"
 # blade-graphics (Vulkan) on Linux, which the CI runners do not provide. Keeping
 # the dependency target-scoped means Linux builds never fetch or compile it.
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui = "0.2"
+# Keep the legacy document-detail workbench reproducible while the supported
+# intake/status surface lives in native SwiftUI (macos/).  An exact version is
+# intentional: GPUI is pre-1.0 and its macOS backend is not API-stable.
+gpui = "=0.2.2"
 
 [lints]
 workspace = true

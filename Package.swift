@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "text_processing_engine",
+    platforms: [.macOS(.v15)],
     targets: [
         .target(name: "text_processing_engine"),
         .testTarget(
