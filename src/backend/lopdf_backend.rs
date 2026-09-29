@@ -100,6 +100,17 @@ const MIN_VECTOR_SIDE: f32 = 8.0;
 /// Most painted boxes clustered on one page; beyond it the page gets one
 /// `vector` figure covering all of them.
 const MAX_CLUSTER_BOXES: usize = 2000;
+/// Most decompressed content bytes accepted from one page or Form `XObject`.
+/// This bounds compressed-stream bombs before the lexer sees their output.
+const MAX_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+/// Most retained operators in one content stream. A compact stream can contain
+/// millions of zero-operand operators, so the byte cap alone is insufficient.
+const MAX_CONTENT_OPS: usize = 250_000;
+/// Most retained operands in one content stream.
+const MAX_CONTENT_OPERANDS: usize = 1_000_000;
+/// Most rule and raster figures retained on one page. Vector shapes have the
+/// tighter [`MAX_CLUSTER_BOXES`] bound because clustering is quadratic.
+const MAX_PAGE_FIGURES: usize = 50_000;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
@@ -2090,6 +2101,11 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
         }
         let operator = bytes.get(at..end).unwrap_or_default();
         if let Some(kind) = OpKind::from_operator(operator) {
+            if program.ops.len() >= MAX_CONTENT_OPS
+                || program.operands.len().saturating_add(starts.len()) > MAX_CONTENT_OPERANDS
+            {
+                return Err(invalid_content());
+            }
             let first = program.operands.len();
             for &start in &starts {
                 if let Ok((_, Some(operand))) = lex_object(bytes, start, MAX_NESTING, false, true) {
@@ -2268,6 +2284,8 @@ struct Graphics {
     /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
     overflow: bool,
     rasters: Vec<Raster>,
+    /// More rule or raster figures were painted than can safely be retained.
+    figures_overflow: bool,
 }
 
 impl Graphics {
@@ -2277,7 +2295,11 @@ impl Graphics {
         let horizontal = height < RULE_THICKNESS && width >= RULE_LENGTH;
         let vertical = width < RULE_THICKNESS && height >= RULE_LENGTH;
         if horizontal || vertical {
-            self.rules.push(bbox);
+            if self.rules.len().saturating_add(self.rasters.len()) < MAX_PAGE_FIGURES {
+                self.rules.push(bbox);
+            } else {
+                self.figures_overflow = true;
+            }
             return;
         }
         self.extent = Some(match self.extent {
@@ -2288,6 +2310,14 @@ impl Graphics {
             self.shapes.push(bbox);
         } else {
             self.overflow = true;
+        }
+    }
+
+    fn add_raster(&mut self, raster: Raster) {
+        if self.rules.len().saturating_add(self.rasters.len()) < MAX_PAGE_FIGURES {
+            self.rasters.push(raster);
+        } else {
+            self.figures_overflow = true;
         }
     }
 
@@ -2372,6 +2402,11 @@ impl<'a> Interpreter<'a> {
     /// as one warning.
     fn finish(mut self) -> PageText {
         let graphics = std::mem::take(&mut self.graphics);
+        if graphics.figures_overflow {
+            self.page.warnings.push(format!(
+                "figures truncated at {MAX_PAGE_FIGURES} rules and rasters"
+            ));
+        }
         self.page.figures = graphics.into_figures();
         if self.ligatures > 0 {
             let count = self.ligatures;
@@ -2507,7 +2542,7 @@ impl<'a> Interpreter<'a> {
             ctm.apply(0.0, 1.0),
             ctm.apply(1.0, 1.0),
         ]);
-        self.graphics.rasters.push(Raster {
+        self.graphics.add_raster(Raster {
             bbox,
             width_px: pixel_count(&stream.dict, b"Width"),
             height_px: pixel_count(&stream.dict, b"Height"),
@@ -2730,9 +2765,15 @@ impl<'a> Interpreter<'a> {
         let program = if let Some(program) = cached {
             program
         } else {
-            let content_bytes = match stream.get_plain_content() {
+            let content_bytes = match stream.get_plain_content_with_limit(MAX_CONTENT_BYTES) {
                 Ok(bytes) => bytes,
-                Err(_) => stream.content.clone(),
+                Err(_) if stream.content.len() <= MAX_CONTENT_BYTES => stream.content.clone(),
+                Err(_) => {
+                    self.warn(format!(
+                        "XObject {label}: content exceeds {MAX_CONTENT_BYTES} byte limit; skipped"
+                    ));
+                    return;
+                }
             };
             let Ok(program) = lex_content(&content_bytes) else {
                 self.warn(format!("XObject {label}: undecodable content stream"));
@@ -2800,7 +2841,9 @@ fn extract_page(
         page_text.warnings.push(message);
     }
 
-    let content_bytes = doc.get_page_content(page_id);
+    let content_bytes = doc
+        .get_page_content_with_limit(page_id, MAX_CONTENT_BYTES)
+        .map_err(|err| page_error(page, format!("content stream exceeds safe limit: {err}")))?;
     let program = match lex_content(&content_bytes) {
         Ok(program) => program,
         Err(err) => return Err(page_error(page, format!("content stream: {err}"))),

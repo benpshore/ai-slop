@@ -31,6 +31,13 @@ use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
 /// Service-time target per 20-page chunk, in milliseconds.
 const TARGET_MS_PER_CHUNK: f64 = 30.0;
+/// Hard ceiling for batch workers. Each extraction can itself use native
+/// parser/ML threads, so accepting an input-sized `--jobs` value would allow
+/// a command line with many paths to exhaust the process/thread limit.
+const MAX_EXTRACTION_WORKERS: usize = 64;
+/// Default CLI input ceiling. Library callers may still deliberately pass
+/// `None`, but untrusted command-line batches must be bounded by default.
+const DEFAULT_MAX_INPUT_BYTES: &str = "268435456";
 
 /// User agent sent with corpus downloads.
 const USER_AGENT: &str =
@@ -126,7 +133,7 @@ struct ExtractArgs {
     #[arg(long, short, default_value_t = 1, value_name = "N")]
     jobs: usize,
     /// Reject inputs larger than this many bytes.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", default_value = DEFAULT_MAX_INPUT_BYTES)]
     max_bytes: Option<u64>,
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
@@ -145,7 +152,7 @@ struct BibliographyArgs {
     #[arg(long)]
     password: Option<String>,
     /// Reject inputs larger than this many bytes.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", default_value = DEFAULT_MAX_INPUT_BYTES)]
     max_bytes: Option<u64>,
 }
 
@@ -366,6 +373,10 @@ fn next_path(queue: &Mutex<VecDeque<PathBuf>>) -> Option<PathBuf> {
     guard.pop_front()
 }
 
+fn extraction_worker_count(requested: usize, inputs: usize) -> usize {
+    requested.clamp(1, inputs.clamp(1, MAX_EXTRACTION_WORKERS))
+}
+
 /// Run the pipeline for one path on a worker thread.
 fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
     let job = Job {
@@ -400,7 +411,7 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
     }
 
     let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
-    let workers = args.jobs.clamp(1, args.paths.len().max(1));
+    let workers = extraction_worker_count(args.jobs, args.paths.len());
     let (sender, receiver) = mpsc::channel::<Outcome>();
 
     let any_failed = thread::scope(|scope| -> anyhow::Result<bool> {
@@ -1007,7 +1018,8 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManifestItem, Split, check_backend, parse_pages, percentile, probe_backend, short_hash,
+        MAX_EXTRACTION_WORKERS, ManifestItem, Split, check_backend, extraction_worker_count,
+        parse_pages, percentile, probe_backend, short_hash,
     };
     use tpe::backend;
 
@@ -1066,6 +1078,16 @@ mod tests {
         assert!((percentile(&samples, 0.95) - 5.0).abs() < f64::EPSILON);
         assert!((percentile(&samples, 0.0) - 1.0).abs() < f64::EPSILON);
         assert!(percentile(&[], 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extraction_workers_cannot_be_a_thread_bomb() {
+        assert_eq!(extraction_worker_count(0, 100), 1);
+        assert_eq!(extraction_worker_count(8, 3), 3);
+        assert_eq!(
+            extraction_worker_count(usize::MAX, usize::MAX),
+            MAX_EXTRACTION_WORKERS
+        );
     }
 
     #[test]
