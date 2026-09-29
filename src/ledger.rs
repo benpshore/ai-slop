@@ -3,26 +3,145 @@
 //! One database holds every document seen (by content hash), every extraction
 //! run keyed by that hash plus the [`BackendIdentity`] that produced it, and
 //! the pages, metadata, reference entries and in-text citations of each run.
-//! Publication is idempotent: writing a result whose identity key already
-//! exists replaces the earlier run inside a single transaction. Positioned
+//! Final-result publication is transactional and idempotent. Job attempts and
+//! their progress events are append-only, so retries preserve history. Positioned
 //! evidence (spans, lines), warnings, keywords and the raw `/Info` map are
 //! kept as JSON text columns; everything a query would filter on is a plain
 //! column. Figures (image and drawing regions) get their own `figures` table,
-//! created on open when missing, so ledgers written before it existed gain
-//! it without a [`SCHEMA_VERSION`] change.
+//! created on open when missing. Versioned migrations extend older ledgers.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 use thiserror::Error;
 
+use crate::pipeline::{ProgressEvent, ProgressSink, ProgressStage};
 use crate::schema::{
     Author, BBox, BackendIdentity, ChunkResult, CitationMarker, ContentHash, Document,
     ExtractionResult, Figure, Metadata, PageText, ReferenceEntry, SCHEMA_VERSION,
     SourceObservation, StageTimings, Status,
 };
+
+/// Version of the `SQLite` layout. This is deliberately independent from the
+/// extraction result contract's `SCHEMA_VERSION`.
+pub const LEDGER_SCHEMA_VERSION: u32 = 4;
+
+pub type AttemptId = i64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueState {
+    Queued,
+    Active,
+    Succeeded,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+impl QueueState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Active => "active",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Structured failure information retained even if extraction produced no result.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ErrorDetails {
+    pub kind: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+/// Typed current state for a durable job attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptProgress {
+    pub id: AttemptId,
+    pub document_hash: Option<ContentHash>,
+    pub source: SourceObservation,
+    pub backend: BackendIdentity,
+    pub queue_state: QueueState,
+    pub stage: ProgressStage,
+    pub completed_pages: u32,
+    pub total_pages: Option<u32>,
+    pub completed_chunks: u32,
+    pub total_chunks: Option<u32>,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub heartbeat_at: i64,
+    pub retry_count: u32,
+    pub cancelled: bool,
+    pub error: Option<ErrorDetails>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredProgressEvent {
+    pub sequence: u64,
+    pub stage: ProgressStage,
+    pub completed_pages: u32,
+    pub total_pages: Option<u32>,
+    pub completed_chunks: u32,
+    pub total_chunks: Option<u32>,
+    pub created_at: i64,
+}
+
+/// A coalescing pipeline sink. Stage transitions, chunk completions and every
+/// 16 pages are durable immediately; otherwise writes are limited to twice a
+/// second to avoid lock contention on large documents.
+pub struct LedgerProgressSink<'a> {
+    ledger: &'a mut Ledger,
+    attempt: AttemptId,
+    last: Option<ProgressEvent>,
+    last_write: Instant,
+    error: Option<LedgerError>,
+}
+
+impl<'a> LedgerProgressSink<'a> {
+    pub fn new(ledger: &'a mut Ledger, attempt: AttemptId) -> Self {
+        Self {
+            ledger,
+            attempt,
+            last: None,
+            last_write: Instant::now(),
+            error: None,
+        }
+    }
+
+    pub fn finish(self) -> Result<(), LedgerError> {
+        self.error.map_or(Ok(()), Err)
+    }
+}
+
+impl ProgressSink for LedgerProgressSink<'_> {
+    fn emit(&mut self, event: ProgressEvent) {
+        if self.error.is_some() {
+            return;
+        }
+        let persist = self.last.as_ref().is_none_or(|last| {
+            last.stage != event.stage
+                || event.completed_chunks > last.completed_chunks
+                || event.completed_pages >= last.completed_pages.saturating_add(16)
+                || self.last_write.elapsed() >= Duration::from_millis(500)
+        });
+        if persist {
+            if let Err(error) = self.ledger.record_progress(self.attempt, &event) {
+                self.error = Some(error);
+                return;
+            }
+            self.last = Some(event);
+            self.last_write = Instant::now();
+        }
+    }
+}
 
 /// Row id of a run in the `runs` table.
 pub type RunId = i64;
@@ -230,6 +349,45 @@ CREATE TABLE IF NOT EXISTS figures (
 );
 ";
 
+const ATTEMPTS_MIGRATION_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS job_attempts (
+    id INTEGER PRIMARY KEY,
+    document_hash TEXT,
+    source_json TEXT NOT NULL,
+    backend_name TEXT NOT NULL,
+    backend_version TEXT NOT NULL,
+    config_digest TEXT NOT NULL,
+    queue_state TEXT NOT NULL,
+    current_stage TEXT NOT NULL,
+    completed_pages INTEGER NOT NULL DEFAULT 0,
+    total_pages INTEGER,
+    completed_chunks INTEGER NOT NULL DEFAULT 0,
+    total_chunks INTEGER,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    heartbeat_at INTEGER NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    cancelled INTEGER NOT NULL DEFAULT 0,
+    error_json TEXT,
+    run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+    retry_of INTEGER REFERENCES job_attempts(id)
+);
+CREATE INDEX IF NOT EXISTS attempts_state_heartbeat ON job_attempts(queue_state, heartbeat_at);
+CREATE INDEX IF NOT EXISTS attempts_hash ON job_attempts(document_hash);
+CREATE TABLE IF NOT EXISTS progress_events (
+    attempt_id INTEGER NOT NULL REFERENCES job_attempts(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    completed_pages INTEGER NOT NULL,
+    total_pages INTEGER,
+    completed_chunks INTEGER NOT NULL,
+    total_chunks INTEGER,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (attempt_id, sequence)
+);
+";
+
 // Statement text. `references` and `offset` are SQL keywords and stay quoted.
 
 const SELECT_VERSION: &str = "SELECT version FROM schema_meta";
@@ -336,13 +494,30 @@ impl Ledger {
         let found = optional_row(&conn, SELECT_VERSION, [], |row| row.get::<_, u32>(0))?;
         match found {
             None => {
-                conn.execute(INSERT_VERSION, params![SCHEMA_VERSION])?;
+                conn.execute_batch(ATTEMPTS_MIGRATION_SQL)?;
+                conn.execute(INSERT_VERSION, params![LEDGER_SCHEMA_VERSION])?;
             }
-            Some(SCHEMA_VERSION) => {}
+            Some(1..=3) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migrated = conn.execute_batch(ATTEMPTS_MIGRATION_SQL).and_then(|()| {
+                    conn.execute(
+                        "UPDATE schema_meta SET version = ?1",
+                        params![LEDGER_SCHEMA_VERSION],
+                    )?;
+                    conn.execute_batch("COMMIT")
+                });
+                if let Err(error) = migrated {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error.into());
+                }
+            }
+            Some(LEDGER_SCHEMA_VERSION) => {
+                conn.execute_batch(ATTEMPTS_MIGRATION_SQL)?;
+            }
             Some(found) => {
                 return Err(LedgerError::SchemaMismatch {
                     found,
-                    expected: SCHEMA_VERSION,
+                    expected: LEDGER_SCHEMA_VERSION,
                 });
             }
         }
@@ -364,6 +539,250 @@ impl Ledger {
         insert_source(&tx, hash, obs, now)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Creates a durable attempt before acquisition begins. `retry_of` links
+    /// retries without mutating or deleting the earlier attempt.
+    pub fn create_attempt(
+        &mut self,
+        source: &SourceObservation,
+        backend: &BackendIdentity,
+        retry_of: Option<AttemptId>,
+    ) -> Result<AttemptId, LedgerError> {
+        let now = now_unix();
+        let retry_count = retry_of.map_or(0, |id| {
+            self.conn
+                .query_row(
+                    "SELECT retry_count + 1 FROM job_attempts WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap_or(1)
+        });
+        self.conn.execute(
+            "INSERT INTO job_attempts (source_json, backend_name, backend_version, config_digest, \
+             queue_state, current_stage, created_at, started_at, heartbeat_at, retry_count, retry_of) \
+             VALUES (?1, ?2, ?3, ?4, 'active', 'acquisition', ?5, ?5, ?5, ?6, ?7)",
+            params![serde_json::to_string(source)?, backend.name, backend.version,
+                backend.config_digest, now, retry_count, retry_of],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Appends an event and advances the attempt snapshot atomically. Older or
+    /// decreasing counters are ignored, ensuring readers always see monotonic progress.
+    pub fn record_progress(
+        &mut self,
+        attempt: AttemptId,
+        event: &ProgressEvent,
+    ) -> Result<(), LedgerError> {
+        let now = now_unix();
+        let tx = self.conn.transaction()?;
+        let current: Option<(String, u32, u32)> = tx
+            .query_row(
+                "SELECT current_stage, completed_pages, completed_chunks FROM job_attempts WHERE id=?1",
+                params![attempt],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((stage, pages, chunks)) = current else {
+            return Err(LedgerError::NotFound(format!("attempt {attempt}")));
+        };
+        if stage_rank(&stage)? > event.stage as u8
+            || pages > event.completed_pages
+            || chunks > event.completed_chunks
+        {
+            return Ok(());
+        }
+        let sequence: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM progress_events WHERE attempt_id=?1",
+            params![attempt],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO progress_events VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                attempt,
+                sequence,
+                stage_name(event.stage),
+                event.completed_pages,
+                event.total_pages,
+                event.completed_chunks,
+                event.total_chunks,
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE job_attempts SET current_stage=?1, completed_pages=?2, total_pages=COALESCE(?3,total_pages), \
+             completed_chunks=?4, total_chunks=COALESCE(?5,total_chunks), heartbeat_at=?6 WHERE id=?7",
+            params![stage_name(event.stage), event.completed_pages, event.total_pages,
+                event.completed_chunks, event.total_chunks, now, attempt],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Marks an attempt failed, retaining structured details even when no result exists.
+    pub fn fail_attempt(
+        &mut self,
+        attempt: AttemptId,
+        error: &ErrorDetails,
+    ) -> Result<(), LedgerError> {
+        self.finish_attempt(attempt, QueueState::Failed, None, Some(error))
+    }
+
+    pub fn cancel_attempt(&mut self, attempt: AttemptId) -> Result<(), LedgerError> {
+        self.finish_attempt(attempt, QueueState::Cancelled, None, None)
+    }
+
+    /// Associates a successful attempt with the transactionally published run.
+    pub fn complete_attempt(
+        &mut self,
+        attempt: AttemptId,
+        run: RunId,
+        hash: &ContentHash,
+    ) -> Result<(), LedgerError> {
+        let current = self.attempt(attempt)?;
+        self.record_progress(
+            attempt,
+            &ProgressEvent {
+                stage: ProgressStage::Complete,
+                completed_pages: current.completed_pages,
+                total_pages: current.total_pages,
+                completed_chunks: current.completed_chunks,
+                total_chunks: current.total_chunks,
+            },
+        )?;
+        let now = now_unix();
+        let changed = self.conn.execute(
+            "UPDATE job_attempts SET document_hash=?1, queue_state='succeeded', current_stage='complete', \
+             finished_at=?2, heartbeat_at=?2, run_id=?3 WHERE id=?4",
+            params![hash.0, now, run, attempt],
+        )?;
+        if changed == 0 {
+            return Err(LedgerError::NotFound(format!("attempt {attempt}")));
+        }
+        Ok(())
+    }
+
+    fn finish_attempt(
+        &mut self,
+        attempt: AttemptId,
+        state: QueueState,
+        run: Option<RunId>,
+        error: Option<&ErrorDetails>,
+    ) -> Result<(), LedgerError> {
+        let current = self.attempt(attempt)?;
+        let terminal = if state == QueueState::Failed {
+            ProgressStage::Failed
+        } else {
+            ProgressStage::Complete
+        };
+        self.record_progress(
+            attempt,
+            &ProgressEvent {
+                stage: terminal,
+                completed_pages: current.completed_pages,
+                total_pages: current.total_pages,
+                completed_chunks: current.completed_chunks,
+                total_chunks: current.total_chunks,
+            },
+        )?;
+        let now = now_unix();
+        let terminal_name = if state == QueueState::Failed {
+            "failed"
+        } else {
+            "complete"
+        };
+        let error_json = error.map(serde_json::to_string).transpose()?;
+        let changed = self.conn.execute(
+            "UPDATE job_attempts SET queue_state=?1,current_stage=?2,finished_at=?3,heartbeat_at=?3,run_id=?4,error_json=?5,cancelled=?6 WHERE id=?7",
+            params![state.as_str(), terminal_name, now, run, error_json, state == QueueState::Cancelled, attempt],
+        )?;
+        if changed == 0 {
+            return Err(LedgerError::NotFound(format!("attempt {attempt}")));
+        }
+        Ok(())
+    }
+
+    pub fn attempt(&self, id: AttemptId) -> Result<AttemptProgress, LedgerError> {
+        optional_row(&self.conn,
+            "SELECT id,document_hash,source_json,backend_name,backend_version,config_digest,queue_state,current_stage,completed_pages,total_pages,completed_chunks,total_chunks,created_at,started_at,finished_at,heartbeat_at,retry_count,cancelled,error_json FROM job_attempts WHERE id=?1",
+            params![id], map_attempt)?.ok_or_else(|| LedgerError::NotFound(format!("attempt {id}")))
+    }
+
+    pub fn progress_events(
+        &self,
+        attempt: AttemptId,
+    ) -> Result<Vec<StoredProgressEvent>, LedgerError> {
+        let mut stmt = self.conn.prepare("SELECT sequence,stage,completed_pages,total_pages,completed_chunks,total_chunks,created_at FROM progress_events WHERE attempt_id=?1 ORDER BY sequence")?;
+        let rows = stmt.query_map(params![attempt], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (
+                sequence,
+                stage,
+                completed_pages,
+                total_pages,
+                completed_chunks,
+                total_chunks,
+                created_at,
+            ) = row?;
+            Ok(StoredProgressEvent {
+                sequence: to_u64(sequence),
+                stage: parse_stage(&stage)?,
+                completed_pages,
+                total_pages,
+                completed_chunks,
+                total_chunks,
+                created_at,
+            })
+        })
+        .collect()
+    }
+
+    /// Interrupts stale active attempts and creates queued retry records up to
+    /// `max_retries`. Returns the new attempt ids for a service queue to claim.
+    pub fn recover_stale(
+        &mut self,
+        stale_before: i64,
+        max_retries: u32,
+    ) -> Result<Vec<AttemptId>, LedgerError> {
+        let mut stmt = self.conn.prepare("SELECT id,source_json,backend_name,backend_version,config_digest,retry_count FROM job_attempts WHERE queue_state='active' AND heartbeat_at < ?1")?;
+        let stale = stmt
+            .query_map(params![stale_before], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, u32>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let now = now_unix();
+        let tx = self.conn.transaction()?;
+        let mut queued = Vec::new();
+        for (id, source, name, version, digest, retries) in stale {
+            tx.execute("UPDATE job_attempts SET queue_state='interrupted',current_stage='failed',finished_at=?1,heartbeat_at=?1,error_json=?2 WHERE id=?3", params![now, serde_json::to_string(&ErrorDetails{kind:"interrupted".into(),message:"stale heartbeat on startup".into(),retryable:true})?, id])?;
+            if retries < max_retries {
+                tx.execute("INSERT INTO job_attempts (source_json,backend_name,backend_version,config_digest,queue_state,current_stage,created_at,heartbeat_at,retry_count,retry_of) VALUES (?1,?2,?3,?4,'queued','acquisition',?5,?5,?6,?7)",params![source,name,version,digest,now,retries+1,id])?;
+                queued.push(tx.last_insert_rowid());
+            }
+        }
+        tx.commit()?;
+        Ok(queued)
     }
 
     /// Publishes `result` in one transaction. Any earlier run with the same
@@ -588,6 +1007,95 @@ where
 {
     let value = conn.query_row(sql, params, map).optional()?;
     Ok(value)
+}
+
+fn stage_name(stage: ProgressStage) -> &'static str {
+    match stage {
+        ProgressStage::Acquisition => "acquisition",
+        ProgressStage::Hashing => "hashing",
+        ProgressStage::BackendOpening => "backend_opening",
+        ProgressStage::PageExtraction => "page_extraction",
+        ProgressStage::ChunkExtraction => "chunk_extraction",
+        ProgressStage::MetadataAnalysis => "metadata_analysis",
+        ProgressStage::ReferenceAnalysis => "reference_analysis",
+        ProgressStage::CitationAnalysis => "citation_analysis",
+        ProgressStage::OutputPublication => "output_publication",
+        ProgressStage::Complete => "complete",
+        ProgressStage::Failed => "failed",
+    }
+}
+
+fn parse_stage(value: &str) -> Result<ProgressStage, LedgerError> {
+    Ok(match value {
+        "acquisition" => ProgressStage::Acquisition,
+        "hashing" => ProgressStage::Hashing,
+        "backend_opening" => ProgressStage::BackendOpening,
+        "page_extraction" => ProgressStage::PageExtraction,
+        "chunk_extraction" => ProgressStage::ChunkExtraction,
+        "metadata_analysis" => ProgressStage::MetadataAnalysis,
+        "reference_analysis" => ProgressStage::ReferenceAnalysis,
+        "citation_analysis" => ProgressStage::CitationAnalysis,
+        "output_publication" => ProgressStage::OutputPublication,
+        "complete" => ProgressStage::Complete,
+        "failed" => ProgressStage::Failed,
+        other => return Err(LedgerError::NotFound(format!("progress stage {other}"))),
+    })
+}
+
+fn stage_rank(value: &str) -> Result<u8, LedgerError> {
+    Ok(parse_stage(value)? as u8)
+}
+
+fn parse_queue(value: &str) -> rusqlite::Result<QueueState> {
+    match value {
+        "queued" => Ok(QueueState::Queued),
+        "active" => Ok(QueueState::Active),
+        "succeeded" => Ok(QueueState::Succeeded),
+        "failed" => Ok(QueueState::Failed),
+        "interrupted" => Ok(QueueState::Interrupted),
+        "cancelled" => Ok(QueueState::Cancelled),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn map_attempt(row: &Row<'_>) -> rusqlite::Result<AttemptProgress> {
+    let source_json: String = row.get(2)?;
+    let error_json: Option<String> = row.get(18)?;
+    Ok(AttemptProgress {
+        id: row.get(0)?,
+        document_hash: row.get::<_, Option<String>>(1)?.map(ContentHash),
+        source: serde_json::from_str(&source_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        backend: BackendIdentity {
+            name: row.get(3)?,
+            version: row.get(4)?,
+            config_digest: row.get(5)?,
+        },
+        queue_state: parse_queue(&row.get::<_, String>(6)?)?,
+        stage: parse_stage(&row.get::<_, String>(7)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        completed_pages: row.get(8)?,
+        total_pages: row.get(9)?,
+        completed_chunks: row.get(10)?,
+        total_chunks: row.get(11)?,
+        created_at: row.get(12)?,
+        started_at: row.get(13)?,
+        finished_at: row.get(14)?,
+        heartbeat_at: row.get(15)?,
+        retry_count: row.get(16)?,
+        cancelled: row.get(17)?,
+        error: error_json
+            .map(|j| {
+                serde_json::from_str(&j).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        18,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .transpose()?,
+    })
 }
 
 /// Inserts a source observation unless the same one is already stored.
@@ -1310,6 +1818,110 @@ mod tests {
     fn in_memory_ledger_starts_empty() {
         let ledger = Ledger::open_in_memory().unwrap();
         assert_eq!(ledger.stats().unwrap(), LedgerStats::default());
+    }
+
+    #[test]
+    fn attempts_keep_monotonic_progress_and_structured_failure() {
+        let mut ledger = Ledger::open_in_memory().unwrap();
+        let result = sample_result();
+        let id = ledger
+            .create_attempt(&result.document.sources[0], &result.backend, None)
+            .unwrap();
+        let page = |completed| ProgressEvent {
+            stage: ProgressStage::PageExtraction,
+            completed_pages: completed,
+            total_pages: Some(10),
+            completed_chunks: 0,
+            total_chunks: Some(1),
+        };
+        ledger.record_progress(id, &page(4)).unwrap();
+        ledger.record_progress(id, &page(2)).unwrap();
+        let error = ErrorDetails {
+            kind: "backend".into(),
+            message: "worker exited".into(),
+            retryable: true,
+        };
+        ledger.fail_attempt(id, &error).unwrap();
+        let attempt = ledger.attempt(id).unwrap();
+        assert_eq!(attempt.completed_pages, 4);
+        assert_eq!(attempt.queue_state, QueueState::Failed);
+        assert_eq!(attempt.error, Some(error));
+        assert_eq!(ledger.progress_events(id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn retry_preserves_attempt_history_and_cancellation() {
+        let mut ledger = Ledger::open_in_memory().unwrap();
+        let result = sample_result();
+        let first = ledger
+            .create_attempt(&result.document.sources[0], &result.backend, None)
+            .unwrap();
+        ledger.cancel_attempt(first).unwrap();
+        let retry = ledger
+            .create_attempt(&result.document.sources[0], &result.backend, Some(first))
+            .unwrap();
+        assert_ne!(first, retry);
+        assert_eq!(
+            ledger.attempt(first).unwrap().queue_state,
+            QueueState::Cancelled
+        );
+        assert!(ledger.attempt(first).unwrap().cancelled);
+        assert_eq!(ledger.attempt(retry).unwrap().retry_count, 1);
+    }
+
+    #[test]
+    fn startup_recovery_interrupts_and_requeues_stale_attempt() {
+        let mut ledger = Ledger::open_in_memory().unwrap();
+        let result = sample_result();
+        let first = ledger
+            .create_attempt(&result.document.sources[0], &result.backend, None)
+            .unwrap();
+        ledger
+            .conn
+            .execute(
+                "UPDATE job_attempts SET heartbeat_at=1 WHERE id=?1",
+                params![first],
+            )
+            .unwrap();
+        let queued = ledger.recover_stale(2, 3).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            ledger.attempt(first).unwrap().queue_state,
+            QueueState::Interrupted
+        );
+        assert_eq!(
+            ledger.attempt(queued[0]).unwrap().queue_state,
+            QueueState::Queued
+        );
+    }
+
+    #[test]
+    fn concurrent_reader_observes_committed_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.sqlite");
+        let mut writer = Ledger::open(&path).unwrap();
+        let result = sample_result();
+        let attempt = writer
+            .create_attempt(&result.document.sources[0], &result.backend, None)
+            .unwrap();
+        writer
+            .record_progress(
+                attempt,
+                &ProgressEvent {
+                    stage: ProgressStage::Hashing,
+                    completed_pages: 0,
+                    total_pages: None,
+                    completed_chunks: 0,
+                    total_chunks: None,
+                },
+            )
+            .unwrap();
+        let reader = Ledger::open(&path).unwrap();
+        assert_eq!(
+            reader.attempt(attempt).unwrap().stage,
+            ProgressStage::Hashing
+        );
+        assert_eq!(reader.progress_events(attempt).unwrap().len(), 1);
     }
 
     #[test]

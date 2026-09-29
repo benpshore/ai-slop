@@ -29,6 +29,62 @@ use crate::schema::{
 };
 use crate::text_cleanup;
 
+/// Ordered stages reported while a job is being processed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProgressStage {
+    Acquisition,
+    Hashing,
+    BackendOpening,
+    PageExtraction,
+    ChunkExtraction,
+    MetadataAnalysis,
+    ReferenceAnalysis,
+    CitationAnalysis,
+    OutputPublication,
+    Complete,
+    Failed,
+}
+
+/// A monotonic progress notification. Counts are cumulative within a job.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgressEvent {
+    pub stage: ProgressStage,
+    pub completed_pages: u32,
+    pub total_pages: Option<u32>,
+    pub completed_chunks: u32,
+    pub total_chunks: Option<u32>,
+}
+
+/// Destination for pipeline progress. Implementations should return quickly;
+/// durable sinks can coalesce notifications before writing them.
+pub trait ProgressSink {
+    fn emit(&mut self, event: ProgressEvent);
+}
+
+impl<F> ProgressSink for F
+where
+    F: FnMut(ProgressEvent),
+{
+    fn emit(&mut self, event: ProgressEvent) {
+        self(event);
+    }
+}
+
+struct NoopProgress;
+impl ProgressSink for NoopProgress {
+    fn emit(&mut self, _event: ProgressEvent) {}
+}
+
+fn progress(stage: ProgressStage) -> ProgressEvent {
+    ProgressEvent {
+        stage,
+        completed_pages: 0,
+        total_pages: None,
+        completed_chunks: 0,
+        total_chunks: None,
+    }
+}
+
 /// Failure of a whole job. Per-page backend failures are not errors: they
 /// become warnings and a `Partial` status instead.
 #[derive(Debug, Error)]
@@ -39,6 +95,8 @@ pub enum PipelineError {
     Backend(#[from] BackendError),
     #[error("unknown backend: {0}")]
     UnknownBackend(String),
+    #[error("progress sink: {0}")]
+    Progress(String),
 }
 
 /// Milliseconds elapsed since `start`.
@@ -215,10 +273,12 @@ fn parse_while_hashing(
     job: &Job,
     bytes: &[u8],
     identity: &mut BackendIdentity,
+    sink: &mut dyn ProgressSink,
 ) -> Result<Parsed, PipelineError> {
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
         let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
 
+        sink.emit(progress(ProgressStage::BackendOpening));
         let mut session = extractor.open(bytes, job.password.as_deref())?;
         let page_count = session.page_count();
         let (first, last) = resolve_page_range(job.pages, page_count)?;
@@ -259,6 +319,13 @@ fn parse_while_hashing(
                 }
                 Err(other) => return Err(PipelineError::Backend(other)),
             }
+            sink.emit(ProgressEvent {
+                stage: ProgressStage::PageExtraction,
+                completed_pages: pages.len() as u32,
+                total_pages: Some(last - first + 1),
+                completed_chunks: 0,
+                total_chunks: None,
+            });
         }
         let info: BTreeMap<String, String> = session.info();
         Ok(Parsed {
@@ -302,15 +369,36 @@ fn parse_while_hashing(
 /// second thread while the backend parses; that work is reported as
 /// `hash_ms`, and any wait for it falls inside `parse_ms`.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
+    run_job_with_progress(job, &mut NoopProgress)
+}
+
+/// [`run_job`] while delivering ordered, cumulative progress notifications.
+pub fn run_job_with_progress(
+    job: &Job,
+    sink: &mut dyn ProgressSink,
+) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
-    run_job_with(extractor.as_ref(), job)
+    let result = run_job_with_progress_and_extractor(extractor.as_ref(), job, sink);
+    if result.is_err() {
+        sink.emit(progress(ProgressStage::Failed));
+    }
+    result
 }
 
 /// [`run_job`] with an already resolved backend; `job.backend` is ignored.
 pub fn run_job_with(
     extractor: &dyn Extractor,
     job: &Job,
+) -> Result<ExtractionResult, PipelineError> {
+    run_job_with_progress_and_extractor(extractor, job, &mut NoopProgress)
+}
+
+/// [`run_job_with`] with progress reporting.
+pub fn run_job_with_progress_and_extractor(
+    extractor: &dyn Extractor,
+    job: &Job,
+    sink: &mut dyn ProgressSink,
 ) -> Result<ExtractionResult, PipelineError> {
     let mut identity = extractor.identity();
 
@@ -319,6 +407,8 @@ pub fn run_job_with(
     let acquire_start = Instant::now();
     let read = acquire::read_verified(Path::new(&job.path), job.max_bytes)?;
     timings.acquire_ms = elapsed_ms(acquire_start);
+    sink.emit(progress(ProgressStage::Acquisition));
+    sink.emit(progress(ProgressStage::Hashing));
 
     let parse_start = Instant::now();
     let Parsed {
@@ -328,7 +418,7 @@ pub fn run_job_with(
         warnings,
         status,
         info,
-    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity)?;
+    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity, sink)?;
     timings.parse_ms = elapsed_ms(parse_start);
     timings.hash_ms = hashed.ms;
     let snapshot = read.into_snapshot(hashed.hash);
@@ -347,13 +437,25 @@ pub fn run_job_with(
     timings.order_ms = elapsed_ms(order_start);
 
     let chunks = chunk_results(&pages, timings.parse_ms + timings.order_ms);
+    for completed in 1..=chunks.len() {
+        sink.emit(ProgressEvent {
+            stage: ProgressStage::ChunkExtraction,
+            completed_pages: pages.len() as u32,
+            total_pages: Some(pages.len() as u32),
+            completed_chunks: completed as u32,
+            total_chunks: Some(chunks.len() as u32),
+        });
+    }
 
+    sink.emit(progress(ProgressStage::MetadataAnalysis));
     let metadata_start = Instant::now();
     let meta = metadata::extract_metadata(&info, &pages);
     timings.metadata_ms = elapsed_ms(metadata_start);
 
+    sink.emit(progress(ProgressStage::ReferenceAnalysis));
     let citations_start = Instant::now();
     let (references, markers) = citations::extract_citations(&pages);
+    sink.emit(progress(ProgressStage::CitationAnalysis));
     timings.citations_ms = elapsed_ms(citations_start);
 
     let size = snapshot.bytes.len() as u64;
@@ -364,7 +466,7 @@ pub fn run_job_with(
         sources: vec![snapshot.source],
     };
 
-    Ok(ExtractionResult {
+    let result = ExtractionResult {
         schema_version: SCHEMA_VERSION,
         document,
         backend: identity,
@@ -376,7 +478,22 @@ pub fn run_job_with(
         citations: markers,
         warnings,
         timings,
-    })
+    };
+    sink.emit(ProgressEvent {
+        stage: ProgressStage::OutputPublication,
+        completed_pages: result.pages.len() as u32,
+        total_pages: Some(result.pages.len() as u32),
+        completed_chunks: result.chunks.len() as u32,
+        total_chunks: Some(result.chunks.len() as u32),
+    });
+    sink.emit(ProgressEvent {
+        stage: ProgressStage::Complete,
+        completed_pages: result.pages.len() as u32,
+        total_pages: Some(result.pages.len() as u32),
+        completed_chunks: result.chunks.len() as u32,
+        total_chunks: Some(result.chunks.len() as u32),
+    });
+    Ok(result)
 }
 
 /// Summarise pages into chunks of [`CHUNK_PAGES`] consecutive page numbers.
@@ -436,8 +553,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        PipelineError, chunk_results, figure_extension, resolve_page_range, run_job, run_job_with,
-        sub_range_digest,
+        PipelineError, ProgressStage, chunk_results, figure_extension, resolve_page_range, run_job,
+        run_job_with, run_job_with_progress, sub_range_digest,
     };
     use crate::backend::{BackendError, DocumentSession, Extractor, lopdf_backend::LopdfBackend};
     use crate::schema::{
@@ -744,6 +861,36 @@ mod tests {
     fn warm_up_is_repeatable() {
         super::warm_up();
         super::warm_up();
+    }
+
+    #[test]
+    fn progress_is_monotonic_and_terminal() {
+        let (_dir, path) = three_page_fixture();
+        let mut events = Vec::new();
+        run_job_with_progress(&lopdf_job(&path, None), &mut |event| events.push(event)).unwrap();
+        assert!(events.windows(2).all(|pair| pair[0].stage <= pair[1].stage));
+        assert_eq!(events.last().unwrap().stage, ProgressStage::Complete);
+        let pages: Vec<u32> = events
+            .iter()
+            .filter(|event| event.stage == ProgressStage::PageExtraction)
+            .map(|event| event.completed_pages)
+            .collect();
+        assert_eq!(pages, vec![1, 2, 3]);
+        for stage in [
+            ProgressStage::Acquisition,
+            ProgressStage::Hashing,
+            ProgressStage::BackendOpening,
+            ProgressStage::ChunkExtraction,
+            ProgressStage::MetadataAnalysis,
+            ProgressStage::ReferenceAnalysis,
+            ProgressStage::CitationAnalysis,
+            ProgressStage::OutputPublication,
+        ] {
+            assert!(
+                events.iter().any(|event| event.stage == stage),
+                "missing {stage:?}"
+            );
+        }
     }
 
     #[test]
