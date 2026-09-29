@@ -44,14 +44,14 @@
 //! the results: one [`PageText`] of spans per page plus the raw figure
 //! streams. [`DocumentSession::page_text`] clones from that cache.
 //!
-//! Memory is bounded by what is kept: spans (text and geometry only) and
-//! figure streams copied as stored in the file, so at most about the size of
-//! the PDF itself, never bitmaps or `pdfium`'s page caches, which die with
-//! the document at the end of `open`. The trade-off is that a very long
-//! document is extracted in full up front even when the job asks for a page
-//! range, and all its spans stay resident for the session. A future
-//! refinement is streaming: extract a window of pages per binding and
-//! re-open for the next window when `page_text` moves past it.
+//! Distinct retained image streams are capped at 256 MiB and deduplicated
+//! as each image is visited, so a page does not accumulate copies before
+//! applying the cap. A single raw stream is still allocated before hashing;
+//! this cap is not a total-memory or peak-RSS bound. All page spans and
+//! figure metadata remain resident, and `pdfium` can allocate its own caches
+//! until the document is dropped at the end of `open`. Extraction of a page
+//! range still visits the whole document. Bounded page-window extraction
+//! remains a separate refinement.
 //!
 //! # Text granularity
 //!
@@ -73,7 +73,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use pdfium_render::prelude::{
     PdfDocument, PdfDocumentMetadataTagType, PdfMatrix, PdfPageImageObject, PdfPageObject,
@@ -148,68 +147,109 @@ impl Extractor for PdfiumBackend {
         bytes: &[u8],
         password: Option<&str>,
     ) -> Result<Box<dyn DocumentSession>, BackendError> {
+        self.open_session(bytes, password, FIGURE_BYTES_CAP)
+            .map(|session| Box::new(session) as Box<dyn DocumentSession>)
+    }
+}
+
+impl PdfiumBackend {
+    /// The cap is private and injectable so boundary tests need only tiny images.
+    fn open_session(
+        &self,
+        bytes: &[u8],
+        password: Option<&str>,
+        figure_cap: usize,
+    ) -> Result<PdfiumSession, BackendError> {
         let pdfium = bind(self.library_dir.as_deref())?;
-        // `doc` borrows `pdfium` and `bytes`; locals drop in reverse order,
-        // so the document is closed before the library is destroyed.
+        // `doc` borrows `pdfium` and `bytes`; locals drop in reverse order.
         let doc = load(&pdfium, bytes, password)?;
         let page_count = u32::from(doc.pages().len());
         let info = read_info(&doc);
-        let mut pages: Vec<Result<PageText, String>> = Vec::new();
-        // Image streams are retained once per distinct content (a PDF often
-        // reuses one XObject on many pages) and only up to
-        // `FIGURE_BYTES_CAP` in total; beyond that the figure record keeps
-        // its geometry and hash but no bytes, and the page says so.
-        let mut blobs: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
-        let mut figure_keys: HashMap<(u32, u32), String> = HashMap::new();
-        let mut retained: usize = 0;
+        let mut pages = Vec::new();
+        let mut figures = FigureStore::new(figure_cap);
         for page in 1..=page_count {
-            match extract_numbered(&doc, page) {
-                Ok(mut extracted) => {
-                    for (figure_index, data) in extracted.figures {
-                        let key = sha256_hex(&data);
-                        if let Some(figure) = extracted
-                            .page
-                            .figures
-                            .iter_mut()
-                            .find(|f| f.index == figure_index)
-                        {
-                            figure.sha256 = Some(key.clone());
-                        }
-                        if blobs.contains_key(&key) {
-                            figure_keys.insert((page, figure_index), key);
-                        } else if retained + data.len() <= FIGURE_BYTES_CAP {
-                            retained += data.len();
-                            blobs.insert(key.clone(), Arc::new(data));
-                            figure_keys.insert((page, figure_index), key);
-                        } else {
-                            extracted.page.warnings.push(format!(
-                                "figure {figure_index}: bytes not retained (cap of {} MiB reached)",
-                                FIGURE_BYTES_CAP / (1024 * 1024)
-                            ));
-                        }
-                    }
-                    pages.push(Ok(extracted.page));
-                }
-                Err(message) => pages.push(Err(message)),
-            }
+            pages.push(extract_numbered(&doc, page, &mut figures));
         }
-        Ok(Box::new(PdfiumSession {
+        Ok(PdfiumSession {
             page_count,
             info,
             pages,
-            blobs,
-            figure_keys,
-        }))
+            figures,
+        })
+    }
+}
+
+/// Distinct image payload plus the number of occurrences still available.
+struct FigureBlob {
+    bytes: Vec<u8>,
+    remaining: usize,
+}
+
+/// Apply the session cap before visiting the next image, including images
+/// on the same page. Metadata is kept by the collector even on overflow.
+struct FigureStore {
+    blobs: HashMap<String, FigureBlob>,
+    keys: HashMap<(u32, u32), String>,
+    retained: usize,
+    cap: usize,
+}
+
+impl FigureStore {
+    fn new(cap: usize) -> Self {
+        Self {
+            blobs: HashMap::new(),
+            keys: HashMap::new(),
+            retained: 0,
+            cap,
+        }
+    }
+
+    /// Return the digest even when the payload cannot be retained.
+    fn retain(&mut self, page: u32, index: u32, bytes: Vec<u8>) -> (String, bool) {
+        let key = sha256_hex(&bytes);
+        if let Some(blob) = self.blobs.get_mut(&key) {
+            blob.remaining += 1;
+        } else if bytes.len() <= self.cap.saturating_sub(self.retained) {
+            self.retained += bytes.len();
+            self.blobs.insert(
+                key.clone(),
+                FigureBlob {
+                    bytes,
+                    remaining: 1,
+                },
+            );
+        } else {
+            return (key, false);
+        }
+        self.keys.insert((page, index), key.clone());
+        (key, true)
+    }
+
+    fn take(&mut self, page: u32, index: u32) -> Option<Vec<u8>> {
+        let key = self.keys.remove(&(page, index))?;
+        let blob = self.blobs.get_mut(&key)?;
+        blob.remaining -= 1;
+        if blob.remaining == 0 {
+            let blob = self.blobs.remove(&key)?;
+            self.retained -= blob.bytes.len();
+            Some(blob.bytes)
+        } else {
+            Some(blob.bytes.clone())
+        }
     }
 }
 
 /// Extract 1-based `page` from an open document, reducing any failure to
 /// the message `page_text` will later wrap in [`BackendError::Page`].
-fn extract_numbered(doc: &PdfDocument<'_>, page: u32) -> Result<Extracted, String> {
+fn extract_numbered(
+    doc: &PdfDocument<'_>,
+    page: u32,
+    figures: &mut FigureStore,
+) -> Result<PageText, String> {
     let Ok(index) = u16::try_from(page - 1) else {
         return Err("page index beyond pdfium's 16-bit range".to_string());
     };
-    extract_page(doc, page, index).map_err(|err| match err {
+    extract_page(doc, page, index, figures).map_err(|err| match err {
         BackendError::Page { message, .. } => message,
         other => other.to_string(),
     })
@@ -318,11 +358,8 @@ struct PdfiumSession {
     /// One entry per page in order: the spans and figures, or the message
     /// of the failure that page hit.
     pages: Vec<Result<PageText, String>>,
-    /// Raw image bytes keyed by `(page, figure index)`, handed out once.
-    /// Distinct image streams by SHA-256, shared by every figure that uses them.
-    blobs: HashMap<String, Arc<Vec<u8>>>,
-    /// Figure (page, index) -> key into `blobs`.
-    figure_keys: HashMap<(u32, u32), String>,
+    /// Shared image payloads, released after their final occurrence is taken.
+    figures: FigureStore,
 }
 
 impl DocumentSession for PdfiumSession {
@@ -351,9 +388,7 @@ impl DocumentSession for PdfiumSession {
     }
 
     fn take_figure_bytes(&mut self, page: u32, index: u32) -> Option<Vec<u8>> {
-        let key = self.figure_keys.remove(&(page, index))?;
-        let blob = self.blobs.get(&key)?;
-        Some(blob.as_ref().clone())
+        self.figures.take(page, index)
     }
 }
 
@@ -361,13 +396,12 @@ fn page_error(page: u32, message: String) -> BackendError {
     BackendError::Page { page, message }
 }
 
-/// One page's spans and figures plus the raw bytes behind the figures.
-struct Extracted {
-    page: PageText,
-    figures: Vec<(u32, Vec<u8>)>,
-}
-
-fn extract_page(doc: &PdfDocument<'_>, page: u32, index: u16) -> Result<Extracted, BackendError> {
+fn extract_page(
+    doc: &PdfDocument<'_>,
+    page: u32,
+    index: u16,
+    figures: &mut FigureStore,
+) -> Result<PageText, BackendError> {
     let pdf_page = doc
         .pages()
         .get(index)
@@ -384,7 +418,7 @@ fn extract_page(doc: &PdfDocument<'_>, page: u32, index: u16) -> Result<Extracte
     let (width, height) = unrotated_size(pdf_page.width().value, pdf_page.height().value, rotation);
     let mut collector = Collector {
         page: PageText::new(page, width, height, rotation),
-        figures: Vec::new(),
+        figures,
         seq: 0,
         paths: 0,
         shadings: 0,
@@ -419,16 +453,16 @@ fn unrotated_size(width: f32, height: f32, rotation: i32) -> (f32, f32) {
 }
 
 /// Accumulates spans, figures and object counts while walking a page.
-struct Collector {
+struct Collector<'a> {
     page: PageText,
-    figures: Vec<(u32, Vec<u8>)>,
+    figures: &'a mut FigureStore,
     seq: u32,
     paths: u32,
     shadings: u32,
     unsupported: u32,
 }
 
-impl Collector {
+impl Collector<'_> {
     fn warn(&mut self, message: String) {
         if !self.page.warnings.contains(&message) {
             self.page.warnings.push(message);
@@ -559,11 +593,19 @@ impl Collector {
             .and_then(|value| u32::try_from(value).ok());
         let bytes = image.get_raw_image_data().unwrap_or_default();
         let mime = sniff_mime(&bytes).map(str::to_string);
-        if bytes.is_empty() {
+        let sha256 = if bytes.is_empty() {
             self.warn(format!("figure {index}: pdfium returned no image data"));
+            None
         } else {
-            self.figures.push((index, bytes));
-        }
+            let (digest, retained) = self.figures.retain(self.page.page, index, bytes);
+            if !retained {
+                self.page.warnings.push(format!(
+                    "figure {index}: bytes not retained (cap of {} bytes reached)",
+                    self.figures.cap
+                ));
+            }
+            Some(digest)
+        };
         self.page.figures.push(Figure {
             index,
             bbox,
@@ -571,13 +613,13 @@ impl Collector {
             mime,
             width_px,
             height_px,
-            sha256: None,
+            sha256,
             file: None,
             caption: None,
         });
     }
 
-    fn finish(mut self) -> Extracted {
+    fn finish(mut self) -> PageText {
         let paths = self.paths;
         if paths > 0 {
             self.warn(format!("{paths} vector paths (not exported)"));
@@ -590,10 +632,7 @@ impl Collector {
         if unsupported > 0 {
             self.warn(format!("{unsupported} unsupported page objects"));
         }
-        Extracted {
-            page: self.page,
-            figures: self.figures,
-        }
+        self.page
     }
 }
 
@@ -1033,6 +1072,132 @@ mod tests {
         assert!(close(figure_box.y1, 350.0, 0.5), "y1 {}", figure_box.y1);
         assert_eq!(first_take, Some(IMAGE_SAMPLES.to_vec()));
         assert_eq!(second_take, None);
+    }
+
+    #[test]
+    fn repeated_images_share_the_cap_and_release_after_the_last_take() {
+        let mut store = FigureStore::new(IMAGE_SAMPLES.len());
+        let expected = sha256_hex(&IMAGE_SAMPLES);
+        // Reuse within a page and across pages, with the cap exactly full.
+        for (page, index) in [(1, 0), (1, 1), (2, 0)] {
+            assert_eq!(
+                store.retain(page, index, IMAGE_SAMPLES.to_vec()),
+                (expected.clone(), true)
+            );
+        }
+        assert_eq!(store.blobs.len(), 1);
+        assert_eq!(store.retained, IMAGE_SAMPLES.len());
+        let retained_pointer = store.blobs[&expected].bytes.as_ptr();
+        // Requests need not follow page order; each occurrence is single-use.
+        assert_eq!(store.take(2, 0), Some(IMAGE_SAMPLES.to_vec()));
+        assert_eq!(store.take(2, 0), None);
+        assert_eq!(store.take(1, 0), Some(IMAGE_SAMPLES.to_vec()));
+        assert_eq!(store.retained, IMAGE_SAMPLES.len());
+        let last = store.take(1, 1).unwrap();
+        assert_eq!(last, IMAGE_SAMPLES);
+        assert_eq!(
+            last.as_ptr(),
+            retained_pointer,
+            "final take must move, not copy"
+        );
+        assert!(store.blobs.is_empty());
+        assert!(store.keys.is_empty());
+        assert_eq!(store.retained, 0);
+    }
+
+    #[test]
+    fn image_cap_rejects_distinct_overflow_without_losing_retained_duplicates() {
+        let mut store = FigureStore::new(4);
+        assert!(store.retain(1, 0, vec![1, 2, 3]).1);
+        // Distinct payload over the remaining budget; digest is still available.
+        let rejected = vec![4, 5];
+        assert_eq!(
+            store.retain(1, 1, rejected.clone()),
+            (sha256_hex(&rejected), false)
+        );
+        assert!(store.retain(1, 2, vec![6]).1, "exact cap must fit");
+        assert!(store.retain(2, 0, vec![1, 2, 3]).1);
+        assert_eq!(store.retained, 4);
+        assert_eq!(store.blobs.len(), 2);
+        assert_eq!(store.take(1, 1), None);
+        assert_eq!(store.take(1, 0), Some(vec![1, 2, 3]));
+        assert_eq!(store.take(2, 0), Some(vec![1, 2, 3]));
+        assert_eq!(store.take(1, 2), Some(vec![6]));
+        assert_eq!(store.retained, 0);
+    }
+
+    #[test]
+    fn oversized_image_and_zero_cap_keep_no_payload() {
+        for cap in [0, IMAGE_SAMPLES.len() - 1] {
+            let mut store = FigureStore::new(cap);
+            assert_eq!(
+                store.retain(1, 0, IMAGE_SAMPLES.to_vec()),
+                (sha256_hex(&IMAGE_SAMPLES), false)
+            );
+            assert!(store.blobs.is_empty());
+            assert!(store.keys.is_empty());
+            assert_eq!(store.retained, 0);
+        }
+    }
+
+    #[test]
+    fn repeated_image_pdf_retains_one_blob_across_and_within_pages() {
+        if !pdfium_available() {
+            return;
+        }
+        let mut ops = placed_xobject_ops("Im1", 100, 50, 200, 300);
+        ops.extend(placed_xobject_ops("Im1", 50, 25, 20, 30));
+        let bytes = build_pdf(vec![ops.clone(), ops], None, true);
+        let mut session = PdfiumBackend::default()
+            .open_session(&bytes, None, IMAGE_SAMPLES.len())
+            .unwrap();
+        assert_eq!(session.figures.blobs.len(), 1);
+        assert_eq!(session.figures.retained, IMAGE_SAMPLES.len());
+        for page in 1..=2 {
+            let extracted = session.page_text(page).unwrap();
+            assert!(extracted.warnings.is_empty(), "{:?}", extracted.warnings);
+            assert_eq!(extracted.figures.len(), 2);
+            for figure in &extracted.figures {
+                assert_eq!(figure.sha256, Some(sha256_hex(&IMAGE_SAMPLES)));
+                assert_eq!(
+                    session.take_figure_bytes(page, figure.index),
+                    Some(IMAGE_SAMPLES.to_vec())
+                );
+                assert_eq!(session.take_figure_bytes(page, figure.index), None);
+            }
+        }
+        assert_eq!(session.figures.retained, 0);
+        assert!(session.figures.blobs.is_empty());
+    }
+
+    #[test]
+    fn capped_image_pdf_preserves_geometry_digest_and_text_with_warning() {
+        if !pdfium_available() {
+            return;
+        }
+        let mut ops = text_ops(12, 72, 700, "Text survives the image cap");
+        ops.extend(placed_xobject_ops("Im1", 100, 50, 200, 300));
+        let bytes = build_pdf(vec![ops], None, true);
+        let backend = PdfiumBackend::default();
+        let expected = backend
+            .open_session(&bytes, None, IMAGE_SAMPLES.len())
+            .unwrap()
+            .page_text(1)
+            .unwrap();
+        let mut capped = backend
+            .open_session(&bytes, None, IMAGE_SAMPLES.len() - 1)
+            .unwrap();
+        let actual = capped.page_text(1).unwrap();
+        assert_eq!(actual.spans, expected.spans);
+        assert_eq!(actual.figures, expected.figures);
+        assert_eq!(actual.figures[0].sha256, Some(sha256_hex(&IMAGE_SAMPLES)));
+        assert_eq!(
+            actual.warnings,
+            vec!["figure 0: bytes not retained (cap of 3 bytes reached)"]
+        );
+        assert_eq!(capped.take_figure_bytes(1, 0), None);
+        assert!(capped.figures.blobs.is_empty());
+        assert_eq!(capped.figures.retained, 0);
     }
 
     #[test]

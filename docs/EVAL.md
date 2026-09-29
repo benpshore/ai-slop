@@ -101,28 +101,37 @@ so IEEE `[17], [18]` (two groups) and `\cite{a,b}` (one command) score the
 same. The older resolved-markers over cite-commands ratio is still reported
 as `marker_command_ratio`, uncapped, as a diagnostic.
 
-## Measured status (2026-09-28)
+## Measured status (2026-09-29)
 
-Eval run 36498236950 (`lopdf`, `dev` split, 60 papers) and run 36498705659 (`holdout`, 10
-papers), both on `ubuntu-24.04-arm` after PR #36. Full per-metric numbers for both splits are
-in [README.md](../README.md) and GitHub issue #15.
+Eval run 36511221210 (`lopdf`, `dev` split, 60 papers) and run 36511549138 (`holdout`, 10
+papers), both on `ubuntu-24.04-arm` after PRs #39, #40 and #41. Full per-metric numbers for
+both splits are in [README.md](../README.md) and GitHub issue #15.
 
-Known gaps: `body_alignment` (0.877 `dev` / 0.883 `holdout`, exact word LCS, appendices
-included) is far from the chunk-level acceptance protocol in [ENGINE.md](ENGINE.md) (the 99%
-error-free-chunk target is in [README.md](../README.md)), and `body_word_precision` (82.3%
-`dev` / 82.0% `holdout`) is held down by untagged figure/table/math fragments; a few papers
-remain at 0.65–0.78 body alignment. `marker_precision` (targets that resolve to the *correct*
-entry, not just any entry) is 99.5% `dev` / 99.9% `holdout`, and `marker_key_recall` is 97.2%
-`dev` / 99.2% `holdout`; the plain `marker_recall` diagnostic still does not check correctness.
-Reference title accuracy is 94.4% `dev`. `ms_per_chunk` p50 (22.9 ms `dev`, 20.8 ms `holdout`)
-is a sub-30 ms diagnostic on these hosted runners, not the M1 service-time measurement — perf loop PR #35 took arm p50 from 35.4 ms
-to 18.7 ms before loop 10's region tagging added about 4 ms back — and M1 numbers have not been
-measured; a pre-loop-10 comparison (Native run 36491886979) found the full `docling` pipeline a
-routed exception at about 4.9 s per chunk, and `pdfium` about 6x slower than `lopdf` on the
+Known gaps: `body_alignment` (0.950 `dev` / 0.940 `holdout`, body only; exact word LCS; math,
+digit and operator tokens dropped on both sides; appendices included) is still short of the
+chunk-level acceptance protocol in [ENGINE.md](ENGINE.md) (the 99% error-free-chunk target is
+in [README.md](../README.md)), and `body_word_precision` is 91.8% `dev` / 89.2% `holdout`.
+Since the last refresh, loops 11 (math/footnote token dropping, lopdf figure boxes,
+geometry-based figure/table tagging, column overhangs) and 13 (caption continuations, figure
+labels, longtable pages, biography/front-matter roles, digit/listing handling) worked on body
+text, and loop 12 (marker residue, parser tail cases, hyphen pairs, INFORMS truth, NFKC title
+comparison) worked on references and markers; PR #42 is pending for a figure-box regression on
+one paper (2509.04183, at 0.711). `marker_precision` (targets that resolve to the *correct*
+entry, not just any entry) is 100% `dev` / 100% `holdout`, and `marker_key_recall` is 99.6%
+`dev` / 99.3% `holdout`; the plain `marker_recall` diagnostic still does not check correctness.
+Reference title accuracy is 98.5% `dev`, leaving the remaining 1.5% of titles and 0.4% of
+cited keys on `dev` open. `ms_per_chunk` p50 (27.5 ms `dev`, 25.5 ms `holdout`) is still a
+sub-30 ms diagnostic on these hosted runners, not the M1 service-time measurement, though the
+added tagging (loops 11 and 13) is creeping it toward 30 ms and a second perf loop is due —
+perf loop PR #35 took arm p50 from 35.4 ms to 18.7 ms before loop 10's region tagging added
+about 4 ms back — and M1 numbers have not been measured natively; a
+pre-loop-10 comparison (Native run 36491886979) found the full `docling` pipeline a routed
+exception at about 4.9 s per chunk, and `pdfium` about 6x slower than `lopdf` on the
 reference-metrics path.
 
 Per-loop taxonomies are in `docs/analysis/`: `eval-2026-09-28-lopdf.md`,
 `eval-2026-09-28-holdout.md`, `reading-order-2026-09-28.md`,
 `citations-loop6-2026-09-28.md`, `reading-order-loop7-2026-09-28.md`,
 `markers-loop8-2026-09-28.md`, `titles-loop9-2026-09-28.md`,
-`body-loop10-2026-09-28.md`, `perf-2026-09-28.md`.
+`body-loop10-2026-09-28.md`, `perf-2026-09-28.md`, `body-loop11-2026-09-28.md`,
+`refs-loop12-2026-09-28.md`, `body-loop13-2026-09-28.md`.
