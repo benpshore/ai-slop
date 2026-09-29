@@ -340,6 +340,30 @@ fn series_suffix_re() -> &'static Regex {
     })
 }
 
+/// A year that `natbib` prints at the end of a title block (`…
+/// reinforcement learning, 2025.`, `…, 2024{\natexlab{a}}`): the date of
+/// the entry, not part of its title.
+fn title_year_suffix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r",\s*(?:19|20)\d{2}[a-z]?$").expect("valid regex"))
+}
+
+/// A bracketed descriptor closing a title (`… collaboration [analysis
+/// code]`): it names the medium, it is not part of the title.
+fn descriptor_suffix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s+\[[\p{L} ]+\]$").expect("valid regex"))
+}
+
+/// A title block that is only a URL (`\newblock \URLprefix \url{https://…}`
+/// in `elsarticle-harv` misc entries): no title is printed.
+fn url_only_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^(?:url:?\s*)?(?:https?://|www\.)\S*$").expect("valid regex")
+    })
+}
+
 /// Matches `\input{f}`, `\include{f}` and `\subfile{f}` (group 1), plus the
 /// brace-free plain-`TeX` form `\input f` that only `\input` accepts, where
 /// `f` runs until whitespace, `{`, `}` or `\` (group 2).
@@ -535,9 +559,11 @@ fn collapse_whitespace(s: &str) -> String {
 /// forms; escaped symbols (`\&`, `\%`, `\_`, `\$`, `\{`, `\}`) become the
 /// symbol; accents (`\'e`, `\c{c}`, `\v{s}`, ...) and special letters (`\ss`,
 /// `\o`, `\ae`, `\l`, `\i`, ...) become the composed character; `$...$` keeps
-/// its contents; labels, references, spacing and citation commands are
-/// dropped with their arguments; any other `\command` disappears and its
-/// brace arguments are kept as text. Whitespace is collapsed and trimmed.
+/// its contents, with Greek letters and common symbols (`\tau`, `\pm`) as
+/// Unicode and operator names (`\log`) as their name; labels, references,
+/// spacing and citation commands are dropped with their arguments; any other
+/// `\command` disappears and its brace arguments are kept as text.
+/// Whitespace is collapsed and trimmed.
 pub fn latex_to_text(s: &str) -> String {
     let clean = strip_comments(s);
     let mut out = String::with_capacity(clean.len());
@@ -695,6 +721,92 @@ fn special_letter(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Math letters and symbols as the typeset PDF shows them (Greek letters,
+/// `\pm`, `\times`, relations), so a title keeps `τ` in `$\tau$-bench`.
+fn math_symbol(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "alpha" => "α",
+        "beta" => "β",
+        "gamma" => "γ",
+        "delta" => "δ",
+        "epsilon" => "ϵ",
+        "varepsilon" => "ε",
+        "zeta" => "ζ",
+        "eta" => "η",
+        "theta" => "θ",
+        "vartheta" => "ϑ",
+        "iota" => "ι",
+        "kappa" => "κ",
+        "lambda" => "λ",
+        "mu" => "μ",
+        "nu" => "ν",
+        "xi" => "ξ",
+        "pi" => "π",
+        "varpi" => "ϖ",
+        "rho" => "ρ",
+        "varrho" => "ϱ",
+        "sigma" => "σ",
+        "varsigma" => "ς",
+        "tau" => "τ",
+        "upsilon" => "υ",
+        "phi" => "ϕ",
+        "varphi" => "φ",
+        "chi" => "χ",
+        "psi" => "ψ",
+        "omega" => "ω",
+        "Gamma" => "Γ",
+        "Delta" => "Δ",
+        "Theta" => "Θ",
+        "Lambda" => "Λ",
+        "Xi" => "Ξ",
+        "Pi" => "Π",
+        "Sigma" => "Σ",
+        "Upsilon" => "Υ",
+        "Phi" => "Φ",
+        "Psi" => "Ψ",
+        "Omega" => "Ω",
+        "pm" => "±",
+        "mp" => "∓",
+        "times" => "×",
+        "cdot" => "·",
+        "infty" => "∞",
+        "le" | "leq" => "≤",
+        "ge" | "geq" => "≥",
+        "ne" | "neq" => "≠",
+        "approx" => "≈",
+        "sim" => "∼",
+        "to" | "rightarrow" => "→",
+        "ell" => "ℓ",
+        "partial" => "∂",
+        "nabla" => "∇",
+        _ => return None,
+    })
+}
+
+/// Math operator names that print as their own name (`\log n` → `log n`).
+fn is_operator_name(name: &str) -> bool {
+    matches!(
+        name,
+        "log"
+            | "ln"
+            | "exp"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "max"
+            | "min"
+            | "sup"
+            | "inf"
+            | "lim"
+            | "det"
+            | "arg"
+            | "deg"
+            | "dim"
+            | "ker"
+            | "Pr"
+    )
+}
+
 /// The mark of a one-letter accent command (`\c`, `\v`, `\H`, ...).
 fn accent_letter(name: &str) -> Option<char> {
     let mut chars = name.chars();
@@ -766,8 +878,19 @@ fn drops_two_arguments(name: &str) -> bool {
 /// A letter control word `name`; `after` is the index past the name (and the
 /// whitespace `TeX` would swallow).
 fn letter_command(s: &str, name: &str, after: usize, out: &mut String) -> usize {
-    if let Some(text) = special_letter(name) {
+    if let Some(text) = special_letter(name).or_else(|| math_symbol(name)) {
         out.push_str(text);
+        return after;
+    }
+    if is_operator_name(name) {
+        // `$O(n\log n)$` prints `O(n log n)`.
+        if out.chars().next_back().is_some_and(char::is_alphanumeric) {
+            out.push(' ');
+        }
+        out.push_str(name);
+        if char_at(s, after).is_some_and(|c| c.is_alphanumeric() || c == '\\') {
+            out.push(' ');
+        }
         return after;
     }
     if let Some(mark) = accent_letter(name) {
@@ -1090,8 +1213,10 @@ fn compose_text(
 /// `\doi{..}`, `doi:`, `https://doi.org/` or a bare `10.xxxx/..`, `arxiv_id`
 /// from `arXiv:..`, `/abs/` or `\eprint{..}`. When the item has `\newblock`s
 /// the first segment gives the authors and the second the title (ACM's
-/// `\showarticletitle{..}` is preferred when present). Without `\newblock`
-/// (`IEEEtran`, `siam`) the title is the first quoted span (` ``..'' `,
+/// `\showarticletitle{..}` is preferred when present). Without `\newblock`,
+/// an INFORMS item `Authors (year) Title. \emph{Venue} ..` is split around
+/// the year (see `author_year_inline`); otherwise (`IEEEtran`, `siam`) the
+/// title is the first quoted span (` ``..'' `,
 /// `"..."`, `“..”`) or italic group (`{\em ..}`, `\emph{..}`,
 /// `\textit{..}`), whichever opens first, and the authors are the text
 /// before it; with neither, both stay empty. The year skips page and volume
@@ -1150,7 +1275,9 @@ fn parse_bibitem(item: &str) -> Option<TruthReference> {
         } else {
             (split_bbl_authors(&first), bbl_title(rest, segments[1]))
         }
-    } else if let Some((inline_authors, inline_title)) = inline_title(rest) {
+    } else if let Some((inline_authors, inline_title)) =
+        author_year_inline(rest).or_else(|| inline_title(rest))
+    {
         (inline_authors, Some(inline_title))
     } else {
         (Vec::new(), None)
@@ -1172,7 +1299,9 @@ fn parse_bibitem(item: &str) -> Option<TruthReference> {
 }
 
 /// Title of a `\bibitem`: an explicit ACM title macro anywhere in the item,
-/// else the detexed second `\newblock` segment without its final period.
+/// else the detexed second `\newblock` segment without its final period, a
+/// closing series (`, volume 48`), year (`, 2025`, `, 2024a`) or bracketed
+/// descriptor (`[analysis code]`). A segment that is only a URL is no title.
 fn bbl_title(rest: &str, segment: &str) -> Option<String> {
     if let Some(m) = acm_title_re().find(rest) {
         let open = m.end() - 1;
@@ -1185,10 +1314,12 @@ fn bbl_title(rest: &str, segment: &str) -> Option<String> {
     }
     let full = latex_to_text(segment);
     let title = full.strip_suffix('.').unwrap_or(&full).trim();
-    let title = series_suffix_re()
-        .find(title)
-        .filter(|m| m.start() > 0)
-        .map_or(title, |m| title[..m.start()].trim_end());
+    if url_only_re().is_match(title) {
+        return None;
+    }
+    let title = without_suffix(title, series_suffix_re());
+    let title = without_suffix(title, title_year_suffix_re());
+    let title = without_suffix(title, descriptor_suffix_re());
     if title.is_empty() {
         None
     } else {
@@ -1216,6 +1347,96 @@ fn author_year_title(first: &str) -> Option<(&str, String)> {
         return None;
     }
     Some((names, title.to_owned()))
+}
+
+/// `text` without the part `re` matches at its end, unless that is all of it.
+fn without_suffix<'a>(text: &'a str, re: &Regex) -> &'a str {
+    re.find(text)
+        .filter(|m| m.start() > 0)
+        .map_or(text, |m| text[..m.start()].trim_end())
+}
+
+/// Lower-case abbreviations whose period does not end a sentence.
+const NON_FINAL_ABBREVIATIONS: [&str; 10] = [
+    "e.g", "i.e", "vs", "dr", "st", "no", "vol", "fig", "al", "cf",
+];
+
+/// Whether the period right after `before` (the text up to it) belongs to an
+/// abbreviation or an initial rather than ending a sentence: the word before
+/// it is a single letter (`J.`, the `S` of `U.S.`), already contains a
+/// period (`U.S`, `e.g`), or is in [`NON_FINAL_ABBREVIATIONS`].
+fn abbreviation_period(before: &str) -> bool {
+    let word = before
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .trim_start_matches(['(', '[', '{', '"', '\u{201C}']);
+    let mut chars = word.chars();
+    let single_letter = chars.next().is_some_and(char::is_alphabetic) && chars.next().is_none();
+    single_letter
+        || word.contains('.')
+        || NON_FINAL_ABBREVIATIONS.contains(&word.to_lowercase().as_str())
+}
+
+/// `text` up to its first sentence end: a `.`, `?` or `!` followed by
+/// whitespace and then an uppercase letter or `[`. A closing `?` or `!` stays,
+/// a period is dropped. A period inside a token (no whitespace after it) or
+/// after an abbreviation or initial (see [`abbreviation_period`]: `U.S.`,
+/// `Dr.`, `e.g.`) does not end the sentence. The whole `text` when there is
+/// none.
+fn first_sentence(text: &str) -> &str {
+    for (at, c) in text.char_indices() {
+        if !matches!(c, '.' | '?' | '!') {
+            continue;
+        }
+        if c == '.' && abbreviation_period(&text[..at]) {
+            continue;
+        }
+        let after = &text[at + c.len_utf8()..];
+        let next_word = after.trim_start();
+        if next_word.len() == after.len() {
+            continue;
+        }
+        if next_word
+            .chars()
+            .next()
+            .is_some_and(|n| n.is_uppercase() || n == '[')
+        {
+            let end = if c == '.' { at } else { at + c.len_utf8() };
+            return &text[..end];
+        }
+    }
+    text
+}
+
+/// Authors and title of a `\bibitem` without `\newblock` that reads
+/// `Authors (year) Title. \emph{Venue} vol(no):pages.` (INFORMS, 2602.16061):
+/// the detexed text before the first italic group is split around the
+/// parenthesised year (see [`author_year_title`]) and the title ends at its
+/// first sentence end (`… homo silicus? Technical report, …`). `None` when the
+/// author part has a digit or a quote (a volume, or an `IEEEtran` quoted
+/// title, precedes the year), when fewer than two words follow the year, or
+/// when the text after the year starts with `In`; an italic group right after
+/// the year (a book title) therefore falls through to [`inline_title`].
+fn author_year_inline(rest: &str) -> Option<(Vec<String>, String)> {
+    let head = italic_span(rest).map_or(rest, |(start, _)| &rest[..start]);
+    let first = latex_to_text(head);
+    let (names, tail) = author_year_title(&first)?;
+    if names
+        .chars()
+        .any(|c| c.is_ascii_digit() || matches!(c, '"' | '\u{201C}' | '\u{201D}'))
+    {
+        return None;
+    }
+    let title = first_sentence(&tail).trim_end_matches(['.', ',', ' ']);
+    let words = title
+        .split_whitespace()
+        .filter(|word| word.chars().filter(|c| c.is_alphabetic()).count() >= 2)
+        .count();
+    if words < 2 || title.to_lowercase().starts_with("in ") {
+        return None;
+    }
+    Some((split_bbl_authors(names), title.to_owned()))
 }
 
 /// Byte index of the first `pat` in `s` at or after `from` that is not
@@ -1347,6 +1568,7 @@ fn split_bbl_authors(text: &str) -> Vec<String> {
             .filter(|stem| stem.chars().last().is_some_and(char::is_lowercase))
             .unwrap_or(trimmed);
         if token.is_empty()
+            || is_year_token(token)
             || token.eq_ignore_ascii_case("others")
             || token.eq_ignore_ascii_case("et al")
             || token.eq_ignore_ascii_case("et al.")
@@ -1363,6 +1585,18 @@ fn split_bbl_authors(text: &str) -> Vec<String> {
         }
     }
     authors
+}
+
+/// A year left in an author list (`Henderson, M., 2022.` in `elsarticle-harv`):
+/// `2022`, `2022.` or `2022a`.
+fn is_year_token(token: &str) -> bool {
+    let stem = token.strip_suffix('.').unwrap_or(token);
+    let digits = stem
+        .strip_suffix(|c: char| c.is_ascii_lowercase())
+        .unwrap_or(stem);
+    digits.len() == 4
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits.starts_with("19") || digits.starts_with("20"))
 }
 
 /// `biblatex` `.bbl`: `\entry{key}{type}{options} ... \endentry` blocks.
@@ -3807,7 +4041,7 @@ Text \cite{k1}.
 
     #[test]
     fn latex_to_text_table() {
-        let cases: [(&str, &str); 18] = [
+        let cases: [(&str, &str); 21] = [
             (r#"\'e \`a \^o \"u \~n"#, "é à ô ü ñ"),
             (
                 r"\c{c} \v{s} \H{o} \k{a} \={e} \.{z} \u{g} \r{a}",
@@ -3833,7 +4067,13 @@ Text \cite{k1}.
             ),
             ("``quoted'' --- yes", "\"quoted\" — yes"),
             (r"A \& B 100\% a\_b \$5 \{x\}", "A & B 100% a_b $5 {x}"),
-            (r"the {$\log n$} barrier", "the n barrier"),
+            (r"the {$\log n$} barrier", "the log n barrier"),
+            (r"$O(n\log n)$ and $\log(n)$", "O(n log n) and log(n)"),
+            (r"$\tau$-bench, Gym-$\mu$RTS", "τ-bench, Gym-μRTS"),
+            (
+                r"CuO$_{6\pm\delta}$ for $\chi$-separation",
+                "CuO_6±δ for χ-separation",
+            ),
             (r"$x^2 + y$", "x^2 + y"),
             (
                 r"Über die {V}erteilung der {W}urzeln",
@@ -3903,9 +4143,9 @@ Text \cite{k1}.
         assert_eq!(refs[0].label.as_deref(), Some("Aamand et al., 2021"));
     }
 
-    /// INFORMS / `spbasic` output: authors, year and title share the first
-    /// `\newblock` segment (entries from 2602.16061; the markup is
-    /// reconstructed from the detexed truth).
+    /// `spbasic`-like output: authors, year and title share the first
+    /// `\newblock` segment (entries from 2602.16061 with `\newblock`s added;
+    /// the real file has none, see `INFORMS_PLAIN_BBL`).
     const INFORMS_BBL: &str = r"\begin{thebibliography}{2}
 \bibitem[{Gui and Toubia(2023)}]{gui2023challenge}
 Gui G, Toubia O (2023) The challenge of using llms to simulate human behavior:
@@ -3938,6 +4178,203 @@ Abrevaya J, Donald SG (2017) A gmm approach for dealing with missing data on
             Some("A gmm approach for dealing with missing data on regressors")
         );
         assert_eq!(refs[1].authors, ["Abrevaya J", "Donald SG"]);
+    }
+
+    /// INFORMS output as 2602.16061 ships it (verbatim): no `\newblock`, one
+    /// block `Authors (year) Title. \emph{Venue} vol(no):pages.` per item.
+    const INFORMS_PLAIN_BBL: &str = r"\begin{thebibliography}{54}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\urlprefix}{URL }
+
+\bibitem[{Abrevaya \protect\BIBand{} Donald(2017)}]{abrevaya2017gmm}
+Abrevaya J, Donald SG (2017) A gmm approach for dealing with missing data on
+  regressors. \emph{Review of Economics and Statistics} 99(4):657--662.
+
+\bibitem[{Angelopoulos et~al.(2023{\natexlab{b}})Angelopoulos, Duchi,
+  \protect\BIBand{} Zrnic}]{angelopoulos2023ppi++}
+Angelopoulos AN, Duchi JC, Zrnic T (2023{\natexlab{b}}) Ppi++: Efficient
+  prediction-powered inference. \emph{arXiv preprint arXiv:2311.01453} .
+
+\bibitem[{Dell \protect\BIBand{} Rambachan(2026)}]{dell2026measurement}
+Dell M, Rambachan A (2026) The measurement revolution? credible measurement and
+  inference in the age of ai .
+
+\bibitem[{Horton(2023)}]{horton2023large}
+Horton JJ (2023) Large language models as simulated economic agents: What can
+  we learn from homo silicus? Technical report, National Bureau of Economic
+  Research.
+
+\bibitem[{Litvinchev \protect\BIBand{}
+  Tsurkov(2013)}]{litvinchev2013aggregation}
+Litvinchev I, Tsurkov V (2013) \emph{Aggregation in large-scale optimization},
+  volume~83 (Springer Science \& Business Media).
+
+\bibitem[{Manski(2003)}]{manski2003partial}
+Manski CF (2003) \emph{Partial identification of probability distributions}
+  (Springer).
+\end{thebibliography}
+";
+
+    #[test]
+    fn parse_bbl_informs_without_newblock() {
+        let refs = parse_bbl(INFORMS_PLAIN_BBL);
+        assert_eq!(refs.len(), 6);
+        // The title ends before the italic venue, which is not the title.
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("A gmm approach for dealing with missing data on regressors")
+        );
+        assert_eq!(refs[0].authors, ["Abrevaya J", "Donald SG"]);
+        assert_eq!(refs[0].year, Some(2017));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some("Ppi++: Efficient prediction-powered inference")
+        );
+        assert_eq!(refs[1].authors, ["Angelopoulos AN", "Duchi JC", "Zrnic T"]);
+        assert_eq!(refs[1].year, Some(2023));
+        assert_eq!(refs[1].arxiv_id.as_deref(), Some("2311.01453"));
+        // No venue: a lowercase word after `?` continues the title.
+        assert_eq!(
+            refs[2].title.as_deref(),
+            Some("The measurement revolution? credible measurement and inference in the age of ai")
+        );
+        assert_eq!(refs[2].authors, ["Dell M", "Rambachan A"]);
+        // No venue: the title ends at `? Technical report`, keeping the `?`.
+        assert_eq!(
+            refs[3].title.as_deref(),
+            Some(
+                "Large language models as simulated economic agents: What can we learn from \
+                 homo silicus?"
+            )
+        );
+        assert_eq!(refs[3].authors, ["Horton JJ"]);
+        // An italic book title right after the year is the title.
+        assert_eq!(
+            refs[4].title.as_deref(),
+            Some("Aggregation in large-scale optimization")
+        );
+        assert_eq!(refs[4].authors, ["Litvinchev I", "Tsurkov V"]);
+        assert_eq!(refs[4].year, Some(2013));
+        assert_eq!(
+            refs[5].title.as_deref(),
+            Some("Partial identification of probability distributions")
+        );
+        assert_eq!(refs[5].authors, ["Manski CF"]);
+    }
+
+    /// An `IEEEtran` online entry with the year after the author (2507.14211,
+    /// verbatim) and an `IEEEtran` article whose `(2020)` follows the volume.
+    const IEEE_YEAR_BBL: &str = r"\begin{thebibliography}{10}
+\bibitem{gemv2}
+\BIBentryALTinterwordspacing
+M.~Boban. (2014) {GEMV2: Geometry Based Efficient Propagation Model for V2V
+  Communication}. [Online]. Available: \url{http://vehicle2x.net/}
+\BIBentrySTDinterwordspacing
+
+\bibitem{volume}
+A.~Author, Some title words, Journal 5 (2020) pages one to ten.
+\end{thebibliography}
+";
+
+    #[test]
+    fn parse_bbl_author_year_inline_guards() {
+        let refs = parse_bbl(IEEE_YEAR_BBL);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("GEMV2: Geometry Based Efficient Propagation Model for V2V Communication")
+        );
+        assert_eq!(refs[0].authors, ["M. Boban"]);
+        assert_eq!(refs[0].year, Some(2014));
+        // A digit before the year (a volume) is not an author list.
+        assert_eq!(refs[1].title, None);
+        assert!(refs[1].authors.is_empty());
+    }
+
+    #[test]
+    fn author_year_inline_keeps_abbreviation_periods() {
+        let bbl = r"\begin{thebibliography}{1}
+\bibitem[{Abrevaya(2017)}]{abrevaya2017}
+Abrevaya J (2017) A study of U.S. Policy after Dr. Smith. \emph{Journal}
+  12(3):45--67.
+\end{thebibliography}
+";
+        let refs = parse_bbl(bbl);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("A study of U.S. Policy after Dr. Smith")
+        );
+        assert_eq!(refs[0].authors, ["Abrevaya J"]);
+        assert_eq!(refs[0].year, Some(2017));
+        // The sentence still ends at a real period, not at an abbreviation.
+        assert_eq!(
+            first_sentence("Trade e.g. Steel vs. Iron. Technical report"),
+            "Trade e.g. Steel vs. Iron"
+        );
+        assert_eq!(
+            first_sentence("Results in Fig. Two and No. Three. Working paper"),
+            "Results in Fig. Two and No. Three"
+        );
+        assert_eq!(first_sentence("Web 2.0 Tools. Report"), "Web 2.0 Tools");
+        assert_eq!(first_sentence("Plain title. Next"), "Plain title");
+    }
+
+    /// Title blocks with a trailing year or descriptor, or only a URL
+    /// (2503.00030, 2511.13979 and 2410.17124, verbatim apart from the
+    /// shortened author lists).
+    const TITLE_EXTRAS_BBL: &str = r"\begin{thebibliography}{4}
+\bibitem[DeepSeek-AI et~al.(2025)]{deepseekai2025deepseekr1}
+DeepSeek-AI, Guo, D., Yang, D., and Zhang, Z.
+\newblock Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning, 2025.
+\newblock URL \url{https://arxiv.org/abs/2501.12948}.
+
+\bibitem[Zhang et~al.(2024{\natexlab{a}})Zhang, Yu, Peng, Song, Tian, Huo, Jiang, Mi, and Yu]{zhang2024iterativenashpolicyoptimization}
+Zhang, Y., Yu, D., Peng, B., Song, L., Tian, Y., Huo, M., Jiang, N., Mi, H., and Yu, D.
+\newblock Iterative nash policy optimization: Aligning llms with general preferences via no-regret learning, 2024{\natexlab{a}}.
+\newblock URL \url{https://arxiv.org/abs/2407.00617}.
+
+\bibitem[Ju and Aral(2026{\natexlab{a}})]{ju2026code}
+H.~Ju and S.~Aral.
+\newblock Personality pairing improves human-ai collaboration [analysis code].
+\newblock GitHub, 2026{\natexlab{a}}.
+\newblock URL \url{https://github.com/harangju/personality-pairing}.
+
+%Type = Misc
+\bibitem[{Henderson(2022)}]{RSNA}
+\bibinfo{author}{Henderson, M.}, \bibinfo{year}{2022}.
+\newblock \URLprefix \url{https://www.rsna.org/news/2022/may/global-radiologist-shortage}.
+\end{thebibliography}
+";
+
+    #[test]
+    fn parse_bbl_title_drops_year_descriptor_and_url() {
+        let refs = parse_bbl(TITLE_EXTRAS_BBL);
+        assert_eq!(refs.len(), 4);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some(
+                "Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning"
+            )
+        );
+        assert_eq!(refs[0].year, Some(2025));
+        assert_eq!(
+            refs[1].title.as_deref(),
+            Some(
+                "Iterative nash policy optimization: Aligning llms with general preferences via \
+                 no-regret learning"
+            )
+        );
+        assert_eq!(refs[1].year, Some(2024));
+        assert_eq!(
+            refs[2].title.as_deref(),
+            Some("Personality pairing improves human-ai collaboration")
+        );
+        // A URL is not a title.
+        assert_eq!(refs[3].title, None);
+        assert_eq!(refs[3].authors, ["M. Henderson"]);
+        assert_eq!(refs[3].year, Some(2022));
     }
 
     /// `apalike`-style books whose title block carries the series (entries

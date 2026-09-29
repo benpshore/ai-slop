@@ -39,7 +39,7 @@
 //! still tagged `body` are retagged, except that `furniture` wins over any
 //! tag.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -255,8 +255,13 @@ const SCRIPT_MAX_CHARS: usize = 16;
 const SCRIPT_MAX_WORDS: usize = 3;
 /// Longest superscript or subscript fragment (`10, 11, 12`), in characters.
 const SUPERSCRIPT_MAX_CHARS: usize = 12;
-/// Rounding slack on `SCRIPT_RATIO` for the superscript rule: sizes taken
-/// from scaled text matrices come out as 5.98 on 7.97 for a 6 on 8 pt pair.
+/// A detached superscript or subscript fragment (rule 3a) is at most this
+/// share of its base line's font size: RSC sets 7 pt citation numbers on
+/// 9 pt text (0.78), and 8 on 10 pt is the loosest common pair.
+const SUPERSCRIPT_RATIO: f32 = 0.8;
+/// Rounding slack on `SUPERSCRIPT_RATIO` for the superscript rule: sizes
+/// taken from scaled text matrices come out as 5.98 on 7.97 for a 6 on 8 pt
+/// pair.
 const RATIO_SLACK: f32 = 0.005;
 /// Distance from a span box's bottom up to its baseline, as a share of its
 /// font size (the backends' descent estimate).
@@ -278,6 +283,11 @@ const LOWERED_IDEAL: f32 = -0.4;
 /// How far outside the base line's box a superscript may sit, in base font
 /// sizes.
 const SUPERSCRIPT_REACH: f32 = 0.5;
+/// How far a superscript lying wholly beyond the base line's right edge
+/// may sit from it, in base font sizes: a tolerance for a citation number
+/// set after the final punctuation of a line, where nothing to its right
+/// competes for it.
+const SUPERSCRIPT_REACH_AFTER: f32 = 1.0;
 /// Unicode superscript and subscript digits, indexed by value.
 const SUPERSCRIPT_DIGITS: [char; 10] = [
     '\u{2070}', '\u{00B9}', '\u{00B2}', '\u{00B3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}',
@@ -328,6 +338,22 @@ const JOIN_PREFIXES: &[&str] = &[
 /// Shortest unattested right half that still joins after a
 /// [`JOIN_PREFIXES`] entry (`pre-` + `serving`).
 const PREFIX_JOIN_MIN_RIGHT: usize = 5;
+/// Capitalised left halves (`Multi-`, `Cross-`, `Dual-`), compared lower
+/// cased, whose hyphen before a lowercase attested word is kept unless the
+/// joined word dominates (see [`hyphen_policy_counted`]). Any other
+/// capitalised word (`Every-` + `body`) is left to the later rules.
+const CAPITALISED_COMPOUND_PREFIXES: &[&str] = &[
+    "multi", "cross", "self", "semi", "non", "pre", "post", "co", "sub", "inter", "intra", "meta",
+    "anti", "bi", "tri", "dual", "single", "low", "high", "long", "short", "real", "open", "two",
+    "three", "zero", "few", "one", "fine", "coarse", "end", "full", "half", "well", "ill", "state",
+    "large", "small", "deep", "wide",
+];
+/// The joined word dominates the hyphenated pair when it occurs at least
+/// this many times as often.
+const JOINED_DOMINANCE: usize = 2;
+/// Fewest letters in a joined all-capital word (`EFFI-` + `CIENT`) for its
+/// line-end hyphen to be dropped without the joined word being attested.
+const CAPS_JOIN_MIN_LETTERS: usize = 6;
 /// Longest right half that is never a typeset word break (`TeX` leaves at
 /// least three letters after a break), so `most-` + `dl` stays a compound.
 const MAX_UNBREAKABLE_RIGHT: usize = 2;
@@ -418,13 +444,22 @@ enum Decision {
     Join(String, String),
 }
 
-/// Lower-cased words and hyphenated pairs seen in the document's body lines.
-/// Word halves at a line-end hyphen (the last word before it and the first
-/// word of the next body line) are not recorded as words, so a split
-/// `cost-` / `effective` does not attest its own halves.
+/// Lower-cased words and hyphenated pairs seen in the document's body lines,
+/// with the number of times each occurs. Word halves at a line-end hyphen
+/// (the last word before it and the first word of the next body line) are
+/// not recorded as words, so a split `cost-` / `effective` does not attest
+/// its own halves.
 struct Vocabulary {
-    words: HashSet<String>,
-    compounds: HashSet<String>,
+    words: HashMap<String, usize>,
+    compounds: HashMap<String, usize>,
+}
+
+impl Vocabulary {
+    /// Occurrences of the lower-cased word or hyphenated pair `piece`.
+    fn count(&self, piece: &str) -> usize {
+        self.words.get(piece).copied().unwrap_or(0)
+            + self.compounds.get(piece).copied().unwrap_or(0)
+    }
 }
 
 fn page_number_re() -> &'static Regex {
@@ -1182,11 +1217,12 @@ impl PageGeom {
 /// the page is a candidate, not only the neighbours in reading order:
 /// fragments printed on one row follow each other (`8`, `9`, `10,11`), and
 /// when two columns interleave the base line can be further away. The base
-/// line has a font size of at least `1 / SCRIPT_RATIO` times the
+/// line has a font size of at least `1 / SUPERSCRIPT_RATIO` times the
 /// fragment's, reaches the fragment horizontally within
-/// `SUPERSCRIPT_REACH`, and has its baseline at a box-bottom offset in the
-/// raised window (superscript) or, for digits only, just below it
-/// (subscript). The candidate closest to the typical offset wins (the
+/// `SUPERSCRIPT_REACH` (`SUPERSCRIPT_REACH_AFTER` when the fragment lies
+/// wholly beyond its right edge), and has its baseline at a box-bottom
+/// offset in the raised window (superscript) or, for digits only, just
+/// below it (subscript). The candidate closest to the typical offset wins (the
 /// lowest line index on a tie). Only lines whose baseline lies within the
 /// offset range at the page's largest size are looked at (`geom`, with
 /// `window` as scratch space); every other line fails the offset test.
@@ -1225,11 +1261,16 @@ fn superscript_target(
         let (Some(ob), Some((baseline, other_size))) = (other.bbox, other.base) else {
             continue;
         };
-        if size > (SCRIPT_RATIO + RATIO_SLACK) * other_size {
+        if size > (SUPERSCRIPT_RATIO + RATIO_SLACK) * other_size {
             continue;
         }
         let gap = (ob.x0 - bbox.x1).max(bbox.x0 - ob.x1).max(0.0);
-        if gap > SUPERSCRIPT_REACH * other_size {
+        let horizontal_reach = if bbox.x0 >= ob.x1 {
+            SUPERSCRIPT_REACH_AFTER
+        } else {
+            SUPERSCRIPT_REACH
+        };
+        if gap > horizontal_reach * other_size {
             continue;
         }
         let offset = (bbox.y0 - baseline) / other_size;
@@ -1382,20 +1423,22 @@ fn push_lowercase(buf: &mut String, word: &str) {
     }
 }
 
-/// Insert `key` into `set` unless it is there already (one allocation per
-/// new entry only).
-fn insert_new(set: &mut HashSet<String>, key: &str) {
-    if !set.contains(key) {
-        set.insert(key.to_owned());
+/// Count one occurrence of `key` in `counts` (one allocation per new entry
+/// only).
+fn count_one(counts: &mut HashMap<String, usize>, key: &str) {
+    if let Some(slot) = counts.get_mut(key) {
+        *slot += 1;
+    } else {
+        counts.insert(key.to_owned(), 1);
     }
 }
 
-/// Words and hyphenated word pairs of every body line, lower-cased, in
-/// reading order (see [`Vocabulary`] for the halves left out).
+/// Words and hyphenated word pairs of every body line, lower-cased and
+/// counted, in reading order (see [`Vocabulary`] for the halves left out).
 fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
     let mut vocab = Vocabulary {
-        words: HashSet::new(),
-        compounds: HashSet::new(),
+        words: HashMap::new(),
+        compounds: HashMap::new(),
     };
     let alphabetic = |piece: &str| !piece.is_empty() && piece.chars().all(char::is_alphabetic);
     let mut buf = String::new();
@@ -1432,7 +1475,7 @@ fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
                         if !split_head && !split_tail {
                             buf.clear();
                             push_lowercase(&mut buf, word);
-                            insert_new(&mut vocab.words, &buf);
+                            count_one(&mut vocab.words, &buf);
                         }
                         first_word = false;
                     }
@@ -1444,7 +1487,7 @@ fn vocabulary(pages: &[PageText], work: &[PageWork]) -> Vocabulary {
                         push_lowercase(&mut buf, prev);
                         buf.push('-');
                         push_lowercase(&mut buf, part);
-                        insert_new(&mut vocab.compounds, &buf);
+                        count_one(&mut vocab.compounds, &buf);
                     }
                     prev_part = Some(part);
                     first_part = false;
@@ -1502,30 +1545,93 @@ fn printed_compound(left: &str, right: &str) -> bool {
         || (left_len <= 5 && right_len == 3 && vowelless(right))
 }
 
+/// Whether `left` is a capitalised compound prefix (`Multi`, `Cross`,
+/// `Dual`: a capital, then lowercase letters, and a
+/// `CAPITALISED_COMPOUND_PREFIXES` entry when lower cased) and `right` is
+/// all lowercase (`agent`): in a title or at a sentence start such a pair
+/// is far more often a compound than a broken word.
+fn capitalised_prefix(left: &str, right: &str) -> bool {
+    CAPITALISED_COMPOUND_PREFIXES.contains(&left.to_lowercase().as_str())
+        && left.chars().next().is_some_and(char::is_uppercase)
+        && left.chars().skip(1).all(char::is_lowercase)
+        && !right.is_empty()
+        && right.chars().all(char::is_lowercase)
+}
+
+/// Whether both halves are all-capital words (`EFFI-` + `CIENT`, `TIME-` +
+/// `DIAL`) with a right half long enough to be a typeset break and at least
+/// `CAPS_JOIN_MIN_LETTERS` letters together.
+fn all_caps_break(left: &str, right: &str) -> bool {
+    let caps = |half: &str| !half.is_empty() && half.chars().all(char::is_uppercase);
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    caps(left)
+        && caps(right)
+        && left_len >= 2
+        && right_len > MAX_UNBREAKABLE_RIGHT
+        && left_len + right_len >= CAPS_JOIN_MIN_LETTERS
+}
+
 /// Decide a line-end hyphen between `left`, the word before the hyphen, and
 /// `right`, the word that starts the next line, both as printed.
 /// `attested(piece)` tells whether the lower-cased word (`optimization`) or
 /// hyphenated pair (`noise-regularized`) occurs elsewhere in the document
-/// as a whole word. The first matching rule wins:
-/// 1. the joined word is attested → join (`with-` + `out`, `without` seen);
-/// 2. the hyphenated pair is attested → keep (`noise-regularized` seen);
-/// 3. the left half is a `COMPOUND_PREFIXES` entry (`self-`) → keep;
-/// 4. the left half is a `JOIN_PREFIXES` entry and the right half is all
+/// as a whole word. The rules are those of [`hyphen_policy_counted`], with
+/// every attested piece counted once.
+pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -> HyphenPolicy {
+    hyphen_policy_counted(left, right, &|piece: &str| usize::from(attested(piece)))
+}
+
+/// Decide a line-end hyphen between `left` and `right` (see
+/// [`hyphen_policy`]) with `count(piece)`, the number of times the
+/// lower-cased word or hyphenated pair occurs elsewhere in the document.
+/// The first matching rule wins:
+/// 1. the hyphenated pair is attested at least as often as the joined word
+///    → keep (`noise-regularized` seen);
+/// 2. a capitalised `CAPITALISED_COMPOUND_PREFIXES` entry before a
+///    lowercase right half that is an attested word of at least
+///    `MIN_ATTESTED_HALF` letters, not an `AMBIGUOUS_HALVES` entry → keep
+///    (`Multi-` + `agent`), unless the joined word is attested and occurs
+///    at least `JOINED_DOMINANCE` times as often as the pair; any other
+///    capitalised left half (`Every-` + `body`) goes on to the later rules;
+/// 3. the joined word is attested → join (`with-` + `out`, `without` seen);
+/// 4. the left half is a `COMPOUND_PREFIXES` entry (`self-`) → keep;
+/// 5. the left half is a `JOIN_PREFIXES` entry and the right half is all
 ///    lowercase and an attested word or at least `PREFIX_JOIN_MIN_RIGHT`
 ///    letters → join (`pre-` + `serving`);
-/// 5. the printed halves mark a compound (see `printed_compound`) → keep;
-/// 6. both halves are attested words of at least `MIN_ATTESTED_HALF`
+/// 6. both halves are all capitals (see `all_caps_break`) and not both
+///    attested words of at least `MIN_ATTESTED_HALF` letters → join
+///    (`EFFI-` + `CIENT`, `TIME-` + `DIAL`; `LARGE-` + `SCALE` falls through
+///    when `large` and `scale` occur);
+/// 7. the printed halves mark a compound (see `printed_compound`) → keep;
+/// 8. both halves are attested words of at least `MIN_ATTESTED_HALF`
 ///    letters, neither an `AMBIGUOUS_HALVES` entry → keep (`cost-` +
 ///    `effective`, `web-` + `based`, `Dual-` + `domain`);
-/// 7. otherwise join (`algo-` + `rithm`).
-pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -> HyphenPolicy {
+/// 9. otherwise join (`algo-` + `rithm`).
+pub fn hyphen_policy_counted(
+    left: &str,
+    right: &str,
+    count: &dyn Fn(&str) -> usize,
+) -> HyphenPolicy {
     let lower_left = left.to_lowercase();
     let lower_right = right.to_lowercase();
-    if attested(&format!("{lower_left}{lower_right}")) {
-        return HyphenPolicy::Join;
-    }
-    if attested(&format!("{lower_left}-{lower_right}")) {
+    let joined_count = count(&format!("{lower_left}{lower_right}"));
+    let pair_count = count(&format!("{lower_left}-{lower_right}"));
+    if pair_count > 0 && pair_count >= joined_count {
         return HyphenPolicy::Keep;
+    }
+    let word = |half: &str| {
+        half.chars().count() >= MIN_ATTESTED_HALF
+            && !AMBIGUOUS_HALVES.contains(&half)
+            && count(half) > 0
+    };
+    let joined_dominates =
+        joined_count > 0 && joined_count >= JOINED_DOMINANCE.saturating_mul(pair_count);
+    if capitalised_prefix(left, right) && word(&lower_right) && !joined_dominates {
+        return HyphenPolicy::Keep;
+    }
+    if joined_count > 0 {
+        return HyphenPolicy::Join;
     }
     if COMPOUND_PREFIXES.contains(&lower_left.as_str()) {
         return HyphenPolicy::Keep;
@@ -1533,19 +1639,18 @@ pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -
     let lowercase_word = !right.is_empty() && right.chars().all(char::is_lowercase);
     if JOIN_PREFIXES.contains(&lower_left.as_str())
         && lowercase_word
-        && (attested(&lower_right) || right.chars().count() >= PREFIX_JOIN_MIN_RIGHT)
+        && (count(&lower_right) > 0 || right.chars().count() >= PREFIX_JOIN_MIN_RIGHT)
     {
+        return HyphenPolicy::Join;
+    }
+    let both_words = word(&lower_left) && word(&lower_right);
+    if all_caps_break(left, right) && !both_words {
         return HyphenPolicy::Join;
     }
     if printed_compound(left, right) {
         return HyphenPolicy::Keep;
     }
-    let word = |half: &str| half.chars().count() >= MIN_ATTESTED_HALF && attested(half);
-    if word(&lower_left)
-        && word(&lower_right)
-        && !AMBIGUOUS_HALVES.contains(&lower_left.as_str())
-        && !AMBIGUOUS_HALVES.contains(&lower_right.as_str())
-    {
+    if both_words {
         HyphenPolicy::Keep
     } else {
         HyphenPolicy::Join
@@ -1553,8 +1658,9 @@ pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -
 }
 
 /// Rule 2 for one pair of consecutive lines: a lowercase continuation after
-/// an alphabetic word and a line-end hyphen is decided by [`hyphen_policy`]
-/// against the document vocabulary.
+/// an alphabetic word and a line-end hyphen, or an all-capital continuation
+/// after an all-capital word (`EFFI-` + `CIENT`), is decided by
+/// [`hyphen_policy_counted`] against the document vocabulary.
 fn hyphen_decision(first: &str, second: &str, vocab: &Vocabulary) -> Decision {
     let Some(stem) = strip_final_hyphen(first) else {
         return Decision::NotApplicable;
@@ -1568,15 +1674,19 @@ fn hyphen_decision(first: &str, second: &str, vocab: &Vocabulary) -> Decision {
     let Some(head) = rest.split_whitespace().next() else {
         return Decision::NotApplicable;
     };
-    if !head.chars().next().is_some_and(char::is_lowercase) {
+    let first_char = head.chars().next();
+    let caps_pair = word.chars().count() >= 2
+        && word.chars().all(char::is_uppercase)
+        && first_char.is_some_and(char::is_uppercase);
+    if !first_char.is_some_and(char::is_lowercase) && !caps_pair {
         return Decision::NotApplicable;
     }
     let right: String = head.chars().take_while(|c| c.is_alphanumeric()).collect();
-    if right.is_empty() {
+    if right.is_empty() || (caps_pair && !right.chars().all(char::is_uppercase)) {
         return Decision::NotApplicable;
     }
-    let attested = |piece: &str| vocab.words.contains(piece) || vocab.compounds.contains(piece);
-    match hyphen_policy(word, &right, &attested) {
+    let count = |piece: &str| vocab.count(piece);
+    match hyphen_policy_counted(word, &right, &count) {
         HyphenPolicy::Join => {
             let tail = rest
                 .get(head.len()..)
@@ -2988,30 +3098,183 @@ mod tests {
         hyphen_policy(left, right, &|piece: &str| vocab.contains(piece))
     }
 
-    /// Rule 1: an attested joined word wins over every keep rule.
+    /// An attested joined word wins over every later keep rule.
     #[test]
     fn hyphen_policy_joins_an_attested_word_first() {
         use HyphenPolicy::Join;
         assert_eq!(policy("with", "out", &["with", "out", "without"]), Join);
         assert_eq!(policy("work", "flow", &["work", "flow", "workflow"]), Join);
+        assert_eq!(policy("opti", "mization", &["optimization"]), Join);
+        assert_eq!(policy("self", "supervised", &["selfsupervised"]), Join);
+    }
+
+    /// An attested hyphenated pair keeps the hyphen, also when the joined
+    /// word is attested as often (this case joined before the pair rule
+    /// moved ahead of the joined-word rule).
+    #[test]
+    fn hyphen_policy_keeps_an_attested_compound() {
+        use HyphenPolicy::Keep;
+        assert_eq!(policy("noise", "regularized", &["noise-regularized"]), Keep);
+        assert_eq!(policy("pre", "serving", &["pre-serving"]), Keep);
         assert_eq!(
             policy(
                 "noise",
                 "regularized",
                 &["noiseregularized", "noise-regularized"]
             ),
-            Join
+            Keep
         );
-        assert_eq!(policy("opti", "mization", &["optimization"]), Join);
-        assert_eq!(policy("self", "supervised", &["selfsupervised"]), Join);
     }
 
-    /// Rule 2: an attested hyphenated pair keeps the hyphen.
+    /// [`hyphen_policy_counted`] against fixed occurrence counts.
+    fn counted(left: &str, right: &str, seen: &[(&str, usize)]) -> HyphenPolicy {
+        let counts: BTreeMap<String, usize> = seen
+            .iter()
+            .map(|(piece, n)| (String::from(*piece), *n))
+            .collect();
+        hyphen_policy_counted(left, right, &|piece: &str| {
+            counts.get(piece).copied().unwrap_or(0)
+        })
+    }
+
+    /// The pair rule runs first whenever the pair occurs at least as often
+    /// as the joined word; a more frequent joined word still joins.
     #[test]
-    fn hyphen_policy_keeps_an_attested_compound() {
-        use HyphenPolicy::Keep;
-        assert_eq!(policy("noise", "regularized", &["noise-regularized"]), Keep);
-        assert_eq!(policy("pre", "serving", &["pre-serving"]), Keep);
+    fn hyphen_policy_counts_pair_against_joined_word() {
+        use HyphenPolicy::{Join, Keep};
+        let tie = [("multi-agent", 1), ("multiagent", 1)];
+        assert_eq!(counted("multi", "agent", &tie), Keep);
+        let pair_more = [("multi-agent", 3), ("multiagent", 2)];
+        assert_eq!(counted("multi", "agent", &pair_more), Keep);
+        let joined_more = [("multi-agent", 1), ("multiagent", 2)];
+        assert_eq!(counted("multi", "agent", &joined_more), Join);
+        assert_eq!(counted("opti", "mization", &[("optimization", 1)]), Join);
+    }
+
+    /// A capitalised compound prefix before an attested lowercase word
+    /// keeps its hyphen unless the joined word occurs at least twice as
+    /// often as the pair; broken words whose right half is no word, and
+    /// capitalised words that are no compound prefix, still join.
+    #[test]
+    fn hyphen_policy_keeps_capitalised_prefix_compounds() {
+        use HyphenPolicy::{Join, Keep};
+        // `multi` is a bound prefix: without the capital rule this joins.
+        assert_eq!(counted("Multi", "agent", &[("agent", 3)]), Keep);
+        assert_eq!(counted("multi", "agent", &[("agent", 3)]), Join);
+        assert_eq!(counted("Cross", "domain", &[("domain", 1)]), Keep);
+        assert_eq!(counted("Dual", "channel", &[("channel", 1)]), Keep);
+        // `Super` is no compound prefix: the bound-prefix rule joins it.
+        assert_eq!(counted("Super", "resolution", &[("resolution", 2)]), Join);
+        // An ordinary capitalised word split at the line end joins, also
+        // when its right half occurs elsewhere.
+        assert_eq!(counted("Every", "body", &[("body", 2)]), Join);
+        assert_eq!(counted("Over", "all", &[("all", 3)]), Join);
+        // The joined word below twice the pair's count keeps the hyphen.
+        let close = [("agent", 1), ("multi-agent", 2), ("multiagent", 3)];
+        assert_eq!(counted("Multi", "agent", &close), Keep);
+        // Twice as often, or seen with no pair at all, joins.
+        let twice = [("agent", 1), ("multi-agent", 1), ("multiagent", 2)];
+        assert_eq!(counted("Multi", "agent", &twice), Join);
+        let only_joined = [("agent", 1), ("multiagent", 1)];
+        assert_eq!(counted("Multi", "agent", &only_joined), Join);
+        assert_eq!(
+            counted("Self", "supervised", &[("selfsupervised", 1)]),
+            Join
+        );
+        // The right half must be an attested, unambiguous word.
+        assert_eq!(counted("Multi", "agent", &[]), Join);
+        assert_eq!(counted("Addi", "tionally", &[]), Join);
+        assert_eq!(counted("How", "ever", &[("ever", 1), ("however", 1)]), Join);
+        assert_eq!(counted("Pro", "ing", &[("ing", 1)]), Join);
+        // Other or all-capital left halves are not covered.
+        assert_eq!(counted("Presence", "only", &[("only", 4)]), Join);
+        assert_eq!(counted("MULTI", "agent", &[("agent", 1)]), Join);
+    }
+
+    /// All-capital halves join when the joined word is attested or has at
+    /// least six letters, unless both halves are attested words.
+    #[test]
+    fn hyphen_policy_joins_all_capital_breaks() {
+        use HyphenPolicy::{Join, Keep};
+        assert_eq!(counted("EFFI", "CIENT", &[]), Join);
+        assert_eq!(counted("TIME", "DIAL", &[("time", 4)]), Join);
+        assert_eq!(counted("ABC", "DEF", &[("abcdef", 1)]), Join);
+        // Short, attested as a pair, both halves words, or prefix: keep.
+        assert_eq!(counted("ABC", "DE", &[]), Keep);
+        assert_eq!(counted("RGB", "D", &[]), Keep);
+        assert_eq!(counted("EFFI", "CIENT", &[("effi-cient", 1)]), Keep);
+        let words = [("large", 1), ("scale", 2)];
+        assert_eq!(counted("LARGE", "SCALE", &words), Keep);
+        assert_eq!(counted("SELF", "SUPERVISED", &[]), Keep);
+        // An all-capital left half before a lowercase or mixed word stays.
+        assert_eq!(counted("MRI", "guided", &[]), Keep);
+        assert_eq!(counted("MRI", "Guided", &[]), Keep);
+    }
+
+    /// The vocabulary counts words and hyphenated pairs, leaving out the
+    /// halves of a line-end hyphen.
+    #[test]
+    fn vocabulary_counts_occurrences() {
+        let pages = vec![page_of(
+            1,
+            &[
+                (
+                    "a multi-task model and a multi-task loss for data",
+                    60.0,
+                    600.0,
+                    0,
+                ),
+                ("with multitask data and a pre-", 60.0, 588.0, 0),
+                ("training step.", 60.0, 576.0, 0),
+            ],
+        )];
+        let work: Vec<PageWork> = pages.iter().map(prepare).collect();
+        let vocab = vocabulary(&pages, &work);
+        assert_eq!(vocab.count("multi-task"), 2);
+        assert_eq!(vocab.count("multitask"), 1);
+        assert_eq!(vocab.count("data"), 2);
+        assert_eq!(vocab.count("task"), 2);
+        assert_eq!(vocab.count("pre"), 0);
+        assert_eq!(vocab.count("training"), 0);
+        assert_eq!(vocab.count("step"), 1);
+    }
+
+    /// Capitalised compounds, pairs attested as often as the joined word,
+    /// all-capital breaks and a capitalised word that is no compound prefix
+    /// (`Every-` + `body`, `body` seen) through the whole pass.
+    #[test]
+    fn capitalised_and_all_capital_hyphens_in_the_document_pass() {
+        let mut pages = vec![page_of(
+            1,
+            &[
+                ("the Multi-", 60.0, 600.0, 0),
+                ("agent planner and one agent per task.", 60.0, 588.0, 0),
+                ("OUR EFFI-", 60.0, 576.0, 0),
+                ("CIENT MODELS", 60.0, 564.0, 0),
+                ("a multi-", 60.0, 552.0, 0),
+                (
+                    "task model, a multi-task loss and multitask data.",
+                    60.0,
+                    540.0,
+                    0,
+                ),
+                ("see the Proto-", 60.0, 528.0, 0),
+                ("Indo text.", 60.0, 516.0, 0),
+                ("so Every-", 60.0, 504.0, 0),
+                ("body agrees on one body plan.", 60.0, 492.0, 0),
+            ],
+        )];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.hyphens_joined, 2);
+        assert_eq!(report.hyphens_kept, 2);
+        assert_eq!(
+            pages[0].text,
+            "the Multi-\nagent planner and one agent per task.\n\
+             OUR EFFICIENT\nMODELS\n\
+             a multi-\ntask model, a multi-task loss and multitask data.\n\
+             see the Proto-\nIndo text.\n\
+             so Everybody\nagrees on one body plan."
+        );
     }
 
     /// Rules 3 and 4: compound prefixes keep, bound prefixes join.
@@ -4350,6 +4613,80 @@ mod tests {
         }
     }
 
+    /// RSC-style geometry: a 7 pt citation number raised 3.5 pt over 10 pt
+    /// text, 6 pt to the right of the line end (beyond the 5 pt reach that
+    /// applies inside the line).
+    #[test]
+    fn raised_number_after_the_line_end_attaches_within_one_size() {
+        // Base baseline 400; fragment baseline 403.5, box bottom 402.1.
+        let spans = vec![
+            span_at("the literature.", 50.0, 398.0, 10.0, 0),
+            span_at("38", 131.0, 402.1, 7.0, 1),
+        ];
+        let page = page_with(spans, &[&[1], &[0]]);
+        assert_matches_naive(&page);
+        let mut pages = vec![page];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(report.scripts_merged, 0);
+        assert_eq!(pages[0].text, "the literature.\u{00B3}\u{2078}");
+        assert_eq!(pages[0].lines.len(), 1);
+        assert_eq!(pages[0].lines[0].spans, [0, 1]);
+    }
+
+    /// The printed geometry of `arXiv:2510.26824`: 7 pt numbers on 9 pt text
+    /// (ratio 0.78), 1 pt after the word and before its comma.
+    #[test]
+    fn seven_point_number_on_nine_point_text_attaches() {
+        // Base baseline 399.8; fragment box bottom 1.9 pt above it.
+        let spans = vec![
+            span_at("energy conversion", 50.0, 398.0, 9.0, 0),
+            span_at(",", 131.5, 398.0, 9.0, 1),
+            span_at("1", 127.5, 401.7, 7.0, 2),
+        ];
+        let page = page_with(spans, &[&[2], &[0, 1]]);
+        assert_matches_naive(&page);
+        let mut pages = vec![page];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.superscripts_merged, 1);
+        assert_eq!(pages[0].text, "energy conversion\u{00B9},");
+        assert_eq!(pages[0].lines[0].spans, [0, 2, 1]);
+    }
+
+    /// The wider reach holds only beyond the right edge, and a fragment
+    /// above `SUPERSCRIPT_RATIO` of the base size is no superscript.
+    #[test]
+    fn wider_reach_and_ratio_have_limits() {
+        // 6 pt before the line start: outside the 5 pt reach.
+        let before = vec![
+            span_at("38", 47.0, 402.1, 7.0, 0),
+            span_at("Prein and co", 60.0, 398.0, 10.0, 1),
+        ];
+        // 11 pt after the line end: outside the 10 pt reach.
+        let far = vec![
+            span_at("the literature.", 50.0, 398.0, 10.0, 0),
+            span_at("38", 136.0, 402.1, 7.0, 1),
+        ];
+        // 7.5 pt on 9 pt (0.83), touching the word.
+        let large = vec![
+            span_at("energy conversion", 50.0, 398.0, 9.0, 0),
+            span_at("1", 127.5, 401.7, 7.5, 1),
+        ];
+        for (spans, script) in [(before, 0), (far, 1), (large, 1)] {
+            let lines: [&[u32]; 2] = [&[0], &[1]];
+            let page = page_with(spans, &lines);
+            assert_matches_naive(&page);
+            let w = prepare(&page);
+            let geom = PageGeom::new(&page);
+            let mut window: Vec<usize> = Vec::new();
+            assert_eq!(
+                superscript_target(&page, &w, &geom, script, &mut window),
+                None,
+                "{script}"
+            );
+        }
+    }
+
     #[test]
     fn lowered_digit_becomes_a_subscript_of_its_own_line() {
         // The `3` also lies in the raised window of the line below; the
@@ -4387,11 +4724,16 @@ mod tests {
             else {
                 continue;
             };
-            if size > (SCRIPT_RATIO + RATIO_SLACK) * other_size {
+            if size > (SUPERSCRIPT_RATIO + RATIO_SLACK) * other_size {
                 continue;
             }
             let gap = (ob.x0 - bbox.x1).max(bbox.x0 - ob.x1).max(0.0);
-            if gap > SUPERSCRIPT_REACH * other_size {
+            let horizontal_reach = if bbox.x0 >= ob.x1 {
+                SUPERSCRIPT_REACH_AFTER
+            } else {
+                SUPERSCRIPT_REACH
+            };
+            if gap > horizontal_reach * other_size {
                 continue;
             }
             let offset = (bbox.y0 - baseline) / other_size;

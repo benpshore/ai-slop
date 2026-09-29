@@ -2414,12 +2414,14 @@ fn raw_label_re() -> &'static Regex {
 
 /// The tail of a title-less journal reference: `, <year>, <volume>,
 /// <pages>.` (`, 2013, 42, 3127–3171.`, `, 2015, 518, 179–186.`), with an
-/// optional `(issue)` after the volume.
+/// optional `(issue)` after the volume. The pages field may also be an
+/// article number (`, 2019, 10, 3921.`) or an `e`-number (`e202200030`,
+/// `eadg8180`).
 fn titleless_tail_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r",\s*(?:19|20)\d{2}[a-z]?,\s*\d{1,5}(?:\s*\(\d{1,4}\))?,\s*\p{Lu}?\d{1,6}(?:\s*[–—-]\s*\p{Lu}?\d{1,6})?\.?$",
+            r",\s*(?:19|20)\d{2}[a-z]?,\s*\d{1,5}(?:\s*\(\d{1,4}\))?,\s*(?:e[a-z]{0,4}\d{1,9}|\p{Lu}?\d{1,6}(?:\s*[–—-]\s*\p{Lu}?\d{1,6})?)\.?$",
         )
         .expect("valid regex")
     })
@@ -2439,13 +2441,14 @@ fn initials_first_name_re() -> &'static Regex {
 
 /// Whether one comma-delimited part of a reference is a list of
 /// initials-first names (`Q. Zhang`, `E. Uchaker and G. Cao`, `and G. Cao`,
-/// `et al.`).
+/// `et al.`, `N. A. Krishnan et al.`).
 fn is_initials_first_names(part: &str) -> bool {
     let part = part.trim();
     let part = part.strip_prefix("and ").unwrap_or(part);
     let mut any = false;
     for name in part.split(" and ").map(str::trim) {
-        let is_name = name == "et al." || initials_first_name_re().is_match(name);
+        let person = name.strip_suffix(" et al.").map_or(name, str::trim_end);
+        let is_name = name == "et al." || initials_first_name_re().is_match(person);
         if name.is_empty() || !is_name {
             return false;
         }
@@ -2491,12 +2494,109 @@ fn titleless_raw(raw: &str) -> bool {
             .any(|w| w.chars().count() >= 4 && w.starts_with(char::is_lowercase))
 }
 
-/// Whether two optional titles are both present and equal after normalisation.
-fn title_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
-    match (title_key(truth), title_key(extracted)) {
-        (Some(t), Some(e)) => t == e,
-        _ => false,
+/// Characters that mark TeX sub/superscripts or math in a truth title.
+const TEX_MARKUP: [char; 3] = ['_', '^', '$'];
+
+/// Characters dropped from both sides when the truth title has TeX markup.
+const TEX_DROPPED: [char; 6] = ['_', '^', '$', '{', '}', '\\'];
+
+/// Title comparison form of `s`: NFKC (mathematical alphanumerics such as
+/// `𝑥` become `x`, `³`/`₂` become digits), `−` folded to `-`, then
+/// [`normalize_title`]. With `tex`, the characters in [`TEX_DROPPED`] are
+/// removed before normalising, so `W_2` becomes `w2`.
+fn title_compare_form(s: &str, tex: bool) -> String {
+    let compat: String = s
+        .nfkc()
+        .map(|c| if c == '\u{2212}' { '-' } else { c })
+        .filter(|c| !(tex && TEX_DROPPED.contains(c)))
+        .collect();
+    normalize_title(&compat)
+}
+
+/// Characters of the truth title in [`title_compare_form`], each with
+/// whether spaces may be added or dropped there. With `tex`, a whitespace
+/// token is marked when it contains a character of [`TEX_MARKUP`], starts
+/// inside `$…$` or an open brace group, or follows a token ending in `_` or
+/// `^`; the characters of its words, the spaces between them and the spaces
+/// next to them are marked. Without `tex` nothing is marked.
+fn truth_title_chars(s: &str, tex: bool) -> Vec<(char, bool)> {
+    let mut words: Vec<(String, bool)> = Vec::new();
+    let mut in_math = false;
+    let mut depth: u32 = 0;
+    let mut after_script = false;
+    for token in s.split_whitespace() {
+        let marked = tex && (in_math || depth > 0 || after_script || token.contains(TEX_MARKUP));
+        for c in token.chars() {
+            match c {
+                '$' => in_math = !in_math,
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        after_script = token.ends_with(['_', '^']);
+        let form = title_compare_form(token, tex);
+        for word in form.split(' ').filter(|w| !w.is_empty()) {
+            words.push((word.to_string(), marked));
+        }
     }
+    let mut out: Vec<(char, bool)> = Vec::new();
+    let mut prev_marked = false;
+    for (k, (word, marked)) in words.iter().enumerate() {
+        if k > 0 {
+            out.push((' ', *marked || prev_marked));
+        }
+        out.extend(word.chars().map(|c| (c, *marked)));
+        prev_marked = *marked;
+    }
+    out
+}
+
+/// Whether the truth character at `i` or the one before it is marked by
+/// [`truth_title_chars`].
+fn near_marked(truth: &[(char, bool)], i: usize) -> bool {
+    let at = truth.get(i).is_some_and(|&(_, marked)| marked);
+    let before = i
+        .checked_sub(1)
+        .and_then(|p| truth.get(p))
+        .is_some_and(|&(_, marked)| marked);
+    at || before
+}
+
+/// Whether `extracted` equals the marked `truth` characters, where a marked
+/// truth space may be missing from `extracted` and `extracted` may have an
+/// extra space next to a marked truth character. Everywhere else the two
+/// must agree exactly, word boundaries included.
+fn marked_chars_equal(truth: &[(char, bool)], extracted: &[char]) -> bool {
+    let (mut i, mut j) = (0_usize, 0_usize);
+    loop {
+        match (truth.get(i).copied(), extracted.get(j).copied()) {
+            (None, None) => return true,
+            (Some((t, _)), Some(e)) if t == e => {
+                i += 1;
+                j += 1;
+            }
+            (Some((' ', true)), _) => i += 1,
+            (_, Some(' ')) if near_marked(truth, i) => j += 1,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether two optional titles are both present and equal after
+/// [`title_compare_form`]. When the truth title contains `_`, `^` or `$`,
+/// TeX mode drops the markup and lets spacing differ only inside and next to
+/// the marked sub/superscript or math tokens (see [`truth_title_chars`]), so
+/// `W_2` equals `W2` and `La_1-xCa_x` equals `La 1−𝑥Ca𝑥`, while a dropped or
+/// added hyphen elsewhere in the title still counts as a miss.
+fn title_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
+    let (Some(truth), Some(extracted)) = (truth, extracted) else {
+        return false;
+    };
+    let tex = truth.contains(TEX_MARKUP);
+    let t = truth_title_chars(truth, tex);
+    let e: Vec<char> = title_compare_form(extracted, tex).chars().collect();
+    !t.is_empty() && marked_chars_equal(&t, &e)
 }
 
 /// Whether the extracted paper title matches the truth title: equal after
@@ -2602,29 +2702,29 @@ fn doi_is_printed(doi: &str, squashed: &str) -> bool {
 /// `(correct targets, distinct cited keys hit, distinct cited keys)`. A target
 /// is correct when its extracted entry is matched to a truth key that occurs
 /// in `cited_keys`; a key is hit when at least one correct target points at
-/// its matched entry.
+/// its matched entry. Keys compare ASCII-case-insensitively, as `BibTeX`
+/// keys do (`\cite{lee2021hardware}` cites `@article{Lee2021Hardware}`).
 fn marker_correctness(
     markers: &[CitationMarker],
     matches: &[RefMatch],
     cited_keys: &[String],
 ) -> (u32, u32, u32) {
-    let cited: BTreeSet<&str> = cited_keys.iter().map(String::as_str).collect();
-    let mut key_of: HashMap<u32, &str> = HashMap::new();
+    let cited: BTreeSet<String> = cited_keys
+        .iter()
+        .map(|key| key.to_ascii_lowercase())
+        .collect();
+    let mut key_of: HashMap<u32, String> = HashMap::new();
     for m in matches {
         if let Some(idx) = m.extracted_index {
-            key_of.insert(idx, m.truth_key.as_str());
+            key_of.insert(idx, m.truth_key.to_ascii_lowercase());
         }
     }
     let mut correct = 0_u32;
     let mut hit: BTreeSet<&str> = BTreeSet::new();
     for target in markers.iter().flat_map(|marker| marker.targets.iter()) {
-        if let Some(key) = key_of
-            .get(target)
-            .copied()
-            .filter(|key| cited.contains(key))
-        {
+        if let Some(key) = key_of.get(target).filter(|key| cited.contains(*key)) {
             correct += 1;
-            hit.insert(key);
+            hit.insert(key.as_str());
         }
     }
     (correct, hit.len() as u32, cited.len() as u32)
@@ -4650,6 +4750,106 @@ mod tests {
         assert!(!titleless_raw("Smith, J., Nature, 2015, 518, 179–186."));
         assert!(!titleless_raw("Q. Zhang, 2013, 42, 3127–3171."));
         assert!(!titleless_raw(""));
+    }
+
+    #[test]
+    fn titleless_raw_accepts_e_numbers_article_numbers_and_et_al() {
+        assert!(titleless_raw(
+            "53 W. U. Khan, H. S. Alasiri, S. A. Ali and M. M. Hossain, Chem. Rec., 2022, 22, e202200030."
+        ));
+        assert!(titleless_raw(
+            "87 T. Suchak, A. E. Aliu and M. Spick, PLoS Biol., 2025, 23, e3003152."
+        ));
+        assert!(titleless_raw("A. Author, Sci. Adv., 2023, 9, eadg8180."));
+        assert!(titleless_raw(
+            "A. Author, Nat. Commun., 2020, 11, e0123456."
+        ));
+        assert!(titleless_raw("A. Author, Nat. Commun., 2019, 10, 3921."));
+        assert!(titleless_raw("A. Author, Sci. Rep., 2021, 12, 1–9."));
+        assert!(titleless_raw(
+            "32 K. Hira, M. Zaki, D. Sheth, N. A. Krishnan et al., Digit. Discov., 2024, 3, 1021–1037."
+        ));
+        // A lower-case word after the year is not a page field.
+        assert!(!titleless_raw("A. Author, Nature, 2015, 518, epub."));
+        // `et al.` does not make a sentence an author part.
+        assert!(!titleless_raw(
+            "A study of things et al., Nature, 2015, 518, 179–186."
+        ));
+    }
+
+    #[test]
+    fn title_equal_folds_nfkc_and_tex_sub_superscripts() {
+        let eq = |t: &str, e: &str| title_equal(Some(&t.to_string()), Some(&e.to_string()));
+        assert!(eq(
+            "A high-dimensional CLT in W_2 distance",
+            "A high-dimensional CLT in W2 distance"
+        ));
+        assert!(eq("Fermi level in GdCo_2", "Fermi level in GdCo2"));
+        assert!(eq(
+            "Magnetism of La_1-xCa_xMnO_3",
+            "Magnetism of La 1\u{2212}\u{1d465}Ca\u{1d465}MnO3"
+        ));
+        assert!(eq("F^3Net: fusion", "F\u{b3} net: fusion"));
+        assert!(eq("NMR of ^75As", "NMR of \u{2077}\u{2075}As"));
+        assert!(eq("Mass of $^{75}$As", "Mass of 75As"));
+        // NFKC without markup: math letters and subscript digits.
+        assert!(eq("GdCo2 phases", "GdCo\u{2082} phases"));
+        assert!(eq("A \u{1d400}\u{1d401} test", "A AB test"));
+        assert!(eq("x \u{2212} y", "x - y"));
+        // Without markup in the truth, spacing and hyphen errors still count.
+        assert!(!eq("Multi-agent systems", "Multiagent systems"));
+        assert!(!eq("W2 distance", "W 2 distance"));
+        assert!(!eq("W_2 distance", "W_3 distance"));
+        // TeX mode folds spaces only around the marked tokens.
+        assert!(!eq("W_2 multi-agent systems", "W2 multiagent systems"));
+        assert!(eq("W_2 multi-agent systems", "W2 multi-agent systems"));
+        assert!(eq("W_2 systems", "W2 systems"));
+        assert!(eq("W_2 systems", "W 2systems"));
+        assert!(!eq("W_2 deep learning", "W2 deeplearning"));
+        assert!(eq(
+            "La_1-xCa_x MnO_3",
+            "La 1\u{2212}\u{1d465}Ca\u{1d465} MnO\u{2083}"
+        ));
+        assert!(eq("Sums $a + b$ of squares", "Sums a+b of squares"));
+        assert!(!eq("Sums $a + b$ of squares", "Sums a+b ofsquares"));
+        assert!(!title_equal(None, Some(&"x".to_string())));
+        assert!(!eq("---", "---"));
+    }
+
+    #[test]
+    fn marker_correctness_ignores_key_case() {
+        let matches = vec![
+            RefMatch {
+                truth_key: "Lee2021Hardware".to_string(),
+                extracted_index: Some(1),
+                method: "doi".to_string(),
+                score: 1.0,
+            },
+            RefMatch {
+                truth_key: "MAMUJOCO".to_string(),
+                extracted_index: Some(2),
+                method: "doi".to_string(),
+                score: 1.0,
+            },
+            RefMatch {
+                truth_key: "other".to_string(),
+                extracted_index: Some(3),
+                method: "doi".to_string(),
+                score: 1.0,
+            },
+        ];
+        let markers = vec![CitationMarker {
+            page: 1,
+            offset: 0,
+            text: "[1-3]".to_string(),
+            targets: vec![1, 1, 2, 3],
+        }];
+        let cited = vec![
+            "lee2021hardware".to_string(),
+            "MAMuJoCo".to_string(),
+            "Lee2021HARDWARE".to_string(),
+        ];
+        assert_eq!(marker_correctness(&markers, &matches, &cited), (3, 2, 2));
     }
 
     #[test]
