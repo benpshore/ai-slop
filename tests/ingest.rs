@@ -1,5 +1,7 @@
 //! Fidelity assertions use authored source values, not another extractor's
 //! normalized output. These fixtures test contracts, not corpus accuracy.
+//! Warning/stderr payloads are inspected where needed but not dumped into
+//! assertion diagnostics; credential-exclusion checks still examine both streams.
 
 mod common;
 
@@ -16,7 +18,7 @@ fn pdf_magic_overrides_extension_and_keeps_source_lines() {
     fs::write(&path, &bytes).unwrap();
     let record = run(&path, &Options::default());
     assert_eq!(record.format, Format::Pdf);
-    assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+    assert_eq!(record.outcome, Outcome::Extracted);
     assert_eq!(
         record.policy["formats_enabled"],
         cfg!(feature = "formats").to_string()
@@ -88,12 +90,7 @@ fn encrypted_pdf_credentials_reach_backend_without_entering_records_or_policy() 
     let correct = tpe::ingest::run_with_password(&path, &options, Some(PASSWORD));
     assert_eq!(missing.outcome, Outcome::Failed);
     assert_eq!(wrong.outcome, Outcome::Failed);
-    assert_eq!(
-        correct.outcome,
-        Outcome::Extracted,
-        "{:?}",
-        correct.warnings
-    );
+    assert_eq!(correct.outcome, Outcome::Extracted);
     assert!(
         correct.content.as_ref().unwrap()["pages"][0]["text"]
             .as_str()
@@ -119,7 +116,7 @@ fn encrypted_pdf_credentials_reach_backend_without_entering_records_or_policy() 
             .env("INGEST_TEST_PDF_PASSWORD", password)
             .output()
             .unwrap();
-        assert_eq!(output.status.success(), succeeds, "{:?}", output.stderr);
+        assert_eq!(output.status.success(), succeeds);
         assert!(!String::from_utf8_lossy(&output.stdout).contains(password));
         assert!(!String::from_utf8_lossy(&output.stderr).contains(password));
         let record: tpe::ingest::Record = serde_json::from_slice(&output.stdout).unwrap();
@@ -185,7 +182,7 @@ fn digital_page_number_does_not_hide_a_dominant_scanned_image() {
 fn small_captioned_image_is_not_a_dominant_scan() {
     let (_dir, path) = common::write_temp_pdf(&raster_with_text(100, b"A photograph", true));
     let record = run(&path, &Options::default());
-    assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+    assert_eq!(record.outcome, Outcome::Extracted);
     assert_eq!(
         record.content.unwrap()["ocr_candidates"],
         serde_json::json!([])
@@ -309,7 +306,7 @@ mod office {
         // Content-based Office routing also works for extensionless downloads.
         let record = process("download", &bytes, &Options::default());
         assert_eq!(record.format, Format::Docx);
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         let mut text = Vec::new();
         strings(&content, "text", &mut text);
@@ -347,12 +344,7 @@ mod office {
             ("word/settings.xml", settings),
         ];
         let record = process("notes.docx", &package(&parts), &Options::default());
-        assert_eq!(
-            record.outcome,
-            Outcome::ReviewRequired,
-            "{:?}",
-            record.warnings
-        );
+        assert_eq!(record.outcome, Outcome::ReviewRequired);
         let content = record.content.unwrap();
         let evidence = content["tpe_supplemental_parts"].as_array().unwrap();
         for (name, source_xml) in parts.iter().filter(|(name, _)| name.starts_with("word/")) {
@@ -407,7 +399,7 @@ mod office {
     #[test]
     fn sparse_excel_keeps_formula_metadata_cached_values_and_hidden_sheets() {
         let record = process("sparse.xlsx", &workbook(), &Options::default());
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         let sheets = content["sheets"].as_array().unwrap();
         assert_eq!(sheets.len(), 2);
@@ -468,12 +460,7 @@ mod office {
                 ),
             ];
             let record = process("chart.xlsx", &package(&parts), &Options::default());
-            assert_eq!(
-                record.outcome,
-                Outcome::ReviewRequired,
-                "{:?}",
-                record.warnings
-            );
+            assert_eq!(record.outcome, Outcome::ReviewRequired);
             let content = record.content.unwrap();
             assert_eq!(content["sheets"][0]["name"], "Chart evidence");
             assert_eq!(content["sheets"][0]["sheet_type"], "ChartSheet");
@@ -507,7 +494,7 @@ mod office {
             .map(|(name, xml)| (name.as_str(), xml.as_str()))
             .collect();
         let record = process("late-anchor.xlsx", &package(&refs), &Options::default());
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         let cells = content["sheets"][0]["cells"].as_array().unwrap();
         assert_eq!(cells[0]["row"], 2);
@@ -546,7 +533,7 @@ mod office {
     #[test]
     fn html_keeps_text_and_links_without_running_scripts() {
         let record = process("page.html", br#"<!doctype html><html><body><h1>Laboratory records</h1><p>D. Loutchko &amp; A. Author.</p><p><a href="https://example.org/source">Exact source</a></p><table><tr><th>Sample</th><th>Mass</th></tr><tr><td>A-1</td><td>12.50 mg</td></tr></table><script>SHOULD_NOT_EXECUTE</script></body></html>"#, &Options::default());
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         let mut text = Vec::new();
         strings(&content, "text", &mut text);
@@ -565,7 +552,7 @@ mod office {
             b"name,note\n\"Loutchko, D.\",\"first line\nsecond line\"\n",
             &Options::default(),
         );
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         assert_eq!(
             content["rows"],
@@ -582,7 +569,7 @@ mod office {
     fn csv_quoted_header_cannot_change_dialect_and_ragged_rows_stay_ragged() {
         let source = "\"Name; aliases; initials\",Count\r\n\"Loutchko; D.; DL\",1\r\n\nonly one cell\nlast,,\n";
         let record = process("header.csv", source.as_bytes(), &Options::default());
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         assert_eq!(
             content["rows"],
@@ -652,7 +639,7 @@ mod office {
                 .as_bytes(),
             &Options::default(),
         );
-        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        assert_eq!(record.outcome, Outcome::Extracted);
         let content = record.content.unwrap();
         let mut text = Vec::new();
         strings(&content, "text", &mut text);
@@ -681,8 +668,7 @@ mod office {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("duplicate")),
-            "{:?}",
-            record.warnings
+            "expected an explicit duplicate-member rejection"
         );
     }
 }
