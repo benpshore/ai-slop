@@ -12,6 +12,7 @@ use std::path::Path;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::SearchError;
+use crate::permissions::private_file;
 use crate::store::VectorStore;
 
 /// Approximate nearest-neighbour store (cosine metric, `f32` storage).
@@ -114,6 +115,9 @@ impl VectorStore for UsearchStore {
 
     fn save(&self, path: &Path) -> Result<(), SearchError> {
         let tmp = path.with_extension("tmp");
+        // Ensure usearch writes into an owner-only file rather than creating
+        // one according to the process's ambient umask.
+        drop(private_file(&tmp, true)?);
         self.index
             .save(path_str(&tmp)?)
             .map_err(|e| store_err(&e))?;

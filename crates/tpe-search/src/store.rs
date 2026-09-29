@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::SearchError;
 use crate::embed::l2_normalize;
+use crate::permissions::private_file;
 
 /// A keyed collection of vectors searchable by cosine similarity.
 pub trait VectorStore {
@@ -183,7 +184,9 @@ impl VectorStore for FlatStore {
     fn save(&self, path: &Path) -> Result<(), SearchError> {
         let bytes = self.to_bytes()?;
         let tmp = path.with_extension("tmp");
-        fs::write(&tmp, bytes)?;
+        let mut file = private_file(&tmp, true)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -192,6 +195,9 @@ impl VectorStore for FlatStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     const EPS: f32 = 1e-5;
 
@@ -265,6 +271,11 @@ mod tests {
         assert_eq!(
             loaded.search(&[1.0, 1.0, 0.0], 1).unwrap()[0].0,
             s.search(&[1.0, 1.0, 0.0], 1).unwrap()[0].0
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 
