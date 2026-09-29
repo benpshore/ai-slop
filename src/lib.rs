@@ -38,6 +38,7 @@ pub mod backend;
 pub mod citations;
 pub mod corpus;
 pub mod eval;
+pub mod ingest;
 pub mod latex_refs;
 pub mod ledger;
 pub mod metadata;

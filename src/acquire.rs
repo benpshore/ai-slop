@@ -3,6 +3,7 @@
 //! the read so a concurrent modification is reported instead of hashed.
 
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 use thiserror::Error;
@@ -115,7 +116,12 @@ pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, Acquire
 /// [`snapshot`] without the hash: read `path` completely with the same
 /// checks, and leave hashing to the caller.
 pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, AcquireError> {
-    let before_meta = fs::metadata(path)?;
+    // Reject special files before opening (opening a FIFO can itself block).
+    if !fs::metadata(path)?.is_file() {
+        return Err(AcquireError::NotAFile);
+    }
+    let file = fs::File::open(path)?;
+    let before_meta = file.metadata()?;
     if !before_meta.is_file() {
         return Err(AcquireError::NotAFile);
     }
@@ -132,12 +138,15 @@ pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, Ac
         });
     }
 
-    let bytes = fs::read(path)?;
+    // Bound the actual read too: a file can grow after the size check. Use
+    // the same descriptor for reading and both metadata observations so a
+    // replacement path cannot silently substitute a different file.
+    let bytes = read_bounded(&file, before.size)?;
 
-    let after_meta = fs::metadata(path)?;
+    let after_meta = file.metadata()?;
     let after = observe(&after_meta);
     let read_len = bytes.len() as u64;
-    if after != before || read_len != before.size {
+    if after != before || observe(&fs::metadata(path)?) != before || read_len != before.size {
         return Err(AcquireError::ChangedDuringRead);
     }
 
@@ -151,11 +160,25 @@ pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, Ac
     Ok(Unhashed { bytes, source })
 }
 
+fn read_bounded(reader: impl Read, observed_size: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(observed_size.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
+
+    #[test]
+    fn growing_input_is_read_only_to_observed_size_plus_one() {
+        let bytes = read_bounded(std::io::repeat(b'x'), 12).unwrap();
+        assert_eq!(bytes.len(), 13);
+    }
 
     #[test]
     fn snapshot_has_hash_size_and_path() {
