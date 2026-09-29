@@ -20,11 +20,11 @@ tokio = { version = "1", features = ["rt"], optional = true }
 docling-asr = { version = "1.69", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Same ranges as objc2-avf-audio 0.3.2 so Cargo resolves ONE objc2/block2
-# (the block type in `writeUtterance:toBufferCallback:` must be the same crate).
-objc2 = ">=0.6.2, <0.8.0"
-block2 = ">=0.6.1, <0.8.0"
-objc2-foundation = { version = "0.3.2", default-features = false, features = [
+# Exact pins match objc2-avf-audio 0.3.2 and keep the block type in
+# `writeUtterance:toBufferCallback:` from resolving from another crate release.
+objc2 = "=0.6.4"
+block2 = "=0.6.2"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSArray",
     "NSDate",
@@ -34,7 +34,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSString",
     "NSURL",
 ] }
-objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
+objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
     "std",
     "block2",
     "AVAudioBuffer",
