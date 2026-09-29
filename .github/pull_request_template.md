@@ -17,6 +17,10 @@ quietly becoming competing implementations.
 
 For a consolidation PR, list each source PR and the disposition of every
 user-visible change (kept, replaced, or intentionally dropped).
+
+`gh pr create --fill` takes the body from the commit message, not from this
+template. To use it, fill in a copy and pass `--body-file <copy>` (see
+docs/PR_CONSOLIDATION.md).
 -->
 
 - Standalone; no known overlap.
@@ -36,8 +40,8 @@ user-visible change (kept, replaced, or intentionally dropped).
 - [ ] `uv run pytest`
 - [ ] `uv audit --preview-features audit-command`
 - [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
 - [ ] `swift build && swift test`
 - [ ] `cmake -S . -B build && cmake --build build && ctest --test-dir build`
 

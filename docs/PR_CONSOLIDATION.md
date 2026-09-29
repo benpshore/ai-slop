@@ -45,6 +45,18 @@ it permits conflicts, duplicate changes, and commit boundaries to be cleaned
 up before committing. Preserve authorship with `Co-authored-by` trailers for
 material contributions that are rewritten rather than cherry-picked.
 
+## Opening the PR
+
+`gh pr create --fill`, the invocation `AGENTS.md` prescribes, takes the title
+and body from the commit message and never loads
+`.github/pull_request_template.md`. For a consolidation PR, copy the
+template, fill it in, and pass it explicitly:
+
+```sh
+cp .github/pull_request_template.md /tmp/pr-body.md   # then edit it
+gh pr create --title "<title>" --body-file /tmp/pr-body.md
+```
+
 ## Required PR inventory
 
 Put this table in the integration PR under **Relationship to other changes**:
