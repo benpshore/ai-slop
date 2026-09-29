@@ -59,6 +59,13 @@ jobs:
           persist-credentials: false
       - run: rustup component add clippy rustfmt
       - run: rustc --version --verbose && uname -m
+      - name: Install GPUI Linux development libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libfontconfig1-dev libvulkan-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev pkg-config
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -69,6 +76,9 @@ jobs:
           key: cargo-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ matrix.os }}-
       - run: cargo fmt --check
+      # The package's target-specific dependency compiles native Metal on macOS
+      # and both explicitly enabled display backends on every Linux runner.
+      - run: cargo check -p tpe-app --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 

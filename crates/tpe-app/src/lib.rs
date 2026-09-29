@@ -2,7 +2,7 @@
 //!
 //! The crate is split so that everything testable lives in this library and
 //! compiles on every platform, while the GPUI front end (`src/gui.rs` in the
-//! binary) is `#[cfg(target_os = "macos")]`:
+//! binary) is built on macOS and Linux (Wayland and X11):
 //!
 //! - [`ledger`]: read-only access to the engine ledger (`tpe extract --db`),
 //!   producing plain rows for the corpus list and the document view.

@@ -1,5 +1,5 @@
-//! GPUI front end (macOS only; the whole module is behind
-//! `#[cfg(target_os = "macos")]` in `main.rs`).
+//! GPUI front end for native macOS and Linux Wayland/X11; the whole module is
+//! behind the corresponding platform gate in `main.rs`.
 //!
 //! Three panes: corpus list (left), document view (centre: page text with
 //! reading-order line numbers and citation markers, plus references), and the
