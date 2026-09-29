@@ -1,8 +1,8 @@
-//! `tpe-app` binary: the GPUI workbench (macOS only).
+//! `tpe-app` binary: the GPUI workbench (native macOS, Linux Wayland and Linux X11).
 //!
 //! `tpe-app <ledger.sqlite>` (or `TPE_LEDGER=<file> tpe-app`) opens the ledger
 //! read-only and shows the corpus list, the document view and the Ask panel.
-//! On other operating systems the binary prints a notice and exits 0 so the
+//! On unsupported operating systems the binary prints a notice and exits 0 so the
 //! workspace builds and the library tests run everywhere.
 
 #![allow(
@@ -11,10 +11,10 @@
     clippy::missing_errors_doc
 )]
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod gui;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {
     use std::path::PathBuf;
 
@@ -29,7 +29,7 @@ fn main() {
     gui::run(path);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
-    println!("GUI is macOS-only for now");
+    println!("GUI is supported on macOS and Linux (Wayland or X11)");
 }

@@ -1,7 +1,7 @@
 //! Pure view models for the three screens. Nothing here depends on GPUI, so
 //! the labels, line numbering, marker placement, keyboard-pane cycling and
 //! the stale-answer guard of the Ask panel are unit tested on Linux CI even
-//! though the GUI only builds on macOS.
+//! while the GUI builds on native macOS and Linux Wayland/X11.
 
 use std::fmt::Write as _;
 

@@ -77,7 +77,7 @@ Workbench crates under `crates/` (each is a library with offline tests; see [Tra
 | `tpe-zotero` | Zotero Web API client, local database reader, plugin import body ([Zotero](docs/ZOTERO.md)) |
 | `tpe-search` | lexical (FTS5) and semantic search over ledger text |
 | `tpe-speech` | text-to-speech with a speech-recognition round trip |
-| `tpe-app` | GPUI workbench skeleton (macOS only), gated on extraction quality |
+| `tpe-app` | GPUI workbench skeleton (native macOS and Linux Wayland/X11), gated on extraction quality |
 | `tpe-browser` | research-browser model (DOI/PDF detection, host policy, cookies). CEF embedding is design-only ([Browser](docs/BROWSER.md)) |
 
 ## Performance and fidelity targets
@@ -193,6 +193,12 @@ Report completed documents/s, pages/s, bytes/s, latency percentiles, peak RSS, C
 Evaluate **GPUI** for a small standalone Rust application. Reuse Zed's responsiveness and panes as interaction references, building only corpus browsing, PDF/text viewing, source highlighting, disagreement inspection, search, and pause/resume. Keep language servers, terminals, collaboration, and editor-agent features out of scope.
 
 GPUI is Apache-2.0 and pre-1.0; Zed application code has different licensing. Pin the GUI dependency separately. Its current accessibility integration does not establish our app's usability: prove VoiceOver, large adjustable text, contrast, keyboard access, selectable text, and reduced motion in a small prototype before expanding it. Keep processing state in the engine, not in UI-only storage.
+
+The `tpe-app` binary uses GPUI's native macOS backend and enables both Wayland
+and X11 on Linux. Debian/Ubuntu builds need `pkg-config`, `libfontconfig1-dev`,
+`libvulkan-dev`, `libwayland-dev`, `libxkbcommon-dev`, and
+`libxkbcommon-x11-dev`. At runtime, a working Vulkan driver and the libraries
+for the active display protocol must be installed.
 
 ## Development and checks
 
