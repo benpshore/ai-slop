@@ -7,7 +7,9 @@ use std::fmt::Write as _;
 
 use tpe_common::{PaperRecord, normalize_doi};
 
-use crate::ledger::{CitationRow, CorpusRow, DocumentDetail, ReferenceRow};
+use crate::ledger::{
+    AttemptRow, CitationRow, CorpusRow, DocumentDetail, ObservationRow, ReferenceRow,
+};
 use crate::tpe_ai::Provider;
 
 /// System prompt sent with every question. It tells the model to stay inside
@@ -17,6 +19,165 @@ pub const SYSTEM_PROMPT: &str = "You are a research assistant inside the Text Pr
 workbench. Answer using only the extracted document text supplied in the user message. When the \
 text does not contain the answer, say so plainly instead of guessing. Quote page numbers when \
 you cite the text.";
+
+/// User-facing lifecycle states.  `CancellationRequested` is deliberately
+/// separate from `Cancelled`: requesting cancellation does not imply that a
+/// worker has stopped or released the source yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkState {
+    Queued,
+    Stabilizing,
+    Processing,
+    Partial,
+    Failed,
+    Complete,
+    CancellationRequested,
+    Cancelled,
+}
+
+impl WorkState {
+    pub fn from_status(status: Option<&str>) -> Self {
+        match status.unwrap_or("queued") {
+            "stabilizing" => Self::Stabilizing,
+            "processing" | "active" | "running" => Self::Processing,
+            "partial" => Self::Partial,
+            "failed" => Self::Failed,
+            "complete" => Self::Complete,
+            "cancellation_requested" | "cancel_requested" => Self::CancellationRequested,
+            "cancelled" | "canceled" => Self::Cancelled,
+            _ => Self::Queued,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Stabilizing => "Stabilizing",
+            Self::Processing => "Processing",
+            Self::Partial => "Partial",
+            Self::Failed => "Failed",
+            Self::Complete => "Complete",
+            Self::CancellationRequested => "Cancellation requested",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+/// Fully formatted, platform-independent queue row consumed by GPUI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgressRow {
+    pub observation_id: i64,
+    pub hash: String,
+    pub path: String,
+    pub state: WorkState,
+    pub summary: String,
+    pub accessibility_label: String,
+}
+
+impl ProgressRow {
+    pub fn new(observation: &ObservationRow, now: i64) -> Self {
+        let state = WorkState::from_status(observation.attempt.as_ref().map(|a| a.status.as_str()));
+        let mut fields = vec![state.label().to_owned()];
+        if let Some(attempt) = observation.attempt.as_ref() {
+            append_progress(&mut fields, attempt);
+            fields.push(format_elapsed(now.saturating_sub(attempt.started_at)));
+            if !attempt.warnings.is_empty() {
+                fields.push(format!("{} warning(s)", attempt.warnings.len()));
+            }
+            if !attempt.retry_history.is_empty() {
+                fields.push(format!("retry {}", attempt.retry_history.len()));
+            }
+            if let Some(error) = attempt.terminal_error.as_deref() {
+                fields.push(error.to_owned());
+            }
+        }
+        let summary = fields.join(" · ");
+        let accessibility_label = format!(
+            "{}; {}; {}",
+            observation.path,
+            short_hash(&observation.hash),
+            summary
+        );
+        Self {
+            observation_id: observation.id,
+            hash: observation.hash.clone(),
+            path: observation.path.clone(),
+            state,
+            summary,
+            accessibility_label,
+        }
+    }
+}
+
+fn append_progress(fields: &mut Vec<String>, attempt: &AttemptRow) {
+    if let Some(position) = attempt.queue_position {
+        fields.push(format!("queue position {position}"));
+    }
+    if let Some(stage) = attempt.current_stage.as_deref() {
+        fields.push(stage.to_owned());
+    }
+    if let Some(total) = attempt.pages_total.filter(|total| *total > 0) {
+        let done = attempt.pages_done.min(total);
+        fields.push(format!("{done}/{total} pages"));
+        fields.push(format!("{}%", u64::from(done) * 100 / u64::from(total)));
+    } else if attempt.pages_done > 0 {
+        fields.push(format!("{} pages", attempt.pages_done));
+    }
+    if let Some(total) = attempt.chunks_total.filter(|total| *total > 0) {
+        fields.push(format!(
+            "{}/{} chunks",
+            attempt.chunks_done.min(total),
+            total
+        ));
+    } else if attempt.chunks_done > 0 {
+        fields.push(format!("{} chunks", attempt.chunks_done));
+    }
+}
+
+pub fn format_elapsed(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// Generation guard used by asynchronous refreshes. Older results can never
+/// replace a newer snapshot, even if database reads complete out of order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefreshModel {
+    issued: u64,
+    applied: u64,
+    pub rows: Vec<ProgressRow>,
+    pub selected_hash: Option<String>,
+}
+
+impl RefreshModel {
+    pub fn begin(&mut self) -> u64 {
+        self.issued += 1;
+        self.issued
+    }
+    pub fn apply(&mut self, generation: u64, rows: Vec<ProgressRow>) -> bool {
+        if generation < self.issued || generation <= self.applied {
+            return false;
+        }
+        self.applied = generation;
+        self.rows = rows;
+        if self
+            .selected_hash
+            .as_ref()
+            .is_some_and(|hash| !self.rows.iter().any(|row| &row.hash == hash))
+        {
+            self.selected_hash = None;
+        }
+        true
+    }
+    pub fn selected_index(&self) -> Option<usize> {
+        let hash = self.selected_hash.as_deref()?;
+        self.rows.iter().position(|row| row.hash == hash)
+    }
+}
 
 /// The three keyboard-navigable panes, in tab order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -705,5 +866,118 @@ mod tests {
         assert_eq!(record.source_id.as_deref(), Some("h"));
         assert_eq!(record.pmid, None);
         assert_eq!(record.url, None);
+    }
+
+    fn observation(id: i64, hash: &str, path: &str, status: &str) -> ObservationRow {
+        ObservationRow {
+            id,
+            hash: hash.into(),
+            path: path.into(),
+            attempt: Some(AttemptRow {
+                id,
+                status: status.into(),
+                started_at: 10,
+                ..AttemptRow::default()
+            }),
+            ..ObservationRow::default()
+        }
+    }
+
+    #[test]
+    fn refresh_race_rejects_an_older_snapshot() {
+        let mut model = RefreshModel::default();
+        let old = model.begin();
+        let new = model.begin();
+        assert!(model.apply(
+            new,
+            vec![ProgressRow::new(
+                &observation(2, "new", "/new", "processing"),
+                12
+            )]
+        ));
+        assert!(!model.apply(
+            old,
+            vec![ProgressRow::new(
+                &observation(1, "old", "/old", "complete"),
+                12
+            )]
+        ));
+        assert_eq!(model.rows[0].hash, "new");
+    }
+
+    #[test]
+    fn replacement_clears_selection_but_reordering_preserves_hash() {
+        let mut model = RefreshModel {
+            selected_hash: Some("a".into()),
+            ..RefreshModel::default()
+        };
+        let generation = model.begin();
+        model.apply(
+            generation,
+            vec![
+                ProgressRow::new(&observation(2, "b", "/b", "queued"), 12),
+                ProgressRow::new(&observation(1, "a", "/a", "queued"), 12),
+            ],
+        );
+        assert_eq!(model.selected_index(), Some(1));
+        let generation = model.begin();
+        model.apply(
+            generation,
+            vec![ProgressRow::new(
+                &observation(3, "replacement", "/a", "queued"),
+                12,
+            )],
+        );
+        assert_eq!(model.selected_hash, None);
+    }
+
+    #[test]
+    fn duplicate_paths_are_individual_observations() {
+        let rows = [
+            observation(1, "same", "/one.pdf", "complete"),
+            observation(2, "same", "/two.pdf", "complete"),
+        ];
+        let shown: Vec<_> = rows.iter().map(|row| ProgressRow::new(row, 20)).collect();
+        assert_eq!(shown.len(), 2);
+        assert_ne!(shown[0].observation_id, shown[1].observation_id);
+    }
+
+    #[test]
+    fn unknown_totals_never_show_a_percentage() {
+        let mut row = observation(1, "h", "/a", "processing");
+        row.attempt.as_mut().unwrap().pages_done = 3;
+        let shown = ProgressRow::new(&row, 20);
+        assert!(shown.summary.contains("3 pages"));
+        assert!(!shown.summary.contains('%'));
+    }
+
+    #[test]
+    fn stale_attempt_is_replaced_by_latest_observation_data() {
+        let old = ProgressRow::new(&observation(1, "h", "/a", "processing"), 20);
+        let current = ProgressRow::new(&observation(1, "h", "/a", "complete"), 30);
+        assert_eq!(old.state, WorkState::Processing);
+        assert_eq!(current.state, WorkState::Complete);
+    }
+
+    #[test]
+    fn every_state_has_a_complete_accessibility_label() {
+        for status in [
+            "queued",
+            "stabilizing",
+            "processing",
+            "partial",
+            "failed",
+            "complete",
+            "cancellation_requested",
+            "cancelled",
+        ] {
+            let row = ProgressRow::new(
+                &observation(1, "0123456789abcdef", "/paper.pdf", status),
+                20,
+            );
+            assert!(row.accessibility_label.contains("/paper.pdf"));
+            assert!(row.accessibility_label.contains(row.state.label()));
+            assert!(!row.accessibility_label.trim().is_empty());
+        }
     }
 }

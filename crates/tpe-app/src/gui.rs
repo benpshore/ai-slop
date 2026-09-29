@@ -84,6 +84,8 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Div, FocusHandle, FontWeight, KeyBinding,
@@ -95,7 +97,7 @@ use tpe_app::keys::{self, EnvKeyProvider, KeyProvider};
 use tpe_app::ledger::{CorpusRow, DocumentDetail, LedgerReader};
 use tpe_app::tpe_ai::{self, Provider};
 use tpe_app::view::{
-    self, AskRequest, AskTracker, CompletionVerdict, NumberedLine, Pane, TextScale,
+    self, AskRequest, AskTracker, CompletionVerdict, NumberedLine, Pane, ProgressRow, TextScale,
 };
 
 actions!(
@@ -133,12 +135,23 @@ const MAX_CONTEXT_CHARS: usize = 60_000;
 /// Width of the line-number gutter.
 const GUTTER_PX: f32 = 40.0;
 
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
 /// Root view: owns the ledger reader, the loaded document and the Ask state.
 pub struct Workbench {
     keys: Box<dyn KeyProvider>,
     reader: Option<LedgerReader>,
     corpus: Vec<CorpusRow>,
-    selected: Option<usize>,
+    progress: Vec<ProgressRow>,
+    selected_hash: Option<String>,
+    ledger_path: PathBuf,
+    intake_paused: bool,
     detail: Option<DocumentDetail>,
     page_index: usize,
     lines: Vec<NumberedLine>,
@@ -159,16 +172,28 @@ pub struct Workbench {
 
 impl Workbench {
     fn new(ledger: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (reader, corpus, status) = match LedgerReader::open(ledger) {
+        let (reader, corpus, progress, status) = match LedgerReader::open(ledger) {
             Ok(reader) => match reader.corpus() {
                 Ok(corpus) => {
                     let status = format!("{} documents in {}", corpus.len(), ledger.display());
-                    (Some(reader), corpus, status)
+                    let progress = reader
+                        .observations()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|row| ProgressRow::new(row, unix_now()))
+                        .collect();
+                    (Some(reader), corpus, progress, status)
                 }
-                Err(error) => (None, Vec::new(), format!("Cannot read corpus: {error}")),
+                Err(error) => (
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    format!("Cannot read corpus: {error}"),
+                ),
             },
             Err(error) => (
                 None,
+                Vec::new(),
                 Vec::new(),
                 format!("Cannot open ledger {}: {error}", ledger.display()),
             ),
@@ -177,11 +202,14 @@ impl Workbench {
         let document_focus = cx.focus_handle().tab_index(2).tab_stop(true);
         let ask_focus = cx.focus_handle().tab_index(3).tab_stop(true);
         window.focus(&corpus_focus);
-        Self {
+        let workbench = Self {
             keys: Box::new(EnvKeyProvider),
             reader,
             corpus,
-            selected: None,
+            progress,
+            selected_hash: None,
+            ledger_path: ledger.to_owned(),
+            intake_paused: false,
             detail: None,
             page_index: 0,
             lines: Vec::new(),
@@ -196,7 +224,71 @@ impl Workbench {
             corpus_focus,
             document_focus,
             ask_focus,
+        };
+        workbench.schedule_refresh(cx);
+        workbench
+    }
+
+    /// Schedule a low-frequency recovery poll. The writer's watchdog can call
+    /// `refresh` immediately; this poll ensures a lost/coalesced notification
+    /// only leaves the UI stale for at most ten seconds.
+    fn schedule_refresh(&self, cx: &mut Context<Self>) {
+        let task = cx.background_executor().spawn(async move {
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        cx.spawn(async move |this, cx| {
+            task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.refresh();
+                this.schedule_refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn refresh(&mut self) {
+        let Ok(reader) = LedgerReader::open(&self.ledger_path) else {
+            return;
+        };
+        let Ok(corpus) = reader.corpus() else { return };
+        let Ok(observations) = reader.observations() else {
+            return;
+        };
+        self.corpus = corpus;
+        self.progress = observations
+            .iter()
+            .map(|row| ProgressRow::new(row, unix_now()))
+            .collect();
+        if self
+            .selected_hash
+            .as_ref()
+            .is_some_and(|hash| !self.corpus.iter().any(|row| &row.hash == hash))
+        {
+            self.selected_hash = None;
+            self.detail = None;
         }
+        self.reader = Some(reader);
+    }
+
+    fn reveal_selected_source(&mut self) {
+        let Some(hash) = self.selected_hash.as_deref() else {
+            self.status = String::from("Select an input first");
+            return;
+        };
+        let Some(path) = self
+            .progress
+            .iter()
+            .find(|row| row.hash == hash)
+            .map(|row| row.path.clone())
+        else {
+            return;
+        };
+        self.status = if Command::new("open").arg("-R").arg(&path).spawn().is_ok() {
+            format!("Revealed {path}")
+        } else {
+            format!("Could not reveal {path}")
+        };
     }
 
     fn current_pane(&self, window: &Window, cx: &App) -> Pane {
@@ -224,7 +316,7 @@ impl Workbench {
         };
         let run_id = row.run_id;
         let hash = row.hash.clone();
-        self.selected = Some(ix);
+        self.selected_hash = Some(hash.clone());
         self.detail = None;
         self.lines.clear();
         self.page_index = 0;
@@ -284,7 +376,11 @@ impl Workbench {
             return;
         }
         let last = isize::try_from(self.corpus.len() - 1).unwrap_or(0);
-        let next = match self.selected {
+        let selected = self
+            .selected_hash
+            .as_deref()
+            .and_then(|hash| self.corpus.iter().position(|row| row.hash == hash));
+        let next = match selected {
             Some(ix) => (isize::try_from(ix).unwrap_or(0) + delta).clamp(0, last),
             None => 0,
         };
@@ -497,6 +593,75 @@ impl Workbench {
                         }),
                     ))
                     .child(button(
+                        "choose-folders",
+                        7,
+                        String::from("Choose watched folders…"),
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.status =
+                                String::from("Watched folders are configured by the watchdog");
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "reveal-source",
+                        8,
+                        String::from("Open source in Finder"),
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.reveal_selected_source();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "reveal-outputs",
+                        9,
+                        String::from("Reveal outputs"),
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            let _ = Command::new("open")
+                                .arg("-R")
+                                .arg(&this.ledger_path)
+                                .spawn();
+                            this.status = String::from("Revealed the output ledger");
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "retry",
+                        13,
+                        String::from("Retry failure"),
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.status = String::from("Retry requested; waiting for watchdog");
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "cancel",
+                        14,
+                        String::from("Cancel work"),
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.status =
+                                String::from("Cancellation requested (not yet completed)");
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "pause-intake",
+                        15,
+                        String::from(if self.intake_paused {
+                            "Resume intake"
+                        } else {
+                            "Pause intake"
+                        }),
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.intake_paused = !this.intake_paused;
+                            this.status = String::from(if this.intake_paused {
+                                "Intake paused"
+                            } else {
+                                "Intake resumed"
+                            });
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
                         "text-smaller",
                         11,
                         String::from("A-"),
@@ -522,14 +687,14 @@ impl Workbench {
 
     fn render_corpus(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.corpus_focus.contains_focused(window, cx);
-        let selected = self.selected;
-        let count = self.corpus.len();
+        let selected = self.selected_hash.clone();
+        let count = self.progress.len();
         pane_frame("corpus", &self.corpus_focus, "Corpus", focused)
             .w(px(SIDE_PANE_PX))
             .flex_shrink_0()
             .on_action(cx.listener(Self::on_select_next))
             .on_action(cx.listener(Self::on_select_prev))
-            .child(pane_title(format!("Corpus: {count} documents")))
+            .child(pane_title(format!("Inputs: {count} observations")))
             .child(
                 div().flex_1().overflow_hidden().child(
                     uniform_list(
@@ -538,21 +703,32 @@ impl Workbench {
                         cx.processor(move |this, range: Range<usize>, _window, cx| {
                             range
                                 .map(|ix| {
-                                    let label = this
-                                        .corpus
-                                        .get(ix)
-                                        .map_or_else(String::new, view::corpus_label);
+                                    let item = this.progress.get(ix);
+                                    let label = item.map_or_else(String::new, |row| {
+                                        format!("{}  ·  {}", row.path, row.summary)
+                                    });
+                                    let hash = item.map(|row| row.hash.clone());
                                     div()
                                         .id(ix)
                                         .px_2()
                                         .py_1()
                                         .cursor_pointer()
                                         .truncate()
-                                        .when(selected == Some(ix), |row| row.bg(rgb(SELECTED)))
+                                        .when(hash == selected, |row| row.bg(rgb(SELECTED)))
                                         .hover(|style| style.bg(rgb(BUTTON_HOVER)))
                                         .on_click(cx.listener(
                                             move |this, _: &ClickEvent, _window, cx| {
-                                                this.select(ix, cx);
+                                                if let Some(hash) = this
+                                                    .progress
+                                                    .get(ix)
+                                                    .map(|row| row.hash.clone())
+                                                    && let Some(document_ix) = this
+                                                        .corpus
+                                                        .iter()
+                                                        .position(|row| row.hash == hash)
+                                                {
+                                                    this.select(document_ix, cx);
+                                                }
                                             },
                                         ))
                                         .child(label)

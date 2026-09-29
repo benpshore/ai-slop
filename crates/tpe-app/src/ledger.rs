@@ -58,6 +58,48 @@ pub struct CorpusRow {
     pub doi: Option<String>,
 }
 
+/// A single sighting of an input file.  Unlike [`CorpusRow`], observations are
+/// deliberately not deduplicated by content hash: two paths containing the
+/// same bytes remain two rows in the work queue.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObservationRow {
+    pub id: i64,
+    pub hash: String,
+    pub path: String,
+    pub seen_at: i64,
+    pub size: u64,
+    pub attempt: Option<AttemptRow>,
+}
+
+/// The latest extraction attempt and the progress that can be established
+/// reliably from committed ledger rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AttemptRow {
+    pub id: i64,
+    pub status: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub current_stage: Option<String>,
+    pub pages_done: u32,
+    pub pages_total: Option<u32>,
+    pub chunks_done: u32,
+    pub chunks_total: Option<u32>,
+    pub queue_position: Option<u32>,
+    pub warnings: Vec<String>,
+    pub retry_history: Vec<RetryRow>,
+    pub terminal_error: Option<String>,
+}
+
+/// An earlier attempt for the same content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetryRow {
+    pub id: i64,
+    pub status: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub error: Option<String>,
+}
+
 /// Reading-ordered text of one page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageRow {
@@ -141,6 +183,10 @@ const SELECT_CORPUS: &str = "SELECT d.hash, d.size, d.pages, r.id, r.status, r.f
         ORDER BY finished_at DESC, id DESC LIMIT 1) \
     LEFT JOIN metadata m ON m.run_id = r.id \
     ORDER BY (m.title IS NULL), lower(COALESCE(m.title, d.hash)), d.hash";
+const SELECT_OBSERVATIONS: &str = "SELECT s.id, s.hash, s.path, s.seen_at, s.size \
+    FROM sources s ORDER BY s.seen_at, s.id";
+const SELECT_ATTEMPTS: &str = "SELECT id, status, started_at, finished_at, warnings_json \
+    FROM runs WHERE hash = ?1 ORDER BY started_at DESC, id DESC";
 const SELECT_RUN: &str = "SELECT hash, status FROM runs WHERE id = ?1";
 const SELECT_METADATA: &str = "SELECT title, doi, arxiv_id, year, venue, abstract_text \
     FROM metadata WHERE run_id = ?1";
@@ -203,6 +249,147 @@ impl LedgerReader {
         })?;
         let out = rows.collect::<rusqlite::Result<Vec<CorpusRow>>>()?;
         Ok(out)
+    }
+
+    /// Returns one row per source observation, enriched with its newest
+    /// attempt.  Committed page/chunk rows are used as progress counters; a
+    /// percentage is intentionally unavailable when the document page count
+    /// is zero because that is an unknown total, not 0%.
+    pub fn observations(&self) -> Result<Vec<ObservationRow>, LedgerError> {
+        let mut stmt = self.conn.prepare(SELECT_OBSERVATIONS)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ObservationRow {
+                id: row.get(0)?,
+                hash: row.get(1)?,
+                path: row.get(2)?,
+                seen_at: row.get(3)?,
+                size: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                attempt: None,
+            })
+        })?;
+        let mut observations = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for observation in &mut observations {
+            observation.attempt = self.latest_attempt(&observation.hash)?;
+        }
+        Ok(observations)
+    }
+
+    /// Attempts which have not reached a terminal state.
+    pub fn active_attempts(&self) -> Result<Vec<AttemptRow>, LedgerError> {
+        let mut by_id = BTreeMap::new();
+        for row in self.observations()? {
+            if let Some(attempt) = row.attempt
+                && matches!(
+                    attempt.status.as_str(),
+                    "queued"
+                        | "deferred"
+                        | "stabilizing"
+                        | "processing"
+                        | "active"
+                        | "running"
+                        | "cancellation_requested"
+                )
+            {
+                by_id.insert(attempt.id, attempt);
+            }
+        }
+        Ok(by_id.into_values().collect())
+    }
+
+    /// Latest per-document stage progress, if the hash has an attempt.
+    pub fn stage_progress(&self, hash: &str) -> Result<Option<AttemptRow>, LedgerError> {
+        self.latest_attempt(hash)
+    }
+
+    /// Queue position for a document. Schema-v1 ledgers do not persist the
+    /// in-memory scheduler queue, so this is `None` rather than a guessed rank.
+    pub fn queue_position(&self, hash: &str) -> Result<Option<u32>, LedgerError> {
+        Ok(self
+            .latest_attempt(hash)?
+            .and_then(|attempt| attempt.queue_position))
+    }
+
+    pub fn warnings(&self, hash: &str) -> Result<Vec<String>, LedgerError> {
+        Ok(self
+            .latest_attempt(hash)?
+            .map_or_else(Vec::new, |attempt| attempt.warnings))
+    }
+
+    pub fn retry_history(&self, hash: &str) -> Result<Vec<RetryRow>, LedgerError> {
+        Ok(self
+            .latest_attempt(hash)?
+            .map_or_else(Vec::new, |attempt| attempt.retry_history))
+    }
+
+    pub fn terminal_error(&self, hash: &str) -> Result<Option<String>, LedgerError> {
+        Ok(self
+            .latest_attempt(hash)?
+            .and_then(|attempt| attempt.terminal_error))
+    }
+
+    fn latest_attempt(&self, hash: &str) -> Result<Option<AttemptRow>, LedgerError> {
+        let mut stmt = self.conn.prepare(SELECT_ATTEMPTS)?;
+        let raw = stmt
+            .query_map(params![hash], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let Some((id, status, started_at, finished_at, warnings_json)) = raw.first() else {
+            return Ok(None);
+        };
+        let warnings: Vec<String> = serde_json::from_str(warnings_json).unwrap_or_default();
+        let pages_done = self.conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let pages_total: u32 = self.conn.query_row(
+            "SELECT pages FROM documents WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        )?;
+        let chunks_done = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE run_id = ?1 AND status = 'complete'",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let chunks_total: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE run_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let retry_history = raw
+            .iter()
+            .skip(1)
+            .map(|(id, status, started_at, finished_at, warnings)| RetryRow {
+                id: *id,
+                status: status.clone(),
+                started_at: *started_at,
+                finished_at: *finished_at,
+                error: terminal_error(status, warnings),
+            })
+            .collect();
+        Ok(Some(AttemptRow {
+            id: *id,
+            status: status.clone(),
+            started_at: *started_at,
+            finished_at: *finished_at,
+            current_stage: infer_stage(status, pages_done, chunks_done),
+            pages_done,
+            pages_total: (pages_total > 0).then_some(pages_total),
+            chunks_done,
+            chunks_total: (chunks_total > 0).then_some(chunks_total),
+            queue_position: None,
+            terminal_error: terminal_error(status, warnings_json),
+            warnings,
+            retry_history,
+        }))
     }
 
     /// Loads pages, metadata, references and citation markers of one run.
@@ -340,6 +527,33 @@ where
     Ok(out)
 }
 
+fn terminal_error(status: &str, warnings_json: &str) -> Option<String> {
+    if status != "failed" {
+        return None;
+    }
+    serde_json::from_str::<Vec<String>>(warnings_json)
+        .ok()
+        .and_then(|warnings| {
+            warnings
+                .into_iter()
+                .find(|warning| !warning.trim().is_empty())
+        })
+        .or_else(|| Some(String::from("Extraction failed")))
+}
+
+fn infer_stage(status: &str, pages: u32, chunks: u32) -> Option<String> {
+    match status {
+        "queued" | "deferred" => Some(String::from("Queued")),
+        "stabilizing" => Some(String::from("Waiting for file to stabilize")),
+        "processing" if chunks > 0 => Some(String::from("Writing chunks")),
+        "processing" if pages > 0 => Some(String::from("Processing pages")),
+        "processing" => Some(String::from("Acquiring input")),
+        "partial" | "failed" | "complete" | "cancelled" => None,
+        other if !other.is_empty() => Some(other.to_owned()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +569,16 @@ CREATE TABLE IF NOT EXISTS documents (
     size INTEGER NOT NULL,
     pages INTEGER NOT NULL DEFAULT 0,
     first_seen INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sources (
+    id INTEGER PRIMARY KEY,
+    hash TEXT NOT NULL REFERENCES documents(hash),
+    path TEXT NOT NULL,
+    inode INTEGER,
+    device INTEGER,
+    mtime_unix INTEGER,
+    size INTEGER NOT NULL,
+    seen_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
@@ -381,6 +605,16 @@ CREATE TABLE IF NOT EXISTS pages (
     lines_json TEXT NOT NULL,
     warnings_json TEXT NOT NULL,
     PRIMARY KEY (run_id, page)
+);
+CREATE TABLE IF NOT EXISTS chunks (
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    chunk_index INTEGER NOT NULL,
+    first_page INTEGER NOT NULL,
+    last_page INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    text_sha256 TEXT NOT NULL,
+    ms REAL NOT NULL,
+    PRIMARY KEY (run_id, chunk_index)
 );
 CREATE TABLE IF NOT EXISTS metadata (
     run_id INTEGER PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
@@ -447,6 +681,8 @@ CREATE TABLE IF NOT EXISTS citation_targets (
 INSERT INTO schema_meta (version) VALUES (1);
 INSERT INTO documents (hash, size, pages, first_seen) VALUES ('bbbb2222', 10, 0, 1);
 INSERT INTO documents (hash, size, pages, first_seen) VALUES ('aaaa1111', 2048, 2, 1);
+INSERT INTO sources (id, hash, path, size, seen_at) VALUES (1, 'aaaa1111', '/one.pdf', 2048, 2);
+INSERT INTO sources (id, hash, path, size, seen_at) VALUES (2, 'aaaa1111', '/copy.pdf', 2048, 3);
 INSERT INTO runs (id, hash, backend_name, backend_version, config_digest, schema_version,
     status, started_at, finished_at, timings_json, warnings_json)
     VALUES (7, 'aaaa1111', 'lopdf', '0.45', 'd', 1, 'partial', 5, 6, '{}', '[]');
@@ -493,6 +729,20 @@ INSERT INTO citation_targets (citation_id, seq, ref_idx) VALUES (3, 0, 0);
         assert_eq!(rows[1].run_id, None);
         assert_eq!(rows[1].status, None);
         assert_eq!(rows[1].title, None);
+    }
+
+    #[test]
+    fn observations_keep_duplicate_content_paths_and_expose_progress() {
+        let rows = fixture().observations().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, "/one.pdf");
+        assert_eq!(rows[1].path, "/copy.pdf");
+        assert_eq!(rows[0].hash, rows[1].hash);
+        let attempt = rows[0].attempt.as_ref().unwrap();
+        assert_eq!(attempt.id, 9);
+        assert_eq!(attempt.pages_done, 2);
+        assert_eq!(attempt.pages_total, Some(2));
+        assert_eq!(attempt.retry_history.len(), 1);
     }
 
     #[test]
