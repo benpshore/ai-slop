@@ -207,8 +207,9 @@ pub struct PaperEval {
     /// page text without the reference lists (text after a list, such as
     /// an appendix, is kept), with lines tagged with a non-body role,
     /// citation markers, caption paragraphs and math-heavy lines removed, the truth side has math-heavy lines removed; both
-    /// sides are tokenized without math tokens (see `is_math_token`). `None`
-    /// when the truth has no body text.
+    /// sides are tokenized without math tokens (see `is_math_token`) and
+    /// without all-digit words (see `alignment_words`). `None` when the
+    /// truth has no body text.
     pub body_alignment: Option<f32>,
     /// [`word_alignment`] of all extracted page text (pages joined by `\n`)
     /// against the unfiltered detexed body; the pre-loop-5 metric. `None`
@@ -701,6 +702,15 @@ const NUMBER_SUFFIXES: &[&str] = &[
 /// split a token holding math (`top-𝑘`) in [`alignment_words`].
 const HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{2011}'];
 
+/// Operator names that are math when they are a token's whole
+/// alphanumeric core (`log`, `max`, `argmin`), in any case: the detexed
+/// truth drops them with the inline math they sit in. Longer words that
+/// start with one (`logistic`, `maximum`) stay words.
+const OPERATOR_NAMES: &[&str] = &[
+    "log", "max", "min", "exp", "sin", "cos", "tan", "argmax", "argmin", "sup", "inf", "lim",
+    "det", "tr", "diag", "softmax", "sigmoid", "relu",
+];
+
 /// Whether `core` is ASCII digits followed by a [`NUMBER_SUFFIXES`] suffix.
 fn is_ordinal_or_unit(core: &str) -> bool {
     let digits = core
@@ -712,14 +722,21 @@ fn is_ordinal_or_unit(core: &str) -> bool {
 /// Whether a token is math rather than a word, on either side of the body
 /// alignment: it holds an [`is_math_token_char`] character, or its
 /// alphanumeric core (the token without leading and trailing punctuation)
-/// is a single letter other than `a`, `A`, `i` or `I`, or mixes digits and
-/// letters (`x0`, `vij2`) while the token has no hyphen and the core is not
-/// an ordinal or unit ([`is_ordinal_or_unit`]).
+/// is a single letter other than `a`, `A`, `i` or `I`, is one of the
+/// [`OPERATOR_NAMES`], or mixes digits and letters (`x0`, `vij2`) while the
+/// token has no hyphen and the core is not an ordinal or unit
+/// ([`is_ordinal_or_unit`]).
 fn is_math_token(token: &str) -> bool {
     if token.chars().any(is_math_token_char) {
         return true;
     }
     let core = token.trim_matches(|c: char| !c.is_alphanumeric());
+    if OPERATOR_NAMES
+        .iter()
+        .any(|op| core.eq_ignore_ascii_case(op))
+    {
+        return true;
+    }
     let mut chars = core.chars();
     if let (Some(only), None) = (chars.next(), chars.next()) {
         return only.is_alphabetic() && !matches!(only, 'a' | 'A' | 'i' | 'I');
@@ -735,7 +752,11 @@ fn is_math_token(token: &str) -> bool {
 /// are themselves math tokens (`f(x)` keeps neither `f` nor `x`). A token
 /// holding an [`is_math_token_char`] is first split at its hyphens, so
 /// `top-𝑘`, `𝑛-gram` and `ε-greedy` keep `top`, `gram` and `greedy` as the
-/// detexed `top-$k$` does.
+/// detexed `top-$k$` does. Words that are all digits are dropped too, so
+/// `Section 3.1`, `(4)`, `95.5%` and `1,379` keep no number: the detexed
+/// truth never prints `\ref`, section or equation numbers, nor the numbers
+/// of inline math. This is a metric change on both sides, not an
+/// extraction gain.
 fn alignment_words(s: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for token in s.split_whitespace() {
@@ -746,7 +767,11 @@ fn alignment_words(s: &str) -> Vec<String> {
         };
         for piece in pieces {
             if !is_math_token(piece) {
-                out.extend(words(piece).into_iter().filter(|word| !is_math_token(word)));
+                out.extend(
+                    words(piece)
+                        .into_iter()
+                        .filter(|word| !is_math_token(word) && !word.chars().all(char::is_numeric)),
+                );
             }
         }
     }
@@ -857,7 +882,8 @@ fn marker_char_ranges(page: &PageText, markers: &[CitationMarker]) -> Vec<(usize
 }
 
 /// Line roles whose text stays in the body-only text: `body`, `heading`,
-/// and an empty role (treated as untagged).
+/// and an empty role (treated as untagged). Every other role is left out,
+/// among them `code`, `biography`, `figure`, `table` and `caption`.
 fn is_body_role(role: &str) -> bool {
     matches!(role, "" | "body" | "heading")
 }
@@ -5558,7 +5584,8 @@ mod tests {
         let eval = evaluate("captions", &result, &truth);
         let alignment = eval.body_alignment.expect("body text present");
         assert!(close(alignment, 1.0), "got {alignment}");
-        assert_eq!(eval.body_words_extracted, 8);
+        // body one table shows the body two (the `2` is dropped as a number)
+        assert_eq!(eval.body_words_extracted, 7);
     }
 
     #[test]
@@ -5661,6 +5688,12 @@ mod tests {
             "GPT4",
             "(2020a)",
             "θ̂(x0),",
+            "log",
+            "Max",
+            "argmax",
+            "(softmax",
+            "relu,",
+            "tr",
         ] {
             assert!(is_math_token(math), "{math:?}");
         }
@@ -5686,6 +5719,13 @@ mod tests {
             "GPT-4o",
             "x0-dependent",
             "e.g.,",
+            "logistic",
+            "maximum",
+            "minimal",
+            "trace",
+            "tangent",
+            "infinity",
+            "sigmoidal",
         ] {
             assert!(!is_math_token(word), "{word:?}");
         }
@@ -5732,6 +5772,48 @@ mod tests {
             alignment_words("top- -gram -greedy"),
             vec!["top", "gram", "greedy"]
         );
+    }
+
+    #[test]
+    fn alignment_words_drop_numbers_and_operator_names() {
+        assert_eq!(
+            alignment_words(
+                "Section 3.1 and Table 2, (4) gave 95.5% of 1,379 in 2020 via log(p) \
+                 and max over logistic maximum 2nd 3D COVID-19"
+            ),
+            vec![
+                "section", "and", "table", "gave", "of", "in", "via", "and", "over", "logistic",
+                "maximum", "2nd", "3d", "covid",
+            ]
+        );
+        // The truth side, detexed without `\ref` numbers or math, gives the
+        // same words.
+        assert_eq!(
+            alignment_words(
+                "Section and Table , () gave % of in via and over logistic maximum 2nd 3D COVID-"
+            ),
+            vec![
+                "section", "and", "table", "gave", "of", "in", "via", "and", "over", "logistic",
+                "maximum", "2nd", "3d", "covid",
+            ]
+        );
+    }
+
+    #[test]
+    fn code_and_biography_roles_are_not_body() {
+        for role in ["", "body", "heading"] {
+            assert!(is_body_role(role), "{role:?}");
+        }
+        for role in [
+            "code",
+            "biography",
+            "figure",
+            "table",
+            "caption",
+            "footnote",
+        ] {
+            assert!(!is_body_role(role), "{role:?}");
+        }
     }
 
     #[test]
