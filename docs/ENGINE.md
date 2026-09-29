@@ -32,19 +32,26 @@ backend that is not compiled in fails with a hint naming the feature.
 A backend that declares its own reading order (`docling-text`, `docling`) gets one line per
 span in `seq` order; the others are ordered by the XY-cut.
 
-## Measured status (2026-09-28)
+## Measured status (2026-09-29)
 
-The `lopdf` backend's reference/metadata/marker/timing numbers from Eval run 36498236950
-(`dev`, 60 papers) and run 36498705659 (`holdout`, 10 papers), both after PR #36 on
-`ubuntu-24.04-arm`, are in [README.md](../README.md) and GitHub issue #15; per-loop
-taxonomies are in [docs/analysis/](analysis/). Body-text alignment (0.877 `dev` / 0.883
-`holdout`, exact word LCS, appendices included) is far from the 99% error-free-chunk goal, and
-body word precision (82.3% `dev` / 82.0% `holdout`) is held down by untagged figure/table/math
-fragments; a few papers remain at 0.65–0.78 body alignment. Citation-marker precision (targets
-that resolve to the correct entry) is 99.5% `dev` / 99.9% `holdout`, and marker key recall is
-97.2% `dev` / 99.2% `holdout`. Perf loop (PR #35) took arm p50 from 35.4 ms to 18.7 ms, before
-loop 10's region tagging added about 4 ms back; p50 is now 22.9 ms `dev` / 20.8 ms `holdout`,
-a sub-30 ms diagnostic on these hosted runners; the M1 service-time target is not yet measured.
+The `lopdf` backend's reference/metadata/marker/timing numbers from Eval run 36511221210
+(`dev`, 60 papers) and run 36511549138 (`holdout`, 10 papers), both after PRs #39, #40 and #41
+on `ubuntu-24.04-arm`, are in [README.md](../README.md) and GitHub issue #15; per-loop
+taxonomies are in [docs/analysis/](analysis/). Body-text alignment (0.950 `dev` / 0.940
+`holdout`, body only; exact word LCS; math, digit and operator tokens dropped on both sides;
+appendices included) is still short of the 99% error-free-chunk goal, and body word precision
+is 91.8% `dev` / 89.2% `holdout`. Since the last refresh, loops 11 (math/footnote token
+dropping, lopdf figure boxes, geometry-based figure/table tagging, column overhangs) and 13
+(caption continuations, figure labels, longtable pages, biography/front-matter roles,
+digit/listing handling) worked on body text, and loop 12 (marker residue, parser tail cases,
+hyphen pairs, INFORMS truth, NFKC title comparison) worked on references and markers; PR #42
+is pending for a figure-box regression on one paper (2509.04183, at 0.711). Citation-marker
+precision (targets that resolve to the correct entry) is 100% `dev` / 100% `holdout`, and
+marker key recall is 99.6% `dev` / 99.3% `holdout`. Perf loop (PR #35) took arm p50 from 35.4
+ms to 18.7 ms, before loop 10's region tagging added about 4 ms back; the added tagging (loops
+11 and 13) brought p50 to 27.5 ms `dev` / 25.5 ms `holdout`, still a sub-30 ms diagnostic on
+these hosted runners though creeping toward it, so a second perf loop is due; the M1
+service-time target is not yet measured.
 
 A pre-loop-10 three-backend comparison on the reference-metrics path (Native run 36491886979)
 found `lopdf` at 99.6%/99.7% with body alignment 0.738 at p50 18.7 ms; `pdfium` at 97.3%/99.6%
