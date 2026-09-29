@@ -58,14 +58,16 @@ def run_poppler(pdf: Path) -> tuple[str, list[float]]:
     output = b""
     for _ in range(5):
         start = time.perf_counter()
-        result = subprocess.run(cmd, capture_output=True, check=True, timeout=60)
+        result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
+            cmd, capture_output=True, check=True, timeout=60
+        )
         samples.append((time.perf_counter() - start) * 1000)
         output = result.stdout
     return output.decode("utf-8"), samples
 
 
 def run_tpe_bench(pdf: Path, executable: Path) -> tuple[float, str]:
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 - fixed local TPE executable, no shell
         [str(executable), "bench", str(pdf), "--iterations", "5"],
         capture_output=True,
         text=True,
