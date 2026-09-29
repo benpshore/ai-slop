@@ -138,6 +138,17 @@ pub fn line_index_of_offset(text: &str, offset: usize) -> Option<usize> {
 /// `page` to the line each marker's char offset falls on.
 pub fn numbered_lines(page_text: &str, citations: &[CitationRow], page: u32) -> Vec<NumberedLine> {
     let mut lines: Vec<NumberedLine> = Vec::new();
+    // Build the character offsets of line breaks once. Citation offsets are
+    // attacker-influenced, so rescanning the page for every marker would make
+    // rendering quadratic when a page contains many citations.
+    let mut newline_offsets = Vec::new();
+    let mut char_count = 0usize;
+    for ch in page_text.chars() {
+        if ch == '\n' {
+            newline_offsets.push(char_count);
+        }
+        char_count += 1;
+    }
     let mut number = 0usize;
     for raw in page_text.split('\n') {
         let blank = raw.trim().is_empty();
@@ -152,7 +163,9 @@ pub fn numbered_lines(page_text: &str, citations: &[CitationRow], page: u32) -> 
     }
     for citation in citations.iter().filter(|c| c.page == page) {
         let offset = usize::try_from(citation.offset).unwrap_or(usize::MAX);
-        if let Some(ix) = line_index_of_offset(page_text, offset)
+        let line_index = (offset <= char_count)
+            .then(|| newline_offsets.partition_point(|newline| *newline < offset));
+        if let Some(ix) = line_index
             && let Some(line) = lines.get_mut(ix)
         {
             line.markers.push(marker_label(citation));
@@ -490,6 +503,24 @@ mod tests {
         assert!(
             lines[3].markers.is_empty(),
             "other page and out of range ignored"
+        );
+    }
+
+    #[test]
+    fn numbered_lines_maps_offsets_with_one_page_index() {
+        let text = "hé\nbody";
+        let mut cites = Vec::new();
+        for offset in 0..=text.chars().count() as u32 {
+            cites.push(citation(1, offset, &format!("[{offset}]"), &[offset]));
+        }
+        cites.push(citation(1, 99, "[outside]", &[]));
+
+        let lines = numbered_lines(text, &cites, 1);
+
+        assert_eq!(lines[0].markers, ["[0] -> 0", "[1] -> 1", "[2] -> 2"]);
+        assert_eq!(
+            lines[1].markers,
+            ["[3] -> 3", "[4] -> 4", "[5] -> 5", "[6] -> 6", "[7] -> 7"]
         );
     }
 
