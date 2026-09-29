@@ -2726,7 +2726,7 @@ fn continues_author_list(text: &str, from: usize) -> bool {
 fn part_marker_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^\s(?:Part\s+(?:[IVX]{1,4}|\d{1,2})|[IVX]{1,4})\.").expect("valid regex")
+        Regex::new(r"^\s+(?:Part\s+(?:[IVX]{1,4}|\d{1,2})|[IVX]{1,4})\.").expect("valid regex")
     })
 }
 
@@ -2737,6 +2737,13 @@ fn part_marker_re() -> &'static Regex {
 /// II. J. Math. Phys.` ends after `II`), and so does a `?` / `!` that venue
 /// words follow (`Resolved? arXiv preprint` ends after the `?`).
 fn title_end(text: &str) -> usize {
+    title_end_with_identifiers(text, &[], 0)
+}
+
+/// Title boundary in a masked slice of the entry. `offset` maps the slice
+/// to the original identifier ranges, so indentation is never mistaken for
+/// a masked DOI, URL or arXiv identifier.
+fn title_end_with_identifiers(text: &str, identifiers: &[Range<usize>], offset: usize) -> usize {
     let mut search = 0usize;
     while let Some(rel) = text[search..].find(['.', '?', '!']) {
         let pos = search + rel;
@@ -2748,9 +2755,15 @@ fn title_end(text: &str) -> usize {
                 return pos + 1;
             }
             let terminal = if period {
-                title_period_ends(text, pos)
+                let identifier_follows =
+                    identifier_in_separator(after, identifiers, offset + pos + 1);
+                title_period_ends(text, pos, identifier_follows)
             } else {
-                question_ends_title(following)
+                question_ends_title(
+                    following,
+                    identifiers,
+                    offset + text.len() - following.len(),
+                )
             };
             if terminal {
                 if period && let Some(marker) = part_marker_re().find(&text[pos + 1..]) {
@@ -2770,7 +2783,7 @@ fn title_end(text: &str) -> usize {
 /// number (`above 40 K. Supercond. Sci.`) or a word before a journal name
 /// (`models in R. Journal of Open Source Software`). A period before a
 /// lowercase clause of the title does not end it either ([`title_goes_on`]).
-fn title_period_ends(text: &str, dot: usize) -> bool {
+fn title_period_ends(text: &str, dot: usize, identifier_follows: bool) -> bool {
     let word = word_before(text, dot);
     if period_is_abbreviation(text, dot) {
         return capital_ends_title(text, dot, word);
@@ -2781,7 +2794,17 @@ fn title_period_ends(text: &str, dot: usize) -> bool {
     ) {
         return false;
     }
-    !title_goes_on(&text[dot + 1..])
+    identifier_follows || !title_goes_on(&text[dot + 1..])
+}
+
+/// Does the leading whitespace contain an identifier's actual masked
+/// range? The mask preserves byte offsets; ordinary spaces carry no such
+/// evidence, regardless of indentation width or newline convention.
+fn identifier_in_separator(text: &str, identifiers: &[Range<usize>], offset: usize) -> bool {
+    let end = offset + text.len() - text.trim_start().len();
+    identifiers
+        .iter()
+        .any(|range| range.start >= offset && range.start < end)
 }
 
 /// Is the single capital `word` before the period at byte `dot` a word of
@@ -2854,15 +2877,6 @@ fn lower_venue_word_re() -> &'static Regex {
 /// clause with venue words (`ieee transactions on …`) and a one-word or
 /// numbered clause (`nature, 529`, `eneuro 12`) do not.
 fn title_goes_on(after: &str) -> bool {
-    // An identifier masked to spaces follows the period (`Suite.
-    // https://www.ibm.com/products/ maximo Accessed: …`): the title ends
-    // there, whatever text trails the identifier.
-    // Entry text can retain LF/CRLF or other whitespace before the masked
-    // bytes. Check the complete separator, without crossing into its tail.
-    let separator_end = after.len() - after.trim_start().len();
-    if after[..separator_end].contains("  ") {
-        return false;
-    }
     let rest = after.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
     if lower_roman_re().is_match(rest) {
         return true;
@@ -2886,13 +2900,13 @@ fn title_goes_on(after: &str) -> bool {
         && !lower_venue_word_re().is_match(clause)
 }
 
-/// Byte offset of the first `. `, `? ` or `! ` in `text` that ends a
-/// sentence; a period that closes an initial or abbreviation does not.
+/// Byte offset of the first `.`, `?` or `!` followed by whitespace in
+/// `text` that ends a sentence; an initial or abbreviation does not.
 fn sentence_end(text: &str) -> Option<usize> {
     let mut search = 0usize;
     while let Some(rel) = text[search..].find(['.', '?', '!']) {
         let pos = search + rel;
-        if text[pos + 1..].starts_with(' ')
+        if text[pos + 1..].starts_with(char::is_whitespace)
             && (text.as_bytes()[pos] != b'.' || !period_is_abbreviation(text, pos))
         {
             return Some(pos);
@@ -2947,7 +2961,7 @@ fn clause_names_venue(clause: &str) -> bool {
 /// arXiv:2602.00409`). A masked identifier alone is not enough: a clause
 /// with venue words (`Work? Journal of Artificial Intelligence. https://…`)
 /// or followed by a volume is the venue, and the title ends.
-fn question_ends_title(after: &str) -> bool {
+fn question_ends_title(after: &str, identifiers: &[Range<usize>], offset: usize) -> bool {
     if after.trim_start().starts_with(char::is_lowercase) {
         return false;
     }
@@ -2966,7 +2980,7 @@ fn question_ends_title(after: &str) -> bool {
         return false;
     }
     // An identifier masked to spaces (`Study. arXiv:2602.00409`) follows.
-    let masked_identifier = following.starts_with("  ");
+    let masked_identifier = identifier_in_separator(following, identifiers, offset + end + 1);
     if !masked_identifier || subtitle.chars().any(|c| c.is_ascii_digit()) {
         return true;
     }
@@ -3686,7 +3700,7 @@ struct CommaSplit {
 /// the title runs to the first sentence end or the comma before a venue-like
 /// part. `None` when the entry is not of this shape (a quoted title, a
 /// sentence period after the authors, a year right after them).
-fn comma_style(masked: &str) -> Option<CommaSplit> {
+fn comma_style(masked: &str, identifiers: &[Range<usize>]) -> Option<CommaSplit> {
     let parts = comma_parts(masked);
     if parts.len() < 2 {
         return None;
@@ -3794,7 +3808,8 @@ fn comma_style(masked: &str) -> Option<CommaSplit> {
     if let Some(lead) = et_al_lead_re().find(stripped) {
         title_start += lead.end();
     }
-    let mut end = title_start + title_end(&masked[title_start..]);
+    let mut end =
+        title_start + title_end_with_identifiers(&masked[title_start..], identifiers, title_start);
     if end <= title_start {
         return None;
     }
@@ -4271,7 +4286,9 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         title_start = journal.start;
         titleless = true;
         titleless_volume = volume;
-    } else if let Some(split) = comma_style(&masked).or_else(|| organisation_comma(&masked)) {
+    } else if let Some(split) =
+        comma_style(&masked, &masked_ranges).or_else(|| organisation_comma(&masked))
+    {
         authors_end = Some(split.authors_end);
         title_start = split.title_start;
         title_limit = Some(split.title_end);
@@ -4374,7 +4391,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         range.end
     } else {
         let title_masked = &masked[title_start..];
-        let mut stop = title_end(title_masked);
+        let mut stop = title_end_with_identifiers(title_masked, &masked_ranges, title_start);
         if let Some(limit) = title_limit {
             stop = stop.min(limit.saturating_sub(title_start));
         } else if let Some(venue) = comma_venue_re().find(title_masked) {
@@ -4406,7 +4423,11 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         if !title.is_empty() && title.chars().count() <= 500 && names_something(title) {
             entry.title = Some(title.to_string());
         }
-        (title_start + stop + 1).min(body.len())
+        // The boundary may already include a question/exclamation mark,
+        // leaving a Unicode separator next. Advance one character, not one
+        // byte, so the venue slice always starts on a UTF-8 boundary.
+        let boundary = title_start + stop;
+        boundary + body[boundary..].chars().next().map_or(0, char::len_utf8)
     };
     let rest_masked = &masked[rest_start.min(masked.len())..];
     entry.venue = parse_venue(rest_masked);
@@ -6196,6 +6217,89 @@ mod loop12_parse_tests {
             );
             let entry = format!("{title}{gap}In Proceedings of the conference.");
             assert_eq!(super::title_end(&entry), title.len());
+        }
+    }
+
+    #[test]
+    fn pr57_part_markers_survive_multicharacter_whitespace() {
+        for gap in ["\r\n", "\n  ", "\t ", " \u{a0}"] {
+            for marker in ["IV", "Part 2", "Part II"] {
+                let title = format!("Graph minors.{gap}{marker}");
+                let body = format!("{title}. Journal of Widgets, 2020.");
+                assert_eq!(super::title_end(&body), title.len(), "{body:?}");
+                let raw = format!("[1] A. Smith. {body}");
+                let entry = parse_raw(&raw, "[1]");
+                assert_eq!(entry.title.as_deref(), Some(title.as_str()), "{raw:?}");
+                assert_eq!(entry.venue.as_deref(), Some("Journal of Widgets"));
+            }
+        }
+    }
+
+    #[test]
+    fn pr57_indentation_is_not_identifier_evidence() {
+        for gap in ["  ", "\n  ", "\r\n    ", "\n\t", "\u{a0}  "] {
+            let title = format!("Function words in attribution.{gap}from black magic to theory?");
+            let body = format!("{title} In Proceedings of the conference, 2020.");
+            assert_eq!(super::title_end(&body), title.len(), "{body:?}");
+            let raw = format!("[1] A. Smith. 2020. {body}");
+            let entry = parse_raw(&raw, "[1]");
+            assert_eq!(entry.title.as_deref(), Some(title.as_str()), "{raw:?}");
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Proceedings of the conference")
+            );
+        }
+    }
+
+    #[test]
+    fn pr57_multiline_question_subtitles_survive() {
+        for gap in ["\n", "\r\n", "\n  ", "\t", "\u{a0}"] {
+            let title = format!(
+                "Is ChatGPT Good at Search?{gap}Investigating Large Language Models as Re-Ranking Agents"
+            );
+            let body = format!("{title}.{gap}In Proceedings of the conference, 2020.");
+            assert_eq!(super::title_end(&body), title.len(), "{body:?}");
+            let raw = format!("[1] A. Smith. 2020. {body}");
+            let entry = parse_raw(&raw, "[1]");
+            assert_eq!(entry.title.as_deref(), Some(title.as_str()), "{raw:?}");
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Proceedings of the conference")
+            );
+        }
+    }
+
+    #[test]
+    fn pr57_identifier_ranges_distinguish_masks_from_indent() {
+        for gap in ["  ", "\n  ", "\r\n\t", "\u{a0}"] {
+            for identifier in [
+                "https://example.org/résumé",
+                "10.1000/example",
+                "arXiv:2602.00409",
+            ] {
+                let title =
+                    format!("Function words in attribution.{gap}from black magic to theory");
+                let raw = format!(
+                    "[1] A. García. 2020. {title}.{gap}{identifier}{gap}additional metadata"
+                );
+                let entry = parse_raw(&raw, "[1]");
+                assert_eq!(entry.title.as_deref(), Some(title.as_str()), "{raw:?}");
+                assert!(entry.url.is_some() || entry.doi.is_some() || entry.arxiv_id.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn pr57_question_title_before_unicode_venue_separator() {
+        for gap in ["\u{a0}", "\u{2003}", "\r\n", "\n  "] {
+            let raw =
+                format!("[1] A. Smith. 2020. Does It Work?{gap}In Proceedings of the conference.");
+            let entry = parse_raw(&raw, "[1]");
+            assert_eq!(entry.title.as_deref(), Some("Does It Work?"));
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Proceedings of the conference")
+            );
         }
     }
 
@@ -9037,18 +9141,27 @@ mod tests {
                 )
             );
 
-            // The clause and what follows the masked identifier decide.
-            let masked = "Journal of Artificial Intelligence.                 ";
-            assert!(question_ends_title(masked));
-            assert!(question_ends_title(
-                "Deep Widget Models.                  (2021), 12(3)."
+            // The clause and what follows an actual masked identifier decide.
+            // Blank padding alone is not evidence that an identifier existed.
+            let with_identifier = |text: &str| {
+                let range = find_arxiv(text).unwrap().0;
+                let ranges = [range];
+                let masked = mask_ranges(text, &ranges);
+                question_ends_title(&masked, &ranges, 0)
+            };
+            assert!(with_identifier(
+                "Journal of Artificial Intelligence. arXiv:2602.00409"
             ));
-            assert!(!question_ends_title(
-                "A Systematic Review.                  [cs.SE]"
+            assert!(with_identifier(
+                "Deep Widget Models. arXiv:2602.00409 (2021), 12(3)."
             ));
-            assert!(!question_ends_title(
-                "An Empirical Study.                  [cs.SE]"
+            assert!(!with_identifier(
+                "A Systematic Review. arXiv:2602.00409 [cs.SE]"
             ));
+            assert!(!with_identifier(
+                "An Empirical Study. arXiv:2602.00409 [cs.SE]"
+            ));
+            assert!(question_ends_title("An Empirical Study.  [cs.SE]", &[], 0));
             // A bare year after the identifier is no venue evidence.
             let dated = parsed(
                 "[16] Andre Hora and Romain Robbes. 2026. Are Coding Agents Generating \
