@@ -41,6 +41,17 @@ pub enum PipelineError {
     UnknownBackend(String),
 }
 
+/// A page-level progress notification for one document, delivered on the
+/// calling thread while the job runs (see [`run_job_observed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// The document opened: it has `pages` pages and `total` of them will be
+    /// processed (fewer than `pages` for a sub-range run).
+    Opened { pages: u32, total: u32 },
+    /// Page `page` (1-based) finished; `done` of `total` are processed.
+    Page { page: u32, done: u32, total: u32 },
+}
+
 /// Milliseconds elapsed since `start`.
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
@@ -215,6 +226,7 @@ fn parse_while_hashing(
     job: &Job,
     bytes: &[u8],
     identity: &mut BackendIdentity,
+    observe: &mut dyn FnMut(Progress),
 ) -> Result<Parsed, PipelineError> {
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
         let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
@@ -223,6 +235,11 @@ fn parse_while_hashing(
         let page_count = session.page_count();
         let (first, last) = resolve_page_range(job.pages, page_count)?;
         let covers_all_pages = first <= 1 && last >= page_count;
+        let total = last - first + 1;
+        observe(Progress::Opened {
+            pages: page_count,
+            total,
+        });
 
         let mut pages: Vec<PageText> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
@@ -259,6 +276,11 @@ fn parse_while_hashing(
                 }
                 Err(other) => return Err(PipelineError::Backend(other)),
             }
+            observe(Progress::Page {
+                page,
+                done: u32::try_from(pages.len()).unwrap_or(u32::MAX),
+                total,
+            });
         }
         let info: BTreeMap<String, String> = session.info();
         Ok(Parsed {
@@ -302,15 +324,33 @@ fn parse_while_hashing(
 /// second thread while the backend parses; that work is reported as
 /// `hash_ms`, and any wait for it falls inside `parse_ms`.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
+    run_job_observed(job, &mut |_| {})
+}
+
+/// [`run_job`] reporting a [`Progress`] event when the document opens and
+/// after each page, on the calling thread.
+pub fn run_job_observed(
+    job: &Job,
+    observe: &mut dyn FnMut(Progress),
+) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
-    run_job_with(extractor.as_ref(), job)
+    run_job_with_observed(extractor.as_ref(), job, observe)
 }
 
 /// [`run_job`] with an already resolved backend; `job.backend` is ignored.
 pub fn run_job_with(
     extractor: &dyn Extractor,
     job: &Job,
+) -> Result<ExtractionResult, PipelineError> {
+    run_job_with_observed(extractor, job, &mut |_| {})
+}
+
+/// [`run_job_with`] reporting [`Progress`] events like [`run_job_observed`].
+pub fn run_job_with_observed(
+    extractor: &dyn Extractor,
+    job: &Job,
+    observe: &mut dyn FnMut(Progress),
 ) -> Result<ExtractionResult, PipelineError> {
     let mut identity = extractor.identity();
 
@@ -328,7 +368,7 @@ pub fn run_job_with(
         warnings,
         status,
         info,
-    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity)?;
+    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity, observe)?;
     timings.parse_ms = elapsed_ms(parse_start);
     timings.hash_ms = hashed.ms;
     let snapshot = read.into_snapshot(hashed.hash);
@@ -436,8 +476,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        PipelineError, chunk_results, figure_extension, resolve_page_range, run_job, run_job_with,
-        sub_range_digest,
+        PipelineError, Progress, chunk_results, figure_extension, resolve_page_range, run_job,
+        run_job_observed, run_job_with, sub_range_digest,
     };
     use crate::backend::{BackendError, DocumentSession, Extractor, lopdf_backend::LopdfBackend};
     use crate::schema::{
@@ -777,6 +817,34 @@ mod tests {
         assert_eq!(
             result.backend.config_digest,
             sub_range_digest(&full.config_digest, 2, 2)
+        );
+    }
+
+    #[test]
+    fn progress_reports_the_open_and_every_page_of_the_range() {
+        let (_dir, path) = three_page_fixture();
+        let mut events = Vec::new();
+        let result = run_job_observed(&lopdf_job(&path, Some((2, 3))), &mut |event| {
+            events.push(event);
+        })
+        .unwrap();
+
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(
+            events,
+            [
+                Progress::Opened { pages: 3, total: 2 },
+                Progress::Page {
+                    page: 2,
+                    done: 1,
+                    total: 2
+                },
+                Progress::Page {
+                    page: 3,
+                    done: 2,
+                    total: 2
+                },
+            ]
         );
     }
 

@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::backend::{BackendError, Extractor};
 use crate::citations;
+use crate::pipeline::Progress;
 use crate::reading_order;
 use crate::regions;
 use crate::schema::{PageText, ReferenceEntry};
@@ -36,9 +37,26 @@ pub fn scan_backward(
     bytes: &[u8],
     password: Option<&str>,
 ) -> Result<BibliographyScan, BackendError> {
+    scan_backward_observed(extractor, bytes, password, &mut |_| {})
+}
+
+/// [`scan_backward`] reporting a [`Progress`] event when the document opens
+/// and after each page read from the end. `total` is the page count: how
+/// many pages the scan will need is unknown until the boundary is found, so
+/// `done` counts pages scanned so far and usually stops well short of it.
+pub fn scan_backward_observed(
+    extractor: &dyn Extractor,
+    bytes: &[u8],
+    password: Option<&str>,
+    observe: &mut dyn FnMut(Progress),
+) -> Result<BibliographyScan, BackendError> {
     let mut session = extractor.open(bytes, password)?;
     let total_pages = session.page_count();
     let mut pages: Vec<PageText> = Vec::new();
+    observe(Progress::Opened {
+        pages: total_pages,
+        total: total_pages,
+    });
 
     for number in (1..=total_pages).rev() {
         let mut page = session.page_text(number)?;
@@ -48,6 +66,11 @@ pub fn scan_backward(
             reading_order::order_page(&mut page);
         }
         pages.insert(0, page);
+        observe(Progress::Page {
+            page: number,
+            done: u32::try_from(pages.len()).unwrap_or(u32::MAX),
+            total: total_pages,
+        });
 
         // Cleanup uses the selected document context. Keep the ordered source
         // pages untouched so an earlier page can change that context safely.
@@ -109,8 +132,9 @@ mod tests {
     use lopdf::content::{Content, Operation};
     use lopdf::{Document, Object, Stream, dictionary};
 
-    use super::scan_backward;
+    use super::{scan_backward, scan_backward_observed};
     use crate::backend::lopdf_backend::LopdfBackend;
+    use crate::pipeline::Progress;
 
     fn pdf(pages: &[&[&str]]) -> Vec<u8> {
         let mut document = Document::with_version("1.5");
@@ -190,6 +214,41 @@ mod tests {
         assert_eq!(scan.references[0].page, 3);
         assert_eq!(scan.references[2].page, 4);
         assert!(scan.references.iter().all(|r| !r.raw.contains("Earlier")));
+    }
+
+    #[test]
+    fn progress_counts_pages_read_from_the_end() {
+        let bytes = pdf(&[
+            &["Introduction"],
+            &["[1] A. One, First cited work, 2020."],
+            &[
+                "[2] B. Two, Second cited work, 2021.",
+                "[3] C. Three, Third cited work, 2022.",
+            ],
+        ]);
+        let mut events = Vec::new();
+        let scan = scan_backward_observed(&LopdfBackend::default(), &bytes, None, &mut |event| {
+            events.push(event);
+        })
+        .unwrap();
+        assert!(scan.found);
+        assert_eq!(scan.pages_scanned, 2);
+        assert_eq!(
+            events,
+            [
+                Progress::Opened { pages: 3, total: 3 },
+                Progress::Page {
+                    page: 3,
+                    done: 1,
+                    total: 3
+                },
+                Progress::Page {
+                    page: 2,
+                    done: 2,
+                    total: 3
+                },
+            ]
+        );
     }
 
     #[test]
