@@ -194,20 +194,31 @@ impl Extractor for DoclingBackend {
 }
 
 /// `docling-pdf` otherwise falls back to `.pdfium/lib` below the current
-/// directory. Require its first-choice environment path to be explicit and
-/// absolute before entering native code.
+/// directory and then to the loader search path. Require its first-choice
+/// environment path to be explicit, absolute and present before entering
+/// native code, so a missing library never reaches that fallback. A library
+/// that is present there but fails to load is not detected here.
 fn require_trusted_pdfium_path() -> Result<(), BackendError> {
-    let configured = std::env::var("PDFIUM_DYNAMIC_LIB_PATH").map_err(|_| {
-        BackendError::Unsupported(
-            "docling requires PDFIUM_DYNAMIC_LIB_PATH to be an absolute trusted path".to_string(),
-        )
-    })?;
-    if !is_trusted_pdfium_path(&configured) {
-        return Err(BackendError::Unsupported(
-            "docling requires PDFIUM_DYNAMIC_LIB_PATH to be an absolute trusted path".to_string(),
-        ));
+    let configured = std::env::var("PDFIUM_DYNAMIC_LIB_PATH").unwrap_or_default();
+    trusted_pdfium_library(&configured).map(|_| ())
+}
+
+/// The library file a trusted `PDFIUM_DYNAMIC_LIB_PATH` value names.
+fn trusted_pdfium_library(configured: &str) -> Result<PathBuf, BackendError> {
+    const HINT: &str = "set PDFIUM_DYNAMIC_LIB_PATH to the absolute path of a provisioned library";
+    if !is_trusted_pdfium_path(configured) {
+        return Err(BackendError::Unsupported(format!(
+            "pdfium not installed at a trusted location: {HINT}"
+        )));
     }
-    Ok(())
+    let file = crate::backend::pdfium_backend::library_file(Path::new(configured));
+    if !file.is_file() {
+        return Err(BackendError::Unsupported(format!(
+            "pdfium not installed at {}: {HINT}",
+            file.display()
+        )));
+    }
+    Ok(file)
 }
 
 fn is_trusted_pdfium_path(path: &str) -> bool {
@@ -1384,6 +1395,23 @@ mod tests {
         assert!(!is_trusted_pdfium_path(".pdfium/lib"));
         let absolute = std::env::current_dir().unwrap().join(".pdfium/lib");
         assert!(is_trusted_pdfium_path(absolute.to_str().unwrap()));
+    }
+
+    #[test]
+    fn full_mode_requires_a_present_library_at_the_trusted_path() {
+        for configured in ["", ".pdfium/lib"] {
+            let err = trusted_pdfium_library(configured).unwrap_err();
+            assert!(err.to_string().contains("not installed"), "{err}");
+        }
+        let missing = tempfile::tempdir().unwrap();
+        let err = trusted_pdfium_library(missing.path().to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("not installed"), "{err}");
+        let file = missing.path().join("libpdfium.so");
+        std::fs::write(&file, []).unwrap();
+        assert_eq!(
+            trusted_pdfium_library(file.to_str().unwrap()).unwrap(),
+            file
+        );
     }
 
     /// Whether the full pipeline can run here: a layout model and a pdfium

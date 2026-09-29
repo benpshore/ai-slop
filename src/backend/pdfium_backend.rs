@@ -297,7 +297,7 @@ fn configured_library_file(path: &str) -> Result<PathBuf, BackendError> {
 
 /// `path` itself when it names a file, else the platform library file name
 /// inside that directory.
-fn library_file(path: &Path) -> PathBuf {
+pub(crate) fn library_file(path: &Path) -> PathBuf {
     if path.is_file() {
         path.to_path_buf()
     } else {

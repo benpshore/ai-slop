@@ -115,6 +115,7 @@ None of these artifacts is committed to the repository. The `.models/` and
 
 ```sh
 sh native/fetch.sh                                   # about 82 MB of models plus PDFium; prints a table
+export PDFIUM_DYNAMIC_LIB_PATH="$PWD/.pdfium/lib"    # required: relative library paths are rejected
 cargo build --release --features docling,pdfium      # the first build downloads ONNX Runtime
 cargo test --features docling,pdfium -- --nocapture  # native smoke tests must not print "skipped:"
 ./target/release/tpe extract paper.pdf --backend docling --db local.sqlite --out out/
