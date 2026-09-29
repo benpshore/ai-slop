@@ -2228,30 +2228,28 @@ fn box_kinds(regions: &[BBox], captions: &[CaptionBox]) -> Vec<Option<Kind>> {
             best.map(|(_, kind)| kind)
         })
         .collect();
-    for _ in 0..regions.len() {
-        let next: Vec<Option<Kind>> = regions
-            .iter()
-            .enumerate()
-            .map(|(i, &r)| {
-                kinds[i].or_else(|| {
-                    regions
-                        .iter()
-                        .zip(kinds.iter())
-                        .enumerate()
-                        .find_map(|(j, (&o, &kind))| {
-                            let kind = kind?;
-                            let near = j != i
-                                && x_overlap(r, o)
-                                && vertical_distance(r, o) <= CAPTION_REACH;
-                            near.then_some(kind)
-                        })
-                })
-            })
-            .collect();
-        if next == kinds {
-            break;
+    // Spread kinds outward one breadth level at a time. A region reached
+    // from two chains in the same level takes the kind of the lower-index
+    // assigned neighbour, the tie-break of the round-based propagation this
+    // replaces; every region is a source exactly once, so the work is
+    // bounded by regions squared instead of cubed.
+    let mut frontier: Vec<usize> = (0..regions.len()).filter(|&i| kinds[i].is_some()).collect();
+    while !frontier.is_empty() {
+        let mut next: Vec<usize> = Vec::new();
+        for &i in &frontier {
+            let kind = kinds[i].expect("frontier regions have a kind");
+            for (j, &other) in regions.iter().enumerate() {
+                if kinds[j].is_none()
+                    && x_overlap(regions[i], other)
+                    && vertical_distance(regions[i], other) <= CAPTION_REACH
+                {
+                    kinds[j] = Some(kind);
+                    next.push(j);
+                }
+            }
         }
-        kinds = next;
+        next.sort_unstable();
+        frontier = next;
     }
     kinds
 }
@@ -2993,6 +2991,75 @@ mod tests {
     use crate::schema::Figure;
 
     const SIZE: f32 = 10.0;
+
+    #[test]
+    fn competing_caption_chains_keep_the_lowest_index_tie_break() {
+        let stack = |y0: f32| BBox {
+            x0: 0.0,
+            y0,
+            x1: 10.0,
+            y1: y0 + 10.0,
+        };
+        // Index order: A (figure end), B (table end), Y (next to B),
+        // X (next to A), Z (between X and Y, reached by both in one level).
+        let regions = [
+            stack(200.0),
+            stack(40.0),
+            stack(80.0),
+            stack(160.0),
+            stack(120.0),
+        ];
+        let captions = [
+            CaptionBox {
+                line: 0,
+                kind: Kind::Figure,
+                bbox: stack(225.0),
+            },
+            CaptionBox {
+                line: 1,
+                kind: Kind::Table,
+                bbox: stack(5.0),
+            },
+        ];
+
+        assert_eq!(
+            box_kinds(&regions, &captions),
+            [
+                Some(Kind::Figure),
+                Some(Kind::Table),
+                Some(Kind::Table),
+                Some(Kind::Figure),
+                Some(Kind::Table),
+            ]
+        );
+    }
+
+    #[test]
+    fn caption_kind_propagates_along_a_long_box_chain() {
+        let regions: Vec<BBox> = (0..500)
+            .map(|i| BBox {
+                x0: 0.0,
+                y0: -(i as f32) * CAPTION_REACH,
+                x1: 10.0,
+                y1: 10.0 - (i as f32) * CAPTION_REACH,
+            })
+            .collect();
+        let captions = [CaptionBox {
+            line: 0,
+            kind: Kind::Figure,
+            bbox: BBox {
+                x0: 0.0,
+                y0: 20.0,
+                x1: 10.0,
+                y1: 30.0,
+            },
+        }];
+
+        assert_eq!(
+            box_kinds(&regions, &captions),
+            vec![Some(Kind::Figure); regions.len()]
+        );
+    }
 
     /// A 10 pt line with its baseline at `baseline`: the box runs from
     /// 0.2 size below to 0.8 size above, 5 pt per character wide.

@@ -85,8 +85,9 @@ const LIGATURE_POLICY: &str = "expand";
 /// Revision of the content-stream extraction policy, part of the backend
 /// identity so ledger runs from different policies are never confused:
 /// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
-/// stack per Form; 3 = painted paths and Image `XObject`s become figures.
-const CONTENT_POLICY: &str = "3";
+/// stack per Form; 3 = painted paths and Image `XObject`s become figures;
+/// 4 = image placements are bounded per page.
+const CONTENT_POLICY: &str = "4";
 
 /// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
 /// long is a `rule` figure.
@@ -97,8 +98,8 @@ const RULE_LENGTH: f32 = 30.0;
 const CLUSTER_GAP: f32 = 6.0;
 /// A `vector` cluster that fits in a square this wide (points) is dropped.
 const MIN_VECTOR_SIDE: f32 = 8.0;
-/// Most painted boxes clustered on one page; beyond it the page gets one
-/// `vector` figure covering all of them.
+/// Most painted boxes or image placements retained on one page. Beyond this,
+/// painted boxes become one covering `vector` figure and images are ignored.
 const MAX_CLUSTER_BOXES: usize = 2000;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
@@ -2267,6 +2268,7 @@ struct Graphics {
     extent: Option<BBox>,
     /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
     overflow: bool,
+    /// Image placements, at most [`MAX_CLUSTER_BOXES`].
     rasters: Vec<Raster>,
 }
 
@@ -2288,6 +2290,12 @@ impl Graphics {
             self.shapes.push(bbox);
         } else {
             self.overflow = true;
+        }
+    }
+
+    fn add_raster(&mut self, raster: Raster) {
+        if self.rasters.len() < MAX_CLUSTER_BOXES {
+            self.rasters.push(raster);
         }
     }
 
@@ -2507,7 +2515,7 @@ impl<'a> Interpreter<'a> {
             ctm.apply(0.0, 1.0),
             ctm.apply(1.0, 1.0),
         ]);
-        self.graphics.rasters.push(Raster {
+        self.graphics.add_raster(Raster {
             bbox,
             width_px: pixel_count(&stream.dict, b"Width"),
             height_px: pixel_count(&stream.dict, b"Height"),
@@ -4760,13 +4768,15 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "3".to_string());
+        config.insert("content".to_string(), "4".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
         config.insert("content".to_string(), "2".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "3".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "4".to_string());
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
@@ -6045,6 +6055,26 @@ mod tests {
         assert_eq!(figures.len(), 1);
         assert_eq!(figures[0].kind, "vector");
         assert_box(&figures[0], 0.0, 0.0, 40_010.0, 10.0);
+    }
+
+    #[test]
+    fn raster_placements_are_bounded() {
+        let mut graphics = Graphics::default();
+        for step in 0..=MAX_CLUSTER_BOXES {
+            graphics.add_raster(Raster {
+                bbox: BBox {
+                    x0: step as f32,
+                    y0: 0.0,
+                    x1: step as f32 + 1.0,
+                    y1: 1.0,
+                },
+                width_px: Some(1),
+                height_px: Some(1),
+            });
+        }
+        let figures = graphics.into_figures();
+        assert_eq!(figures.len(), MAX_CLUSTER_BOXES);
+        assert!(figures.iter().all(|figure| figure.kind == "raster"));
     }
 
     #[test]
