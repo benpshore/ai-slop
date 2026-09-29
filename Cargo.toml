@@ -40,7 +40,7 @@ pdfium = ["dep:pdfium-render"]
 # docling.rs backends (`docling-text`, `docling`); `docling` needs PDFium and the models.
 docling = ["dep:docling-pdf", "dep:docling-core", "pdfium"]
 # Model-free Office/HTML converters; never pulls in PDF ML or speech models.
-formats = ["dep:docling-formats", "dep:zip", "dep:calamine"]
+formats = ["dep:docling-formats", "dep:zip", "dep:calamine", "dep:csv"]
 
 [dependencies]
 anyhow = "1"
@@ -49,6 +49,7 @@ docling-core = { version = "=1.69.2", optional = true }
 docling-pdf = { version = "=1.69.2", optional = true }
 docling-formats = { package = "docling", version = "=1.69.2", optional = true, default-features = false }
 calamine = { version = "=0.36.1", features = ["dates"], optional = true }
+csv = { version = "=1.4.0", optional = true }
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"], optional = true }
 # zlib-rs inflates faster than the default miniz_oxide. Feature unification
 # switches lopdf's inflate too: flate2 prefers zlib-rs over miniz_oxide when

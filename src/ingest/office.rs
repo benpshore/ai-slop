@@ -88,11 +88,13 @@ pub(super) fn extract(mut bytes: Vec<u8>, options: &Options, record: &mut Record
     if record.format == Format::Xlsx {
         return extract_xlsx(&bytes, options, record);
     }
+    if record.format == Format::Csv {
+        return extract_csv(&bytes, options, record);
+    }
     let format = match record.format {
         Format::Docx => InputFormat::Docx,
         Format::Html => InputFormat::Html,
         Format::Markdown => InputFormat::Md,
-        Format::Csv => InputFormat::Csv,
         _ => bail!("unsupported declarative format"),
     };
     // No silent codepage guess. An encoding adapter can be added separately
@@ -109,7 +111,16 @@ pub(super) fn extract(mut bytes: Vec<u8>, options: &Options, record: &mut Record
         // our already-validated UTF-8 policy authoritative for that branch.
         bytes.splice(..0, [0xef, 0xbb, 0xbf]);
     }
-    record.extractor = Some(identity("docling-declarative", "1.69.2"));
+    let supplemental = if record.format == Format::Docx {
+        supplemental_word_parts(&bytes)?
+    } else {
+        Vec::new()
+    };
+    record.extractor = Some(identity(
+        "docling-declarative",
+        "1.69.2",
+        &record.policy_digest,
+    ));
     // An in-memory source has no base directory. External images, scripts,
     // remote URLs and sidecar files are never fetched or executed here.
     let source =
@@ -123,7 +134,7 @@ pub(super) fn extract(mut bytes: Vec<u8>, options: &Options, record: &mut Record
         ConversionStatus::PartialSuccess => Outcome::ReviewRequired,
         ConversionStatus::Failure => bail!("document converter reported failure"),
     };
-    let content = converted.document.export_to_json_value();
+    let mut content = converted.document.export_to_json_value();
     if converted.document.nodes.is_empty() {
         record.outcome = Outcome::ReviewRequired;
         record.warnings.push(
@@ -141,12 +152,128 @@ pub(super) fn extract(mut bytes: Vec<u8>, options: &Options, record: &mut Record
             "embedded pictures are represented structurally; their text has not been OCRed".into(),
         );
     }
+    if !supplemental.is_empty() {
+        record.outcome = Outcome::ReviewRequired;
+        record.warnings.push("Word note/header/footer/comment parts are preserved as raw XML supplemental evidence; their completeness and reading order are not certified by the document converter".into());
+        content["tpe_supplemental_parts"] = Value::Array(supplemental);
+    }
     record.content = Some(content);
     Ok(())
 }
 
+/// Preserve known side parts even when the converter silently omits them.
+/// Archive size/CRC/duplicate checks have already run on these immutable bytes.
+fn supplemental_word_parts(bytes: &[u8]) -> Result<Vec<Value>> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+    let mut names: Vec<String> = archive
+        .file_names()
+        .filter(|name| {
+            let Some(part) = name.strip_prefix("word/") else {
+                return false;
+            };
+            !part.contains('/')
+                && std::path::Path::new(part)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
+                && (matches!(part, "footnotes.xml" | "endnotes.xml")
+                    || part.starts_with("header")
+                    || part.starts_with("footer")
+                    || part.starts_with("comments"))
+        })
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Main-document anchors, section references and note/hyperlink relationship
+    // targets remain inspectable without inventing an integrated text order.
+    let side_names = names.clone();
+    names.extend([
+        "word/document.xml".into(),
+        "word/_rels/document.xml.rels".into(),
+        "word/settings.xml".into(),
+    ]);
+    for name in side_names {
+        if let Some(part) = name.strip_prefix("word/") {
+            names.push(format!("word/_rels/{part}.rels"));
+        }
+    }
+    names.sort();
+    names.dedup();
+    let available: HashSet<String> = archive.file_names().map(str::to_owned).collect();
+    let mut result = Vec::new();
+    for name in names.into_iter().filter(|name| available.contains(name)) {
+        let mut part = Vec::new();
+        archive.by_name(&name)?.read_to_end(&mut part)?;
+        let sha256 = crate::schema::sha256_hex(&part);
+        let xml = String::from_utf8(part)
+            .with_context(|| format!("supplemental Word part {name} is not UTF-8"))?;
+        result.push(json!({"path": name, "sha256": sha256, "xml": xml}));
+    }
+    Ok(result)
+}
+
+fn extract_csv(bytes: &[u8], options: &Options, record: &mut Record) -> Result<()> {
+    let text = std::str::from_utf8(bytes).context("CSV input must be UTF-8")?;
+    if text.contains('\0') {
+        bail!("NUL in CSV input");
+    }
+    validate_csv_quotes(text.trim_start_matches('\u{feff}'))?;
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b',')
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(bytes);
+    let mut rows = Vec::new();
+    let mut cells = 0_usize;
+    for row in reader.records() {
+        let row = row?;
+        cells = cells
+            .checked_add(row.len())
+            .context("CSV cell count overflow")?;
+        if cells > options.max_cells {
+            bail!("CSV exceeds {} cells", options.max_cells);
+        }
+        rows.push(row.iter().map(str::to_owned).collect::<Vec<_>>());
+    }
+    record.extractor = Some(identity("csv", "1.4.0", &record.policy_digest));
+    record.content = Some(json!({
+        "dialect": {"delimiter": ",", "quote": "\"", "has_headers": false, "ragged_rows": "preserved", "empty_lines": "omitted_from_rows_preserved_in_source_text"},
+        "rows": rows, "source_text": text,
+    }));
+    Ok(())
+}
+
+/// The csv crate deliberately accepts unterminated/misplaced quotes. Reject
+/// those ambiguous inputs before extraction instead of silently repairing them.
+fn validate_csv_quotes(text: &str) -> Result<()> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Start,
+        Unquoted,
+        Quoted,
+        AfterQuote,
+    }
+    let mut state = State::Start;
+    for byte in text.bytes() {
+        state = match (state, byte) {
+            (State::Start | State::Unquoted | State::AfterQuote, b',' | b'\r' | b'\n') => {
+                State::Start
+            }
+            (State::Quoted, b'"') => State::AfterQuote,
+            (State::Start | State::AfterQuote, b'"') | (State::Quoted, _) => State::Quoted,
+            (State::Unquoted, b'"') | (State::AfterQuote, _) => bail!("malformed CSV quoting"),
+            (State::Start | State::Unquoted, _) => State::Unquoted,
+        };
+    }
+    if matches!(state, State::Quoted) {
+        bail!("unterminated quoted CSV field");
+    }
+    Ok(())
+}
+
 fn extract_xlsx(bytes: &[u8], options: &Options, record: &mut Record) -> Result<()> {
-    record.extractor = Some(identity("calamine-sparse", "0.36.1"));
+    record.extractor = Some(identity("calamine-sparse", "0.36.1", &record.policy_digest));
     let mut workbook = Xlsx::new(Cursor::new(bytes))?;
     let metadata = workbook.sheets_metadata().to_vec();
     let mut sheets = Vec::new();
@@ -237,7 +364,9 @@ fn cell_value(value: &DataRef<'_>) -> Result<Value> {
         DataRef::SharedString(value) => json!({"kind": "string", "value": value}),
         DataRef::Bool(value) => json!({"kind": "boolean", "value": value}),
         DataRef::DateTime(value) => {
-            json!({"kind": "excel_datetime", "serial": value.as_f64(), "calendar": value.to_ymd_hms_milli(), "is_duration": value.is_duration()})
+            // Excel serials carry no time zone. Converting to UTC without a
+            // supplied source zone would invent an instant, including DST rules.
+            json!({"kind": "excel_datetime", "serial": value.as_f64(), "calendar": value.to_ymd_hms_milli(), "is_duration": value.is_duration(), "timezone": null})
         }
         DataRef::DateTimeIso(value) => json!({"kind": "iso_datetime", "value": value}),
         DataRef::DurationIso(value) => json!({"kind": "iso_duration", "value": value}),

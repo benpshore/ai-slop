@@ -18,6 +18,10 @@ fn pdf_magic_overrides_extension_and_keeps_source_lines() {
     assert_eq!(record.format, Format::Pdf);
     assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
     assert_eq!(
+        record.policy["formats_enabled"],
+        cfg!(feature = "formats").to_string()
+    );
+    assert_eq!(
         record.sha256.as_deref(),
         Some(tpe::schema::sha256_hex(&bytes).as_str())
     );
@@ -40,6 +44,88 @@ fn scan_is_not_reported_as_successful_empty_text() {
     assert_eq!(
         record.content.unwrap()["ocr_candidates"],
         serde_json::json!([1])
+    );
+}
+
+#[test]
+fn prose_mentioning_pdf_magic_remains_exact_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prose.txt");
+    let text = "The PDF format starts with %PDF-1.7.\nThis is prose.\n";
+    fs::write(&path, text).unwrap();
+    let record = run(&path, &Options::default());
+    assert_eq!(record.format, Format::Text);
+    assert_eq!(record.outcome, Outcome::Extracted);
+    assert_eq!(record.content.unwrap()["text"], text);
+}
+
+fn raster_with_text(image_height: i64, text: &[u8], font: bool) -> Vec<u8> {
+    use lopdf::{Document, Stream, dictionary};
+    let mut doc = Document::load_mem(&common::raster::scanned_fixture()).unwrap();
+    let page_id = doc.get_pages()[&1];
+    let font_id = doc.add_object(dictionary! {"Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding"});
+    let mut content =
+        format!("q 612 0 0 {image_height} 0 40 cm /Im0 Do Q\nBT /F1 10 Tf 300 15 Td (")
+            .into_bytes();
+    content.extend_from_slice(text);
+    content.extend_from_slice(b") Tj ET");
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+    let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+    page.set("Contents", content_id);
+    if font {
+        page.get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Font", dictionary! {"F1" => font_id});
+    }
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn digital_page_number_does_not_hide_a_dominant_scanned_image() {
+    let (_dir, path) = common::write_temp_pdf(&raster_with_text(748, b"1", true));
+    let record = run(&path, &Options::default());
+    assert_eq!(record.outcome, Outcome::NeedsOcr);
+    let content = record.content.unwrap();
+    assert_eq!(content["pages"][0]["text"], "1");
+    assert_eq!(content["ocr_candidates"], serde_json::json!([1]));
+    assert_eq!(
+        content["ocr_evidence"][0]["reason"],
+        "sparse_text_dominant_raster"
+    );
+    assert!(
+        content["ocr_evidence"][0]["dominant_raster_fraction"]
+            .as_f64()
+            .unwrap()
+            > 0.9
+    );
+}
+
+#[test]
+fn small_captioned_image_is_not_a_dominant_scan() {
+    let (_dir, path) = common::write_temp_pdf(&raster_with_text(100, b"A photograph", true));
+    let record = run(&path, &Options::default());
+    assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+    assert_eq!(
+        record.content.unwrap()["ocr_candidates"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn font_fallback_is_review_required_even_without_replacement_characters() {
+    let (_dir, path) = common::write_temp_pdf(&raster_with_text(100, b"Hi", false));
+    let record = run(&path, &Options::default());
+    assert_eq!(record.outcome, Outcome::ReviewRequired);
+    assert_eq!(record.content.unwrap()["pages"][0]["text"], "Hi");
+    assert!(
+        record
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Latin-1"))
     );
 }
 
@@ -161,6 +247,56 @@ mod office {
         }
     }
 
+    #[test]
+    fn word_notes_even_headers_and_anchors_survive_as_hashed_xml_evidence() {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Body text</w:t></w:r><w:r><w:footnoteReference w:id="1"/><w:endnoteReference w:id="2"/></w:r></w:p><w:sectPr><w:headerReference w:type="even" r:id="rHead"/><w:footerReference w:type="default" r:id="rFoot"/></w:sectPr></w:body></w:document>"#;
+        let relationships = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rNote" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="rEnd" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="rHead" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/><Relationship Id="rFoot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>"#;
+        let notes = r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>D. Loutchko, Essential reference. 2026.</w:t></w:r></w:p></w:footnote></w:footnotes>"#;
+        let endnotes = r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="2"><w:p><w:r><w:t>Essential endnote citation</w:t></w:r></w:p></w:endnote></w:endnotes>"#;
+        let header = r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Even-page header</w:t></w:r></w:p></w:hdr>"#;
+        let footer = r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>"#;
+        let comments = r#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="3"><w:p><w:r><w:t>Reviewer evidence</w:t></w:r></w:p></w:comment></w:comments>"#;
+        let settings = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:evenAndOddHeaders/></w:settings>"#;
+        let parts = [
+            ("[Content_Types].xml", TYPES),
+            ("_rels/.rels", RELS),
+            ("word/document.xml", document),
+            ("word/_rels/document.xml.rels", relationships),
+            ("word/footnotes.xml", notes),
+            ("word/endnotes.xml", endnotes),
+            ("word/header2.xml", header),
+            ("word/footer1.xml", footer),
+            ("word/comments.xml", comments),
+            ("word/settings.xml", settings),
+        ];
+        let record = process("notes.docx", &package(&parts), &Options::default());
+        assert_eq!(
+            record.outcome,
+            Outcome::ReviewRequired,
+            "{:?}",
+            record.warnings
+        );
+        let content = record.content.unwrap();
+        let evidence = content["tpe_supplemental_parts"].as_array().unwrap();
+        for (name, source_xml) in parts.iter().filter(|(name, _)| name.starts_with("word/")) {
+            let part = evidence
+                .iter()
+                .find(|part| part["path"] == *name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(part["xml"], *source_xml);
+            assert_eq!(
+                part["sha256"],
+                tpe::schema::sha256_hex(source_xml.as_bytes())
+            );
+        }
+        assert!(
+            record
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("reading order"))
+        );
+    }
+
     fn workbook() -> Vec<u8> {
         package(&[
             ("[Content_Types].xml", TYPES),
@@ -177,12 +313,16 @@ mod office {
                 r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
             ),
             (
+                "xl/styles.xml",
+                r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>"#,
+            ),
+            (
                 "xl/worksheets/sheet1.xml",
                 r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:XFD1048576"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>D. Loutchko</t></is></c><c r="B1"><v>12.5</v></c><c r="C1"><f>B1*2</f><v>25</v></c><c r="D1"><f t="shared" si="0" ref="D1:D2">B1+1</f><v>13.5</v></c></row><row r="2"><c r="D2"><f t="shared" si="0"/><v>8</v></c></row><row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>far corner</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A3:B3"/></mergeCells></worksheet>"#,
             ),
             (
                 "xl/worksheets/sheet2.xml",
-                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="b"><v>1</v></c><c r="B1" t="e"><v>#DIV/0!</v></c><c r="C1"><f>1/0</f></c></row></sheetData></worksheet>"#,
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="b"><v>1</v></c><c r="B1" t="e"><v>#DIV/0!</v></c><c r="C1"><f>1/0</f></c><c r="D1" s="1"><v>45000.5</v></c></row></sheetData></worksheet>"#,
             ),
         ])
     }
@@ -214,6 +354,53 @@ mod office {
         assert_eq!(sheets[1]["cells"][1]["value"]["kind"], "error");
         assert_eq!(sheets[1]["cells"][2]["value"]["kind"], "empty");
         assert_eq!(sheets[1]["cells"][2]["formula"]["text"], "1/0");
+        let date = &sheets[1]["cells"][3]["value"];
+        assert_eq!(date["kind"], "excel_datetime");
+        assert_eq!(date["serial"], 45000.5);
+        assert_eq!(
+            date["calendar"],
+            serde_json::json!([2023, 3, 15, 12, 0, 0, 0])
+        );
+        assert_eq!(date.get("timezone"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn shared_formula_derived_cell_can_precede_anchor_in_xml_order() {
+        use std::io::Read;
+        let bytes = workbook();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        let mut parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut member = archive.by_index(index).unwrap();
+            let name = member.name().to_owned();
+            let mut xml = String::new();
+            member.read_to_string(&mut xml).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                let first = xml.find("<row ").unwrap();
+                let second = first + xml[first..].find("</row>").unwrap() + 6;
+                let end = second + xml[second..].find("</row>").unwrap() + 6;
+                let reversed = format!("{}{}", &xml[second..end], &xml[first..second]);
+                xml.replace_range(first..end, &reversed);
+            }
+            parts.push((name, xml));
+        }
+        let refs: Vec<(&str, &str)> = parts
+            .iter()
+            .map(|(name, xml)| (name.as_str(), xml.as_str()))
+            .collect();
+        let record = process("late-anchor.xlsx", &package(&refs), &Options::default());
+        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        let content = record.content.unwrap();
+        let cells = content["sheets"][0]["cells"].as_array().unwrap();
+        assert_eq!(cells[0]["row"], 2);
+        assert_eq!(cells[0]["formula"]["kind"], "shared_derived");
+        assert_eq!(cells[4]["row"], 1);
+        assert_eq!(cells[4]["formula"]["kind"], "shared_anchor");
+        assert_eq!(cells[4]["formula"]["text"], "B1+1");
+        assert_eq!(
+            cells[0]["formula"]["shared_index"],
+            cells[4]["formula"]["shared_index"]
+        );
     }
 
     #[test]
@@ -262,10 +449,81 @@ mod office {
         );
         assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
         let content = record.content.unwrap();
-        let mut text = Vec::new();
-        strings(&content, "text", &mut text);
-        assert!(text.contains(&"Loutchko, D."), "{text:?}");
-        assert!(text.contains(&"first line\nsecond line"), "{text:?}");
+        assert_eq!(
+            content["rows"],
+            serde_json::json!([
+                ["name", "note"],
+                ["Loutchko, D.", "first line\nsecond line"]
+            ])
+        );
+        assert_eq!(content["dialect"]["delimiter"], ",");
+        assert_eq!(content["dialect"]["has_headers"], false);
+    }
+
+    #[test]
+    fn csv_quoted_header_cannot_change_dialect_and_ragged_rows_stay_ragged() {
+        let source = "\"Name; aliases; initials\",Count\r\n\"Loutchko; D.; DL\",1\r\n\nonly one cell\nlast,,\n";
+        let record = process("header.csv", source.as_bytes(), &Options::default());
+        assert_eq!(record.outcome, Outcome::Extracted, "{:?}", record.warnings);
+        let content = record.content.unwrap();
+        assert_eq!(
+            content["rows"],
+            serde_json::json!([
+                ["Name; aliases; initials", "Count"],
+                ["Loutchko; D.; DL", "1"],
+                ["only one cell"],
+                ["last", "", ""]
+            ])
+        );
+        assert_eq!(content["source_text"], source);
+        let options = Options {
+            max_cells: 7,
+            ..Options::default()
+        };
+        let limited = process("header.csv", source.as_bytes(), &options);
+        assert_eq!(limited.outcome, Outcome::Failed);
+        assert!(limited.content.is_none());
+        for bad in ["a,\"unclosed\n", "\"closed\"junk,b\n", "a\"b,c\n"] {
+            assert_eq!(
+                process("bad.csv", bad.as_bytes(), &Options::default()).outcome,
+                Outcome::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn parser_limit_environment_changes_are_in_recorded_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.txt");
+        fs::write(&path, "provenance").unwrap();
+        let execute = |depth: &str| {
+            let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+                .args(["ingest"])
+                .arg(&path)
+                .env("DOCLING_RS_MAX_XML_DEPTH", depth)
+                .env("DOCLING_RS_MAX_HTML_DEPTH", " 123 ")
+                .env("DOCLING_RS_MAX_PART_BYTES", "4096")
+                .env("UNRELATED_SECRET", "must never be recorded")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(!text.contains("must never be recorded"));
+            serde_json::from_str::<tpe::ingest::Record>(&text).unwrap()
+        };
+        let first = execute("512");
+        let second = execute("3");
+        let fallback = execute("invalid");
+        assert_eq!(first.policy["formats_enabled"], "true");
+        assert_eq!(first.policy["DOCLING_RS_MAX_HTML_DEPTH"], "123");
+        assert_eq!(first.policy["DOCLING_RS_MAX_PART_BYTES"], "4096");
+        assert_eq!(second.policy["DOCLING_RS_MAX_XML_DEPTH"], "3");
+        assert_ne!(first.policy_digest, second.policy_digest);
+        assert_eq!(first.policy_digest, fallback.policy_digest);
+        assert_eq!(
+            first.policy_digest,
+            tpe::schema::config_digest(&first.policy)
+        );
     }
 
     #[test]
@@ -285,13 +543,19 @@ mod office {
 
     #[test]
     fn duplicate_zip_members_are_rejected_before_conversion() {
+        // ZipWriter forbids duplicate names, so deliberately corrupt this
+        // fixture's local-header and central-directory filenames. Both names
+        // have the same byte length; payload bytes and their CRCs stay intact.
         let mut bytes = package(&[("word/document.xml", "one"), ("word/document.xmL", "two")]);
         let from = b"word/document.xmL";
         let mut start = 0;
+        let mut replacements = 0;
         while let Some(at) = bytes[start..].windows(from.len()).position(|w| w == from) {
             bytes[start + at + from.len() - 1] = b'l';
             start += at + from.len();
+            replacements += 1;
         }
+        assert_eq!(replacements, 2, "one local and one central filename");
         let record = process("duplicate.docx", &bytes, &Options::default());
         assert_eq!(record.outcome, Outcome::Failed);
         assert!(

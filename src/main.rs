@@ -83,7 +83,7 @@ struct IngestArgs {
     /// Maximum ZIP members per Office package.
     #[arg(long, default_value_t = 10_000)]
     max_archive_entries: usize,
-    /// Maximum stored cells per workbook; distant cells do not fill a dense grid.
+    /// Maximum cells per CSV or workbook; distant Excel cells do not fill a dense grid.
     #[arg(long, default_value_t = 250_000)]
     max_cells: usize,
     /// Maximum PDF pages per input.
