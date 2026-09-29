@@ -312,6 +312,16 @@ const SELECT_STATS: &str = "SELECT \
     (SELECT COUNT(*) FROM figures)";
 
 impl Ledger {
+    /// Apply the resolved durability level. This never selects `OFF`; policy
+    /// profiles may increase durability but cannot silently remove it.
+    pub fn set_synchronous(&mut self, level: &str) -> Result<(), LedgerError> {
+        let pragma = match level {
+            "FULL" => "PRAGMA synchronous = FULL",
+            _ => "PRAGMA synchronous = NORMAL",
+        };
+        self.conn.execute_batch(pragma)?;
+        Ok(())
+    }
     /// Opens or creates the ledger file at `path` and verifies its schema
     /// version. Uses WAL journaling, `synchronous = NORMAL`, a 5 s busy
     /// timeout and enforced foreign keys.
