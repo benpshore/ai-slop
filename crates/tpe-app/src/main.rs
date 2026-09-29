@@ -27,7 +27,7 @@ fn main() {
         .iter()
         .any(|arg| arg == std::path::Path::new("--version"))
     {
-        println!("tpe-app {}", env!("CARGO_PKG_VERSION"));
+        println!("PDFTextract {}", version());
         return;
     }
     gui::run(args);
