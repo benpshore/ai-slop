@@ -115,7 +115,7 @@ remain at 0.65–0.78 body alignment. `marker_precision` (targets that resolve t
 entry, not just any entry) is 99.5% `dev` / 99.9% `holdout`, and `marker_key_recall` is 97.2%
 `dev` / 99.2% `holdout`; the plain `marker_recall` diagnostic still does not check correctness.
 Reference title accuracy is 94.4% `dev`. `ms_per_chunk` p50 (22.9 ms `dev`, 20.8 ms `holdout`)
-now meets the 30 ms target on these hosted runners — perf loop PR #35 took arm p50 from 35.4 ms
+is a sub-30 ms diagnostic on these hosted runners, not the M1 service-time measurement — perf loop PR #35 took arm p50 from 35.4 ms
 to 18.7 ms before loop 10's region tagging added about 4 ms back — and M1 numbers have not been
 measured; a pre-loop-10 comparison (Native run 36491886979) found the full `docling` pipeline a
 routed exception at about 4.9 s per chunk, and `pdfium` about 6x slower than `lopdf` on the

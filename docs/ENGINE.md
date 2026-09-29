@@ -44,7 +44,7 @@ fragments; a few papers remain at 0.65–0.78 body alignment. Citation-marker pr
 that resolve to the correct entry) is 99.5% `dev` / 99.9% `holdout`, and marker key recall is
 97.2% `dev` / 99.2% `holdout`. Perf loop (PR #35) took arm p50 from 35.4 ms to 18.7 ms, before
 loop 10's region tagging added about 4 ms back; p50 is now 22.9 ms `dev` / 20.8 ms `holdout`,
-meeting the 30 ms target on these CI runners, though M1 has not yet been measured natively.
+a sub-30 ms diagnostic on these hosted runners; the M1 service-time target is not yet measured.
 
 A pre-loop-10 three-backend comparison on the reference-metrics path (Native run 36491886979)
 found `lopdf` at 99.6%/99.7% with body alignment 0.738 at p50 18.7 ms; `pdfium` at 97.3%/99.6%
