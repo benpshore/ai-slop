@@ -85,6 +85,10 @@ use crate::schema::{BBox, Line, PageText, Span};
 const MAX_DEPTH: u32 = 64;
 /// Maximum number of lines laid out on one page; the rest is appended as is.
 const MAX_LINES: usize = 20_000;
+/// Maximum prior vertical groups examined on one page. Once exhausted,
+/// remaining spans stay separate rather than allowing hostile geometry to
+/// make grouping quadratic.
+const MAX_VERTICAL_GROUP_COMPARISONS: usize = MAX_LINES * 8;
 /// Baseline tolerance for joining spans into one line (multiple of the size).
 const BASELINE_TOLERANCE: f32 = 0.4;
 /// Horizontal reach for joining spans into one line (multiple of the size).
@@ -816,17 +820,33 @@ fn vertical_line(spans: &[Span], bbox: BBox, members: &[(usize, BBox)]) -> Line 
 /// the latest group it overlaps horizontally by `STACK_OVERLAP` of the
 /// narrower box and lies at most `STACK_GAP` ems above or below.
 fn vertical_lines(spans: &[Span], vertical: &[(usize, BBox)]) -> Vec<Line> {
+    vertical_lines_with_budget(spans, vertical, MAX_VERTICAL_GROUP_COMPARISONS)
+}
+
+fn vertical_lines_with_budget(
+    spans: &[Span],
+    vertical: &[(usize, BBox)],
+    mut comparisons_left: usize,
+) -> Vec<Line> {
     let mut order: Vec<(usize, BBox)> = vertical.to_vec();
     order.sort_by_key(|(i, _)| (spans[*i].seq, *i));
     let mut groups: Vec<(BBox, Vec<(usize, BBox)>)> = Vec::new();
     for (i, b) in order {
-        let found = groups.iter().rposition(|(g, _)| {
+        let mut found = None;
+        for (k, (g, _)) in groups.iter().enumerate().rev() {
+            if comparisons_left == 0 {
+                break;
+            }
+            comparisons_left -= 1;
             let narrow = (g.x1 - g.x0).min(b.x1 - b.x0);
             let em = (g.x1 - g.x0).max(b.x1 - b.x0);
             let overlap = g.x1.min(b.x1) - g.x0.max(b.x0);
             let gap = (b.y0 - g.y1).max(g.y0 - b.y1);
-            overlap > 0.0 && overlap >= STACK_OVERLAP * narrow && gap <= STACK_GAP * em
-        });
+            if overlap > 0.0 && overlap >= STACK_OVERLAP * narrow && gap <= STACK_GAP * em {
+                found = Some(k);
+                break;
+            }
+        }
         if let Some(k) = found {
             groups[k].0 = union(groups[k].0, b);
             groups[k].1.push((i, b));
@@ -3032,6 +3052,35 @@ mod tests {
         }
         assert!(lines.contains(&"hidden text layer"));
         assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+    }
+
+    #[test]
+    fn vertical_grouping_stops_searching_when_its_budget_is_exhausted() {
+        let spans = vec![
+            span("first", 10.0, 0.0, 20.0, 50.0, 0),
+            span("second", 10.0, 200.0, 20.0, 250.0, 1),
+            span("third", 10.0, 400.0, 20.0, 450.0, 2),
+            span("near first", 10.0, 55.0, 20.0, 105.0, 3),
+        ];
+        let vertical: Vec<(usize, BBox)> = spans
+            .iter()
+            .enumerate()
+            .map(|(i, span)| (i, span.bbox.unwrap()))
+            .collect();
+
+        let unlimited = vertical_lines_with_budget(&spans, &vertical, usize::MAX);
+        assert_eq!(unlimited.len(), 3);
+        assert_eq!(unlimited[0].text, "first near first");
+
+        let bounded = vertical_lines_with_budget(&spans, &vertical, 2);
+        assert_eq!(bounded.len(), 4);
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third", "near first"]
+        );
     }
 
     #[test]
