@@ -18,6 +18,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1"
 thiserror = "2"
 tpe-common = { path = "../tpe-common" }
+tpe-credentials = { path = "../tpe-credentials" }
 ureq = "3"
 
 # GPUI is a macOS-only dependency. Its default features (`x11`, `wayland`,

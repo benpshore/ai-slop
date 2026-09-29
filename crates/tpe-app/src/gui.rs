@@ -178,7 +178,12 @@ impl Workbench {
         let ask_focus = cx.focus_handle().tab_index(3).tab_stop(true);
         window.focus(&corpus_focus);
         Self {
-            keys: Box::new(EnvKeyProvider),
+            // Prefer the OS-protected Keychain. Environment loading remains a
+            // deliberate fallback for deployments where it is unavailable.
+            keys: keys::preferred_provider().map_or_else(
+                |_| Box::new(EnvKeyProvider) as Box<dyn KeyProvider>,
+                |store| Box::new(store),
+            ),
             reader,
             corpus,
             selected: None,
@@ -315,11 +320,20 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let Some(key) = self.keys.api_key(provider.credential_service()) else {
-            self.answer = keys::missing_key_message(provider);
-            self.answer_from = None;
-            cx.notify();
-            return;
+        let key = match self.keys.api_key(provider.credential_service()) {
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                self.answer = keys::missing_key_message(provider);
+                self.answer_from = None;
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.answer = format!("Cannot access credentials: {error}");
+                self.answer_from = None;
+                cx.notify();
+                return;
+            }
         };
         let context = match self.detail.as_ref() {
             Some(detail) => view::document_context(detail, MAX_CONTEXT_CHARS),

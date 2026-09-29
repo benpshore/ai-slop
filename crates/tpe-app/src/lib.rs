@@ -11,8 +11,7 @@
 //! - [`tpe_ai`]: request builders, response parsers and the blocking `ask()`
 //!   call for the Anthropic Messages API and the `OpenAI` chat completions API.
 //! - [`keys`]: the `KeyProvider` trait the GUI uses to obtain API keys, with an
-//!   environment-variable implementation. The credentials crate adapter is
-//!   wired by the integration owner once both crates are on `main`.
+//!   credential-store adapter and an opt-in environment-variable fallback.
 //!
 //! No test in this crate touches the network or the file system outside a
 //! temporary in-memory `SQLite` database.
