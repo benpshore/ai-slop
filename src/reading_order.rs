@@ -85,6 +85,9 @@ use crate::schema::{BBox, Line, PageText, Span};
 const MAX_DEPTH: u32 = 64;
 /// Maximum number of lines laid out on one page; the rest is appended as is.
 const MAX_LINES: usize = 20_000;
+/// Maximum estimated character/member inspections spent composing accents
+/// on one page. Above this bound the glyphs are kept verbatim instead.
+const MAX_ACCENT_WORK: usize = 1_000_000;
 /// Baseline tolerance for joining spans into one line (multiple of the size).
 const BASELINE_TOLERANCE: f32 = 0.4;
 /// Horizontal reach for joining spans into one line (multiple of the size).
@@ -1059,6 +1062,7 @@ struct Grouped {
     lines: Vec<Line>,
     margin: Vec<Line>,
     unattached: usize,
+    accent_skipped: bool,
 }
 
 /// Group spans into lines by shared baseline and horizontal proximity, with
@@ -1122,6 +1126,27 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
         .fold(fallback, f32::max);
     candidates.sort_by(baseline_first);
 
+    // Each accent can inspect all candidate members while finding its base
+    // and all characters of that base while inserting its mark. Bound that
+    // attacker-controlled product before doing either repeated scan. When
+    // over budget, group accent glyphs like ordinary text so no content is
+    // lost and the rest of reading-order recovery remains available.
+    let character_count = candidates.iter().fold(0usize, |total, (i, _)| {
+        total.saturating_add(spans[*i].text.chars().count())
+    });
+    let accent_count = candidates.iter().fold(0usize, |total, (i, _)| {
+        let text = spans[*i].text.trim();
+        let accent_only = !text.is_empty() && text.chars().all(|ch| combining_accent(ch).is_some());
+        let trailing = text
+            .chars()
+            .next_back()
+            .is_some_and(|ch| !is_combining(ch) && combining_accent(ch).is_some())
+            && !accent_only;
+        total.saturating_add(usize::from(accent_only || trailing))
+    });
+    let accent_work = accent_count.saturating_mul(candidates.len().saturating_add(character_count));
+    let compose_accents = accent_work <= MAX_ACCENT_WORK;
+
     let mut builds: Vec<LineBuild> = Vec::new();
     let mut accents: Vec<(usize, BBox, String)> = Vec::new();
     // Spans ending in an accent glyph: span index, the byte offset of the
@@ -1129,7 +1154,7 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
     let mut tails: Vec<(usize, usize, String)> = Vec::new();
     for (i, bbox) in &candidates {
         let text = &spans[*i].text;
-        if let Some(marks) = accent_marks(text) {
+        if compose_accents && let Some(marks) = accent_marks(text) {
             accents.push((*i, *bbox, marks));
             continue;
         }
@@ -1148,7 +1173,7 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
                 accents: Vec::new(),
             });
         }
-        if let Some((cut, marks)) = trailing_accent(text) {
+        if compose_accents && let Some((cut, marks)) = trailing_accent(text) {
             tails.push((*i, cut, marks));
         }
     }
@@ -1228,6 +1253,7 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
         lines,
         margin,
         unattached,
+        accent_skipped: !compose_accents,
     }
 }
 
@@ -1953,6 +1979,8 @@ fn push_warning(page: &mut PageText, warning: String) {
 /// at the end, one line each in content-stream order, as their own block.
 /// An accent-only span that sits over no glyph is left as its own line and
 /// noted with the warning `unattached accent glyph at page N: M span(s)`.
+/// If accent composition would exceed its per-page work limit, accent
+/// glyphs remain verbatim and a warning records that composition was skipped.
 /// Vertical text in the page margin (the rotated `arXiv` stamp) is placed
 /// after the ordered lines, before the spans without geometry, as a block
 /// of its own, and noted with the warning
@@ -1978,6 +2006,7 @@ pub fn order_page(page: &mut PageText) {
         lines: grouped,
         margin,
         unattached,
+        accent_skipped,
     } = group_spans(
         turned.as_deref().unwrap_or(page.spans.as_slice()),
         Some(width),
@@ -1985,6 +2014,11 @@ pub fn order_page(page: &mut PageText) {
     if unattached > 0 {
         let number = page.page;
         let msg = format!("unattached accent glyph at page {number}: {unattached} span(s)");
+        push_warning(page, msg);
+    }
+    if accent_skipped {
+        let number = page.page;
+        let msg = format!("accent composition skipped at page {number}: work limit exceeded");
         push_warning(page, msg);
     }
     if grouped.len() > MAX_LINES {
@@ -2657,6 +2691,24 @@ mod tests {
         let first = page.clone();
         order_page(&mut page);
         assert_eq!(page, first);
+    }
+
+    #[test]
+    fn excessive_accent_work_keeps_glyphs_verbatim() {
+        let mut spans = vec![span(&"a".repeat(1_000), 100.0, 700.0, 200.0, 710.0, 0)];
+        for seq in 1..=1_000 {
+            spans.push(span("^", 149.0, 700.04, 151.0, 710.04, seq));
+        }
+        let mut page = page_with(spans);
+
+        order_page(&mut page);
+
+        assert_eq!(page.text.matches('^').count(), 1_000);
+        assert_eq!(page.text.matches('\u{302}').count(), 0);
+        assert_eq!(
+            page.warnings,
+            ["accent composition skipped at page 1: work limit exceeded"]
+        );
     }
 
     #[test]
