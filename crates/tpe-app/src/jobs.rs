@@ -12,7 +12,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
+
+use futures::channel::mpsc::UnboundedSender;
 
 use tpe::acquire;
 use tpe::backend;
@@ -240,6 +243,11 @@ impl JobList {
         self.rows.iter().any(|row| !row.is_active())
     }
 
+    /// Whether any row is queued or running.
+    pub fn has_active(&self) -> bool {
+        self.rows.iter().any(JobRow::is_active)
+    }
+
     /// Drop finished and failed rows.
     pub fn clear_done(&mut self) {
         self.rows.retain(JobRow::is_active);
@@ -250,18 +258,94 @@ impl JobList {
 /// name plus `suffix`, never overwriting an existing file. `paper.pdf` with
 /// suffix `.txt` becomes `paper.txt`, then `paper 2.txt`, `paper 3.txt`, …
 pub fn output_path(source: &Path, suffix: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    output_paths(source, &[suffix], exists).remove(0)
+}
+
+/// [`output_path`] for a set of files written together: they share one
+/// generation number, chosen so that none of them exists. With
+/// `paper.references.txt` present but `paper.references.json` gone, both
+/// become `paper 2.references.*` rather than a pair mixing two runs.
+pub fn output_paths(
+    source: &Path,
+    suffixes: &[&str],
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     let directory = source.parent().unwrap_or_else(|| Path::new(""));
     let base = source
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut candidate = directory.join(format!("{base}{suffix}"));
+    let candidates = |n: u64| -> Vec<PathBuf> {
+        suffixes
+            .iter()
+            .map(|suffix| {
+                if n == 1 {
+                    directory.join(format!("{base}{suffix}"))
+                } else {
+                    directory.join(format!("{base} {n}{suffix}"))
+                }
+            })
+            .collect()
+    };
     let mut n = 1u64;
-    while exists(&candidate) {
+    let mut paths = candidates(n);
+    while paths.iter().any(|path| exists(path)) {
         n += 1;
-        candidate = directory.join(format!("{base} {n}{suffix}"));
+        paths = candidates(n);
     }
-    candidate
+    paths
+}
+
+/// Paths handed to the app from outside its window (Finder Services, files
+/// opened with the app, the command line), possibly before the window
+/// exists: macOS delivers launch-time opens before the application has
+/// finished launching. Items sent before [`Mailbox::install`] are kept and
+/// delivered, in order, the moment a sender arrives.
+pub struct Mailbox<T> {
+    sender: OnceLock<UnboundedSender<T>>,
+    pending: Mutex<Vec<T>>,
+}
+
+impl<T> Mailbox<T> {
+    pub const fn new() -> Self {
+        Self {
+            sender: OnceLock::new(),
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Deliver `item` now, or keep it until a sender is installed.
+    pub fn send(&self, item: T) {
+        // The lock covers the sender check so an install cannot slip in
+        // between the check and the push.
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.sender.get() {
+            Some(sender) => {
+                let _ = sender.unbounded_send(item);
+            }
+            None => pending.push(item),
+        }
+    }
+
+    /// Install the sender (once; later calls are ignored) and deliver
+    /// everything kept so far.
+    pub fn install(&self, sender: UnboundedSender<T>) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.sender.set(sender).is_err() {
+            return;
+        }
+        if let Some(sender) = self.sender.get() {
+            for item in pending.drain(..) {
+                let _ = sender.unbounded_send(item);
+            }
+        }
+    }
+}
+
+impl<T> Default for Mailbox<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The ledger `tpe extract` requires: under Application Support on macOS,
@@ -346,7 +430,7 @@ fn run_text(
         max_bytes: None,
         figures_dir: None,
     };
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+    let mut result = panic::catch_unwind(AssertUnwindSafe(|| {
         pipeline::run_job_observed(&job, observe)
     }))
     .unwrap_or_else(|payload| Err(panic_error(&*payload)))
@@ -362,8 +446,14 @@ fn run_text(
         fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let mut store = Ledger::open(ledger).map_err(|e| format!("ledger: {e}"))?;
-    store
+    // As `tpe extract` does: the write is timed and recorded on the run.
+    let write_start = Instant::now();
+    let run = store
         .write_result(&result)
+        .map_err(|e| format!("ledger: {e}"))?;
+    result.timings.write_ms = write_start.elapsed().as_secs_f64() * 1000.0;
+    store
+        .update_timings(run, &result.timings)
         .map_err(|e| format!("ledger: {e}"))?;
     let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
     let target = output_path(source, ".txt", Path::exists);
@@ -423,11 +513,16 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
             warnings: record.warnings,
         });
     }
-    let json = output_path(source, ".references.json", Path::exists);
+    let mut pair = output_paths(
+        source,
+        &[".references.json", ".references.txt"],
+        Path::exists,
+    );
+    let text = pair.pop().expect("two paths");
+    let json = pair.pop().expect("two paths");
     let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     line.push('\n');
     fs::write(&json, line).map_err(|e| format!("writing {}: {e}", json.display()))?;
-    let text = output_path(source, ".references.txt", Path::exists);
     fs::write(&text, record.plain_text())
         .map_err(|e| format!("writing {}: {e}", text.display()))?;
     let scanned = record.pages_scanned.unwrap_or(0);
@@ -457,7 +552,10 @@ fn panic_error(payload: &(dyn std::any::Any + Send)) -> pipeline::PipelineError 
 mod tests {
     use std::path::Path;
 
-    use super::{Action, JobList, Outcome, Phase, file_url_to_path, output_path, run};
+    use super::{
+        Action, JobList, Mailbox, Outcome, Phase, file_url_to_path, output_path, output_paths, run,
+    };
+    use futures::{FutureExt, StreamExt};
     use tpe::pipeline::Progress;
 
     const FIXTURE: &str = concat!(
@@ -512,6 +610,13 @@ mod tests {
             ]
         );
         assert!(ledger.exists(), "the ledger was created");
+        let store = tpe::ledger::Ledger::open(&ledger).unwrap();
+        let run_id = store
+            .latest_run_for_prefix("")
+            .unwrap()
+            .expect("the run is in the ledger");
+        let stored = store.load_result(run_id).unwrap();
+        assert!(stored.timings.write_ms > 0.0, "the ledger write was timed");
 
         // A second run never overwrites: it numbers the new file.
         let again = run(Action::Text, &pdf, &ledger, &mut |_| {}).unwrap();
@@ -555,6 +660,35 @@ mod tests {
             ]
         );
         assert!(!ledger.exists(), "a bibliography needs no ledger");
+
+        // With one file of the pair gone, the next run numbers both.
+        std::fs::remove_file(&outcome.outputs[0]).unwrap();
+        let again = run(Action::Bibliography, &pdf, &ledger, &mut |_| {}).unwrap();
+        assert_eq!(
+            again.outputs,
+            [
+                dir.path().join("paper 2.references.json"),
+                dir.path().join("paper 2.references.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn mailbox_keeps_items_until_a_sender_is_installed() {
+        let mailbox: Mailbox<u32> = Mailbox::new();
+        mailbox.send(1);
+        mailbox.send(2);
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        mailbox.install(sender);
+        mailbox.send(3);
+        let (other, _keep) = futures::channel::mpsc::unbounded();
+        mailbox.install(other); // ignored: the first sender stays
+        mailbox.send(4);
+        let mut got = Vec::new();
+        while let Some(Some(item)) = receiver.next().now_or_never() {
+            got.push(item);
+        }
+        assert_eq!(got, [1, 2, 3, 4]);
     }
 
     #[test]
@@ -662,6 +796,15 @@ mod tests {
         assert_eq!(
             output_path(source, ".references.json", |_| false),
             Path::new("/docs/My Paper.v2.references.json")
+        );
+        // A set shares one generation: any member present moves them all on.
+        let only_txt = |p: &Path| p.to_str().unwrap() == "/docs/My Paper.v2.references.txt";
+        assert_eq!(
+            output_paths(source, &[".references.json", ".references.txt"], only_txt),
+            [
+                Path::new("/docs/My Paper.v2 2.references.json"),
+                Path::new("/docs/My Paper.v2 2.references.txt")
+            ]
         );
     }
 

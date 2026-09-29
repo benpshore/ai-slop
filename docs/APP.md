@@ -14,7 +14,9 @@ per-page progress bar.
 | Get bibliography | `bibliography::scan_backward_observed` (what `tpe bibliography` runs) | `paper.references.json` (the CLI's record, `bibliography::Record`, [BIBLIOGRAPHY](BIBLIOGRAPHY.md)) and `paper.references.txt` (one entry per line, label then `raw`) |
 
 An existing file is never overwritten: the next run writes `paper 2.txt`
-(`jobs::output_path`, test `output_names_avoid_existing_files`). A failed
+(`jobs::output_path`, test `output_names_avoid_existing_files`); the two
+bibliography files share one number, so a pair never mixes two runs
+(`jobs::output_paths`). A failed
 job, an engine panic included, writes nothing next to the source (test
 `malformed_input_fails_and_writes_nothing`). A bibliography the engine
 reports `not_found` is shown as such and writes nothing. The ledger `tpe
@@ -39,7 +41,12 @@ Ways in:
 Jobs run one at a time (the ledger has one writer). A queued row can be
 removed; a running one runs to completion (the in-process engine has no
 cancellation hook yet). Finished rows offer Copy (the text output to the
-clipboard) and Show in Finder.
+clipboard) and Show in Finder. Closing the window while rows are queued or
+running does not stop them: the view lives on, the app quits itself once
+idle, and the Dock icon reopens the window on the same rows. Files opened
+with the app before the window exists (a cold launch from Finder) are kept
+and queued once it does (`jobs::Mailbox`, test
+`mailbox_keeps_items_until_a_sender_is_installed`).
 
 ## Fast by construction
 
@@ -67,13 +74,18 @@ per-page progress cost on an M1 have not been recorded.
   targets, the job list with bars, keys, menus, the Finder hooks.
 - `src/services.rs` (binary, macOS): the `NSServices` provider.
 - `bundle/Info.plist`, `bundle.sh`: assemble `target/release/PDFTextract.app`
-  with the release binary, ad-hoc signed.
+  with the release binary, ad-hoc signed. The tag-derived version goes into
+  both the plist and the binary (`PDFTextract --version`), never into a
+  manifest field (AGENTS.md).
 - `tests/fixtures/synthetic-paper.pdf`: the engine's synthetic paper
   (`tests/common/mod.rs::synthetic_paper`), used by the `jobs` tests.
 - `.github/workflows/app.yml`: `macos-15`; fmt, clippy and the crate's tests
   with GPUI compiled in, then `bundle.sh` and a bundle smoke test, and the
-  zipped app as an artifact. It runs only when the crate changes and is not
-  part of the required `ci` check, so engine PRs never queue macOS runners.
+  zipped app as an artifact. It runs only when the crate or the dependency
+  set (`Cargo.toml`, `Cargo.lock`) changes and is not part of the required
+  `ci` check, so engine PRs never queue macOS runners; `jobs.rs`, the part
+  of the crate that uses the engine, is compiled and tested on every Linux
+  `ci` leg.
   GPUI stays a macOS-only dependency: it type-checks on Linux but needs
   `libxkbcommon-x11` to link there.
 
@@ -103,8 +115,9 @@ Reasoned from the code:
   the previous `src/gui.rs`), so VoiceOver, Voice Control and Switch Control
   cannot see these controls. This is the app's largest known gap and needs
   an upstream accessibility layer.
-- Keyboard: every action is on a key (⌘O, ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab between
-  the buttons; Enter or Space on the focused one, which shows an accent
+- Keyboard: every action is on a key (⌘O, ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab through
+  the two big buttons, each row's Remove / Copy / Show in Finder and Clear
+  finished; Enter or Space on the focused one, which shows an accent
   border). Nothing is timed, nothing expires.
 - Targets: the two buttons are full-width and at least 132 pt tall; row
   buttons are padded. Drop is an alternative to the button, never the only
@@ -115,7 +128,8 @@ Reasoned from the code:
 ## Known limits
 
 - One job at a time; a 15,000-page document holds the queue while the engine
-  works on it, and cannot be cancelled once started.
+  works on it, and cannot be cancelled once started (quitting the app is the
+  only way to stop it; nothing half-written is left next to the PDF).
 - Progress for a bibliography counts pages read from the end against the
   whole page count, so its bar usually finishes early. That is the true
   state of the backward scan, not an estimate.

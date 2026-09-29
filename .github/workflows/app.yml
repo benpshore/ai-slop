@@ -3,20 +3,26 @@ name: App
 # Builds and tests PDFTextract (crates/tpe-app) on macOS: clippy and the
 # crate's tests with GPUI compiled in, the release binary, and the assembled,
 # ad-hoc-signed bundle as an artifact. Not part of the required `ci` check,
-# and only runs when the crate or this file changes, so engine PRs never
-# queue macOS runners. GPUI is macOS-only in Cargo.toml (it needs
-# libxkbcommon-x11 to link on Linux), so this is where the window compiles.
+# and only runs when the crate, the dependency set (Cargo.toml, Cargo.lock)
+# or this file changes, so engine PRs never queue macOS runners. GPUI is
+# macOS-only in Cargo.toml (it needs libxkbcommon-x11 to link on Linux), so
+# this is where the window compiles; the crate's engine-facing code
+# (src/jobs.rs) is compiled and tested by the Linux `ci` legs.
 
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - crates/tpe-app/**
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/app.yml
   push:
     branches: [main]
     paths:
       - crates/tpe-app/**
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/app.yml
 
 permissions:

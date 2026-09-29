@@ -1,7 +1,9 @@
 //! `tpe-app` binary: `PDFTextract`, the GPUI app (macOS only).
 //!
 //! `tpe-app [paper.pdf ...]` opens the window and queues any given PDFs for
-//! text extraction; `tpe-app --version` prints the version and exits. On
+//! text extraction; `tpe-app --version` prints the version and exits: the
+//! tag-derived version `bundle.sh` passes as `PDFTEXTRACT_VERSION` at build
+//! time (the version is the git tag, AGENTS.md), else the manifest's. On
 //! other operating systems the binary prints a notice and exits 0 so the
 //! workspace builds and the library tests run everywhere.
 
@@ -29,6 +31,12 @@ fn main() {
         return;
     }
     gui::run(args);
+}
+
+/// The tag-derived version when built by `bundle.sh`, else the manifest's.
+#[cfg(target_os = "macos")]
+fn version() -> &'static str {
+    option_env!("PDFTEXTRACT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(not(target_os = "macos"))]

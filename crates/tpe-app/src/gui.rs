@@ -7,6 +7,11 @@
 //! GPUI's background executor in this process: no subprocess, no
 //! serialisation. Progress events are coalesced per frame.
 //!
+//! The view outlives its window: it is held as a GPUI global, so closing the
+//! window while jobs are queued or running lets them finish (the app quits
+//! itself once idle with no window), and the Dock icon reopens the window on
+//! the same state.
+//!
 //! GPUI 0.2.2 items used, verified against the crate source: `Application::on_open_urls`,
 //! `App::{prompt_for_paths, reveal_path, write_to_clipboard, set_menus, on_window_closed,
 //! windows, background_executor}` (`src/app.rs`), `Context::spawn` (async closure
@@ -20,25 +25,26 @@
 //! GPUI 0.2.2 has no accessibility tree (see the note in the workbench that
 //! preceded this window, in the git history of this file), so `VoiceOver`,
 //! Voice Control and Switch Control cannot see these controls. What this
-//! window does provide: every action on a key (⌘O, ⌘B, Tab/Shift-Tab, Enter
-//! or Space on the focused button, ⌘K, ⌘Q), the File menu, large targets,
-//! nothing timed, and visible text on every control.
+//! window does provide: every action on a key (⌘O, ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab
+//! through the two big buttons, every row's buttons and Clear finished; Enter
+//! or Space on the focused one), the File menu, large targets, nothing timed,
+//! and visible text on every control.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
-use futures::channel::mpsc::{self, UnboundedSender};
+use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt};
 use gpui::{
-    App, Application, Bounds, ClickEvent, ClipboardItem, Context, DefiniteLength, Div,
-    ExternalPaths, FocusHandle, FontWeight, KeyBinding, Menu, MenuItem, PathPromptOptions,
+    App, Application, Bounds, ClickEvent, ClipboardItem, Context, DefiniteLength, Div, Entity,
+    ExternalPaths, FocusHandle, FontWeight, Global, KeyBinding, Menu, MenuItem, PathPromptOptions,
     Stateful, SystemMenuType, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::*, px, rgb, size,
 };
 
 use tpe::pipeline::Progress;
-use tpe_app::jobs::{self, Action, JobList, JobRow, Phase};
+use tpe_app::jobs::{self, Action, JobList, JobRow, Mailbox, Phase};
 
 actions!(
     pdftextract,
@@ -65,18 +71,34 @@ const BUTTON: u32 = 0x002f_3440;
 const BUTTON_HOVER: u32 = 0x003d_4454;
 const TRACK: u32 = 0x002f_3440;
 
-/// Paths handed to the running app from outside the view: Finder Services
-/// (`services.rs`) and files opened with the app (`App::on_open_urls`).
+/// Paths handed to the app from outside the view: Finder Services
+/// (`services.rs`), files opened with the app (`Application::on_open_urls`,
+/// which macOS may call before the window exists) and the command line.
 type Intake = (Action, Vec<PathBuf>);
-static INTAKE: OnceLock<UnboundedSender<Intake>> = OnceLock::new();
+static INTAKE: Mailbox<Intake> = Mailbox::new();
 
-/// Queue `paths` for `action` in the running window. Safe from any thread;
-/// dropped silently before the window exists.
+/// Queue `paths` for `action`. Safe from any thread and at any time: items
+/// sent before the window exists are delivered once it does.
 pub fn intake(action: Action, paths: Vec<PathBuf>) {
-    if let Some(sender) = INTAKE.get() {
-        let _ = sender.unbounded_send((action, paths));
-    }
+    INTAKE.send((action, paths));
 }
+
+/// The view, kept alive independently of its window.
+struct ShellHandle(Entity<Shell>);
+
+impl Global for ShellHandle {}
+
+/// Focus handles of one row's buttons, so each is a tab stop.
+struct RowFocus {
+    remove: FocusHandle,
+    copy: FocusHandle,
+    reveal: FocusHandle,
+}
+
+/// Tab indices: the two big buttons, then `ROW_TAB_BASE + 4 * id + k` for
+/// row `id`'s buttons, then Clear finished last.
+const ROW_TAB_BASE: isize = 10;
+const CLEAR_TAB_INDEX: isize = isize::MAX / 2;
 
 /// The window's view.
 pub struct Shell {
@@ -85,17 +107,20 @@ pub struct Shell {
     root_focus: FocusHandle,
     text_focus: FocusHandle,
     biblio_focus: FocusHandle,
+    clear_focus: FocusHandle,
+    row_focus: HashMap<usize, RowFocus>,
 }
 
 impl Shell {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
         let text_focus = cx.focus_handle().tab_index(1).tab_stop(true);
         let biblio_focus = cx.focus_handle().tab_index(2).tab_stop(true);
-        window.focus(&text_focus);
+        let clear_focus = cx.focus_handle().tab_index(CLEAR_TAB_INDEX).tab_stop(true);
 
-        // Paths from Finder or the command line arrive on this channel.
+        // Paths from Finder or the command line arrive on this channel,
+        // including any that arrived before this view existed.
         let (sender, mut receiver) = mpsc::unbounded::<Intake>();
-        let _ = INTAKE.set(sender);
+        INTAKE.install(sender);
         cx.spawn(async move |this, cx| {
             while let Some((action, paths)) = receiver.next().await {
                 if this
@@ -114,6 +139,33 @@ impl Shell {
             root_focus: cx.focus_handle(),
             text_focus,
             biblio_focus,
+            clear_focus,
+            row_focus: HashMap::new(),
+        }
+    }
+
+    /// The focus handles of row `id`'s buttons, created on first use.
+    fn row_focus(&mut self, id: usize, cx: &mut Context<Self>) -> &RowFocus {
+        self.row_focus.entry(id).or_insert_with(|| {
+            let base = ROW_TAB_BASE + 4 * isize::try_from(id).unwrap_or(isize::MAX / 8);
+            RowFocus {
+                remove: cx.focus_handle().tab_index(base).tab_stop(true),
+                copy: cx.focus_handle().tab_index(base + 1).tab_stop(true),
+                reveal: cx.focus_handle().tab_index(base + 2).tab_stop(true),
+            }
+        })
+    }
+
+    /// Drop focus handles of rows that no longer exist.
+    fn prune_row_focus(&mut self) {
+        let live: Vec<usize> = self.jobs.rows().iter().map(|row| row.id).collect();
+        self.row_focus.retain(|id, _| live.contains(id));
+    }
+
+    /// Quit once nothing is queued or running and no window is open.
+    fn quit_if_idle(&self, cx: &mut Context<Self>) {
+        if cx.windows().is_empty() && !self.jobs.has_active() {
+            cx.quit();
         }
     }
 
@@ -183,6 +235,7 @@ impl Shell {
                 this.jobs.finish(id, result);
                 cx.notify();
                 this.pump(cx);
+                this.quit_if_idle(cx);
             });
         })
         .detach();
@@ -207,8 +260,15 @@ impl Shell {
 
     fn remove(&mut self, id: usize, cx: &mut Context<Self>) {
         if self.jobs.remove(id) {
+            self.prune_row_focus();
             cx.notify();
         }
+    }
+
+    fn clear_done(&mut self, cx: &mut Context<Self>) {
+        self.jobs.clear_done();
+        self.prune_row_focus();
+        cx.notify();
     }
 
     #[allow(clippy::unused_self)]
@@ -222,17 +282,38 @@ impl Shell {
     }
 
     fn on_clear_done(&mut self, _: &ClearDone, _: &mut Window, cx: &mut Context<Self>) {
-        self.jobs.clear_done();
-        cx.notify();
+        self.clear_done(cx);
     }
 
-    /// Enter or Space on a focused button.
+    /// Enter or Space on whichever button has focus.
     fn on_activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
         if self.text_focus.is_focused(window) {
             Self::choose(Action::Text, cx);
         } else if self.biblio_focus.is_focused(window) {
             Self::choose(Action::Bibliography, cx);
+        } else if self.clear_focus.is_focused(window) {
+            self.clear_done(cx);
+        } else if let Some((id, which)) = self.focused_row_button(window) {
+            match which {
+                RowButton::Remove => self.remove(id, cx),
+                RowButton::Copy => self.copy(id, cx),
+                RowButton::Reveal => self.reveal(id, cx),
+            }
         }
+    }
+
+    fn focused_row_button(&self, window: &Window) -> Option<(usize, RowButton)> {
+        self.row_focus.iter().find_map(|(id, focus)| {
+            if focus.remove.is_focused(window) {
+                Some((*id, RowButton::Remove))
+            } else if focus.copy.is_focused(window) {
+                Some((*id, RowButton::Copy))
+            } else if focus.reveal.is_focused(window) {
+                Some((*id, RowButton::Reveal))
+            } else {
+                None
+            }
+        })
     }
 
     // GPUI listeners take `&mut Self` even when only the window moves.
@@ -297,18 +378,25 @@ impl Shell {
             )
     }
 
-    fn render_row(row: &JobRow, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_row(&mut self, row: &JobRow, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = row.id;
         let status_color = match row.phase {
             Phase::Failed(_) => FAILED,
             _ => MUTED,
         };
+        let focus = self.row_focus(id, cx);
+        let (remove_focus, copy_focus, reveal_focus) = (
+            focus.remove.clone(),
+            focus.copy.clone(),
+            focus.reveal.clone(),
+        );
         let mut buttons = div().flex().gap_2().flex_shrink_0();
         match row.phase {
             Phase::Queued => {
                 buttons = buttons.child(small_button(
                     ("remove", id),
                     "Remove",
+                    &remove_focus,
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.remove(id, cx)),
                 ));
             }
@@ -318,12 +406,14 @@ impl Shell {
                     buttons = buttons.child(small_button(
                         ("copy", id),
                         "Copy",
+                        &copy_focus,
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.copy(id, cx)),
                     ));
                 }
                 buttons = buttons.child(small_button(
                     ("reveal", id),
                     "Show in Finder",
+                    &reveal_focus,
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.reveal(id, cx)),
                 ));
             }
@@ -369,11 +459,10 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<Stateful<Div>> = self
-            .jobs
-            .rows()
+        let snapshot: Vec<JobRow> = self.jobs.rows().to_vec();
+        let rows: Vec<Stateful<Div>> = snapshot
             .iter()
-            .map(|row| Self::render_row(row, cx))
+            .map(|row| self.render_row(row, cx))
             .collect();
         let empty = rows.is_empty();
         let has_done = self.jobs.has_done();
@@ -428,24 +517,33 @@ impl Render for Shell {
                     div().flex().child(small_button(
                         ("clear", 0),
                         "Clear finished (⌘K)",
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.jobs.clear_done();
-                            cx.notify();
-                        }),
+                        &self.clear_focus,
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.clear_done(cx)),
                     )),
                 )
             })
     }
 }
 
-/// A labelled row button.
+/// Which of a row's buttons has focus.
+#[derive(Clone, Copy)]
+enum RowButton {
+    Remove,
+    Copy,
+    Reveal,
+}
+
+/// A labelled button that is a tab stop (`focus`) and shows an accent
+/// border while focused; Enter and Space reach it through `Activate`.
 fn small_button(
     id: (&'static str, usize),
     label: &'static str,
+    focus: &FocusHandle,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .track_focus(focus)
         .px_3()
         .py_2()
         .rounded_md()
@@ -454,8 +552,35 @@ fn small_button(
         .bg(rgb(BUTTON))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(BUTTON_HOVER)))
+        .focus(|style| style.border_color(rgb(ACCENT)))
         .child(label)
         .on_click(on_click)
+}
+
+/// Open the window on the shared view, focusing the first button.
+fn open_main_window(cx: &mut App) {
+    let shell = cx.global::<ShellHandle>().0.clone();
+    let bounds = Bounds::centered(None, size(px(640.0), px(480.0)), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(480.0), px(320.0))),
+        titlebar: Some(TitlebarOptions {
+            title: Some("PDFTextract".into()),
+            ..TitlebarOptions::default()
+        }),
+        ..WindowOptions::default()
+    };
+    match cx.open_window(options, |window, cx| {
+        let focus = shell.read(cx).text_focus.clone();
+        window.focus(&focus);
+        shell.clone()
+    }) {
+        Ok(_) => cx.activate(true),
+        Err(error) => {
+            eprintln!("cannot open window: {error}");
+            cx.quit();
+        }
+    }
 }
 
 /// Start the app: keys, menus, the Finder hooks, and the window. `paths`
@@ -463,13 +588,20 @@ fn small_button(
 pub fn run(paths: Vec<PathBuf>) {
     let app = Application::new();
     // Files opened with the app (Open With, a drop on the Dock icon): there
-    // is no way to say which action, so text is the default.
+    // is no way to say which action, so text is the default. At launch
+    // these arrive before `run`'s callback; the mailbox keeps them.
     app.on_open_urls(|urls| {
         let paths: Vec<PathBuf> = urls
             .iter()
             .filter_map(|url| jobs::file_url_to_path(url))
             .collect();
         intake(Action::Text, paths);
+    });
+    // The Dock icon, once the window was closed with jobs still running.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() && cx.has_global::<ShellHandle>() {
+            open_main_window(cx);
+        }
     });
     app.run(move |cx: &mut App| {
         cx.bind_keys([
@@ -502,8 +634,11 @@ pub fn run(paths: Vec<PathBuf>) {
                 ],
             },
         ]);
+        // Closing the window is not quitting while work is queued or
+        // running: the view lives on as a global and quits once idle.
         cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+            let idle = !cx.global::<ShellHandle>().0.read(cx).jobs.has_active();
+            if cx.windows().is_empty() && idle {
                 cx.quit();
             }
         })
@@ -513,29 +648,12 @@ pub fn run(paths: Vec<PathBuf>) {
             .spawn(async { tpe::pipeline::warm_up() })
             .detach();
 
-        let bounds = Bounds::centered(None, size(px(640.0), px(480.0)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(480.0), px(320.0))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("PDFTextract".into()),
-                ..TitlebarOptions::default()
-            }),
-            ..WindowOptions::default()
-        };
-        match cx.open_window(options, |window, cx| cx.new(|cx| Shell::new(window, cx))) {
-            Ok(_) => {
-                cx.activate(true);
-                #[cfg(target_os = "macos")]
-                crate::services::install();
-                if !paths.is_empty() {
-                    intake(Action::Text, paths);
-                }
-            }
-            Err(error) => {
-                eprintln!("cannot open window: {error}");
-                cx.quit();
-            }
+        let shell = cx.new(Shell::new);
+        cx.set_global(ShellHandle(shell));
+        open_main_window(cx);
+        crate::services::install();
+        if !paths.is_empty() {
+            intake(Action::Text, paths);
         }
     });
 }
