@@ -47,7 +47,7 @@
 //!   every distinct configuration used in one process loads its own models.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use docling_core::{DoclingDocument, Node, PictureImage, Table, TableCell};
