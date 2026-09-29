@@ -93,7 +93,7 @@ use gpui::{
 
 use tpe_app::keys::{self, EnvKeyProvider, KeyProvider};
 use tpe_app::ledger::{CorpusRow, DocumentDetail, LedgerReader};
-use tpe_app::tpe_ai::{self, Provider};
+use tpe_app::tpe_ai::{self, AnalysisLimits, AnalysisRequest, DocumentContext, Provider};
 use tpe_app::view::{
     self, AskRequest, AskTracker, CompletionVerdict, NumberedLine, Pane, TextScale,
 };
@@ -315,18 +315,36 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let Some(key) = self.keys.api_key(provider.credential_service()) else {
+        let key = self
+            .keys
+            .api_key(provider.credential_service())
+            .unwrap_or_default();
+        if !tpe_ai::client(provider).capabilities().local && key.is_empty() {
             self.answer = keys::missing_key_message(provider);
             self.answer_from = None;
             cx.notify();
             return;
-        };
-        let context = match self.detail.as_ref() {
-            Some(detail) => view::document_context(detail, MAX_CONTEXT_CHARS),
-            None => String::from("No document is selected. Say so, then answer briefly."),
-        };
-        let user = format!("{context}\n\nQuestion: {question}");
+        }
+        let context = self
+            .detail
+            .as_ref()
+            .map_or_else(DocumentContext::default, |detail| {
+                let pages: Vec<_> = detail
+                    .pages
+                    .iter()
+                    .take(AnalysisLimits::default().max_pages)
+                    .map(|page| page.page)
+                    .collect();
+                detail.analysis_context(&pages, MAX_CONTEXT_CHARS)
+            });
         let system = view::SYSTEM_PROMPT.to_owned();
+        let analysis = AnalysisRequest {
+            system,
+            prompt: question,
+            model: tpe_ai::default_model(provider).into(),
+            max_output_tokens: tpe_ai::DEFAULT_MAX_TOKENS,
+            context,
+        };
         // Any earlier request still in flight is superseded by this id; its
         // answer is dropped in `finish_ask`.
         let request = self.ask.issue(provider, document.as_deref());
@@ -334,7 +352,9 @@ impl Workbench {
         self.answer_from = None;
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            tpe_ai::ask(provider, &key, &system, &user).map_err(|error| format!("Error: {error}"))
+            tpe_ai::analyze(provider, &key, &analysis, AnalysisLimits::default())
+                .map(|answer| answer.text)
+                .map_err(|error| format!("Error: {error}"))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -692,9 +712,19 @@ impl Workbench {
             self.question.clone()
         };
         let hint = format!(
-            "Asks {} about the selected document. Tab / Shift-Tab: panes. Enter: send. \
+            "Destination: {} ({}, {}). Sending up to {} relevant pages and 0 images. Tab / Shift-Tab: panes. Enter: send. \
              Cmd-P: switch model. Cmd-= / Cmd--: text size. Cmd-Q: quit.",
-            self.provider.label()
+            self.provider.label(),
+            tpe_ai::default_model(self.provider),
+            if tpe_ai::client(self.provider).capabilities().local {
+                "local"
+            } else {
+                "remote"
+            },
+            self.detail.as_ref().map_or(0, |d| d
+                .pages
+                .len()
+                .min(AnalysisLimits::default().max_pages))
         );
         pane_frame("ask", &self.ask_focus, "Ask", focused)
             .w(px(SIDE_PANE_PX))

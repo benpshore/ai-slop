@@ -11,6 +11,8 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use thiserror::Error;
 
+use crate::tpe_ai::{DocumentContext, Provenance, TextPart};
+
 /// Ledger schema version this reader understands (`schema_meta.version`).
 pub const LEDGER_SCHEMA_VERSION: u32 = 1;
 
@@ -65,6 +67,18 @@ pub struct PageRow {
     pub page: u32,
     /// `pages.text` as written by the reading-order stage.
     pub text: String,
+}
+
+/// A persisted figure artifact available for an explicitly selected analysis.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FigureRow {
+    pub page: u32,
+    pub index: u32,
+    pub mime: Option<String>,
+    /// Path relative to the extraction figure directory; bytes are loaded only
+    /// after the user selects the artifact.
+    pub file: Option<String>,
+    pub caption: Option<String>,
 }
 
 /// One bibliography entry.
@@ -128,10 +142,48 @@ pub struct DocumentDetail {
     pub abstract_text: Option<String>,
     /// Pages in order.
     pub pages: Vec<PageRow>,
+    /// Figure/page artifacts emitted by the extraction pipeline.
+    pub figures: Vec<FigureRow>,
     /// Reference entries in order.
     pub references: Vec<ReferenceRow>,
     /// Citation markers in ledger order.
     pub citations: Vec<CitationRow>,
+}
+
+impl DocumentDetail {
+    /// Builds a page-provenanced analysis view from an explicit page selection.
+    /// Image bytes are deliberately not read here: callers must separately
+    /// approve and load selected [`FigureRow`] files through `ImagePart::new`.
+    pub fn analysis_context(&self, selected_pages: &[u32], max_chars: usize) -> DocumentContext {
+        let selected: std::collections::BTreeSet<_> = selected_pages.iter().copied().collect();
+        let mut remaining = max_chars;
+        let text = self
+            .pages
+            .iter()
+            .filter(|page| selected.contains(&page.page))
+            .filter_map(|page| {
+                if remaining == 0 {
+                    return None;
+                }
+                let value: String = page.text.chars().take(remaining).collect();
+                remaining = remaining.saturating_sub(value.chars().count());
+                Some(TextPart {
+                    text: value,
+                    page: Some(page.page),
+                    provenance: Some(Provenance {
+                        document_hash: self.hash.clone(),
+                        page: page.page,
+                        artifact: None,
+                    }),
+                })
+            })
+            .collect();
+        DocumentContext {
+            document_hash: self.hash.clone(),
+            text,
+            images: Vec::new(),
+        }
+    }
 }
 
 const SELECT_VERSION: &str = "SELECT version FROM schema_meta";
@@ -155,6 +207,8 @@ const SELECT_CITATIONS: &str = "SELECT id, page, \"offset\", text FROM citations
 const SELECT_CITATION_TARGETS: &str = "SELECT t.citation_id, t.ref_idx \
     FROM citation_targets t JOIN citations c ON c.id = t.citation_id \
     WHERE c.run_id = ?1 ORDER BY t.citation_id, t.seq";
+const SELECT_FIGURES: &str = "SELECT page, idx, mime, file, caption FROM figures \
+    WHERE run_id = ?1 ORDER BY page, idx";
 
 /// Read-only handle on a ledger file.
 pub struct LedgerReader {
@@ -230,6 +284,24 @@ impl LedgerReader {
                 text: row.get(1)?,
             })
         })?;
+        // Version-1 ledgers created before figure export do not have this
+        // additive table.  They remain valid read-only documents.
+        let has_figures: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='figures')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_figures {
+            detail.figures = query_vec(&self.conn, SELECT_FIGURES, run_id, |row| {
+                Ok(FigureRow {
+                    page: row.get(0)?,
+                    index: row.get(1)?,
+                    mime: row.get(2)?,
+                    file: row.get(3)?,
+                    caption: row.get(4)?,
+                })
+            })?;
+        }
         detail.references = self.load_references(run_id)?;
         detail.citations = self.load_citations(run_id)?;
         Ok(detail)

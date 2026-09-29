@@ -20,6 +20,10 @@ pub mod services {
     pub const ANTHROPIC: &str = "anthropic";
     /// `OpenAI` API key.
     pub const OPENAI: &str = "openai";
+    /// Google Gemini API key.
+    pub const GEMINI: &str = "gemini";
+    /// Local Ollama service (does not require a secret).
+    pub const OLLAMA: &str = "ollama";
 }
 
 /// Source of API keys for the Ask panel.
@@ -38,6 +42,8 @@ impl EnvKeyProvider {
         match service {
             services::ANTHROPIC => Some("ANTHROPIC_API_KEY"),
             services::OPENAI => Some("OPENAI_API_KEY"),
+            services::GEMINI => Some("GEMINI_API_KEY"),
+            services::OLLAMA => None,
             _ => None,
         }
     }
