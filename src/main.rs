@@ -25,7 +25,7 @@ use tpe::bibliography;
 use tpe::corpus::{self, Manifest, ManifestItem};
 use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
-use tpe::ledger::Ledger;
+use tpe::ledger::{ErrorDetails, Ledger, LedgerProgressSink};
 use tpe::pipeline::{self, PipelineError};
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
@@ -346,6 +346,7 @@ fn store_result(
 struct Outcome {
     path: PathBuf,
     wall_ms: f64,
+    attempt: i64,
     result: Result<ExtractionResult, String>,
 }
 
@@ -377,16 +378,54 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let start = Instant::now();
+    let source = source_observation(&path);
+    let mut attempt_ledger = Ledger::open(&args.db).expect("main thread already opened ledger");
+    let extractor = backend::by_name(&args.backend).expect("backend checked before workers start");
+    let attempt = attempt_ledger
+        .create_attempt(&source, &extractor.identity(), None)
+        .expect("creating durable extraction attempt");
     // A panic inside a backend must fail this file only, not the whole batch.
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| pipeline::run_job(&job)))
-        .map_or_else(
-            |payload| Err(format!("panic: {}", panic_message(&*payload))),
-            |outcome| outcome.map_err(|err| err.to_string()),
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let mut sink = LedgerProgressSink::new(&mut attempt_ledger, attempt);
+        let result = pipeline::run_job_with_progress(&job, &mut sink);
+        sink.finish()
+            .map_err(|error| tpe::pipeline::PipelineError::Progress(error.to_string()))?;
+        result
+    }))
+    .map_or_else(
+        |payload| Err(format!("panic: {}", panic_message(&*payload))),
+        |outcome| outcome.map_err(|err| err.to_string()),
+    );
+    if let Err(message) = &result {
+        let _ = attempt_ledger.fail_attempt(
+            attempt,
+            &ErrorDetails {
+                kind: "pipeline".to_string(),
+                message: message.clone(),
+                retryable: true,
+            },
         );
+    }
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
+        attempt,
         result,
+    }
+}
+
+fn source_observation(path: &Path) -> tpe::schema::SourceObservation {
+    let metadata = fs::metadata(path).ok();
+    tpe::schema::SourceObservation {
+        path: path.to_string_lossy().into_owned(),
+        inode: None,
+        device: None,
+        mtime_unix: metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+        size: metadata.map_or(0, |m| m.len()),
     }
 }
 
@@ -394,6 +433,17 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
     pipeline::warm_up();
     let mut ledger = open_ledger(&args.db)?;
+    let _requeued = ledger.recover_stale(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+        .unwrap_or(i64::MAX)
+            - 300,
+        3,
+    )?;
     if let Some(dir) = &args.out {
         fs::create_dir_all(dir)
             .with_context(|| format!("creating output directory {}", dir.display()))?;
@@ -502,6 +552,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
     let Outcome {
         path,
         wall_ms,
+        attempt,
         result,
     } = outcome;
     let path_display = path.display().to_string();
@@ -513,6 +564,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
             ledger
                 .update_timings(run, &result.timings)
                 .with_context(|| format!("recording write time for {path_display}"))?;
+            ledger.complete_attempt(attempt, run, &result.document.hash)?;
             if let Some(dir) = &args.out {
                 write_outputs(dir, &result)?;
             }
