@@ -25,6 +25,7 @@ you cite the text.";
 /// worker has stopped or released the source yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkState {
+    NotExtracted,
     Queued,
     Stabilizing,
     Processing,
@@ -37,20 +38,24 @@ pub enum WorkState {
 
 impl WorkState {
     pub fn from_status(status: Option<&str>) -> Self {
-        match status.unwrap_or("queued") {
-            "stabilizing" => Self::Stabilizing,
-            "processing" | "active" | "running" => Self::Processing,
-            "partial" => Self::Partial,
-            "failed" => Self::Failed,
-            "complete" => Self::Complete,
-            "cancellation_requested" | "cancel_requested" => Self::CancellationRequested,
-            "cancelled" | "canceled" => Self::Cancelled,
-            _ => Self::Queued,
+        match status {
+            None => Self::NotExtracted,
+            Some(status) => match status {
+                "stabilizing" => Self::Stabilizing,
+                "processing" | "active" | "running" => Self::Processing,
+                "partial" => Self::Partial,
+                "failed" => Self::Failed,
+                "complete" => Self::Complete,
+                "cancellation_requested" | "cancel_requested" => Self::CancellationRequested,
+                "cancelled" | "canceled" => Self::Cancelled,
+                _ => Self::Queued,
+            },
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::NotExtracted => "Not extracted",
             Self::Queued => "Queued",
             Self::Stabilizing => "Stabilizing",
             Self::Processing => "Processing",
@@ -80,7 +85,8 @@ impl ProgressRow {
         let mut fields = vec![state.label().to_owned()];
         if let Some(attempt) = observation.attempt.as_ref() {
             append_progress(&mut fields, attempt);
-            fields.push(format_elapsed(now.saturating_sub(attempt.started_at)));
+            let end = attempt.finished_at.unwrap_or(now);
+            fields.push(format_elapsed(end.saturating_sub(attempt.started_at)));
             if !attempt.warnings.is_empty() {
                 fields.push(format!("{} warning(s)", attempt.warnings.len()));
             }
@@ -940,6 +946,28 @@ mod tests {
         let shown: Vec<_> = rows.iter().map(|row| ProgressRow::new(row, 20)).collect();
         assert_eq!(shown.len(), 2);
         assert_ne!(shown[0].observation_id, shown[1].observation_id);
+    }
+
+    #[test]
+    fn observation_without_a_committed_run_is_not_reported_as_queued() {
+        let row = ObservationRow {
+            id: 1,
+            hash: String::from("h"),
+            path: String::from("/a"),
+            attempt: None,
+            ..ObservationRow::default()
+        };
+        let shown = ProgressRow::new(&row, 20);
+        assert_eq!(shown.state, WorkState::NotExtracted);
+        assert_eq!(shown.summary, "Not extracted");
+    }
+
+    #[test]
+    fn completed_attempt_elapsed_time_does_not_keep_growing() {
+        let mut row = observation(1, "h", "/a", "complete");
+        row.attempt.as_mut().unwrap().started_at = 10;
+        row.attempt.as_mut().unwrap().finished_at = Some(15);
+        assert!(ProgressRow::new(&row, 1_000).summary.contains("5s"));
     }
 
     #[test]

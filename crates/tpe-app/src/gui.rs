@@ -151,7 +151,6 @@ pub struct Workbench {
     progress: Vec<ProgressRow>,
     selected_hash: Option<String>,
     ledger_path: PathBuf,
-    intake_paused: bool,
     detail: Option<DocumentDetail>,
     page_index: usize,
     lines: Vec<NumberedLine>,
@@ -209,7 +208,6 @@ impl Workbench {
             progress,
             selected_hash: None,
             ledger_path: ledger.to_owned(),
-            intake_paused: false,
             detail: None,
             page_index: 0,
             lines: Vec::new(),
@@ -229,9 +227,9 @@ impl Workbench {
         workbench
     }
 
-    /// Schedule a low-frequency recovery poll. The writer's watchdog can call
-    /// `refresh` immediately; this poll ensures a lost/coalesced notification
-    /// only leaves the UI stale for at most ten seconds.
+    /// Poll for newly committed extraction results. Schema-v1 ledgers publish
+    /// a run atomically after extraction, so this deliberately does not claim
+    /// to display in-flight worker progress.
     fn schedule_refresh(&self, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async move {
             std::thread::sleep(Duration::from_secs(10));
@@ -625,43 +623,6 @@ impl Workbench {
                         }),
                     ))
                     .child(button(
-                        "retry",
-                        13,
-                        String::from("Retry failure"),
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.status = String::from("Retry requested; waiting for watchdog");
-                            cx.notify();
-                        }),
-                    ))
-                    .child(button(
-                        "cancel",
-                        14,
-                        String::from("Cancel work"),
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.status =
-                                String::from("Cancellation requested (not yet completed)");
-                            cx.notify();
-                        }),
-                    ))
-                    .child(button(
-                        "pause-intake",
-                        15,
-                        String::from(if self.intake_paused {
-                            "Resume intake"
-                        } else {
-                            "Pause intake"
-                        }),
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.intake_paused = !this.intake_paused;
-                            this.status = String::from(if this.intake_paused {
-                                "Intake paused"
-                            } else {
-                                "Intake resumed"
-                            });
-                            cx.notify();
-                        }),
-                    ))
-                    .child(button(
                         "text-smaller",
                         11,
                         String::from("A-"),
@@ -694,7 +655,7 @@ impl Workbench {
             .flex_shrink_0()
             .on_action(cx.listener(Self::on_select_next))
             .on_action(cx.listener(Self::on_select_prev))
-            .child(pane_title(format!("Inputs: {count} observations")))
+            .child(pane_title(format!("Recorded inputs: {count}")))
             .child(
                 div().flex_1().overflow_hidden().child(
                     uniform_list(

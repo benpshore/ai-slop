@@ -1,4 +1,5 @@
-//! Read-only access to the engine ledger written by `tpe extract --db <file>`.
+//! Read-only access to committed results in the engine ledger written by
+//! `tpe extract --db <file>`.
 //!
 //! The reader opens the `SQLite` file with `SQLITE_OPEN_READ_ONLY` so the GUI can
 //! never modify a ledger, checks `schema_meta.version`, and returns plain rows.
@@ -71,8 +72,10 @@ pub struct ObservationRow {
     pub attempt: Option<AttemptRow>,
 }
 
-/// The latest extraction attempt and the progress that can be established
-/// reliably from committed ledger rows.
+/// The latest committed extraction attempt and its final counters.
+///
+/// Schema-v1 publication is atomic: these values are historical result data,
+/// not a source of live worker or scheduler progress.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttemptRow {
     pub id: i64,
@@ -251,8 +254,8 @@ impl LedgerReader {
         Ok(out)
     }
 
-    /// Returns one row per source observation, enriched with its newest
-    /// attempt.  Committed page/chunk rows are used as progress counters; a
+    /// Returns one row per committed source observation, enriched with its
+    /// newest committed attempt. Committed page/chunk rows are final counters; a
     /// percentage is intentionally unavailable when the document page count
     /// is zero because that is an unknown total, not 0%.
     pub fn observations(&self) -> Result<Vec<ObservationRow>, LedgerError> {
@@ -274,7 +277,9 @@ impl LedgerReader {
         Ok(observations)
     }
 
-    /// Attempts which have not reached a terminal state.
+    /// Non-terminal rows written by a producer that persists lifecycle data.
+    /// `tpe extract` itself atomically publishes terminal results, so callers
+    /// must not use this method as a live view of its workers.
     pub fn active_attempts(&self) -> Result<Vec<AttemptRow>, LedgerError> {
         let mut by_id = BTreeMap::new();
         for row in self.observations()? {
@@ -296,7 +301,7 @@ impl LedgerReader {
         Ok(by_id.into_values().collect())
     }
 
-    /// Latest per-document stage progress, if the hash has an attempt.
+    /// Latest committed per-document counters, if the hash has an attempt.
     pub fn stage_progress(&self, hash: &str) -> Result<Option<AttemptRow>, LedgerError> {
         self.latest_attempt(hash)
     }
