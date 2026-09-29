@@ -2731,8 +2731,8 @@ fn part_marker_re() -> &'static Regex {
 }
 
 /// End (byte offset, exclusive) of a title that starts at byte 0 of `text`:
-/// the first `. ` that does not close an abbreviation, or a `? ` / `! `
-/// after which the title does not go on ([`question_ends_title`]). A part
+/// the first period followed by whitespace that does not close an abbreviation,
+/// or a `?` / `!` after which the title does not go on ([`question_ends_title`]). A part
 /// marker after the period stays in the title (`Orthogonal polynomials.
 /// II. J. Math. Phys.` ends after `II`), and so does a `?` / `!` that venue
 /// words follow (`Resolved? arXiv preprint` ends after the `?`).
@@ -2740,15 +2740,17 @@ fn title_end(text: &str) -> usize {
     let mut search = 0usize;
     while let Some(rel) = text[search..].find(['.', '?', '!']) {
         let pos = search + rel;
-        if text[pos + 1..].starts_with(' ') {
+        let after = &text[pos + 1..];
+        if after.starts_with(char::is_whitespace) {
             let period = text.as_bytes()[pos] == b'.';
-            if !period && venue_lead_re().is_match(text[pos + 2..].trim_start()) {
+            let following = after.trim_start();
+            if !period && venue_lead_re().is_match(following) {
                 return pos + 1;
             }
             let terminal = if period {
                 title_period_ends(text, pos)
             } else {
-                question_ends_title(&text[pos + 2..])
+                question_ends_title(following)
             };
             if terminal {
                 if period && let Some(marker) = part_marker_re().find(&text[pos + 1..]) {
@@ -2855,10 +2857,13 @@ fn title_goes_on(after: &str) -> bool {
     // An identifier masked to spaces follows the period (`Suite.
     // https://www.ibm.com/products/ maximo Accessed: …`): the title ends
     // there, whatever text trails the identifier.
-    if after.starts_with("  ") {
+    // Entry text can retain LF/CRLF or other whitespace before the masked
+    // bytes. Check the complete separator, without crossing into its tail.
+    let separator_end = after.len() - after.trim_start().len();
+    if after[..separator_end].contains("  ") {
         return false;
     }
-    let rest = after.trim_start_matches(['.', ' ']);
+    let rest = after.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
     if lower_roman_re().is_match(rest) {
         return true;
     }
@@ -6179,6 +6184,19 @@ mod loop12_parse_tests {
             weiss.title.as_deref(),
             Some("WISDM Smartphone and Smartwatch Activity and Biometrics Dataset")
         );
+    }
+
+    /// Whitespace at a real title continuation is not itself an identifier
+    /// mask: lowercase clauses survive LF, CRLF, tabs and nonbreaking spaces.
+    #[test]
+    fn title_continuation_across_whitespace_without_identifier_mask() {
+        for gap in [" ", "\n", "\r\n", "\t", "\u{a0}"] {
+            let title = format!(
+                "Function words in authorship attribution.{gap}from black magic to theory?"
+            );
+            let entry = format!("{title}{gap}In Proceedings of the conference.");
+            assert_eq!(super::title_end(&entry), title.len());
+        }
     }
 
     /// Rank 7: a title goes on after an inner comma when a one-word title or
@@ -10017,6 +10035,26 @@ mod tests {
             assert_eq!(entry.year, Some(2008));
         }
 
+        /// Review #40: a masked URL can leave a lowercase continuation that
+        /// resembles a second title sentence. The preceding period is terminal.
+        #[test]
+        fn masked_wrapped_url_tail_does_not_extend_title() {
+            for gap in [" ", "\n", "\r\n", "\t", "\u{a0}"] {
+                let raw = format!(
+                    "[19] IBM. [n. d.]. IBM Maximo Application Suite.{gap}\
+                     https://www.ibm.com/products/{gap}maximo Accessed: May 13, 2025."
+                );
+                let entry = parsed(&raw, Some("[19]"));
+                assert_eq!(entry.authors, vec!["IBM"]);
+                assert_eq!(
+                    entry.title.as_deref(),
+                    Some("IBM Maximo Application Suite"),
+                    "gap {gap:?}"
+                );
+                assert_eq!(entry.year, None);
+            }
+        }
+
         /// ACM `[n. d.]` (arxiv 2506.03828): no year; the next sentence is
         /// the title and the access date is not the year.
         #[test]
@@ -11270,14 +11308,40 @@ mod tests {
             assert_eq!(entry.authors.len(), 7);
             assert_eq!(entry.authors[3], "O. v. d. Heide");
             assert_eq!(entry.authors[5], "C. A. T. v. d. Berg");
-            assert!(
-                entry
-                    .title
-                    .as_deref()
-                    .is_some_and(|t| t.starts_with("Time-efficient, high-resolution 3t")),
-                "{:?}",
-                entry.title
+            assert_eq!(
+                entry.title.as_deref(),
+                Some(
+                    "Time-efficient, high-resolution 3t whole-brain relaxometry using cartesian \
+                     3D MR spin tomography in time-domain (MR-stat) with cerebrospinal fluid suppression"
+                )
             );
+            assert_eq!(
+                entry.venue.as_deref(),
+                Some("Magnetic resonance in medicine")
+            );
+        }
+
+        /// Review #40: the first comma part has no closing quote. Searching
+        /// only that part wrongly includes the venue in the title.
+        #[test]
+        fn quoted_title_spans_comma_parts_without_absorbing_venue() {
+            for (open, close) in [('“', '”'), ('"', '"'), ('„', '“'), ('‘', '’')] {
+                let raw = format!(
+                    "A. Smith, B. Jones, {open}Time-efficient, high-resolution imaging, \
+                     with improved contrast,{close} Magnetic resonance in medicine, 2025."
+                );
+                let entry = parsed(&raw, None);
+                assert_eq!(entry.authors, vec!["A. Smith", "B. Jones"]);
+                assert_eq!(
+                    entry.title.as_deref(),
+                    Some("Time-efficient, high-resolution imaging, with improved contrast"),
+                    "quote pair {open}{close}"
+                );
+                assert_eq!(
+                    entry.venue.as_deref(),
+                    Some("Magnetic resonance in medicine")
+                );
+            }
         }
 
         /// A lowercase initial whose accented capital was lost (`c. Öztürk`)
