@@ -54,7 +54,10 @@ pub fn scan_backward(
         let mut checked = pages.clone();
         text_cleanup::clean_document(&mut checked);
         regions::tag_regions(&mut checked);
-        for section in citations::find_reference_sections(&checked) {
+        for section in citations::find_reference_sections(&checked)
+            .into_iter()
+            .rev()
+        {
             if section.first_page != number {
                 continue;
             }
@@ -214,5 +217,27 @@ mod tests {
         assert!(!scan.found);
         assert_eq!(scan.pages_scanned, 2);
         assert!(scan.references.is_empty());
+    }
+
+    #[test]
+    fn selects_the_last_qualified_heading_when_lists_share_a_page() {
+        let bytes = pdf(&[&[
+            "References",
+            "[1] A. One, Earlier first work, 2020.",
+            "[2] B. Two, Earlier second work, 2021.",
+            "[3] C. Three, Earlier third work, 2022.",
+            "Supplementary References",
+            "[1] D. Four, Final first work, 2023.",
+            "[2] E. Five, Final second work, 2024.",
+            "[3] F. Six, Final third work, 2025.",
+        ]]);
+        let scan = scan_backward(&LopdfBackend::default(), &bytes, None).unwrap();
+        assert_eq!(scan.heading.as_deref(), Some("Supplementary References"));
+        assert_eq!(scan.references.len(), 3);
+        assert!(
+            scan.references
+                .iter()
+                .all(|entry| entry.raw.contains("Final"))
+        );
     }
 }

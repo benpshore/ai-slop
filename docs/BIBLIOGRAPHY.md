@@ -23,6 +23,11 @@ empty reference array and `not_found`, rather than a guessed list. An unreadable
 page produces `failed`, rather than a partial bibliography. Either case gives
 the batch a nonzero exit code while still emitting a JSON record for each PDF.
 The `warnings` array calls out any U+FFFD replacement character in an entry.
+Failed records retain the same fields: any acquired SHA-256 and backend
+identity remain available, unknown scan fields are null, references are empty,
+and the error appears in `error` and `warnings`. Acquisition failures have a
+null hash. Successful records have a null `error`. When multiple qualified
+lists start on the same page, the last one is selected.
 `elapsed_ms` includes file acquisition, hashing, PDF opening, backward page
 processing, and reference parsing; it excludes CLI startup and JSON output.
 

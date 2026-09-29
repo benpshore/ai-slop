@@ -442,23 +442,31 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
     let mut any_failed = false;
     for path in &args.paths {
         let started = Instant::now();
+        let mut hash = None;
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
+            hash = Some(snapshot.hash.0);
             let scan = bibliography::scan_backward(
                 extractor.as_ref(),
                 &snapshot.bytes,
                 args.password.as_deref(),
             )?;
-            Ok::<_, anyhow::Error>((snapshot.hash, scan))
+            Ok::<_, anyhow::Error>(scan)
         }));
         let file = path.to_string_lossy();
         let elapsed = elapsed_ms(started);
-        let record = match result {
-            Ok(Ok((hash, scan))) => {
+        let mut record = serde_json::json!({
+            "path": file, "sha256": hash, "backend": extractor.identity(),
+            "status": "failed", "total_pages": null, "pages_scanned": null,
+            "section_page": null, "heading": null, "references": [],
+            "warnings": [], "elapsed_ms": elapsed, "error": null,
+        });
+        match result {
+            Ok(Ok(scan)) => {
                 any_failed |= !scan.found;
-                serde_json::json!({
+                record = serde_json::json!({
                     "path": file,
-                    "sha256": hash.0,
+                    "sha256": hash,
                     "backend": extractor.identity(),
                     "status": if scan.found { "found" } else { "not_found" },
                     "total_pages": scan.total_pages,
@@ -468,21 +476,21 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
                     "references": scan.references,
                     "warnings": scan.warnings,
                     "elapsed_ms": elapsed,
-                })
+                    "error": null,
+                });
             }
             Ok(Err(err)) => {
                 any_failed = true;
-                serde_json::json!({"path": file, "status": "failed", "error": err.to_string()})
+                record["error"] = serde_json::json!(err.to_string());
+                record["warnings"] = serde_json::json!([err.to_string()]);
             }
             Err(payload) => {
                 any_failed = true;
-                serde_json::json!({
-                    "path": file,
-                    "status": "failed",
-                    "error": format!("panic: {}", panic_message(&*payload)),
-                })
+                let message = format!("panic: {}", panic_message(&*payload));
+                record["error"] = serde_json::json!(message);
+                record["warnings"] = serde_json::json!([message]);
             }
-        };
+        }
         println!("{record}");
     }
     Ok(exit_code(any_failed))

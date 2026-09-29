@@ -121,6 +121,34 @@ fn bibliography_cli_reports_invalid_pdf_as_json_failure() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["status"], "failed");
     assert!(value["error"].as_str().is_some());
+    assert_eq!(value["sha256"], tpe::schema::sha256_hex(b"not a PDF"));
+    assert_eq!(value["backend"]["name"], "lopdf");
+    assert!(value["total_pages"].is_null());
+    assert!(value["pages_scanned"].is_null());
+    assert!(value["elapsed_ms"].as_f64().unwrap() >= 0.0);
+    assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
+    assert!(value["references"].as_array().unwrap().is_empty());
+    for key in ["section_page", "heading", "total_pages", "pages_scanned"] {
+        assert!(value.as_object().unwrap().contains_key(key));
+    }
+}
+
+#[test]
+fn bibliography_acquisition_failure_keeps_schema_without_fabricating_hash() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .arg("bibliography")
+        .arg(directory.path().join("absent.pdf"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "failed");
+    assert!(value["sha256"].is_null());
+    assert_eq!(value["backend"]["name"], "lopdf");
+    assert!(value["elapsed_ms"].is_number());
+    assert!(value["warnings"].is_array());
+    assert!(value["references"].is_array());
 }
 
 #[test]
