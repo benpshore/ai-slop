@@ -44,6 +44,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Stream a JSONL path manifest through bounded, isolated ingestion workers.
+    IngestBatch(BatchArgs),
     /// Extract native PDF/text/Office/HTML structure as one JSON record per input.
     Ingest(IngestArgs),
     /// Extract text, metadata and citations from PDF files into a ledger.
@@ -92,6 +94,95 @@ struct IngestArgs {
     /// Maximum PDF pages per input.
     #[arg(long, default_value_t = 10_000)]
     max_pages: u32,
+}
+
+#[derive(Args)]
+struct BatchArgs {
+    /// JSONL file with one {"path":"..."} object per line; '-' reads stdin.
+    #[arg(long, value_name = "FILE")]
+    input_list: PathBuf,
+    /// Maximum simultaneously running worker processes.
+    #[arg(long, short, default_value_t = 2)]
+    jobs: usize,
+    /// Per-document wall-clock deadline including process startup/output.
+    #[arg(long, default_value_t = 30_000)]
+    timeout_ms: u64,
+    /// Maximum worker JSON bytes per document.
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    max_output_bytes: u64,
+    /// Linux virtual-address-space MiB per worker; 0 disables (default elsewhere).
+    #[arg(long, default_value_t = tpe::batch::default_memory_mib())]
+    worker_memory_mib: u64,
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    max_bytes: u64,
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    max_expanded_bytes: u64,
+    #[arg(long, default_value_t = 10_000)]
+    max_archive_entries: usize,
+    #[arg(long, default_value_t = 250_000)]
+    max_cells: usize,
+    #[arg(long, default_value_t = 10_000)]
+    max_pages: u32,
+}
+
+fn run_batch(args: &BatchArgs) -> anyhow::Result<ExitCode> {
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let input = if args.input_list == Path::new("-") {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+            fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?)
+        }
+        #[cfg(not(unix))]
+        {
+            bail!("stdin batch supervision currently requires Unix");
+        }
+    } else {
+        fs::File::open(&args.input_list)?
+    };
+    let options = tpe::ingest::Options {
+        max_bytes: args.max_bytes,
+        max_expanded_bytes: args.max_expanded_bytes,
+        max_archive_entries: args.max_archive_entries,
+        max_cells: args.max_cells,
+        max_pages: args.max_pages,
+    };
+    let limits = tpe::batch::Limits {
+        jobs: args.jobs,
+        timeout_ms: args.timeout_ms,
+        max_output_bytes: args.max_output_bytes,
+        memory_mib: args.worker_memory_mib,
+    };
+    #[cfg(unix)]
+    let output = {
+        use std::os::fd::AsFd;
+        fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?)
+    };
+    #[cfg(not(unix))]
+    let output = {
+        bail!("isolated batch supervision currently requires Unix");
+    };
+    // Install only after opening descriptors: a FIFO open can block before
+    // the cancellation-aware supervisor exists. Default termination is safe
+    // at that point because no child workers have been started yet.
+    // The library itself never changes its caller's process signal handlers.
+    #[cfg(unix)]
+    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&cancelled))?;
+    }
+    let success = tpe::batch::run(
+        input,
+        output,
+        &std::env::current_exe()?,
+        &options,
+        &limits,
+        &cancelled,
+    )?;
+    Ok(if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn run_ingest(args: &IngestArgs) -> anyhow::Result<ExitCode> {
@@ -276,6 +367,7 @@ struct EvalArgs {
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
+        Cmd::IngestBatch(args) => run_batch(&args),
         Cmd::Ingest(args) => run_ingest(&args),
         Cmd::Extract(args) => run_extract(&args),
         Cmd::Stats { db } => {

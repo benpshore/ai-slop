@@ -35,6 +35,7 @@
 
 pub mod acquire;
 pub mod backend;
+pub mod batch;
 pub mod citations;
 pub mod corpus;
 pub mod eval;
