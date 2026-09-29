@@ -1,5 +1,6 @@
 //! Region tagging: figure text, table cells and algorithm blocks next to
-//! their captions get a non-body [`Line::role`], so body-only consumers can
+//! their captions, text inside figure boxes and monospace code listings
+//! get a non-body [`Line::role`], so body-only consumers can
 //! leave them out. Runs after `text_cleanup::clean_document`; never changes
 //! `PageText::text`, `spans` or line order, and never retags a line whose
 //! role is not `body`.
@@ -72,8 +73,42 @@
 //!   must have a body-size line above it and at most
 //!   [`FOOTNOTE_MAX_LINES`] lines. Lines without font sizes are never
 //!   footnotes. Tagged before the walks, so a walk stops at them.
-//! - math: after the walks, a `body` line with at most 2 ordinary words
-//!   (letter runs of 3 or more, not `log`, `max` and the like) and at least
+//! - tables with paragraph cells: after the walks, next to a table
+//!   caption (below it, else above it), a ruled table is the lines between
+//!   the first rule at most 80 pt from the caption block (no prose-like
+//!   line between) and the farthest rule of the same width before the
+//!   next caption, heading or footnote; rules are `PageText::figures` of
+//!   kind `rule`, or any figure box under 3 pt tall and at least 30 pt
+//!   wide. Without rules, the lines next to the caption (up to a gap of 3
+//!   line heights, a caption start, a numbered heading or a line of
+//!   another role) are a table when, up to the first two consecutive prose
+//!   or prose-like lines reaching across a column start other than the first (body text
+//!   resumed), their left edges form at least 3 column starts (each shared
+//!   by 2 lines, at least 20 pt apart) and at least 2 rows hold lines of 3
+//!   columns side by side. Every `body` line of such a table is tagged
+//!   `table`, prose cells included.
+//! - code: a run of at least 3 consecutive `body` lines (furniture
+//!   skipped) with at least 80 % of their characters in a monospace font
+//!   (a name containing `Mono`, `Courier`, `Consol`, `Menlo`,
+//!   `Typewriter`, `CMTT`, `SFTT` or `TXTT`, any case) is tagged `code`.
+//! - figure boxes: then a `body` line with at least 70 % of its box inside
+//!   a figure box (`PageText::figures` other than rules) at least 60 pt
+//!   tall is tagged with the role of the caption the box belongs to (the
+//!   nearest caption block at most 36 pt above or below it with an
+//!   overlapping x range, or through a box stacked that close to such a
+//!   box), `figure` when it has none. Prose-like lines are tagged only when
+//!   the box has a caption (a framed prompt or dialogue box in a figure
+//!   float); a box covering at least 70 % of the page width and height
+//!   needs a caption to be used at all, and one covering 95 % of the page
+//!   area (a scan under its text layer) is never used.
+//! - graphics labels: at least 4 `body` lines of at most 4 words (not
+//!   numbered headings) whose boxes overlap a figure box at least 20 pt
+//!   wide and tall, or lie between it and its `Figure` caption (at most
+//!   120 pt below or above it, with no prose-like line between), are
+//!   tagged `figure`.
+//! - math: last, a `body` line with at most 2 ordinary words (letter runs
+//!   of 3 or more, not `log`, `max` and the like), at most 1 of them of 4
+//!   or more letters, and at least
 //!   one math character (Mathematical Alphanumeric Symbols, Greek, `=`,
 //!   `+`, `¬`, `×`, `‖`, `⟨⟩`, arrows or the Mathematical Operators block),
 //!   whose ordinary-word letters are at most half of its other non-blank
@@ -89,8 +124,11 @@
 //! Hard guards: a *prose-like* line (at least 7 words, at most 30 %
 //! numeric tokens, at most 2 all-caps or abbreviation tokens, and at least
 //! 2 words starting lowercase) is never tagged `figure`, `table` or
-//! `algorithm` (pseudo-code marker lines excepted under an `Algorithm`
-//! caption), and every walk stops at the first one. Figure and table
+//! `algorithm` by the caption walks (pseudo-code marker lines excepted
+//! under an `Algorithm` caption), and every walk stops at the first one.
+//! The exceptions rest on drawn evidence, not on a walk: lines inside a
+//! captioned figure box, between the rules or in the column pattern of a
+//! table with paragraph cells, and monospace code lines. Figure and table
 //! regions need at least [`MIN_REGION_LINES`] lines, and a region longer
 //! than [`REGION_MAX_LINES`] lines is dropped, not tagged. A page that
 //! already carries a `regions:` warning is not tagged again.
@@ -166,6 +204,76 @@ const BODY_SIZE_MIN_LINES: usize = 3;
 const MATH_MAX_WORDS: usize = 2;
 /// Shortest letter run that counts as an ordinary word in the math test.
 const MATH_WORD_LETTERS: usize = 3;
+/// Most ordinary words of at least [`MATH_LONG_LETTERS`] letters in a
+/// display-math line.
+const MATH_MAX_LONG_WORDS: usize = 1;
+/// Letters in an ordinary word that counts against [`MATH_MAX_LONG_WORDS`].
+const MATH_LONG_LETTERS: usize = 4;
+/// Share of a line's box area that must lie inside a figure box for the
+/// line to be text inside the figure.
+const FIGURE_INSIDE: f32 = 0.7;
+/// Lowest figure box, in points, whose inside lines are figure text.
+const FIGURE_MIN_HEIGHT: f32 = 60.0;
+/// A figure box covering at least this share of both the page width and
+/// the page height is the whole page.
+const WHOLE_PAGE: f32 = 0.7;
+/// A figure box covering at least this share of the page area is a page
+/// background (a scanned page under its text layer) and is never used.
+const PAGE_BACKGROUND: f32 = 0.95;
+/// Largest vertical distance, in points, between a figure box and a
+/// caption block (or another adjacent box) for the two to belong together.
+const CAPTION_REACH: f32 = 36.0;
+/// Fewest short lines in a graphics-label cluster.
+const LABEL_MIN_LINES: usize = 4;
+/// Tallest gap, in points, between a figure box and its caption in which
+/// graphics labels are looked for.
+const LABEL_ZONE_MAX: f32 = 120.0;
+/// Line centres closer than this, in points, lie on one table row.
+const ROW_TOLERANCE: f32 = 4.0;
+/// Smallest width and height, in points, of a figure box graphics labels
+/// sit on.
+const LABEL_BOX_MIN: f32 = 20.0;
+/// Figure kind the backend gives each thin horizontal rule.
+const KIND_RULE: &str = "rule";
+/// A figure box lower than this, in points, and at least
+/// [`RULE_MIN_WIDTH`] wide is a rule whatever its kind.
+const RULE_HEIGHT: f32 = 3.0;
+/// Narrowest rule, in points.
+const RULE_MIN_WIDTH: f32 = 30.0;
+/// Tolerance, in points, when matching rule ends and column starts.
+const X_TOLERANCE: f32 = 3.0;
+/// Most distance, in points, from a table caption block to the first rule
+/// of its table.
+const RULE_REACH: f32 = 80.0;
+/// Smallest distance, in points, between two distinct table column starts.
+const COLUMN_MIN_GAP: f32 = 20.0;
+/// Fewest distinct column starts (each shared by at least 2 lines) of a
+/// table with paragraph cells.
+const TABLE_MIN_COLUMNS: usize = 3;
+/// Fewest rows in which lines of [`TABLE_MIN_COLUMNS`] columns sit side by
+/// side.
+const TABLE_MIN_ROWS: usize = 2;
+/// Most lines in a table block with paragraph cells.
+pub const PARAGRAPH_TABLE_MAX_LINES: usize = 150;
+/// A vertical gap wider than this many median line heights ends a table
+/// block.
+const TABLE_BREAK: f32 = 3.0;
+/// Fewest consecutive monospace lines tagged `code`.
+const CODE_MIN_LINES: usize = 3;
+/// Share of a line's non-blank characters set in a monospace font for the
+/// line to be code, as `numerator / 10`.
+const CODE_SHARE_TENTHS: usize = 8;
+/// Lower-cased substrings of monospace font names.
+const MONOSPACE_MARKERS: [&str; 8] = [
+    "mono",
+    "courier",
+    "consol",
+    "menlo",
+    "typewriter",
+    "cmtt",
+    "sftt",
+    "txtt",
+];
 /// Lower-cased letter runs that are math functions, not words.
 const MATH_FUNCTIONS: [&str; 19] = [
     "inf", "sup", "log", "exp", "min", "max", "arg", "argmin", "argmax", "sin", "cos", "tan",
@@ -177,6 +285,7 @@ const ROLE_FURNITURE: &str = "furniture";
 const ROLE_TABLE: &str = "table";
 const ROLE_MATH: &str = "math";
 const ROLE_FOOTNOTE: &str = "footnote";
+const ROLE_CODE: &str = "code";
 
 /// Lower-cased markers that make a line look like pseudo-code anywhere.
 const ALGORITHM_MARKERS: [&str; 13] = [
@@ -223,6 +332,8 @@ pub struct RegionReport {
     pub math: usize,
     /// Page-foot note lines tagged `footnote`.
     pub footnote: usize,
+    /// Monospace listing lines tagged `code`.
+    pub code: usize,
 }
 
 /// Kind of caption a region hangs off.
@@ -275,13 +386,15 @@ impl Band {
 /// Page-wide measures shared by every caption on the page.
 struct PageGeometry {
     blank: f32,
+    /// Median line height.
+    height: f32,
     width: f32,
     mid: f32,
     two_column: bool,
 }
 
 /// Tag caption continuations, figure text, table cells, algorithm blocks,
-/// footnotes and display-math lines on every page (see the module
+/// code listings, footnotes and display-math lines on every page (see the module
 /// documentation). Adds a page
 /// warning such as `regions: figure text N lines` for each role with new
 /// tags. Idempotent: a page already carrying such a warning is skipped,
@@ -296,6 +409,7 @@ pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
         total.algorithm += report.algorithm;
         total.math += report.math;
         total.footnote += report.footnote;
+        total.code += report.code;
         let counts = [
             ("caption text", report.caption),
             ("figure text", report.figure),
@@ -303,6 +417,7 @@ pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
             ("algorithm text", report.algorithm),
             ("math text", report.math),
             ("footnote text", report.footnote),
+            ("code text", report.code),
         ];
         for (name, n) in counts {
             if n > 0 {
@@ -395,6 +510,11 @@ fn tag_page(page: &mut PageText) -> RegionReport {
             Kind::Algorithm => report.algorithm += n,
         }
     }
+    let boxes = caption_boxes(page, &geometry, &captions);
+    tag_paragraph_tables(page, &geometry, &boxes, &mut report);
+    report.code += tag_code(page);
+    tag_figure_boxes(page, &boxes, &mut report);
+    report.figure += tag_label_clusters(page, &boxes);
     report.math += tag_math(page);
     report
 }
@@ -446,6 +566,7 @@ fn measure(page: &PageText) -> PageGeometry {
     }
     PageGeometry {
         blank: BLANK_GAP * height,
+        height,
         width,
         mid,
         two_column: half > full,
@@ -508,7 +629,11 @@ fn top_first(a: BBox, b: BBox) -> Ordering {
 
 /// The line's box with ordered corners, when all four are finite.
 fn finite_box(line: &Line) -> Option<BBox> {
-    let b = line.bbox?;
+    line.bbox.and_then(ordered_box)
+}
+
+/// `b` with ordered corners, when all four are finite.
+fn ordered_box(b: BBox) -> Option<BBox> {
     if ![b.x0, b.y0, b.x1, b.y1].into_iter().all(f32::is_finite) {
         return None;
     }
@@ -1569,12 +1694,14 @@ fn letter_script(c: char) -> Option<bool> {
     }
 }
 
-/// Ordinary words in a token and their letters: runs of at least
+/// Ordinary words in a token, their letters, and how many of them have at
+/// least [`MATH_LONG_LETTERS`] letters: runs of at least
 /// [`MATH_WORD_LETTERS`] letters of one script that are not a math
 /// function name (`log`, `max`, ...).
-fn ordinary_words(token: &str) -> (usize, usize) {
+fn ordinary_words(token: &str) -> (usize, usize, usize) {
     let mut words: usize = 0;
     let mut letters: usize = 0;
+    let mut long: usize = 0;
     let mut run = String::new();
     let mut script: Option<bool> = None;
     for c in token.chars().chain(std::iter::once(' ')) {
@@ -1587,6 +1714,9 @@ fn ordinary_words(token: &str) -> (usize, usize) {
         if n >= MATH_WORD_LETTERS && !MATH_FUNCTIONS.contains(&run.to_lowercase().as_str()) {
             words += 1;
             letters += n;
+            if n >= MATH_LONG_LETTERS {
+                long += 1;
+            }
         }
         run.clear();
         if next.is_some() {
@@ -1594,11 +1724,12 @@ fn ordinary_words(token: &str) -> (usize, usize) {
         }
         script = next;
     }
-    (words, letters)
+    (words, letters, long)
 }
 
-/// A display-math fragment: at most [`MATH_MAX_WORDS`] ordinary words, at
-/// least one math character, ordinary-word letters at most half of the
+/// A display-math fragment: at most [`MATH_MAX_WORDS`] ordinary words, of
+/// which at most [`MATH_MAX_LONG_WORDS`] have 4 or more letters, at least
+/// one math character, ordinary-word letters at most half of the
 /// other non-blank characters, and not mostly numbers (a table row or an
 /// axis).
 fn is_math_line(text: &str) -> bool {
@@ -1607,12 +1738,14 @@ fn is_math_line(text: &str) -> bool {
     }
     let mut words: usize = 0;
     let mut letters: usize = 0;
+    let mut long: usize = 0;
     for token in text.split_whitespace() {
-        let (w, l) = ordinary_words(token);
+        let (w, l, n) = ordinary_words(token);
         words += w;
         letters += l;
+        long += n;
     }
-    if words > MATH_MAX_WORDS {
+    if words > MATH_MAX_WORDS || long > MATH_MAX_LONG_WORDS {
         return false;
     }
     let chars = non_space_chars(text);
@@ -1631,9 +1764,740 @@ fn tag_math(page: &mut PageText) -> usize {
     n
 }
 
+/// A caption start and the box of its whole caption block.
+#[derive(Clone, Copy, Debug)]
+struct CaptionBox {
+    line: usize,
+    kind: Kind,
+    bbox: BBox,
+}
+
+/// The smallest box holding `a` and `b`.
+fn union(a: BBox, b: BBox) -> BBox {
+    BBox {
+        x0: a.x0.min(b.x0),
+        y0: a.y0.min(b.y0),
+        x1: a.x1.max(b.x1),
+        y1: a.y1.max(b.y1),
+    }
+}
+
+/// Area of an ordered box.
+fn area(b: BBox) -> f32 {
+    (b.x1 - b.x0).max(0.0) * (b.y1 - b.y0).max(0.0)
+}
+
+/// Area of the intersection of two ordered boxes.
+fn overlap_area(a: BBox, b: BBox) -> f32 {
+    let w = (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0);
+    let h = (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0);
+    w * h
+}
+
+/// The x ranges of two ordered boxes overlap.
+fn x_overlap(a: BBox, b: BBox) -> bool {
+    a.x0 < b.x1 && b.x0 < a.x1
+}
+
+/// Vertical distance between two ordered boxes; negative when their y
+/// ranges overlap.
+fn vertical_distance(a: BBox, b: BBox) -> f32 {
+    (a.y0 - b.y1).max(b.y0 - a.y1)
+}
+
+/// Vertical centre of an ordered box.
+fn centre_y(b: BBox) -> f32 {
+    f32::midpoint(b.y0, b.y1)
+}
+
+/// At least [`FIGURE_INSIDE`] of the box's area lies inside `frame` (its
+/// centre, for a box without area).
+fn mostly_inside(b: BBox, frame: BBox) -> bool {
+    let a = area(b);
+    if a <= 0.0 {
+        let cx = f32::midpoint(b.x0, b.x1);
+        let cy = centre_y(b);
+        return (frame.x0..=frame.x1).contains(&cx) && (frame.y0..=frame.y1).contains(&cy);
+    }
+    overlap_area(b, frame) >= FIGURE_INSIDE * a
+}
+
+/// A thin horizontal box: lower than [`RULE_HEIGHT`] and at least
+/// [`RULE_MIN_WIDTH`] wide.
+fn is_rule_box(b: BBox) -> bool {
+    b.y1 - b.y0 < RULE_HEIGHT && b.x1 - b.x0 >= RULE_MIN_WIDTH
+}
+
+/// The page's figure boxes with ordered, finite corners, split into rules
+/// (kind `rule`, or any thin horizontal box) and regions (every other
+/// kind: `vector`, `raster`, `layout`). A region covering at least
+/// [`PAGE_BACKGROUND`] of the page is a background and left out.
+fn page_figures(page: &PageText) -> (Vec<BBox>, Vec<BBox>) {
+    let page_area = page.width.max(0.0) * page.height.max(0.0);
+    let mut rules: Vec<BBox> = Vec::new();
+    let mut regions: Vec<BBox> = Vec::new();
+    for figure in &page.figures {
+        let Some(b) = figure.bbox.and_then(ordered_box) else {
+            continue;
+        };
+        if figure.kind == KIND_RULE || is_rule_box(b) {
+            rules.push(b);
+            continue;
+        }
+        if page_area > 0.0 && area(b) >= PAGE_BACKGROUND * page_area {
+            continue;
+        }
+        regions.push(b);
+    }
+    (rules, regions)
+}
+
+/// Add `n` newly tagged lines to the count of `kind`.
+fn count_kind(report: &mut RegionReport, kind: Kind, n: usize) {
+    match kind {
+        Kind::Figure => report.figure += n,
+        Kind::Table => report.table += n,
+        Kind::Algorithm => report.algorithm += n,
+    }
+}
+
+/// The caption blocks of the page's caption starts: the start plus the
+/// `caption` lines directly below it in its band (no blank separator, at
+/// most [`CAPTION_MAX_LINES`] lines in all). Starts inside a prose
+/// paragraph are left out.
+fn caption_boxes(
+    page: &PageText,
+    geometry: &PageGeometry,
+    captions: &[(usize, Kind)],
+) -> Vec<CaptionBox> {
+    let mut boxes: Vec<CaptionBox> = Vec::new();
+    for &(k, kind) in captions {
+        let Some(b) = finite_box(&page.lines[k]) else {
+            continue;
+        };
+        let band = band_for(geometry, b);
+        let entries = band_entries(page, band);
+        let Some(pos) = entries.iter().position(|&i| i == k) else {
+            continue;
+        };
+        if inside_prose(page, &entries, pos, geometry.blank) {
+            continue;
+        }
+        let mut bbox = b;
+        let mut prev = k;
+        for &i in entries.iter().skip(pos + 1).take(CAPTION_MAX_LINES - 1) {
+            let line = &page.lines[i];
+            if line.role != ROLE_CAPTION
+                || caption_kind(line).is_some()
+                || gap(page, prev, i) > geometry.blank
+            {
+                break;
+            }
+            if let Some(o) = finite_box(line) {
+                bbox = union(bbox, o);
+            }
+            prev = i;
+        }
+        boxes.push(CaptionBox {
+            line: k,
+            kind,
+            bbox,
+        });
+    }
+    boxes
+}
+
+/// The caption kind each region box belongs to: that of the nearest caption
+/// block at most [`CAPTION_REACH`] above or below it (x ranges
+/// overlapping), else that of a box already assigned at most that far
+/// (boxes stacked in one float), else `None`.
+fn box_kinds(regions: &[BBox], captions: &[CaptionBox]) -> Vec<Option<Kind>> {
+    let mut kinds: Vec<Option<Kind>> = regions
+        .iter()
+        .map(|&r| {
+            let mut best: Option<(f32, Kind)> = None;
+            for c in captions {
+                if !x_overlap(r, c.bbox) {
+                    continue;
+                }
+                let d = vertical_distance(r, c.bbox);
+                if d > CAPTION_REACH {
+                    continue;
+                }
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, c.kind));
+                }
+            }
+            best.map(|(_, kind)| kind)
+        })
+        .collect();
+    for _ in 0..regions.len() {
+        let next: Vec<Option<Kind>> = regions
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                kinds[i].or_else(|| {
+                    regions
+                        .iter()
+                        .zip(kinds.iter())
+                        .enumerate()
+                        .find_map(|(j, (&o, &kind))| {
+                            let kind = kind?;
+                            let near = j != i
+                                && x_overlap(r, o)
+                                && vertical_distance(r, o) <= CAPTION_REACH;
+                            near.then_some(kind)
+                        })
+                })
+            })
+            .collect();
+        if next == kinds {
+            break;
+        }
+        kinds = next;
+    }
+    kinds
+}
+
+/// Tag the `body` lines inside figure boxes (see the module
+/// documentation): with the role of the caption the box belongs to
+/// (`figure` when none), prose-like lines only when the box has a caption,
+/// and in a box covering the whole page only when it has one.
+fn tag_figure_boxes(page: &mut PageText, captions: &[CaptionBox], report: &mut RegionReport) {
+    let (_, regions) = page_figures(page);
+    if regions.is_empty() {
+        return;
+    }
+    let kinds = box_kinds(&regions, captions);
+    let mut picked: Vec<(usize, Kind)> = Vec::new();
+    for (&r, &kind) in regions.iter().zip(kinds.iter()) {
+        let width = r.x1 - r.x0;
+        let height = r.y1 - r.y0;
+        if height < FIGURE_MIN_HEIGHT {
+            continue;
+        }
+        let whole = width >= WHOLE_PAGE * page.width && height >= WHOLE_PAGE * page.height;
+        if whole && kind.is_none() {
+            continue;
+        }
+        for (k, line) in page.lines.iter().enumerate() {
+            if line.role != ROLE_BODY {
+                continue;
+            }
+            let Some(b) = finite_box(line) else {
+                continue;
+            };
+            if !mostly_inside(b, r) {
+                continue;
+            }
+            if kind.is_none() && is_prose_like(&line.text) {
+                continue;
+            }
+            picked.push((k, kind.unwrap_or(Kind::Figure)));
+        }
+    }
+    for (k, kind) in picked {
+        let n = tag(&mut page.lines[k], kind.role());
+        count_kind(report, kind, n);
+    }
+}
+
+/// The vertical span between region box `r` and the nearest `Figure`
+/// caption block below or above it (x ranges overlapping), at most
+/// [`LABEL_ZONE_MAX`] tall, when no prose-like `body` line lies in it.
+fn label_zone(page: &PageText, r: BBox, captions: &[CaptionBox]) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32)> = None;
+    for c in captions {
+        if c.kind != Kind::Figure || !x_overlap(r, c.bbox) {
+            continue;
+        }
+        let zone = if c.bbox.y1 <= r.y0 {
+            (c.bbox.y1, r.y0)
+        } else if c.bbox.y0 >= r.y1 {
+            (r.y1, c.bbox.y0)
+        } else {
+            continue;
+        };
+        let size = zone.1 - zone.0;
+        if size > LABEL_ZONE_MAX {
+            continue;
+        }
+        if best.is_none_or(|(lo, hi)| size < hi - lo) {
+            best = Some(zone);
+        }
+    }
+    let (lo, hi) = best?;
+    let prose = page.lines.iter().any(|line| {
+        line.role == ROLE_BODY
+            && is_prose_like(&line.text)
+            && finite_box(line).is_some_and(|b| {
+                let cy = centre_y(b);
+                cy > lo && cy < hi && x_overlap(b, r)
+            })
+    });
+    if prose { None } else { Some((lo, hi)) }
+}
+
+/// Tag clusters of graphics labels `figure`: at least
+/// [`LABEL_MIN_LINES`] `body` lines of at most 4 words whose boxes overlap
+/// a figure box, or lie between it and its `Figure` caption (see
+/// [`label_zone`]); the count of lines newly tagged.
+fn tag_label_clusters(page: &mut PageText, captions: &[CaptionBox]) -> usize {
+    let (_, regions) = page_figures(page);
+    let mut picked: Vec<usize> = Vec::new();
+    for &r in &regions {
+        if r.x1 - r.x0 < LABEL_BOX_MIN || r.y1 - r.y0 < LABEL_BOX_MIN {
+            continue;
+        }
+        let zone = label_zone(page, r, captions);
+        let cluster: Vec<usize> = page
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.role == ROLE_BODY
+                    && !line.text.trim().is_empty()
+                    && word_count(&line.text) <= FRAGMENT_WORDS
+                    && !is_numbered_heading(&line.text)
+                    && caption_kind(line).is_none()
+            })
+            .filter_map(|(k, line)| {
+                let b = finite_box(line)?;
+                let on_box = overlap_area(b, r) > 0.0;
+                let between = zone.is_some_and(|(lo, hi)| {
+                    let cy = centre_y(b);
+                    cy > lo && cy < hi && x_overlap(b, r)
+                });
+                (on_box || between).then_some(k)
+            })
+            .collect();
+        if cluster.len() >= LABEL_MIN_LINES {
+            picked.extend(cluster);
+        }
+    }
+    let mut n = 0;
+    for k in picked {
+        n += tag(&mut page.lines[k], Kind::Figure.role());
+    }
+    n
+}
+
+/// A line that ends a ruled table's extent: another caption start, a
+/// numbered section heading, or a heading, footnote, front-matter or
+/// contents line.
+fn stops_table(line: &Line) -> bool {
+    caption_kind(line).is_some()
+        || is_numbered_heading(&line.text)
+        || matches!(
+            line.role.as_str(),
+            "heading" | ROLE_FOOTNOTE | "front" | "toc"
+        )
+}
+
+/// The `body` lines of a ruled table next to the caption block `cap`
+/// (below it with `down`, else above): the first rule at most
+/// [`RULE_REACH`] from the caption (x ranges overlapping, no prose-like
+/// line between), and the farthest rule of the same width (ends within
+/// [`X_TOLERANCE`] plus 1 pt) more than [`CAPTION_REACH`] before the
+/// next caption, heading or footnote. Every line whose centre lies between the two rules and whose
+/// box lies at least half inside their x range is taken, prose included.
+/// Empty when fewer than 2 such rules exist or more than
+/// [`PARAGRAPH_TABLE_MAX_LINES`] lines lie between them.
+fn ruled_table(page: &PageText, rules: &[BBox], cap: BBox, down: bool) -> Vec<usize> {
+    let reach = |r: BBox| -> Option<f32> {
+        if !x_overlap(r, cap) {
+            return None;
+        }
+        let d = if down { cap.y0 - r.y1 } else { r.y0 - cap.y1 };
+        (-X_TOLERANCE..=RULE_REACH).contains(&d).then_some(d)
+    };
+    let Some(first) = rules
+        .iter()
+        .filter_map(|&r| reach(r).map(|d| (d, r)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, r)| r)
+    else {
+        return Vec::new();
+    };
+    let first_y = centre_y(first);
+    let cap_edge = if down { cap.y0 } else { cap.y1 };
+    let (gap_lo, gap_hi) = (first_y.min(cap_edge), first_y.max(cap_edge));
+    let blocked = page.lines.iter().any(|line| {
+        line.role == ROLE_BODY
+            && is_prose_like(&line.text)
+            && finite_box(line).is_some_and(|b| {
+                let cy = centre_y(b);
+                cy > gap_lo && cy < gap_hi && x_overlap(b, first)
+            })
+    });
+    if blocked {
+        return Vec::new();
+    }
+    let mut limit = if down {
+        f32::NEG_INFINITY
+    } else {
+        f32::INFINITY
+    };
+    for line in &page.lines {
+        if !stops_table(line) {
+            continue;
+        }
+        let Some(b) = finite_box(line) else {
+            continue;
+        };
+        if !x_overlap(b, first) {
+            continue;
+        }
+        let cy = centre_y(b);
+        if down && cy < first_y {
+            limit = limit.max(cy);
+        } else if !down && cy > first_y {
+            limit = limit.min(cy);
+        }
+    }
+    let slack = X_TOLERANCE + 1.0;
+    let mut last_y = first_y;
+    let mut more = false;
+    for &r in rules {
+        let same = (r.x0 - first.x0).abs() <= slack && (r.x1 - first.x1).abs() <= slack;
+        if !same {
+            continue;
+        }
+        let cy = centre_y(r);
+        // A rule this close to the stopper belongs to the next float (the
+        // top rule of a ruled algorithm, say).
+        let inside = if down {
+            cy < first_y && cy > limit + CAPTION_REACH
+        } else {
+            cy > first_y && cy < limit - CAPTION_REACH
+        };
+        let further = if down { cy < last_y } else { cy > last_y };
+        if inside && further {
+            last_y = cy;
+            more = true;
+        }
+    }
+    if !more {
+        return Vec::new();
+    }
+    let (lo, hi) = (first_y.min(last_y), first_y.max(last_y));
+    let band = Band {
+        lo: first.x0 - X_TOLERANCE,
+        hi: first.x1 + X_TOLERANCE,
+        width: first.x1 - first.x0,
+        cross: None,
+    };
+    let region: Vec<usize> = page
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.role == ROLE_BODY && caption_kind(line).is_none())
+        .filter_map(|(k, line)| {
+            let b = finite_box(line)?;
+            let cy = centre_y(b);
+            (cy > lo && cy < hi && band.holds(b)).then_some(k)
+        })
+        .collect();
+    if region.len() > PARAGRAPH_TABLE_MAX_LINES {
+        return Vec::new();
+    }
+    region
+}
+
+/// Lines next to the caption at `entries[pos]` (below it with `down`,
+/// nearest first), after its `caption` continuation lines: through `body`
+/// and already tagged region lines, up to a vertical gap wider than
+/// [`TABLE_BREAK`] line heights, another caption start, a numbered section
+/// heading or a line of any other role; at most
+/// [`PARAGRAPH_TABLE_MAX_LINES`] lines.
+fn table_sequence(
+    page: &PageText,
+    entries: &[usize],
+    pos: usize,
+    down: bool,
+    geometry: &PageGeometry,
+) -> Vec<usize> {
+    let order: Vec<usize> = if down {
+        entries.iter().skip(pos + 1).copied().collect()
+    } else {
+        entries.iter().take(pos).rev().copied().collect()
+    };
+    let limit = TABLE_BREAK * geometry.height;
+    let mut seq: Vec<usize> = Vec::new();
+    let mut prev = entries[pos];
+    let mut leading = true;
+    for i in order {
+        let line = &page.lines[i];
+        if line.role == ROLE_FURNITURE {
+            continue;
+        }
+        let space = if down {
+            gap(page, prev, i)
+        } else {
+            gap(page, i, prev)
+        };
+        if space > limit {
+            break;
+        }
+        if leading && down && line.role == ROLE_CAPTION && caption_kind(line).is_none() {
+            prev = i;
+            continue;
+        }
+        leading = false;
+        if caption_kind(line).is_some() || is_numbered_heading(&line.text) {
+            break;
+        }
+        let open = matches!(
+            line.role.as_str(),
+            ROLE_BODY | ROLE_TABLE | ROLE_MATH | "figure" | "algorithm"
+        );
+        if !open {
+            break;
+        }
+        seq.push(i);
+        prev = i;
+        if seq.len() >= PARAGRAPH_TABLE_MAX_LINES {
+            break;
+        }
+    }
+    seq
+}
+
+/// Distinct column starts of `lines`, ascending: left edges shared (within
+/// [`X_TOLERANCE`]) by at least 2 lines, each at least
+/// [`COLUMN_MIN_GAP`] right of the previous start kept.
+fn column_starts(page: &PageText, lines: &[usize]) -> Vec<f32> {
+    let mut xs: Vec<f32> = lines
+        .iter()
+        .filter_map(|&i| finite_box(&page.lines[i]))
+        .map(|b| b.x0)
+        .collect();
+    xs.sort_by(f32::total_cmp);
+    let mut clusters: Vec<(f32, usize)> = Vec::new();
+    let mut last: Option<f32> = None;
+    for x in xs {
+        let joins = last.is_some_and(|l| x - l <= X_TOLERANCE);
+        if joins && let Some(cluster) = clusters.last_mut() {
+            cluster.1 += 1;
+        } else {
+            clusters.push((x, 1));
+        }
+        last = Some(x);
+    }
+    let mut starts: Vec<f32> = Vec::new();
+    for (x, n) in clusters {
+        if n >= 2 && starts.last().is_none_or(|&s| x - s >= COLUMN_MIN_GAP) {
+            starts.push(x);
+        }
+    }
+    starts
+}
+
+/// Index of the column start a left edge `x` belongs to: the last start at
+/// most [`X_TOLERANCE`] right of it and less than [`COLUMN_MIN_GAP`] left
+/// of it.
+fn column_of(x: f32, starts: &[f32]) -> Option<usize> {
+    starts
+        .iter()
+        .rposition(|&s| (s - X_TOLERANCE..s + COLUMN_MIN_GAP).contains(&x))
+}
+
+/// Rows of `lines` in which lines of at least [`TABLE_MIN_COLUMNS`]
+/// distinct columns sit side by side: line centres lying inside the boxes
+/// of lines from that many columns, centres closer than
+/// [`ROW_TOLERANCE`] counted as one row.
+fn full_rows(page: &PageText, lines: &[usize], starts: &[f32]) -> usize {
+    let boxed: Vec<(BBox, Option<usize>)> = lines
+        .iter()
+        .filter_map(|&i| finite_box(&page.lines[i]))
+        .map(|b| (b, column_of(b.x0, starts)))
+        .collect();
+    let mut centres: Vec<f32> = Vec::new();
+    for &(b, _) in &boxed {
+        let cy = centre_y(b);
+        let mut seen: Vec<usize> = Vec::new();
+        for &(o, column) in &boxed {
+            if let Some(column) = column
+                && (o.y0..=o.y1).contains(&cy)
+                && !seen.contains(&column)
+            {
+                seen.push(column);
+            }
+        }
+        if seen.len() >= TABLE_MIN_COLUMNS {
+            centres.push(cy);
+        }
+    }
+    centres.sort_by(f32::total_cmp);
+    let mut rows: usize = 0;
+    let mut last: Option<f32> = None;
+    for cy in centres {
+        if last.is_none_or(|l| cy - l > ROW_TOLERANCE) {
+            rows += 1;
+        }
+        last = Some(cy);
+    }
+    rows
+}
+
+/// A table with paragraph cells next to the caption at `entries[pos]`
+/// (below it with `down`, else above; see [`table_sequence`]): the lines
+/// up to the first two consecutive prose or prose-like lines that reach
+/// across a column start other than the first (body text resumed), when they hold at least
+/// [`TABLE_MIN_COLUMNS`] column starts and at least [`TABLE_MIN_ROWS`]
+/// rows with that many columns side by side. Prose cells are taken.
+fn column_table(
+    page: &PageText,
+    entries: &[usize],
+    pos: usize,
+    down: bool,
+    geometry: &PageGeometry,
+) -> Vec<usize> {
+    let seq = table_sequence(page, entries, pos, down, geometry);
+    let columns = column_starts(page, &seq);
+    if columns.len() < TABLE_MIN_COLUMNS {
+        return Vec::new();
+    }
+    let crossing = |i: usize| -> bool {
+        let line = &page.lines[i];
+        (is_prose(&line.text) || is_prose_like(&line.text))
+            && finite_box(line).is_some_and(|b| {
+                columns
+                    .iter()
+                    .skip(1)
+                    .any(|&c| b.x0 < c - X_TOLERANCE && b.x1 > c + X_TOLERANCE)
+            })
+    };
+    let stop = seq
+        .windows(2)
+        .position(|w| crossing(w[0]) && crossing(w[1]))
+        .unwrap_or(seq.len());
+    let block = &seq[..stop];
+    let starts = column_starts(page, block);
+    if starts.len() < TABLE_MIN_COLUMNS || full_rows(page, block, &starts) < TABLE_MIN_ROWS {
+        return Vec::new();
+    }
+    block.to_vec()
+}
+
+/// The lines of a table with paragraph cells next to the table caption
+/// `caption`: a ruled table below, then above it, else a column-pattern
+/// table below, then above it.
+fn paragraph_table(
+    page: &PageText,
+    geometry: &PageGeometry,
+    rules: &[BBox],
+    caption: CaptionBox,
+) -> Vec<usize> {
+    for down in [true, false] {
+        let region = ruled_table(page, rules, caption.bbox, down);
+        if !region.is_empty() {
+            return region;
+        }
+    }
+    let Some(b) = finite_box(&page.lines[caption.line]) else {
+        return Vec::new();
+    };
+    let band = band_for(geometry, b);
+    let entries = band_entries(page, band);
+    let Some(pos) = entries.iter().position(|&i| i == caption.line) else {
+        return Vec::new();
+    };
+    for down in [true, false] {
+        let region = column_table(page, &entries, pos, down, geometry);
+        if !region.is_empty() {
+            return region;
+        }
+    }
+    Vec::new()
+}
+
+/// Tag tables with paragraph cells (see [`paragraph_table`]) `table`, and
+/// their caption starts `caption`.
+fn tag_paragraph_tables(
+    page: &mut PageText,
+    geometry: &PageGeometry,
+    captions: &[CaptionBox],
+    report: &mut RegionReport,
+) {
+    let (rules, _) = page_figures(page);
+    let mut picked: Vec<(usize, Vec<usize>)> = Vec::new();
+    for &caption in captions.iter().filter(|c| c.kind == Kind::Table) {
+        let region = paragraph_table(page, geometry, &rules, caption);
+        if !region.is_empty() {
+            picked.push((caption.line, region));
+        }
+    }
+    for (k, region) in picked {
+        report.caption += tag(&mut page.lines[k], ROLE_CAPTION);
+        for i in region {
+            report.table += tag(&mut page.lines[i], ROLE_TABLE);
+        }
+    }
+}
+
+/// A font name of a monospace face (see [`MONOSPACE_MARKERS`]).
+fn is_monospace_font(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    MONOSPACE_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// At least 80 % of the line's non-blank characters are set in a monospace
+/// font.
+fn is_code_line(page: &PageText, line: &Line) -> bool {
+    let mut total: usize = 0;
+    let mut mono: usize = 0;
+    for &idx in &line.spans {
+        let Some(span) = page.spans.get(idx as usize) else {
+            continue;
+        };
+        let n = non_space_chars(&span.text);
+        total += n;
+        if span.font.as_deref().is_some_and(is_monospace_font) {
+            mono += n;
+        }
+    }
+    total > 0 && mono * 10 >= total * CODE_SHARE_TENTHS
+}
+
+/// Tag runs of at least [`CODE_MIN_LINES`] consecutive `body` lines set in
+/// a monospace font (furniture skipped) `code`; the count of lines newly
+/// tagged.
+fn tag_code(page: &mut PageText) -> usize {
+    let flags: Vec<bool> = page
+        .lines
+        .iter()
+        .map(|line| line.role == ROLE_BODY && is_code_line(page, line))
+        .collect();
+    let mut picked: Vec<usize> = Vec::new();
+    let mut run: Vec<usize> = Vec::new();
+    for (k, line) in page.lines.iter().enumerate() {
+        if line.role == ROLE_FURNITURE {
+            continue;
+        }
+        if flags[k] {
+            run.push(k);
+            continue;
+        }
+        if run.len() >= CODE_MIN_LINES {
+            picked.extend_from_slice(&run);
+        }
+        run.clear();
+    }
+    if run.len() >= CODE_MIN_LINES {
+        picked.extend_from_slice(&run);
+    }
+    let mut n = 0;
+    for k in picked {
+        n += tag(&mut page.lines[k], ROLE_CODE);
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::Figure;
 
     const SIZE: f32 = 10.0;
 
@@ -2658,5 +3522,477 @@ mod tests {
         let report = tag_regions(&mut pages);
         assert_eq!(report, RegionReport::default());
         assert!(pages[0].lines.iter().all(|l| l.role == "body"));
+    }
+
+    /// A figure record of `kind` with box (`x0`, `y0`, `x1`, `y1`).
+    fn figure(index: u32, kind: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> Figure {
+        Figure {
+            index,
+            bbox: Some(BBox { x0, y0, x1, y1 }),
+            kind: kind.to_string(),
+            mime: None,
+            width_px: None,
+            height_px: None,
+            sha256: None,
+            file: None,
+            caption: None,
+        }
+    }
+
+    const PROMPT_TITLE: &str = "System prompt";
+    const PROMPT_LINES: [&str; 4] = [
+        "You are a helpful assistant who answers the question below",
+        "and you keep every answer short and polite for the user",
+        "Client: I have been feeling a bit down lately because of",
+        "the thoughts that my family is disappointed in me again",
+    ];
+
+    /// Single-column page: prose, a framed box (a `vector` figure 75 pt
+    /// tall) holding a title and four prose-like prompt lines, with a
+    /// `Figure 7` caption 12 pt below it when `captioned_box`, then prose.
+    fn prompt_page(captioned_box: bool, frame: Figure) -> PageText {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(line(PROMPT_TITLE, 90.0, 612.0, 1));
+        let mut baseline = 600.0;
+        for text in PROMPT_LINES {
+            lines.push(line(text, 90.0, baseline, 1));
+            baseline -= 12.0;
+        }
+        if captioned_box {
+            lines.push(captioned("Figure 7: Prompt template.", 72.0, 530.0, 2));
+        }
+        let mut baseline = 500.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 3));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures.push(frame);
+        page
+    }
+
+    fn prompt_frame() -> Figure {
+        figure(0, "vector", 80.0, 550.0, 560.0, 625.0)
+    }
+
+    #[test]
+    fn a_framed_prose_box_above_a_figure_caption_is_figure_text() {
+        for text in PROMPT_LINES {
+            assert!(is_prose_like(text), "{text}");
+        }
+        let mut pages = vec![prompt_page(true, prompt_frame())];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        assert_eq!(role_of(page, PROMPT_TITLE), "figure");
+        for text in PROMPT_LINES {
+            assert_eq!(role_of(page, text), "figure", "{text}");
+        }
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(role_of(page, "Figure 7: Prompt template."), "caption");
+        assert_eq!(report.figure, 5);
+        assert_eq!(report.table, 0);
+    }
+
+    #[test]
+    fn a_box_without_a_caption_keeps_its_prose_and_a_whole_page_box_is_unused() {
+        let mut pages = vec![prompt_page(false, prompt_frame())];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        assert_eq!(role_of(page, PROMPT_TITLE), "figure");
+        for text in PROMPT_LINES {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.figure, 1);
+
+        // 93 % of the width and 91 % of the height, 85 % of the area: the
+        // whole page, used only with a caption.
+        let whole = figure(0, "vector", 20.0, 40.0, 592.0, 760.0);
+        let mut pages = vec![prompt_page(false, whole)];
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
+        assert!(pages[0].lines.iter().all(|l| l.role == "body"));
+
+        // A scanned page's full-page raster is never used, caption or not.
+        let scan = figure(0, "raster", 0.0, 0.0, 612.0, 792.0);
+        let mut pages = vec![prompt_page(true, scan)];
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
+        assert_eq!(role_of(&pages[0], PROMPT_TITLE), "body");
+    }
+
+    #[test]
+    fn a_raster_figure_with_no_lines_inside_tags_nothing() {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 700.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(captioned("Figure 1: A photograph.", 72.0, 450.0, 1));
+        let mut baseline = 420.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 2));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures
+            .push(figure(0, "raster", 72.0, 470.0, 540.0, 630.0));
+        let mut pages = vec![page];
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
+        assert!(pages[0].warnings.is_empty());
+    }
+
+    const WIDE_ROWS: [&str; 4] = [
+        "Alpha Beta Gamma Delta Epsilon Zeta",
+        "Eta Theta Iota Kappa Lambda Mu",
+        "Nu Xi Omicron Pi Rho Sigma",
+        "Tau Upsilon Phi Chi Psi Omega",
+    ];
+
+    #[test]
+    fn graphics_labels_on_a_figure_box_and_above_its_caption_are_figure_text() {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        // Title-case rows beside the figure (not fragments) make the walk
+        // above the caption fail, so only the label cluster tags.
+        for (k, text) in WIDE_ROWS.iter().enumerate() {
+            lines.push(line(text, 72.0, 590.0 - 15.0 * k as f32, 1));
+        }
+        let labels = [
+            ("Encoder", 310.0, 585.0),
+            ("Decoder", 450.0, 585.0),
+            ("(a) Input", 320.0, 545.0),
+            ("(b) Output", 450.0, 545.0),
+        ];
+        for (text, x0, baseline) in labels {
+            lines.push(line(text, x0, baseline, 2));
+        }
+        lines.push(captioned("Figure 2: Model.", 300.0, 520.0, 3));
+        let mut baseline = 490.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 4));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures
+            .push(figure(0, "vector", 300.0, 560.0, 550.0, 600.0));
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for (text, _, _) in labels {
+            assert_eq!(role_of(page, text), "figure", "{text}");
+        }
+        for text in WIDE_ROWS
+            .iter()
+            .chain(LEFT_PROSE.iter())
+            .chain(AFTER_PROSE.iter())
+        {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.figure, 4);
+    }
+
+    /// Cells of a three-column table with paragraph cells: (text, x0,
+    /// baseline).
+    const PARAGRAPH_CELLS: [(&str, f32, f32); 13] = [
+        ("GPT-4o", 72.0, 610.0),
+        ("generate a detailed review for the", 160.0, 610.0),
+        ("the ornament is a lovely gift and", 360.0, 610.0),
+        ("product with the following short", 160.0, 598.0),
+        ("arrives well packed for the season", 360.0, 598.0),
+        ("description of the ornament", 160.0, 586.0),
+        ("Claude", 72.0, 570.0),
+        ("generate an abstract for the given", 160.0, 570.0),
+        ("in this paper we propose a novel", 360.0, 570.0),
+        ("title about job shop scheduling", 160.0, 558.0),
+        ("teaching learning based method for", 360.0, 558.0),
+        ("the flexible job shop problem", 360.0, 546.0),
+        ("with fuzzy processing times", 160.0, 546.0),
+    ];
+
+    /// Prose, a `Table 3` caption, the [`PARAGRAPH_CELLS`] and then
+    /// `after` at x = 72 from baseline 520 down.
+    fn paragraph_table_page(after: &[&str]) -> PageText {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(captioned("Table 3: Generated examples.", 72.0, 630.0, 1));
+        for (text, x0, baseline) in PARAGRAPH_CELLS {
+            lines.push(line(text, x0, baseline, 2));
+        }
+        let mut baseline = 520.0;
+        for text in after {
+            lines.push(line(text, 72.0, baseline, 3));
+            baseline -= 12.0;
+        }
+        page_of(lines)
+    }
+
+    #[test]
+    fn body_text_after_a_paragraph_table_is_not_table_text() {
+        // Citation-heavy prose: prose-like, but no two neighbouring lines
+        // pass the lowercase-majority prose test.
+        let after = &COLUMN_PROSE[..8];
+        let mut pages = vec![paragraph_table_page(after)];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for (text, _, _) in PARAGRAPH_CELLS {
+            assert_eq!(role_of(page, text), "table", "{text}");
+        }
+        for text in after {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.table, PARAGRAPH_CELLS.len());
+    }
+
+    #[test]
+    fn a_table_with_paragraph_cells_in_three_columns_is_table_text() {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(captioned("Table 3: Generated examples.", 72.0, 630.0, 1));
+        for (text, x0, baseline) in PARAGRAPH_CELLS {
+            lines.push(line(text, x0, baseline, 2));
+        }
+        let mut baseline = 520.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 3));
+            baseline -= 12.0;
+        }
+        let mut pages = vec![page_of(lines)];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for (text, _, _) in PARAGRAPH_CELLS {
+            assert_eq!(role_of(page, text), "table", "{text}");
+        }
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.table, PARAGRAPH_CELLS.len());
+    }
+
+    #[test]
+    fn two_prose_columns_under_a_full_width_table_caption_are_no_table() {
+        let caption =
+            "Table 4: Agreement between simulated and human participants across twelve studies";
+        let mut lines: Vec<Line> = vec![captioned(caption, 54.0, 700.0, 0)];
+        let mut baseline = 686.0;
+        for k in 0..20 {
+            let x0 = if k % 5 == 2 { 80.0 } else { 54.0 };
+            let text = COLUMN_PROSE[k % COLUMN_PROSE.len()];
+            lines.push(line(text, x0, baseline, 1));
+            baseline -= 12.0;
+        }
+        prose_column(&mut lines, 312.0, 686.0, 20, 2);
+        let mut pages = vec![page_of(lines)];
+        let report = tag_regions(&mut pages);
+        assert_eq!(report, RegionReport::default());
+        only_caption_tagged(&pages[0], caption);
+    }
+
+    const RULED_CELLS: [(&str, f32, f32); 6] = [
+        ("Prompt", 80.0, 600.0),
+        (
+            "generate a detailed review for the product with the",
+            160.0,
+            600.0,
+        ),
+        (
+            "following description and keep it short please",
+            160.0,
+            588.0,
+        ),
+        ("Response", 80.0, 560.0),
+        (
+            "the ornament is a lovely gift and arrives well packed",
+            160.0,
+            560.0,
+        ),
+        (
+            "for the holiday season with a ribbon on the top",
+            160.0,
+            548.0,
+        ),
+    ];
+
+    #[test]
+    fn prose_cells_between_table_rules_are_table_text() {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(captioned("Table 5: Example prompts.", 72.0, 630.0, 1));
+        for (text, x0, baseline) in RULED_CELLS {
+            lines.push(line(text, x0, baseline, 2));
+        }
+        let mut baseline = 500.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 3));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures = vec![
+            figure(0, "rule", 72.0, 615.0, 540.0, 615.5),
+            figure(1, "rule", 72.0, 575.0, 540.0, 575.5),
+            figure(2, "rule", 72.0, 525.0, 540.0, 525.5),
+            // A footnote rule: a different width, not part of the table.
+            figure(3, "rule", 72.0, 100.0, 200.0, 100.4),
+        ];
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for (text, _, _) in RULED_CELLS {
+            assert_eq!(role_of(page, text), "table", "{text}");
+        }
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.table, RULED_CELLS.len());
+        // A single rule is not a table.
+        let mut lone = pages[0].clone();
+        lone.warnings.clear();
+        for l in &mut lone.lines {
+            if l.role == "table" {
+                l.role = "body".to_string();
+            }
+        }
+        lone.figures.truncate(1);
+        let mut pages = vec![lone];
+        assert_eq!(tag_regions(&mut pages).table, 0);
+    }
+
+    #[test]
+    fn math_lines_allow_one_long_word() {
+        let two_long = "\u{1d453}(\u{1d465}) = \u{1d454}(\u{1d466}) + \u{1d462}(\u{1d467}) \
+                        \u{2212} \u{1d458}(\u{1d464}) when \u{1d465} \u{2208} \u{1d44b} holds";
+        assert!(!is_math_line(two_long));
+        let short_words = "\u{1d453}(\u{1d465}) = \u{1d454}(\u{1d466}) + \u{1d462}(\u{1d467}) \
+                           \u{2212} \u{1d458}(\u{1d464}) for all \u{1d465} \u{2208} \u{1d44b}";
+        assert!(is_math_line(short_words));
+        let one_long = "\u{1d453}(\u{1d465}) = \u{1d454}(\u{1d466}) + \u{1d462}(\u{1d467}) \
+                        \u{2212} \u{1d458}(\u{1d464}) when \u{1d465} \u{2208} \u{1d44b}";
+        assert!(is_math_line(one_long));
+        assert_eq!(ordinary_words("when"), (1, 4, 1));
+        assert_eq!(ordinary_words("for"), (1, 3, 0));
+        assert_eq!(ordinary_words("log"), (0, 0, 0));
+    }
+
+    /// Adds a 10 pt line at `baseline` made of one span per piece, each
+    /// piece in its font.
+    fn push_fonted(page: &mut PageText, pieces: &[(&str, &str)], baseline: f32) {
+        let mut x0 = 72.0;
+        let mut spans: Vec<u32> = Vec::new();
+        let mut text = String::new();
+        for (piece, font) in pieces {
+            let seq = u32::try_from(page.spans.len()).unwrap();
+            let width = 5.0 * piece.chars().count() as f32;
+            page.spans.push(crate::schema::Span {
+                text: (*piece).to_string(),
+                bbox: Some(BBox {
+                    x0,
+                    y0: baseline - 2.0,
+                    x1: x0 + width,
+                    y1: baseline + 8.0,
+                }),
+                font: Some((*font).to_string()),
+                size: Some(10.0),
+                seq,
+            });
+            spans.push(seq);
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(piece);
+            x0 += width + 5.0;
+        }
+        let right = x0 - 5.0;
+        page.lines.push(Line {
+            text,
+            bbox: Some(BBox {
+                x0: 72.0,
+                y0: baseline - 2.0,
+                x1: right,
+                y1: baseline + 8.0,
+            }),
+            spans,
+            ..Line::default()
+        });
+    }
+
+    #[test]
+    fn three_consecutive_monospace_lines_are_code() {
+        let serif = "Times-Roman";
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE.iter().take(3) {
+            push_fonted(&mut page, &[(*text, serif)], baseline);
+            baseline -= 12.0;
+        }
+        let code = ["def main(args):", "result = run(args)", "print(result)"];
+        for text in code {
+            push_fonted(&mut page, &[(text, "ABCDEF+CMTT10")], baseline);
+            baseline -= 12.0;
+        }
+        push_fonted(&mut page, &[(AFTER_PROSE[0], serif)], baseline);
+        baseline -= 12.0;
+        // Two monospace lines around a mixed line: no run of three.
+        push_fonted(
+            &mut page,
+            &[("x = load()", "Inconsolata-Regular")],
+            baseline,
+        );
+        baseline -= 12.0;
+        let mixed = [
+            ("call", "Inconsolata"),
+            ("the loader once per batch", serif),
+        ];
+        push_fonted(&mut page, &mixed, baseline);
+        baseline -= 12.0;
+        push_fonted(&mut page, &[("y = save(x)", "Inconsolata")], baseline);
+        page.text = page
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for text in code {
+            assert_eq!(role_of(page, text), "code", "{text}");
+        }
+        for text in [
+            "x = load()",
+            "call the loader once per batch",
+            "y = save(x)",
+        ] {
+            assert_ne!(role_of(page, text), "code", "{text}");
+        }
+        assert_eq!(report.code, 3);
+        assert!(
+            page.warnings
+                .contains(&"regions: code text 3 lines".to_string())
+        );
+        assert!(is_monospace_font("LMMono10-Regular"));
+        assert!(is_monospace_font("NimbusMonoPS-Regular"));
+        assert!(is_monospace_font("Courier-Bold"));
+        assert!(!is_monospace_font("CMR10"));
     }
 }

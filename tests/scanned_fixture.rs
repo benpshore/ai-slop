@@ -226,8 +226,8 @@ fn scanned_pdf_is_image_only_and_unfiltered() {
     assert!(!contains_bytes(&bytes, b"BT"), "no text objects on a scan");
 }
 
-/// The `lopdf` backend reads text operators only; it does not report image
-/// `XObject`s as figures, so the only observable is that no text comes back.
+/// The `lopdf` backend reads text operators and records image `XObject`s as
+/// `raster` figures without decoding them: no text comes back, one figure does.
 #[test]
 fn lopdf_backend_sees_no_text_and_one_figure() {
     let (_dir, path) = write_temp_pdf(&scanned_fixture());
@@ -242,6 +242,13 @@ fn lopdf_backend_sees_no_text_and_one_figure() {
         .count();
     assert_eq!(non_blank, 0, "spans: {:?}", page.spans);
     assert!(page.text.trim().is_empty(), "text: {:?}", page.text);
+    let rasters: Vec<_> = page
+        .figures
+        .iter()
+        .filter(|figure| figure.kind == "raster")
+        .collect();
+    assert_eq!(rasters.len(), 1, "figures: {:?}", page.figures);
+    assert!(rasters[0].bbox.is_some(), "raster figure carries a box");
 }
 
 #[cfg(feature = "pdfium")]

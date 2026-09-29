@@ -68,7 +68,7 @@ pub struct Line {
     /// inside a figure), `table` (table cells), `algorithm`, `toc` (table of
     /// contents), `front` (page-1 title, authors and affiliations before the
     /// abstract), `math` (display-equation fragments), `footnote` (page-foot
-    /// notes) or `furniture` (running heads, page numbers, stamps; these
+    /// notes), `code` (monospace listings) or `furniture` (running heads, page numbers, stamps; these
     /// lines are not in `PageText::text`). Tags never remove text by
     /// themselves.
     #[serde(default = "default_line_role")]
@@ -99,7 +99,9 @@ pub struct Figure {
     /// 0-based index of the figure on its page, in backend order.
     pub index: u32,
     pub bbox: Option<BBox>,
-    /// `raster`, `vector`, or `layout` (a model-detected picture region).
+    /// `raster` (an image), `vector` (a cluster of painted paths), `rule` (a
+    /// thin horizontal or vertical painted line, e.g. a table rule) or `layout`
+    /// (a model-detected picture region).
     pub kind: String,
     /// MIME type of the exported bytes when known, e.g. `image/png`.
     pub mime: Option<String>,
