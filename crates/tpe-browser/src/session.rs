@@ -9,11 +9,13 @@
 //! page is the app's choice; for PDFs it should not, since Chromium's viewer
 //! would otherwise swallow the bytes the engine wants.
 
+use std::collections::HashSet;
+
 use crate::BrowserError;
 use crate::cookies::{Cookie, CookieJar};
 use crate::doi::{
-    arxiv_id_in_url, arxiv_ids_in_text, declared_dois_in_html, dois_in_html, dois_in_url,
-    is_doi_resolver,
+    MAX_IDENTIFIERS, MAX_SCAN_BYTES, arxiv_id_in_url, arxiv_ids_in_text, declared_dois_in_html,
+    dois_in_html, dois_in_url, is_doi_resolver,
 };
 use crate::hosts::{HostDecision, ResearchPolicy};
 use crate::html::strip_tags;
@@ -243,6 +245,12 @@ impl BrowserSession {
     /// Gather identifiers and PDF links from a loaded page and remember them.
     pub fn inspect_html(&mut self, raw_url: &str, html: &str) -> Result<PageFacts, BrowserError> {
         let url = NormalizedUrl::parse(raw_url)?;
+        if html.len() > MAX_SCAN_BYTES {
+            return Err(BrowserError::PageTooLarge {
+                actual: html.len(),
+                maximum: MAX_SCAN_BYTES,
+            });
+        }
         let facts = inspect_page(&url, html);
         self.pages.push(facts.clone());
         Ok(facts)
@@ -251,6 +259,7 @@ impl BrowserSession {
 
 /// Identifiers and PDF links of a page at `url`.
 pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
+    let html = bounded_html(html);
     let declared = declared_dois_in_html(html);
     let url_dois = dois_in_url(url);
     let primary_doi = declared
@@ -259,13 +268,22 @@ pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
         .or_else(|| url_dois.first().cloned());
     let mut dois = dois_in_html(html);
     for doi in url_dois {
-        if !dois.contains(&doi) {
-            dois.push(doi);
+        if dois.contains(&doi) {
+            continue;
         }
+        // The page's own identifiers outrank the last mentioned one.
+        if dois.len() == MAX_IDENTIFIERS {
+            dois.pop();
+        }
+        dois.push(doi);
     }
     let mut arxiv_ids: Vec<String> = arxiv_id_in_url(url).into_iter().collect();
+    let mut seen_arxiv: HashSet<String> = arxiv_ids.iter().cloned().collect();
     for id in arxiv_ids_in_text(&strip_tags(html)) {
-        if !arxiv_ids.contains(&id) {
+        if arxiv_ids.len() == MAX_IDENTIFIERS {
+            break;
+        }
+        if seen_arxiv.insert(id.clone()) {
             arxiv_ids.push(id);
         }
     }
@@ -276,6 +294,17 @@ pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
         arxiv_ids,
         pdf_links: pdf_links_in_html(html, url),
     }
+}
+
+fn bounded_html(html: &str) -> &str {
+    if html.len() <= MAX_SCAN_BYTES {
+        return html;
+    }
+    let mut end = MAX_SCAN_BYTES;
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    &html[..end]
 }
 
 fn pdf_intercept(url: &str, cls: &LinkClassification) -> Option<Intercept> {
@@ -603,5 +632,35 @@ mod tests {
         assert!(s.cookie_header("nope", NOW).is_err());
         assert!(s.inspect_html("nope", "<p></p>").is_err());
         assert!(s.history().is_empty());
+    }
+
+    #[test]
+    fn capped_identifier_lists_keep_the_url_identifiers() {
+        use std::fmt::Write as _;
+        let mut html = String::new();
+        for i in 0..MAX_IDENTIFIERS + 5 {
+            write!(html, "<p>10.1000/m{i} arXiv:2401.{i:05}</p>").unwrap();
+        }
+        let url = NormalizedUrl::parse("https://doi.org/10.9999/from-url").unwrap();
+        let facts = inspect_page(&url, &html);
+        assert_eq!(facts.dois.len(), MAX_IDENTIFIERS);
+        assert!(facts.dois.iter().any(|doi| doi == "10.9999/from-url"));
+        assert_eq!(facts.primary_doi.as_deref(), Some("10.9999/from-url"));
+
+        let url = NormalizedUrl::parse("https://arxiv.org/abs/2312.99999").unwrap();
+        let facts = inspect_page(&url, &html);
+        assert_eq!(facts.arxiv_ids.len(), MAX_IDENTIFIERS);
+        assert_eq!(facts.arxiv_ids[0], "2312.99999");
+    }
+
+    #[test]
+    fn page_inspection_rejects_oversized_html() {
+        let mut s = BrowserSession::open();
+        let html = "x".repeat(MAX_SCAN_BYTES + 1);
+        assert!(matches!(
+            s.inspect_html("https://example.com", &html),
+            Err(BrowserError::PageTooLarge { .. })
+        ));
+        assert!(s.pages().is_empty());
     }
 }

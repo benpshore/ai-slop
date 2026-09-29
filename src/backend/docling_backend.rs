@@ -6,8 +6,8 @@
 //!   assembly. Needs no models and no pdfium.
 //! * **full** (`docling`): `docling_pdf::Pipeline` — pdfium text cells and
 //!   page renders, ONNX layout detection, optional OCR and `TableFormer`.
-//!   Needs the pdfium shared library (`PDFIUM_DYNAMIC_LIB_PATH`, `.pdfium/lib`
-//!   or the system library) and the ONNX models (`.models/…` relative to the
+//!   Needs the pdfium shared library at an absolute
+//!   `PDFIUM_DYNAMIC_LIB_PATH` and the ONNX models (`.models/…` relative to the
 //!   working directory, `$DOCLING_RS_MODELS_DIR`, or next to the executable;
 //!   see docling-core `assets.rs`). Nothing is downloaded here.
 //!
@@ -47,6 +47,7 @@
 //!   every distinct configuration used in one process loads its own models.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use docling_core::{DoclingDocument, Node, PictureImage, Table, TableCell};
@@ -155,6 +156,7 @@ impl Extractor for DoclingBackend {
         password: Option<&str>,
     ) -> Result<Box<dyn DocumentSession>, BackendError> {
         let (page_count, geometry, info) = if self.full {
+            require_trusted_pdfium_path()?;
             let count = docling_pdf::page_count(bytes, password)
                 .map_err(|err| open_error(&err, password.is_some()))?;
             let count = u32::try_from(count).unwrap_or(u32::MAX);
@@ -189,6 +191,38 @@ impl Extractor for DoclingBackend {
     fn provides_reading_order(&self) -> bool {
         true
     }
+}
+
+/// `docling-pdf` otherwise falls back to `.pdfium/lib` below the current
+/// directory and then to the loader search path. Require its first-choice
+/// environment path to be explicit, absolute and present before entering
+/// native code, so a missing library never reaches that fallback. A library
+/// that is present there but fails to load is not detected here.
+fn require_trusted_pdfium_path() -> Result<(), BackendError> {
+    let configured = std::env::var("PDFIUM_DYNAMIC_LIB_PATH").unwrap_or_default();
+    trusted_pdfium_library(&configured).map(|_| ())
+}
+
+/// The library file a trusted `PDFIUM_DYNAMIC_LIB_PATH` value names.
+fn trusted_pdfium_library(configured: &str) -> Result<PathBuf, BackendError> {
+    const HINT: &str = "set PDFIUM_DYNAMIC_LIB_PATH to the absolute path of a provisioned library";
+    if !is_trusted_pdfium_path(configured) {
+        return Err(BackendError::Unsupported(format!(
+            "pdfium not installed at a trusted location: {HINT}"
+        )));
+    }
+    let file = crate::backend::pdfium_backend::library_file(Path::new(configured));
+    if !file.is_file() {
+        return Err(BackendError::Unsupported(format!(
+            "pdfium not installed at {}: {HINT}",
+            file.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn is_trusted_pdfium_path(path: &str) -> bool {
+    !path.is_empty() && Path::new(path).is_absolute()
 }
 
 /// Load-time configuration of one shared [`Pipeline`].
@@ -1354,6 +1388,30 @@ mod tests {
             open_error(&layout, false),
             BackendError::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn full_mode_rejects_working_directory_pdfium_paths() {
+        assert!(!is_trusted_pdfium_path(".pdfium/lib"));
+        let absolute = std::env::current_dir().unwrap().join(".pdfium/lib");
+        assert!(is_trusted_pdfium_path(absolute.to_str().unwrap()));
+    }
+
+    #[test]
+    fn full_mode_requires_a_present_library_at_the_trusted_path() {
+        for configured in ["", ".pdfium/lib"] {
+            let err = trusted_pdfium_library(configured).unwrap_err();
+            assert!(err.to_string().contains("not installed"), "{err}");
+        }
+        let missing = tempfile::tempdir().unwrap();
+        let err = trusted_pdfium_library(missing.path().to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("not installed"), "{err}");
+        let file = missing.path().join("libpdfium.so");
+        std::fs::write(&file, []).unwrap();
+        assert_eq!(
+            trusted_pdfium_library(file.to_str().unwrap()).unwrap(),
+            file
+        );
     }
 
     /// Whether the full pipeline can run here: a layout model and a pdfium

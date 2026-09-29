@@ -67,42 +67,86 @@ struct SectionLine {
 
 impl SectionLine {
     /// Is `other` a fragment of the same printed row (same page and column,
-    /// baselines within 0.4 × the font size)?
-    fn same_row(&self, other: &Self) -> bool {
+    /// baselines within 0.4 × the font size)? `size` is the row's font size
+    /// so far: the largest of its fragments, as the merged row used to carry.
+    fn same_row_as(&self, other: &Self, size: Option<f32>) -> bool {
         if self.page != other.page || self.column != other.column {
             return false;
         }
         let (Some(a), Some(b)) = (self.y0, other.y0) else {
             return false;
         };
-        let size = self.size.or(other.size).unwrap_or(10.0);
+        let size = size.or(other.size).unwrap_or(10.0);
         (a - b).abs() <= 0.4 * size
     }
+}
 
-    /// Join the fragment `other` into this row in x order: a fragment that
-    /// sits to the left goes in front even when it arrived later (a DOI set
-    /// in a second font sorts before the text beside it).
-    fn absorb(&mut self, other: &Self) {
-        let before = matches!((self.x0, other.x0), (Some(a), Some(b)) if b < a);
-        if self.text.is_empty() {
-            self.text.clone_from(&other.text);
-        } else if !other.text.is_empty() {
-            if before {
-                self.text = format!("{} {}", other.text, self.text);
-            } else {
-                self.text.push(' ');
-                self.text.push_str(&other.text);
-            }
+/// The larger of two optional font sizes.
+fn max_size(a: Option<f32>, b: Option<f32>) -> Option<f32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+// A genuine printed row has few fragments. These bounds prevent hostile PDF
+// geometry from turning an arbitrary number of lines into one allocation.
+const MAX_ROW_FRAGMENTS: usize = 1_024;
+const MAX_ROW_TEXT_BYTES: usize = 1024 * 1024;
+
+/// Sort the collected fragments once and concatenate them in one allocation.
+/// This avoids repeatedly copying the accumulated row when lower-x fragments
+/// arrive late in reading order.
+fn finish_row(mut fragments: Vec<SectionLine>) -> SectionLine {
+    debug_assert!(!fragments.is_empty());
+    if fragments.len() == 1 {
+        // A lone fragment (possibly one larger than the row budget) is moved
+        // out as it is, never copied.
+        return fragments.pop().expect("one fragment");
+    }
+    // The row keeps the position of the fragment that arrived first, the
+    // lowest x, the largest size and the lowest line index.
+    let (page, column, y0) = (fragments[0].page, fragments[0].column, fragments[0].y0);
+    let line = fragments
+        .iter()
+        .map(|fragment| fragment.line)
+        .min()
+        .unwrap_or(0);
+    let x0 = fragments
+        .iter()
+        .filter_map(|fragment| fragment.x0)
+        .reduce(f32::min);
+    let size = fragments
+        .iter()
+        .filter_map(|fragment| fragment.size)
+        .reduce(f32::max);
+
+    fragments.sort_by(|a, b| match (a.x0, b.x0) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let capacity = fragments
+        .iter()
+        .map(|fragment| fragment.text.len())
+        .sum::<usize>()
+        + fragments.len().saturating_sub(1);
+    let mut text = String::with_capacity(capacity);
+    for fragment in fragments {
+        if !text.is_empty() && !fragment.text.is_empty() {
+            text.push(' ');
         }
-        self.x0 = match (self.x0, other.x0) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        self.size = match (self.size, other.size) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
-        };
-        self.line = self.line.min(other.line);
+        text.push_str(&fragment.text);
+    }
+    SectionLine {
+        page,
+        line,
+        column,
+        x0,
+        y0,
+        size,
+        text,
     }
 }
 
@@ -1143,13 +1187,19 @@ fn identifier_open(text: &str) -> bool {
 /// ([`repeated_furniture`]) and page numbers, except a numeric line that
 /// continues a DOI or URL of the line before it and does not sit in a
 /// margin band.
-fn section_lines(
+/// Collect section lines with document-wide furniture already computed.
+fn section_lines_with_furniture(
     pages: &[PageText],
     section: &ReferenceSection,
     stop: Option<(u32, usize)>,
+    repeated: &[String],
 ) -> Vec<SectionLine> {
-    let repeated = repeated_furniture(pages);
     let mut lines: Vec<SectionLine> = Vec::new();
+    let mut row = Vec::<SectionLine>::new();
+    let mut row_text_bytes = 0usize;
+    // The largest font size among the row's fragments, which decides the
+    // baseline tolerance for the next fragment (as the merged row used to).
+    let mut row_size: Option<f32> = None;
     'pages: for page in pages {
         if page.page < section.first_page {
             continue;
@@ -1178,8 +1228,17 @@ fn section_lines(
             }
             if page_number_re().is_match(text) {
                 let margin = line.bbox.is_some_and(|b| in_margin(b, page.height));
-                let continues =
-                    !margin && lines.last().is_some_and(|prev| identifier_open(&prev.text));
+                let continues = !margin
+                    && row
+                        .iter()
+                        .max_by(|a, b| match (a.x0, b.x0) {
+                            (Some(a), Some(b)) => a.total_cmp(&b),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        })
+                        .or_else(|| lines.last())
+                        .is_some_and(|prev| identifier_open(&prev.text));
                 if !continues {
                     continue;
                 }
@@ -1195,13 +1254,26 @@ fn section_lines(
             };
             // Justified columns leave gaps wider than the layout pass joins,
             // so one printed row can arrive as several lines: re-join them.
-            let same_row = lines.last().is_some_and(|last| last.same_row(&fragment));
-            if same_row && let Some(last) = lines.last_mut() {
-                last.absorb(&fragment);
-            } else {
-                lines.push(fragment);
+            let same_row = row
+                .first()
+                .is_some_and(|first| first.same_row_as(&fragment, row_size));
+            let added_bytes = fragment.text.len() + usize::from(!row.is_empty());
+            let within_budget = row.len() < MAX_ROW_FRAGMENTS
+                && row_text_bytes.saturating_add(added_bytes) <= MAX_ROW_TEXT_BYTES;
+            if !same_row || !within_budget {
+                if !row.is_empty() {
+                    lines.push(finish_row(std::mem::take(&mut row)));
+                }
+                row_text_bytes = 0;
+                row_size = None;
             }
+            row_text_bytes += fragment.text.len() + usize::from(!row.is_empty());
+            row_size = max_size(row_size, fragment.size);
+            row.push(fragment);
         }
+    }
+    if !row.is_empty() {
+        lines.push(finish_row(row));
     }
     lines
 }
@@ -1396,12 +1468,23 @@ fn labels_above_heading(pages: &[PageText], section: &ReferenceSection) -> Vec<L
 
 /// Collect, clean and cut the lines of the list that starts at `section`
 /// and stops before `stop`.
+#[cfg(test)]
 fn list_body(
     pages: &[PageText],
     section: &ReferenceSection,
     stop: Option<(u32, usize)>,
 ) -> ListBody {
-    let mut lines = section_lines(pages, section, stop);
+    let repeated = repeated_furniture(pages);
+    list_body_with_furniture(pages, section, stop, &repeated)
+}
+
+fn list_body_with_furniture(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+    repeated: &[String],
+) -> ListBody {
+    let mut lines = section_lines_with_furniture(pages, section, stop, repeated);
     let style = detect_style(&lines);
     // Labels the layout pass detached from their entries carry no text;
     // a detached list keeps their numbers (with their positions) to label
@@ -1630,7 +1713,17 @@ fn segment_list(
     section: &ReferenceSection,
     stop: Option<(u32, usize)>,
 ) -> Vec<ReferenceEntry> {
-    let body = list_body(pages, section, stop);
+    let repeated = repeated_furniture(pages);
+    segment_list_with_furniture(pages, section, stop, &repeated)
+}
+
+fn segment_list_with_furniture(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+    repeated: &[String],
+) -> Vec<ReferenceEntry> {
+    let body = list_body_with_furniture(pages, section, stop, repeated);
     match body.style {
         Style::AuthorYear => segment_author_year(&body.lines, &body.context),
         Style::Detached => {
@@ -5563,7 +5656,11 @@ struct ListExtent {
 }
 
 /// The extent of every list in `sections` (see [`ListExtent`]).
-fn list_extents(pages: &[PageText], sections: &[ReferenceSection]) -> Vec<ListExtent> {
+fn list_extents(
+    pages: &[PageText],
+    sections: &[ReferenceSection],
+    repeated: &[String],
+) -> Vec<ListExtent> {
     sections
         .iter()
         .enumerate()
@@ -5571,7 +5668,7 @@ fn list_extents(pages: &[PageText], sections: &[ReferenceSection]) -> Vec<ListEx
             let stop = sections
                 .get(k + 1)
                 .map(|next| (next.first_page, next.first_line));
-            let body = list_body(pages, section, stop);
+            let body = list_body_with_furniture(pages, section, stop, repeated);
             ListExtent {
                 start: (section.first_page, section.first_line),
                 end: body.end.or(stop),
@@ -5775,7 +5872,20 @@ fn markers_in_sections(
     if refs.is_empty() {
         return Vec::new();
     }
-    let extents = list_extents(pages, sections);
+    let repeated = repeated_furniture(pages);
+    markers_in_sections_with_furniture(pages, refs, sections, &repeated)
+}
+
+fn markers_in_sections_with_furniture(
+    pages: &[PageText],
+    refs: &[ReferenceEntry],
+    sections: &[ReferenceSection],
+    repeated: &[String],
+) -> Vec<CitationMarker> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let extents = list_extents(pages, sections, repeated);
     let index = RefIndex::build(refs, &extents);
     let page_windows: Vec<Vec<Range<usize>>> = pages
         .iter()
@@ -5856,18 +5966,24 @@ fn markers_in_sections(
 /// vectors.
 pub fn extract_citations(pages: &[PageText]) -> (Vec<ReferenceEntry>, Vec<CitationMarker>) {
     let sections = find_reference_sections(pages);
+    if sections.is_empty() {
+        // Nothing to segment or resolve: skip the document-wide furniture
+        // scan every list would otherwise share.
+        return (Vec::new(), Vec::new());
+    }
+    let repeated = repeated_furniture(pages);
     let mut refs: Vec<ReferenceEntry> = Vec::new();
     for (k, section) in sections.iter().enumerate() {
         let stop = sections
             .get(k + 1)
             .map(|next| (next.first_page, next.first_line));
-        for mut entry in segment_list(pages, section, stop) {
+        for mut entry in segment_list_with_furniture(pages, section, stop, &repeated) {
             entry.index = u32::try_from(refs.len() + 1).unwrap_or(u32::MAX);
             parse_entry(&mut entry);
             refs.push(entry);
         }
     }
-    let markers = markers_in_sections(pages, &refs, &sections);
+    let markers = markers_in_sections_with_furniture(pages, &refs, &sections, &repeated);
     (refs, markers)
 }
 
@@ -8260,6 +8376,60 @@ mod tests {
         assert_eq!(refs[1].label.as_deref(), Some("Hawkins2016"));
     }
 
+    #[test]
+    fn row_tolerance_follows_the_largest_fragment_size() {
+        let fragment = |x0: f32, y0: f32, size: f32| SectionLine {
+            page: 1,
+            line: 0,
+            column: 0,
+            x0: Some(x0),
+            y0: Some(y0),
+            size: Some(size),
+            text: "t".to_string(),
+        };
+        let first = fragment(0.0, 100.0, 5.0);
+        let third = fragment(40.0, 106.0, 5.0);
+        // Under the first fragment's 5 pt the third is 6 pt away and split;
+        // once a 20 pt fragment joined the row it is within 0.4 × 20 pt.
+        assert!(!first.same_row_as(&third, first.size));
+        assert!(first.same_row_as(&third, max_size(first.size, Some(20.0))));
+
+        let lone = vec![fragment(0.0, 100.0, 5.0)];
+        assert_eq!(finish_row(lone).text, "t");
+        let merged = finish_row(vec![fragment(50.0, 100.0, 5.0), fragment(0.0, 100.0, 20.0)]);
+        assert_eq!(merged.text, "t t");
+        assert_eq!(merged.x0, Some(0.0));
+        assert_eq!(merged.size, Some(20.0));
+    }
+
+    #[test]
+    fn row_fragment_budget_splits_hostile_geometry() {
+        let mut input = vec![line_at("References", 0, 72.0, 754.0)];
+        for i in 0..=MAX_ROW_FRAGMENTS {
+            input.push(line_at(
+                &format!("F{i:04}"),
+                0,
+                (MAX_ROW_FRAGMENTS - i) as f32,
+                740.0,
+            ));
+        }
+        let page = page_of(1, input);
+        let section = ReferenceSection {
+            first_page: 1,
+            first_line: 0,
+            heading: "References".to_string(),
+        };
+
+        let pages = [page];
+        let repeated = repeated_furniture(&pages);
+        let rows = section_lines_with_furniture(&pages, &section, None, &repeated);
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].text.starts_with("F1023 F1022"));
+        assert!(rows[0].text.ends_with("F0000"));
+        assert_eq!(rows[1].text, "F1024");
+    }
+
     /// Loop 6 segmentation fixes, each built from the text of an arXiv
     /// paper whose list the evaluation found mis-segmented.
     mod loop6_segmentation_tests {
@@ -9265,7 +9435,8 @@ mod tests {
         assert_eq!(indices, vec![1, 2, 3, 4, 5]);
 
         let sections = find_reference_sections(&pages);
-        let index = RefIndex::build(&refs, &list_extents(&pages, &sections));
+        let repeated = repeated_furniture(&pages);
+        let index = RefIndex::build(&refs, &list_extents(&pages, &sections, &repeated));
         assert!(index.numbered);
         assert_eq!(index.spaces.len(), 2);
         assert_eq!(index.spaces[0].end, Some((2, 4)));
