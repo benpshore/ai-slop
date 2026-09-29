@@ -10,7 +10,6 @@
 //! Bytes never reach the page text.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
@@ -18,6 +17,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use crate::acquire::{self, AcquireError};
+use crate::artifact::{ArtifactLimits, ArtifactWriter};
 use crate::backend::{self, BackendError, DocumentSession, Extractor};
 use crate::citations;
 use crate::metadata;
@@ -88,11 +88,12 @@ fn figure_extension(mime: Option<&str>) -> &'static str {
 }
 
 /// Write `bytes` to `target`, creating its parent directory.
-fn write_figure(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(target, bytes)
+fn write_figure(
+    writer: &ArtifactWriter,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<(), crate::artifact::ArtifactError> {
+    writer.write(target, bytes)
 }
 
 /// The export directory of one run, relative to the figures directory:
@@ -118,6 +119,7 @@ fn collect_figures(
     session: &mut dyn DocumentSession,
     page: &mut PageText,
     export: Option<(&Path, &str)>,
+    writer: &ArtifactWriter,
 ) -> Vec<String> {
     let page_no = page.page;
     let mut warnings: Vec<String> = Vec::new();
@@ -133,7 +135,7 @@ fn collect_figures(
         let ext = figure_extension(figure.mime.as_deref());
         let relative = format!("{run_dir}/p{page_no}-f{index}.{ext}");
         let target = dir.join(&relative);
-        match write_figure(&target, &bytes) {
+        match write_figure(writer, &target, &bytes) {
             Ok(()) => figure.file = Some(relative),
             Err(err) => warnings.push(format!(
                 "figure export: page {page_no} figure {index}: {}: {err}",
@@ -215,6 +217,7 @@ fn parse_while_hashing(
     job: &Job,
     bytes: &[u8],
     identity: &mut BackendIdentity,
+    writer: &ArtifactWriter,
 ) -> Result<Parsed, PipelineError> {
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
         let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
@@ -245,7 +248,8 @@ fn parse_while_hashing(
         for page in first..=last {
             match session.page_text(page) {
                 Ok(mut text) => {
-                    let figure_warnings = collect_figures(session.as_mut(), &mut text, export);
+                    let figure_warnings =
+                        collect_figures(session.as_mut(), &mut text, export, writer);
                     warnings.extend(figure_warnings);
                     pages.push(text);
                 }
@@ -302,15 +306,34 @@ fn parse_while_hashing(
 /// second thread while the backend parses; that work is reported as
 /// `hash_ms`, and any wait for it falls inside `parse_ms`.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
+    let writer = ArtifactWriter::new(ArtifactLimits::default());
+    run_job_with_writer(job, &writer)
+}
+
+/// Run a job with the process-wide artifact writer used by concurrent workers.
+pub fn run_job_with_writer(
+    job: &Job,
+    writer: &ArtifactWriter,
+) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
-    run_job_with(extractor.as_ref(), job)
+    run_job_with_artifacts(extractor.as_ref(), job, writer)
 }
 
 /// [`run_job`] with an already resolved backend; `job.backend` is ignored.
 pub fn run_job_with(
     extractor: &dyn Extractor,
     job: &Job,
+) -> Result<ExtractionResult, PipelineError> {
+    let writer = ArtifactWriter::new(ArtifactLimits::default());
+    run_job_with_artifacts(extractor, job, &writer)
+}
+
+/// [`run_job_with`] using an explicitly shared artifact writer.
+pub fn run_job_with_artifacts(
+    extractor: &dyn Extractor,
+    job: &Job,
+    writer: &ArtifactWriter,
 ) -> Result<ExtractionResult, PipelineError> {
     let mut identity = extractor.identity();
 
@@ -328,7 +351,7 @@ pub fn run_job_with(
         warnings,
         status,
         info,
-    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity)?;
+    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity, writer)?;
     timings.parse_ms = elapsed_ms(parse_start);
     timings.hash_ms = hashed.ms;
     let snapshot = read.into_snapshot(hashed.hash);

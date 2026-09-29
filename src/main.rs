@@ -15,11 +15,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Mutex, mpsc};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use tpe::artifact::{ArtifactLimits, ArtifactWriter, Durability};
 use tpe::backend;
 use tpe::bibliography;
 use tpe::corpus::{self, Manifest, ManifestItem};
@@ -101,6 +102,8 @@ impl Split {
 
 #[derive(Args)]
 struct ExtractArgs {
+    #[command(flatten)]
+    artifacts: ArtifactArgs,
     /// PDF files to process.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
@@ -202,6 +205,8 @@ struct FetchArgs {
 
 #[derive(Args)]
 struct EvalArgs {
+    #[command(flatten)]
+    artifacts: ArtifactArgs,
     /// Path of the corpus manifest (JSON).
     #[arg(long, value_name = "FILE")]
     manifest: PathBuf,
@@ -230,6 +235,83 @@ struct EvalArgs {
     /// (truth vs extracted references, matches, markers, warnings, timings).
     #[arg(long, value_name = "DIR")]
     dump_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum DurabilityArg {
+    #[default]
+    Atomic,
+    Durable,
+}
+
+#[derive(Args, Clone, Debug)]
+struct ArtifactArgs {
+    /// Maximum bytes newly published across all artifact destinations.
+    #[arg(long, value_name = "N")]
+    max_output_bytes: Option<u64>,
+    /// Maximum bytes reserved by concurrent sibling temporary files.
+    #[arg(long, value_name = "N")]
+    max_temp_bytes: Option<u64>,
+    /// Free bytes that must remain after all current temporary reservations.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    min_free_bytes: u64,
+    /// Publication flush policy.
+    #[arg(long, value_enum, default_value_t = DurabilityArg::Atomic)]
+    durability: DurabilityArg,
+}
+
+fn artifact_writer(args: &ArtifactArgs) -> ArtifactWriter {
+    ArtifactWriter::new(ArtifactLimits {
+        max_output_bytes: args.max_output_bytes,
+        max_temp_bytes: args.max_temp_bytes,
+        min_free_bytes: args.min_free_bytes,
+        durability: match args.durability {
+            DurabilityArg::Atomic => Durability::Atomic,
+            DurabilityArg::Durable => Durability::Durable,
+        },
+    })
+}
+
+fn prepare_artifact_root(
+    writer: &ArtifactWriter,
+    args: &ArtifactArgs,
+    root: &Path,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(root)
+        .with_context(|| format!("creating output directory {}", root.display()))?;
+    let removed =
+        tpe::artifact::remove_stale_temps_tree(root, Duration::from_secs(24 * 60 * 60))
+            .with_context(|| format!("cleaning stale artifact files in {}", root.display()))?;
+    if removed > 0 {
+        eprintln!(
+            "removed {removed} stale artifact temporary file(s) from {}",
+            root.display()
+        );
+    }
+    let info = writer
+        .filesystem(root)
+        .with_context(|| format!("detecting filesystem for {}", root.display()))?;
+    eprintln!(
+        "artifact destination {}: filesystem={}, available_bytes={}",
+        root.display(),
+        info.name,
+        info.available_bytes
+    );
+    if !info.atomic_rename {
+        eprintln!(
+            "warning: {} lacks verified local atomic-rename semantics; choose an APFS, ext4, XFS, Btrfs, tmpfs, or overlay destination (host mount settings were not changed)",
+            root.display()
+        );
+    }
+    if info.available_bytes < args.min_free_bytes {
+        eprintln!(
+            "warning: {} has {} available bytes, below --min-free-bytes {}; free space or choose another destination (host TRIM, swap, filesystem, and mount settings were not changed)",
+            root.display(),
+            info.available_bytes,
+            args.min_free_bytes
+        );
+    }
+    Ok(())
 }
 
 fn main() -> anyhow::Result<ExitCode> {
@@ -367,7 +449,7 @@ fn next_path(queue: &Mutex<VecDeque<PathBuf>>) -> Option<PathBuf> {
 }
 
 /// Run the pipeline for one path on a worker thread.
-fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
+fn extract_one(args: &ExtractArgs, writer: &ArtifactWriter, path: PathBuf) -> Outcome {
     let job = Job {
         path: path.to_string_lossy().into_owned(),
         backend: args.backend.clone(),
@@ -378,11 +460,13 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
     };
     let start = Instant::now();
     // A panic inside a backend must fail this file only, not the whole batch.
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| pipeline::run_job(&job)))
-        .map_or_else(
-            |payload| Err(format!("panic: {}", panic_message(&*payload))),
-            |outcome| outcome.map_err(|err| err.to_string()),
-        );
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        pipeline::run_job_with_writer(&job, writer)
+    }))
+    .map_or_else(
+        |payload| Err(format!("panic: {}", panic_message(&*payload))),
+        |outcome| outcome.map_err(|err| err.to_string()),
+    );
     Outcome {
         path,
         wall_ms: elapsed_ms(start),
@@ -394,9 +478,12 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
     pipeline::warm_up();
     let mut ledger = open_ledger(&args.db)?;
+    let writer = artifact_writer(&args.artifacts);
     if let Some(dir) = &args.out {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("creating output directory {}", dir.display()))?;
+        prepare_artifact_root(&writer, &args.artifacts, dir)?;
+    }
+    if let Some(dir) = &args.figures_dir {
+        prepare_artifact_root(&writer, &args.artifacts, dir)?;
     }
 
     let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
@@ -407,9 +494,10 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
         for _ in 0..workers {
             let sender = sender.clone();
             let queue = &queue;
+            let writer = &writer;
             scope.spawn(move || {
                 while let Some(path) = next_path(queue) {
-                    let outcome = extract_one(args, path);
+                    let outcome = extract_one(args, writer, path);
                     if sender.send(outcome).is_err() {
                         break;
                     }
@@ -420,7 +508,7 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
 
         let mut any_failed = false;
         for outcome in receiver {
-            if publish(&mut ledger, args, outcome)? {
+            if publish(&mut ledger, args, &writer, outcome)? {
                 any_failed = true;
             }
         }
@@ -498,7 +586,12 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
 
 /// Record one outcome in the ledger (main thread only), write the optional
 /// output files and print its line. Returns `true` when the file failed.
-fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow::Result<bool> {
+fn publish(
+    ledger: &mut Ledger,
+    args: &ExtractArgs,
+    writer: &ArtifactWriter,
+    outcome: Outcome,
+) -> anyhow::Result<bool> {
     let Outcome {
         path,
         wall_ms,
@@ -514,7 +607,7 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
                 .update_timings(run, &result.timings)
                 .with_context(|| format!("recording write time for {path_display}"))?;
             if let Some(dir) = &args.out {
-                write_outputs(dir, &result)?;
+                write_outputs(writer, dir, &result)?;
             }
             if args.json {
                 println!("{}", serde_json::to_string(&result)?);
@@ -557,14 +650,21 @@ fn summary_line(result: &ExtractionResult, path: &str) -> String {
 }
 
 /// Write `<hash>.json` and `<hash>.txt` for one result into `dir`.
-fn write_outputs(dir: &Path, result: &ExtractionResult) -> anyhow::Result<()> {
+fn write_outputs(
+    writer: &ArtifactWriter,
+    dir: &Path,
+    result: &ExtractionResult,
+) -> anyhow::Result<()> {
     let hash = result.document.hash.0.as_str();
     let json_path = dir.join(format!("{hash}.json"));
     let json = serde_json::to_string_pretty(result)?;
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    writer
+        .write(&json_path, json.as_bytes())
+        .with_context(|| format!("writing {}", json_path.display()))?;
     let text_path = dir.join(format!("{hash}.txt"));
     let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    fs::write(&text_path, texts.join("\u{c}"))
+    writer
+        .write(&text_path, texts.join("\u{c}").as_bytes())
         .with_context(|| format!("writing {}", text_path.display()))?;
     Ok(())
 }
@@ -866,7 +966,7 @@ struct Evaluated {
 
 /// Fetch, extract and score one manifest item. Every failure becomes a
 /// `failed:` paper so the measurement continues with the next item.
-fn eval_item(args: &EvalArgs, item: &ManifestItem) -> Evaluated {
+fn eval_item(args: &EvalArgs, writer: &ArtifactWriter, item: &ManifestItem) -> Evaluated {
     let id = item.id.as_str();
     let failed = |error: String| Evaluated {
         paper: eval::failed_paper(id, &error),
@@ -895,13 +995,17 @@ fn eval_item(args: &EvalArgs, item: &ManifestItem) -> Evaluated {
         max_bytes: None,
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
-    let result = match pipeline::run_job(&job) {
+    let result = match pipeline::run_job_with_writer(&job, writer) {
         Ok(result) => result,
         Err(err) => return failed(format!("extract: {err}")),
     };
     let paper = eval::evaluate(id, &result, &truth);
     if let Some(dir) = &args.dump_dir {
-        match eval::write_dump(dir, &eval::dump_paper(id, &result, &truth, &paper)) {
+        match eval::write_dump_with_writer(
+            writer,
+            dir,
+            &eval::dump_paper(id, &result, &truth, &paper),
+        ) {
             Ok(path) => eprintln!("dump written: {}", path.display()),
             Err(err) => eprintln!("{id}: dump not written: {err}"),
         }
@@ -925,13 +1029,16 @@ fn paper_line(paper: &PaperEval) -> String {
 }
 
 /// Write `report.json` and `report.md` into `dir`.
-fn write_report(dir: &Path, report: &CorpusReport) -> anyhow::Result<()> {
+fn write_report(writer: &ArtifactWriter, dir: &Path, report: &CorpusReport) -> anyhow::Result<()> {
     let json_path = dir.join("report.json");
     let mut json = serde_json::to_string_pretty(report)?;
     json.push('\n');
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    writer
+        .write(&json_path, json.as_bytes())
+        .with_context(|| format!("writing {}", json_path.display()))?;
     let md_path = dir.join("report.md");
-    fs::write(&md_path, eval::render_markdown(report))
+    writer
+        .write(&md_path, eval::render_markdown(report).as_bytes())
         .with_context(|| format!("writing {}", md_path.display()))?;
     Ok(())
 }
@@ -972,8 +1079,14 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
     check_backend(&args.backend)?;
     pipeline::warm_up();
     let manifest = load_corpus(&args.manifest, &args.cache)?;
-    fs::create_dir_all(&args.out)
-        .with_context(|| format!("creating output directory {}", args.out.display()))?;
+    let writer = artifact_writer(&args.artifacts);
+    prepare_artifact_root(&writer, &args.artifacts, &args.out)?;
+    if let Some(dir) = &args.figures_dir {
+        prepare_artifact_root(&writer, &args.artifacts, dir)?;
+    }
+    if let Some(dir) = &args.dump_dir {
+        prepare_artifact_root(&writer, &args.artifacts, dir)?;
+    }
     let mut ledger: Option<Ledger> = args.db.as_deref().map(open_ledger).transpose()?;
     let mut papers: Vec<PaperEval> = Vec::new();
     for item in manifest
@@ -981,7 +1094,7 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
         .iter()
         .filter(|item| args.split.includes(item))
     {
-        let mut evaluated = eval_item(args, item);
+        let mut evaluated = eval_item(args, &writer, item);
         if let (Some(ledger), Some(result)) = (ledger.as_mut(), evaluated.result.as_mut()) {
             let write_start = Instant::now();
             let run = store_result(ledger, result, &item.id)?;
@@ -999,7 +1112,7 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
         papers.push(evaluated.paper);
     }
     let report = eval::build_report(&args.backend, &host_label(), papers);
-    write_report(&args.out, &report)?;
+    write_report(&writer, &args.out, &report)?;
     print_summary(&report);
     Ok(())
 }

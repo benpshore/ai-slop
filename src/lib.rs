@@ -34,6 +34,7 @@
 )]
 
 pub mod acquire;
+pub mod artifact;
 pub mod backend;
 pub mod bibliography;
 pub mod citations;

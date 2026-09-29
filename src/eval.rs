@@ -3680,11 +3680,24 @@ pub fn safe_file_stem(id: &str) -> String {
 /// Writes `dump` as pretty JSON to `<dir>/<safe id>.json`, creating `dir`
 /// when missing, and returns the path written.
 pub fn write_dump(dir: &Path, dump: &PaperDump) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+    let writer = crate::artifact::ArtifactWriter::new(crate::artifact::ArtifactLimits::default());
+    write_dump_with_writer(&writer, dir, dump).map_err(std::io::Error::other)
+}
+
+/// Write a diagnostics dump through the shared quota-aware artifact publisher.
+pub fn write_dump_with_writer(
+    writer: &crate::artifact::ArtifactWriter,
+    dir: &Path,
+    dump: &PaperDump,
+) -> Result<PathBuf, crate::artifact::ArtifactError> {
     let path = dir.join(format!("{}.json", safe_file_stem(&dump.id)));
-    let mut json = serde_json::to_string_pretty(dump).map_err(std::io::Error::other)?;
+    let mut json =
+        serde_json::to_string_pretty(dump).map_err(|error| crate::artifact::ArtifactError::Io {
+            path: path.clone(),
+            source: std::io::Error::other(error),
+        })?;
     json.push('\n');
-    std::fs::write(&path, json)?;
+    writer.write(&path, json.as_bytes())?;
     Ok(path)
 }
 
