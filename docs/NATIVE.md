@@ -80,15 +80,21 @@ Check the build log of the first Native run for these. Pinning ONNX Runtime
 
 | variable | meaning | default when unset |
 | --- | --- | --- |
-| `PDFIUM_DYNAMIC_LIB_PATH` | directory containing `libpdfium.{so,dylib}`, or the library file itself | `.pdfium/lib` under the CWD, then the system library |
+| `PDFIUM_DYNAMIC_LIB_PATH` | absolute directory containing `libpdfium.{so,dylib}`, or the absolute library file itself | required for `pdfium` and full `docling` |
 | `DOCLING_RS_MODELS_DIR` | the `.models` directory **itself** (not its parent). It is consulted for a `.models/<file>` path only when that path does not exist under the CWD | `.models/` under the CWD, then next to the executable and one level above it |
 | `DOCLING_LAYOUT_ONNX`, `DOCLING_OCR_DET_ONNX`, … | per-file overrides from docling.rs; they bypass the resolver entirely | unset |
 | `DOCLING_RS_FP32` | `1` forces the fp32 layout model, which is not provisioned here | unset |
 
+Relative PDFium paths are rejected. In particular, the runtime never loads
+`.pdfium/lib` relative to the working directory; pass the absolute path to a
+provisioned library instead (for example,
+`PDFIUM_DYNAMIC_LIB_PATH="$(pwd)/.pdfium/lib"`).
+
 The resolution order comes from docling-core 1.69.2 (`assets.rs`) and
 docling-pdf 1.69.2 (`pdfium_backend.rs`, `layout.rs`). Running `tpe` from the
-repository root after `fetch.sh` needs no variables. CI sets both variables to
-absolute paths, so tests and `tpe` do not depend on the CWD.
+repository root after `fetch.sh` needs an absolute `PDFIUM_DYNAMIC_LIB_PATH`.
+CI sets both variables to absolute paths, so tests and `tpe` do not depend on
+the CWD.
 
 ## Licences
 
