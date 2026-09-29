@@ -125,10 +125,17 @@
 //!   least 3 short lines (at most 4 words, or numeric) on a page with no
 //!   caption. A box covering at least 70 % of the page width and height
 //!   needs a caption to be used at all, and one covering 95 % of the page
-//!   area (a scan under its text layer) is never used. Guard: a run of at
-//!   least 3 consecutive prose-like lines inside the box of at least 12
-//!   words each, with no caption block within 36 pt of the run, is running
-//!   prose the box happens to cover and is not tagged.
+//!   area (a scan under its text layer) is never used. In a box with a
+//!   caption, a run of at least 3 consecutive prose-like lines of at least
+//!   12 words lying more than 36 pt from every caption block overlapping
+//!   the box's x range stays body (column prose a backend box happens to
+//!   cover), unless the box is a framed text box: a `vector` box whose
+//!   lines all sit at least 3 pt inside its left and right sides with at
+//!   least 90 % of their box inside it, and which is no wider than 55 % of
+//!   the page on a two-column page (95 % otherwise) or holds at least 3
+//!   short lines. Every line of a framed text box with a caption is
+//!   tagged, however long its prose runs (a tall prompt or dialogue float
+//!   whose caption sits below the whole box).
 //! - graphics labels: at least 4 `body` lines of at most 4 words (not
 //!   numbered headings) whose boxes overlap a figure box at least 20 pt
 //!   wide and tall, lie within 24 pt of it (not ending a sentence), or lie
@@ -277,11 +284,21 @@ const STACK_MIN_LINES: usize = 3;
 const FRAME_MIN_HEIGHT: f32 = 100.0;
 /// Fewest short lines inside such a frame.
 const FRAME_MIN_SHORT: usize = 3;
-/// Fewest words in each line of a run of running prose inside a figure
-/// box.
-const BOX_PROSE_WORDS: usize = 12;
-/// Fewest lines in a run of running prose inside a figure box.
-const BOX_PROSE_LINES: usize = 3;
+/// Fewest consecutive long prose-like lines in a captioned figure box that
+/// are column prose when far from the caption.
+const COLUMN_RUN_MIN_LINES: usize = 3;
+/// Fewest words in a line of such a run.
+const COLUMN_RUN_WORDS: usize = 12;
+/// Smallest inset, in points, of every line from the left and right sides
+/// of a framed text box.
+const TEXT_BOX_INSET: f32 = 3.0;
+/// Share of a line's box area that must lie inside a framed text box.
+const TEXT_BOX_INSIDE: f32 = 0.9;
+/// Widest framed text box on a two-column page, as a share of the page
+/// width.
+const TEXT_BOX_COLUMN_WIDTH: f32 = 0.55;
+/// Widest framed text box on any other page, as a share of the page width.
+const TEXT_BOX_PAGE_WIDTH: f32 = 0.95;
 /// Figure kind the backend gives a cluster of painted paths.
 const KIND_VECTOR: &str = "vector";
 /// Tallest gap, in points, between a figure box and its caption in which
@@ -584,7 +601,7 @@ fn tag_page(page: &mut PageText, carry: Option<&[f32]>) -> RegionReport {
     let boxes = caption_boxes(page, &geometry, &captions);
     tag_paragraph_tables(page, &geometry, &boxes, &mut report);
     report.code += tag_code(page);
-    tag_figure_boxes(page, &boxes, &mut report);
+    tag_figure_boxes(page, &geometry, &boxes, &mut report);
     report.figure += tag_label_clusters(page, &boxes);
     report.math += tag_math(page);
     report
@@ -2220,52 +2237,19 @@ fn box_kinds(regions: &[BBox], captions: &[CaptionBox]) -> Vec<Option<Kind>> {
     kinds
 }
 
-/// The lines of `inside` (the `body` lines in one figure box) in runs of
-/// at least [`BOX_PROSE_LINES`] consecutive prose-like lines (top first)
-/// of at least [`BOX_PROSE_WORDS`] words each with no caption block within
-/// [`CAPTION_REACH`] of the run: running prose the box happens to cover.
-fn long_prose_runs(page: &PageText, inside: &[usize], captions: &[CaptionBox]) -> Vec<usize> {
-    let mut order: Vec<(usize, BBox)> = inside
-        .iter()
-        .filter_map(|&k| finite_box(&page.lines[k]).map(|b| (k, b)))
-        .collect();
-    order.sort_by(|a, b| top_first(a.1, b.1));
-    let mut runs: Vec<Vec<(usize, BBox)>> = vec![Vec::new()];
-    for &(k, b) in &order {
-        let text = page.lines[k].text.as_str();
-        if word_count(text) >= BOX_PROSE_WORDS && is_prose_like(text) {
-            if let Some(run) = runs.last_mut() {
-                run.push((k, b));
-            }
-        } else if runs.last().is_some_and(|run| !run.is_empty()) {
-            runs.push(Vec::new());
-        }
-    }
-    let mut guarded: Vec<usize> = Vec::new();
-    for run in runs {
-        if run.len() < BOX_PROSE_LINES {
-            continue;
-        }
-        let Some(span) = run.iter().map(|&(_, b)| b).reduce(union) else {
-            continue;
-        };
-        let captioned = captions
-            .iter()
-            .any(|c| x_overlap(span, c.bbox) && vertical_distance(span, c.bbox) <= CAPTION_REACH);
-        if !captioned {
-            guarded.extend(run.iter().map(|&(k, _)| k));
-        }
-    }
-    guarded
-}
-
 /// Tag the `body` lines inside figure boxes (see the module
 /// documentation): with the role of the caption the box belongs to
 /// (`figure` when none), prose-like lines only when the box has a caption
-/// or is a frame on a page without captions, never runs of running prose
-/// (see [`long_prose_runs`]), and in a box covering the whole page only
-/// when it has a caption.
-fn tag_figure_boxes(page: &mut PageText, captions: &[CaptionBox], report: &mut RegionReport) {
+/// (then every inside line but runs of column prose far from the caption
+/// in a box that is no framed text box) or is a frame on a page without
+/// captions, and in a box covering the whole page only when it has a
+/// caption.
+fn tag_figure_boxes(
+    page: &mut PageText,
+    geometry: &PageGeometry,
+    captions: &[CaptionBox],
+    report: &mut RegionReport,
+) {
     let (_, figures) = page_figures(page);
     if figures.is_empty() {
         return;
@@ -2304,12 +2288,17 @@ fn tag_figure_boxes(page: &mut PageText, captions: &[CaptionBox], report: &mut R
             && vector
             && height >= FRAME_MIN_HEIGHT
             && short >= FRAME_MIN_SHORT;
-        let guarded = long_prose_runs(page, &inside, captions);
+        let text_box = vector && is_text_box(page, geometry, r, &inside, short);
+        let column_prose: Vec<usize> = if kind.is_some() && !text_box {
+            far_prose_runs(page, &inside, r, captions)
+        } else {
+            Vec::new()
+        };
         for k in inside {
-            if guarded.contains(&k) {
+            if kind.is_none() && !framed && is_prose_like(&page.lines[k].text) {
                 continue;
             }
-            if kind.is_none() && !framed && is_prose_like(&page.lines[k].text) {
+            if column_prose.contains(&k) {
                 continue;
             }
             picked.push((k, kind.unwrap_or(Kind::Figure)));
@@ -2319,6 +2308,81 @@ fn tag_figure_boxes(page: &mut PageText, captions: &[CaptionBox], report: &mut R
         let n = tag(&mut page.lines[k], kind.role());
         count_kind(report, kind, n);
     }
+}
+
+/// Box `r` frames its `inside` lines as a text box: each is inset at least
+/// [`TEXT_BOX_INSET`] from the left and right sides of `r` with at least
+/// [`TEXT_BOX_INSIDE`] of its box inside `r`, and `r` is no wider than its
+/// column ([`TEXT_BOX_COLUMN_WIDTH`] of the page on a two-column page,
+/// [`TEXT_BOX_PAGE_WIDTH`] otherwise) or holds at least
+/// [`FRAME_MIN_SHORT`] short lines (`short` of them).
+fn is_text_box(
+    page: &PageText,
+    geometry: &PageGeometry,
+    r: BBox,
+    inside: &[usize],
+    short: usize,
+) -> bool {
+    let inset = inside.iter().all(|&k| {
+        finite_box(&page.lines[k]).is_some_and(|b| {
+            b.x0 >= r.x0 + TEXT_BOX_INSET
+                && b.x1 <= r.x1 - TEXT_BOX_INSET
+                && overlap_area(b, r) >= TEXT_BOX_INSIDE * area(b)
+        })
+    });
+    let share = if geometry.two_column {
+        TEXT_BOX_COLUMN_WIDTH
+    } else {
+        TEXT_BOX_PAGE_WIDTH
+    };
+    inset && (r.x1 - r.x0 <= share * geometry.width || short >= FRAME_MIN_SHORT)
+}
+
+/// The lines of `inside` (lines inside box `r`) in runs of at least
+/// [`COLUMN_RUN_MIN_LINES`] consecutive prose-like lines of at least
+/// [`COLUMN_RUN_WORDS`] words each whose union lies more than
+/// [`CAPTION_REACH`] from every caption block overlapping the x range of
+/// `r`: column prose that a figure box happens to cover.
+fn far_prose_runs(
+    page: &PageText,
+    inside: &[usize],
+    r: BBox,
+    captions: &[CaptionBox],
+) -> Vec<usize> {
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    let mut run: Vec<usize> = Vec::new();
+    for &k in inside {
+        let text = page.lines[k].text.as_str();
+        if word_count(text) >= COLUMN_RUN_WORDS && is_prose_like(text) {
+            run.push(k);
+        } else if !run.is_empty() {
+            runs.push(std::mem::take(&mut run));
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    let mut out: Vec<usize> = Vec::new();
+    for run in runs {
+        if run.len() < COLUMN_RUN_MIN_LINES {
+            continue;
+        }
+        let Some(b) = run
+            .iter()
+            .filter_map(|&k| finite_box(&page.lines[k]))
+            .reduce(union)
+        else {
+            continue;
+        };
+        let far = captions
+            .iter()
+            .filter(|c| x_overlap(r, c.bbox))
+            .all(|c| vertical_distance(b, c.bbox) > CAPTION_REACH);
+        if far {
+            out.extend(run);
+        }
+    }
+    out
 }
 
 /// The vertical span between region box `r` and the nearest `Figure`
@@ -4727,12 +4791,29 @@ mod tests {
     ];
     const BOX_LINE: &str = "the decoder maps the latent code back to the image";
 
-    #[test]
-    fn long_prose_runs_inside_a_captioned_figure_box_stay_body() {
-        for text in BOX_RUN {
-            assert!(word_count(text) >= BOX_PROSE_WORDS, "{text}");
-            assert!(is_prose_like(text), "{text}");
-        }
+    /// Twelve prose-like lines of 15 words each for the tall-box test.
+    const TALL_LINES: [&str; 12] = [
+        "you are a careful assistant and you answer every question with a short kind reply",
+        "the user asks about the weather in the city and you give them plain answers",
+        "then the user wants to know which coat to wear and you suggest a jacket",
+        "the assistant keeps the tone warm and never adds facts the user did not want",
+        "when the user thanks you for the help you reply with a friendly closing line",
+        "the second turn starts when the user shares a worry about work this long week",
+        "you listen to the worry and reflect it back in words the user can recognise",
+        "the user says that the manager seems unhappy with the report that was sent today",
+        "you ask a gentle question about what the manager said and how it felt then",
+        "the user explains that no one gave clear feedback and the silence made it worse",
+        "you suggest asking the manager for a short meeting to talk about the report soon",
+        "the dialogue ends when the user agrees to write a note and you say goodbye",
+    ];
+
+    const BOX_CAPTION: &str = "Figure 3: The encoder and the decoder.";
+
+    /// Single-column page: prose, three long prose lines of the column
+    /// (x from 70), a diagram label and one prose-like line inside
+    /// `frame`, with a `Figure 3` caption 2 pt below a box ending at y 300
+    /// when `captioned_box`, then prose.
+    fn box_run_page(captioned_box: bool, frame: Figure) -> PageText {
         let mut lines: Vec<Line> = Vec::new();
         let mut baseline = 760.0;
         for text in LEFT_PROSE {
@@ -4746,26 +4827,106 @@ mod tests {
         }
         lines.push(line("Encoder", 100.0, 420.0, 2));
         lines.push(line(BOX_LINE, 100.0, 320.0, 3));
-        lines.push(captioned("Figure 3: Example.", 60.0, 285.0, 4));
+        if captioned_box {
+            lines.push(captioned(BOX_CAPTION, 72.0, 290.0, 4));
+        }
         let mut baseline = 250.0;
         for text in AFTER_PROSE {
             lines.push(line(text, 72.0, baseline, 5));
             baseline -= 12.0;
         }
         let mut page = page_of(lines);
-        page.figures
-            .push(figure(0, "vector", 60.0, 300.0, 560.0, 560.0));
-        let mut pages = vec![page];
+        page.figures.push(frame);
+        page
+    }
+
+    #[test]
+    fn prose_inside_a_figure_box_without_a_caption_stays_body() {
+        for text in BOX_RUN {
+            assert!(is_prose_like(text), "{text}");
+        }
+        assert!(is_prose_like(BOX_LINE));
+        let frame = figure(0, "vector", 60.0, 300.0, 560.0, 560.0);
+        let mut pages = vec![box_run_page(false, frame)];
         let report = tag_regions(&mut pages);
         let page = &pages[0];
         for text in BOX_RUN {
             assert_eq!(role_of(page, text), "body", "{text}");
         }
         assert_eq!(role_of(page, "Encoder"), "figure");
-        assert_eq!(role_of(page, BOX_LINE), "figure");
+        assert_eq!(role_of(page, BOX_LINE), "body");
         for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
             assert_eq!(role_of(page, text), "body", "{text}");
         }
-        assert_eq!(report.figure, 2);
+        assert_eq!(report.figure, 1);
+    }
+
+    #[test]
+    fn column_prose_far_above_the_caption_of_a_box_that_is_no_text_box_stays_body() {
+        for text in BOX_RUN {
+            assert!(word_count(text) >= COLUMN_RUN_WORDS, "{text}");
+        }
+        // A vector box the column lines run out of (x1 up to 490 past a
+        // frame ending at 460), and a raster box with no frame at all.
+        let frames = [
+            figure(0, "vector", 60.0, 300.0, 460.0, 560.0),
+            figure(0, "raster", 60.0, 300.0, 560.0, 560.0),
+        ];
+        for frame in frames {
+            let mut pages = vec![box_run_page(true, frame)];
+            let report = tag_regions(&mut pages);
+            let page = &pages[0];
+            for text in BOX_RUN {
+                assert_eq!(role_of(page, text), "body", "{text}");
+            }
+            assert_eq!(role_of(page, "Encoder"), "figure");
+            assert_eq!(role_of(page, BOX_LINE), "figure");
+            assert_eq!(role_of(page, BOX_CAPTION), "caption");
+            for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+                assert_eq!(role_of(page, text), "body", "{text}");
+            }
+            assert_eq!(report.figure, 2);
+        }
+    }
+
+    #[test]
+    fn every_line_of_a_tall_captioned_prompt_box_is_figure_text() {
+        for text in TALL_LINES {
+            assert_eq!(word_count(text), 15, "{text}");
+            assert!(is_prose_like(text), "{text}");
+        }
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 760.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        // 12 lines in the upper part of a 400 pt box (y 280 to 680).
+        let mut baseline = 660.0;
+        for text in TALL_LINES {
+            lines.push(line(text, 80.0, baseline, 1));
+            baseline -= 12.0;
+        }
+        // Caption box y 250 to 260: 20 pt below the box.
+        lines.push(captioned("Figure 2: A long dialogue.", 72.0, 252.0, 2));
+        let mut baseline = 220.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 3));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures
+            .push(figure(0, "vector", 60.0, 280.0, 560.0, 680.0));
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for text in TALL_LINES {
+            assert_eq!(role_of(page, text), "figure", "{text}");
+        }
+        assert_eq!(role_of(page, "Figure 2: A long dialogue."), "caption");
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.figure, 12);
     }
 }
