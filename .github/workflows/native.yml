@@ -1,13 +1,18 @@
 name: Native
 
 # Builds and tests the engine with the native backends (`docling`, `pdfium`)
-# against the artifacts pinned in native/manifest.json, then runs each backend
-# evaluation on the dev split (docs/NATIVE.md, docs/EVAL.md). Not part of the
-# required `ci` check: it needs the network for PDFium, the docling models, ONNX
-# Runtime and the corpus, and the metrics are diagnostic.
+# against the artifacts pinned in native/manifest.json. Corpus evaluation is
+# opt-in (docs/NATIVE.md, docs/EVAL.md). Not part of the required `ci` check:
+# it needs the network for PDFium, models and ONNX Runtime. Corpus metrics
+# are diagnostic and run only when explicitly requested.
 
 on:
   workflow_dispatch:
+    inputs:
+      run_eval:
+        description: Run the scholarly development corpus benchmark after tests
+        type: boolean
+        default: false
   pull_request:
     paths:
       - native/**
@@ -86,45 +91,45 @@ jobs:
           key: native-assets-${{ matrix.os }}-${{ hashFiles('native/manifest.json') }}
       - name: Provision PDFium and the docling models (prints file, bytes, sha256)
         run: sh native/fetch.sh
-      - run: cargo build --release --features docling,pdfium
+      - run: cargo build --release --features docling,pdfium,formats
       # --nocapture so the "skipped: ..." lines of the native smoke tests show
       # in the log: with the artifacts present, none of them should appear.
-      - run: cargo clippy --all-targets --features docling,pdfium -- -D warnings
-      - run: cargo test --features docling,pdfium -- --nocapture
+      - run: cargo clippy --all-targets --features docling,pdfium,formats -- -D warnings
+      - run: cargo test --features docling,pdfium,formats -- --nocapture
       # `tpe backends` (lists compiled-in backends and whether their native
       # dependencies load) is added in the same batch by another change;
       - name: List backends
         if: ${{ !cancelled() }}
         run: ./target/release/tpe backends
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         with:
           path: .corpus-cache
           key: corpus-${{ hashFiles('corpus/manifest.json') }}
           restore-keys: corpus-
       - name: Fetch the corpus (cached items are reused)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
       - name: Evaluate the lopdf baseline on the same runner and corpus
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: uv run python native/measure_eval.py --backend lopdf --out eval-native/lopdf
       - name: Evaluate the pdfium backend
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: uv run python native/measure_eval.py --backend pdfium --out eval-native/pdfium
       - name: Evaluate the docling-text backend
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: uv run python native/measure_eval.py --backend docling-text --out eval-native/docling-text
       - name: Evaluate the docling backend (full layout + OCR)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: uv run python native/measure_eval.py --backend docling --out eval-native/docling
       - name: Require complete successful evaluation coverage
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: |
           for b in lopdf pdfium docling-text docling; do
             uv run python native/validate_eval.py --manifest corpus/manifest.json --split dev --backend "$b" --report "eval-native/$b/report.json"
           done
       - name: Publish the reports in the job summary
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         run: |
           for b in lopdf pdfium docling-text docling; do
             if [ -f "eval-native/$b/report.md" ]; then
@@ -137,7 +142,7 @@ jobs:
             fi
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.run_eval == true }}
         with:
           name: native-eval-${{ matrix.os }}
           path: eval-native

@@ -1,0 +1,94 @@
+name: Dependency updates
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      track:
+        description: Update track
+        type: choice
+        options: [all, docling, pdfium, models]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-updates
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'benpshore/pdftextract'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        track: [docling, pdfium, models]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TRACK: ${{ matrix.track }}
+      REQUESTED_TRACK: ${{ inputs.track || 'all' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Prepare one focused update PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_TRACK" != all && "$REQUESTED_TRACK" != "$TRACK" ]]; then exit 0; fi
+          branch="maintenance/update-$TRACK"
+          dispatch_missing_checks() {
+            local head flow count
+            head=$(gh pr view "$branch" --json headRefOid --jq .headRefOid)
+            for flow in ci.yml native.yml; do
+              count=$(gh run list --workflow "$flow" --branch "$branch" --event workflow_dispatch --limit 30 \
+                --json headSha --jq "[.[] | select(.headSha == \"$head\")] | length")
+              if [[ "$count" != 0 ]]; then continue; fi
+              if [[ "$flow" == native.yml ]]; then
+                gh workflow run "$flow" --ref "$branch" -f run_eval=false
+              else
+                gh workflow run "$flow" --ref "$branch"
+              fi
+            done
+          }
+          # An open proposal belongs to its reviewers. Do not rewrite their work.
+          if [[ "$(gh pr list --head "$branch" --state open --json number --jq length)" != 0 ]]; then
+            echo "An open $TRACK update already exists; leaving it unchanged."
+            dispatch_missing_checks
+            exit 0
+          fi
+          uv sync --locked
+          uv run python scripts/update_dependencies.py --track "$TRACK" --report "$RUNNER_TEMP/update.md"
+          if git diff --quiet; then exit 0; fi
+          uv run python scripts/refresh_dependency_versions.py --check
+          uv run ruff format --check
+          uv run ruff check
+          uv run pytest tests/test_dependency_updates.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add Cargo.toml Cargo.lock native/manifest.json src/backend src/ingest/office.rs
+          git commit -m "Update $TRACK dependencies with pinned provenance"
+          gh auth setup-git
+          # Only the automation-owned branch is replaced after its previous PR closed.
+          previous=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f 1)
+          git push --force-with-lease="refs/heads/$branch:$previous" origin "HEAD:refs/heads/$branch"
+          gh pr create --base main --head "$branch" --title "Update $TRACK dependencies" --body-file "$RUNNER_TEMP/update.md"
+          # GITHUB_TOKEN PR workflows can wait for approval; workflow_dispatch runs directly.
+          # Dispatch checks for this branch, and recover missing dispatches on the next run.
+          dispatch_missing_checks

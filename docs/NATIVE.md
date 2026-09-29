@@ -13,6 +13,10 @@ artifacts which are not crates:
 provisions them. The `Native` workflow (`.github/workflows/native.yml`) does the
 same in CI.
 
+Dependency updates arrive through the daily, review-gated tracks documented in
+[DEPENDENCY_MAINTENANCE.md](DEPENDENCY_MAINTENANCE.md). Native fixture checks
+run normally; corpus benchmarks require an explicit `run_eval: true` dispatch.
+
 ## What gets provisioned, and where
 
 Paths are relative to the repository root. `fetch.sh` always works from there,
