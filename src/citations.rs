@@ -8356,7 +8356,9 @@ mod tests {
             heading: "References".to_string(),
         };
 
-        let rows = section_lines(&[page], &section, None);
+        let pages = [page];
+        let repeated = repeated_furniture(&pages);
+        let rows = section_lines_with_furniture(&pages, &section, None, &repeated);
 
         assert_eq!(rows.len(), 2);
         assert!(rows[0].text.starts_with("F1023 F1022"));
