@@ -3,6 +3,7 @@
 mod common;
 
 use std::path::Path;
+use std::process::Command;
 
 use tpe::backend::BackendError;
 use tpe::ledger::Ledger;
@@ -82,6 +83,44 @@ fn extracts_synthetic_paper_end_to_end() {
         .find(|c| c.text == "[1]")
         .expect("marker [1] found");
     assert_eq!(single.targets, [1], "citations: {cites:#?}");
+}
+
+#[test]
+fn bibliography_cli_emits_one_json_record_without_a_ledger() {
+    let (dir, path) = write_temp_pdf(&synthetic_paper());
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["bibliography", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(value["status"], "found");
+    assert_eq!(value["backend"]["name"], "lopdf");
+    assert_eq!(value["total_pages"], 2);
+    assert_eq!(value["pages_scanned"], 1);
+    assert_eq!(value["references"].as_array().unwrap().len(), 3);
+    assert_eq!(value["sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn bibliography_cli_reports_invalid_pdf_as_json_failure() {
+    let (_dir, path) = write_temp_pdf(b"not a PDF");
+    let output = Command::new(env!("CARGO_BIN_EXE_tpe"))
+        .args(["bibliography", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "failed");
+    assert!(value["error"].as_str().is_some());
 }
 
 #[test]

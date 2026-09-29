@@ -21,6 +21,7 @@ use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use tpe::backend;
+use tpe::bibliography;
 use tpe::corpus::{self, Manifest, ManifestItem};
 use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
@@ -46,6 +47,8 @@ struct Cli {
 enum Cmd {
     /// Extract text, metadata and citations from PDF files into a ledger.
     Extract(ExtractArgs),
+    /// Extract the final bibliography by reading PDF pages from the end.
+    Bibliography(BibliographyArgs),
     /// Print ledger statistics as `key: value` lines.
     Stats {
         /// Path of the `SQLite` ledger.
@@ -128,6 +131,22 @@ struct ExtractArgs {
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct BibliographyArgs {
+    /// PDF files to process; one JSON record per file is printed to stdout.
+    #[arg(required = true, value_name = "PATH")]
+    paths: Vec<PathBuf>,
+    /// Extraction backend name.
+    #[arg(long, default_value = "lopdf")]
+    backend: String,
+    /// Password for encrypted documents.
+    #[arg(long)]
+    password: Option<String>,
+    /// Reject inputs larger than this many bytes.
+    #[arg(long, value_name = "N")]
+    max_bytes: Option<u64>,
 }
 
 #[derive(Args)]
@@ -217,6 +236,7 @@ fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Extract(args) => run_extract(&args),
+        Cmd::Bibliography(args) => run_bibliography(&args),
         Cmd::Stats { db } => {
             run_stats(&db)?;
             Ok(ExitCode::SUCCESS)
@@ -407,6 +427,64 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
         Ok(any_failed)
     })?;
 
+    Ok(exit_code(any_failed))
+}
+
+/// A bibliography-only result does not enter the full-document ledger: it
+/// neither covers the whole PDF nor contains the metadata or in-text markers
+/// promised by an `ExtractionResult`. Each output line carries its own PDF
+/// hash and page range so it can be imported into a separate store later.
+fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
+    check_backend(&args.backend)?;
+    pipeline::warm_up();
+    let extractor = backend::by_name(&args.backend)
+        .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?;
+    let mut any_failed = false;
+    for path in &args.paths {
+        let started = Instant::now();
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
+            let scan = bibliography::scan_backward(
+                extractor.as_ref(),
+                &snapshot.bytes,
+                args.password.as_deref(),
+            )?;
+            Ok::<_, anyhow::Error>((snapshot.hash, scan))
+        }));
+        let file = path.to_string_lossy();
+        let elapsed = elapsed_ms(started);
+        let record = match result {
+            Ok(Ok((hash, scan))) => {
+                any_failed |= !scan.found;
+                serde_json::json!({
+                    "path": file,
+                    "sha256": hash.0,
+                    "backend": extractor.identity(),
+                    "status": if scan.found { "found" } else { "not_found" },
+                    "total_pages": scan.total_pages,
+                    "pages_scanned": scan.pages_scanned,
+                    "section_page": scan.section_page,
+                    "heading": scan.heading,
+                    "references": scan.references,
+                    "warnings": scan.warnings,
+                    "elapsed_ms": elapsed,
+                })
+            }
+            Ok(Err(err)) => {
+                any_failed = true;
+                serde_json::json!({"path": file, "status": "failed", "error": err.to_string()})
+            }
+            Err(payload) => {
+                any_failed = true;
+                serde_json::json!({
+                    "path": file,
+                    "status": "failed",
+                    "error": format!("panic: {}", panic_message(&*payload)),
+                })
+            }
+        };
+        println!("{record}");
+    }
     Ok(exit_code(any_failed))
 }
 
