@@ -7844,9 +7844,13 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 name = "tpe-app"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui",
+ "objc",
  "rusqlite",
  "serde_json",
+ "tempfile",
+ "text-processing-engine",
  "thiserror 2.0.21",
  "tpe-common",
  "ureq",

@@ -1,9 +1,13 @@
-//! `tpe-app`: the GPUI workbench skeleton for the text-processing-engine.
+//! `tpe-app`: `PDFTextract`, the GPUI app over the text-processing-engine, and
+//! the workbench library modules.
 //!
 //! The crate is split so that everything testable lives in this library and
 //! compiles on every platform, while the GPUI front end (`src/gui.rs` in the
 //! binary) is `#[cfg(target_os = "macos")]`:
 //!
+//! - [`jobs`]: the app's job list (one row per PDF and action), the engine
+//!   calls behind the two buttons (in-process, with page progress), and where
+//!   the output files go (docs/APP.md).
 //! - [`ledger`]: read-only access to the engine ledger (`tpe extract --db`),
 //!   producing plain rows for the corpus list and the document view.
 //! - [`view`]: pure view models (labels, reading-order line numbering, citation
@@ -23,6 +27,7 @@
     clippy::missing_errors_doc
 )]
 
+pub mod jobs;
 pub mod keys;
 pub mod ledger;
 pub mod tpe_ai;
