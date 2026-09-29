@@ -84,13 +84,17 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, Div, FocusHandle, FontWeight, KeyBinding,
-    KeyDownEvent, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, rgb, size, uniform_list,
+    App, Application, Bounds, ClickEvent, Context, Div, ExternalPaths, FocusHandle, FontWeight,
+    KeyBinding, KeyDownEvent, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, uniform_list,
 };
 
+use tpe_app::intake::{DocumentIntake, IntakeSource};
 use tpe_app::keys::{self, EnvKeyProvider, KeyProvider};
 use tpe_app::ledger::{CorpusRow, DocumentDetail, LedgerReader};
 use tpe_app::tpe_ai::{self, Provider};
@@ -112,6 +116,8 @@ actions!(
         SelectPrev,
         NextPage,
         PrevPage,
+        OpenOriginal,
+        ShowInFinder,
     ]
 );
 
@@ -151,6 +157,9 @@ pub struct Workbench {
     /// Issues request ids and remembers the request whose answer is awaited.
     ask: AskTracker,
     status: String,
+    intake: Arc<Mutex<DocumentIntake>>,
+    ledger_path: PathBuf,
+    extraction_in_progress: bool,
     root_focus: FocusHandle,
     corpus_focus: FocusHandle,
     document_focus: FocusHandle,
@@ -158,7 +167,12 @@ pub struct Workbench {
 }
 
 impl Workbench {
-    fn new(ledger: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        ledger: &Path,
+        intake: Arc<Mutex<DocumentIntake>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (reader, corpus, status) = match LedgerReader::open(ledger) {
             Ok(reader) => match reader.corpus() {
                 Ok(corpus) => {
@@ -177,7 +191,7 @@ impl Workbench {
         let document_focus = cx.focus_handle().tab_index(2).tab_stop(true);
         let ask_focus = cx.focus_handle().tab_index(3).tab_stop(true);
         window.focus(&corpus_focus);
-        Self {
+        let workbench = Self {
             keys: Box::new(EnvKeyProvider),
             reader,
             corpus,
@@ -192,10 +206,132 @@ impl Workbench {
             answer_from: None,
             ask: AskTracker::default(),
             status,
+            intake,
+            ledger_path: ledger.to_path_buf(),
+            extraction_in_progress: false,
             root_focus: cx.focus_handle(),
             corpus_focus,
             document_focus,
             ask_focus,
+        };
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(Duration::from_millis(250)).await;
+                if this.update(cx, |this, cx| this.consume_intake(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        workbench
+    }
+
+    /// Drain every delivery source into one extraction process. The bundled
+    /// `tpe` executable writes the selected ledger, then the read-only reader
+    /// is reopened so the corpus immediately reflects the new runs.
+    fn consume_intake(&mut self, cx: &mut Context<Self>) {
+        if self.extraction_in_progress {
+            return;
+        }
+        let items = match self.intake.lock() {
+            Ok(mut intake) => intake.drain().collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        if items.is_empty() {
+            return;
+        }
+        self.extraction_in_progress = true;
+        self.status = format!("Extracting {} PDF(s) ...", items.len());
+        cx.notify();
+
+        let ledger = self.ledger_path.clone();
+        let task = cx.background_executor().spawn(async move {
+            let executable = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("tpe")))
+                .unwrap_or_else(|| PathBuf::from("tpe"));
+            let mut command = Command::new(executable);
+            command.arg("extract").arg("--db").arg(&ledger);
+            command.args(items.iter().map(|item| &item.path));
+            command
+                .output()
+                .map_err(|error| error.to_string())
+                .and_then(|output| {
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                        Err(if stderr.is_empty() {
+                            format!("extractor exited with {}", output.status)
+                        } else {
+                            stderr
+                        })
+                    }
+                })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| this.finish_intake(result, cx));
+        })
+        .detach();
+    }
+
+    fn finish_intake(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        self.extraction_in_progress = false;
+        match result {
+            Ok(()) => match LedgerReader::open(&self.ledger_path)
+                .and_then(|reader| reader.corpus().map(|corpus| (reader, corpus)))
+            {
+                Ok((reader, corpus)) => {
+                    let count = corpus.len();
+                    self.reader = Some(reader);
+                    self.corpus = corpus;
+                    self.status = format!("Extraction complete; {count} documents in corpus");
+                }
+                Err(error) => self.status = format!("Cannot refresh corpus: {error}"),
+            },
+            Err(error) => self.status = format!("Extraction failed: {error}"),
+        }
+        cx.notify();
+        self.consume_intake(cx);
+    }
+
+    fn accept_paths(&mut self, paths: &[PathBuf], source: IntakeSource, cx: &mut Context<Self>) {
+        let mut accepted = 0;
+        let mut rejected = 0;
+        if let Ok(mut intake) = self.intake.lock() {
+            for path in paths {
+                match intake.submit_path(path, source) {
+                    Ok(true) => accepted += 1,
+                    Ok(false) => {}
+                    Err(_) => rejected += 1,
+                }
+            }
+        }
+        self.status = format!("Submitted {accepted} PDF(s); {rejected} unsupported item(s)");
+        self.consume_intake(cx);
+        cx.notify();
+    }
+
+    fn source_action(&mut self, reveal: bool) {
+        let Some(detail) = &self.detail else { return };
+        let Some(reader) = &self.reader else { return };
+        match reader.source_locations(&detail.hash) {
+            Ok(locations) => {
+                if let Some(source) = locations.iter().find(|item| item.available) {
+                    let mut command = Command::new("open");
+                    if reveal {
+                        command.arg("-R");
+                    }
+                    if command.arg(&source.path).spawn().is_err() {
+                        self.status = format!("Could not open {}", source.path.display());
+                    }
+                } else {
+                    self.status = String::from("The original is unavailable or still in iCloud");
+                }
+            }
+            Err(error) => self.status = format!("Cannot locate original: {error}"),
         }
     }
 
@@ -780,6 +916,17 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::on_text_larger))
             .on_action(cx.listener(Self::on_text_smaller))
             .on_action(cx.listener(Self::on_toggle_provider))
+            .on_action(cx.listener(|this, _: &OpenOriginal, _, cx| {
+                this.source_action(false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ShowInFinder, _, cx| {
+                this.source_action(true);
+                cx.notify();
+            }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.accept_paths(paths.paths(), IntakeSource::Drop, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -966,8 +1113,24 @@ fn render_references(detail: &DocumentDetail, cx: &mut Context<Workbench>) -> Di
 }
 
 /// Starts the application, binds the keys and opens the window on `ledger`.
-pub fn run(ledger: PathBuf) {
-    Application::new().run(move |cx: &mut App| {
+pub fn run(ledger: PathBuf, initial_documents: Vec<PathBuf>) {
+    let intake = Arc::new(Mutex::new(DocumentIntake::default()));
+    if let Ok(mut queue) = intake.lock() {
+        for path in &initial_documents {
+            let _ = queue.submit_path(path, IntakeSource::CommandLine);
+        }
+    }
+    let application = Application::new();
+    let finder_intake = Arc::clone(&intake);
+    application.on_open_urls(move |urls| {
+        if let Ok(mut queue) = finder_intake.lock() {
+            for url in urls {
+                let _ = queue.submit_url(&url, IntakeSource::Finder);
+            }
+        }
+    });
+    application.on_reopen(|cx| cx.activate(true));
+    application.run(move |cx: &mut App| {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-p", ToggleProvider, Some("Workbench")),
@@ -979,6 +1142,8 @@ pub fn run(ledger: PathBuf) {
             KeyBinding::new("down", SelectNext, Some("Corpus")),
             KeyBinding::new("left", PrevPage, Some("Document")),
             KeyBinding::new("right", NextPage, Some("Document")),
+            KeyBinding::new("cmd-o", OpenOriginal, Some("Workbench")),
+            KeyBinding::new("cmd-shift-r", ShowInFinder, Some("Workbench")),
             KeyBinding::new("enter", SendQuestion, Some("Ask")),
         ]);
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
@@ -992,7 +1157,7 @@ pub fn run(ledger: PathBuf) {
             ..WindowOptions::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| Workbench::new(&ledger, window, cx))
+            cx.new(|cx| Workbench::new(&ledger, Arc::clone(&intake), window, cx))
         });
         match opened {
             Ok(_) => cx.activate(true),

@@ -71,6 +71,21 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Build and validate macOS application bundle
+        if: runner.os == 'macOS'
+        run: macos/package.sh dist
+      - name: Finder and relaunch integration smoke tests
+        if: runner.os == 'macOS'
+        run: macos/integration-test.sh 'dist/Text Processing Engine.app'
+      - name: Archive validated macOS application
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent 'dist/Text Processing Engine.app' dist/text-processing-engine-macos.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: runner.os == 'macOS'
+        with:
+          name: macos-app-${{ runner.arch }}
+          path: dist/text-processing-engine-macos.zip
+          if-no-files-found: error
 
   swift:
     runs-on: ubuntu-latest

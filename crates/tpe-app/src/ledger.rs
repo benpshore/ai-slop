@@ -58,6 +58,15 @@ pub struct CorpusRow {
     pub doi: Option<String>,
 }
 
+/// A location at which bytes with a document's content hash were observed.
+/// Multiple rows deliberately survive moves and renames; the hash remains the
+/// identity while availability is evaluated when an action is invoked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub path: std::path::PathBuf,
+    pub available: bool,
+}
+
 /// Reading-ordered text of one page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageRow {
@@ -155,6 +164,8 @@ const SELECT_CITATIONS: &str = "SELECT id, page, \"offset\", text FROM citations
 const SELECT_CITATION_TARGETS: &str = "SELECT t.citation_id, t.ref_idx \
     FROM citation_targets t JOIN citations c ON c.id = t.citation_id \
     WHERE c.run_id = ?1 ORDER BY t.citation_id, t.seq";
+const SELECT_SOURCE_PATHS: &str = "SELECT path FROM sources WHERE hash = ?1 \
+    ORDER BY seen_at DESC, id DESC";
 
 /// Read-only handle on a ledger file.
 pub struct LedgerReader {
@@ -203,6 +214,20 @@ impl LedgerReader {
         })?;
         let out = rows.collect::<rusqlite::Result<Vec<CorpusRow>>>()?;
         Ok(out)
+    }
+
+    /// Every observed source path, newest first. This is used by “Open
+    /// Original” and “Show in Finder”; unavailable observations remain visible
+    /// rather than being mistaken for a different document after a move.
+    pub fn source_locations(&self, hash: &str) -> Result<Vec<SourceLocation>, LedgerError> {
+        let mut stmt = self.conn.prepare(SELECT_SOURCE_PATHS)?;
+        let rows = stmt.query_map([hash], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            let path = std::path::PathBuf::from(row?);
+            let available = path.is_file();
+            Ok(SourceLocation { path, available })
+        })
+        .collect()
     }
 
     /// Loads pages, metadata, references and citation markers of one run.
