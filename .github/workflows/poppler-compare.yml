@@ -63,6 +63,22 @@ jobs:
           ./target/release/tpe eval --manifest comparison-manifest.json --cache .corpus-cache --out comparison-eval --dump-dir comparison-eval/dumps --split all --offline
           python3 scripts/compare_poppler.py comparison-manifest.json .corpus-cache comparison-eval comparison-out ./target/release/tpe
           cat comparison-out/comparison.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Export three PDFs and complete extracted page text for visual audit
+        run: |
+          mkdir -p audit-out audit-extract
+          for id in 2309.10334 2401.15719 2509.12458; do
+            pdf=".corpus-cache/arxiv_${id}/paper.pdf"
+            ./target/release/tpe extract "$pdf" --db audit.sqlite --out audit-extract
+            cp "$pdf" "audit-out/arxiv_${id}.pdf"
+            hash="$(sha256sum "$pdf" | cut -d' ' -f1)"
+            cp "audit-extract/${hash}.txt" "audit-out/arxiv_${id}.tpe.txt"
+          done
+          du -h audit-out/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: visual-audit-inputs
+          path: audit-out
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
