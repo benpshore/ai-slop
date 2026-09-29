@@ -44,13 +44,14 @@ jobs:
       - run: uv build
 
   rust:
-    # x86-64 Linux plus both native ARM64 targets the engine ships for
-    # (aarch64-unknown-linux-gnu, aarch64-apple-darwin). Cross-compiling is
-    # not runtime verification, so each target runs its own tests.
+    # x86-64 Linux plus native ARM64 Linux (aarch64-unknown-linux-gnu).
+    # Cross-compiling is not runtime verification, so each target runs its
+    # own tests. No macOS runners: aarch64-apple-darwin is verified on a
+    # developer machine (AGENTS.md), not in Actions.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -85,21 +86,14 @@ jobs:
       - run: swift build
       - run: swift test
 
-  cmake:
-    runs-on: macos-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: cmake -S . -B build
-      - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
+  # The CMake targets need Objective-C++ and the Foundation framework, so they
+  # only build on macOS; run `cmake -S . -B build && cmake --build build &&
+  # ctest --test-dir build` locally (AGENTS.md). No macOS runners in Actions.
 
   # The single required check in the branch ruleset. It passes only if every job above passed.
   ci:
     if: always()
-    needs: [repo, python, rust, swift, cmake]
+    needs: [repo, python, rust, swift]
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false
