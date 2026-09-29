@@ -3527,7 +3527,7 @@ const BEGIN_DOCUMENT: &str = "\\begin{document}";
 
 /// The `toplevel` sources that `00README.json` at `root` declares, in file
 /// order, as distinct paths among the discovered `.tex` files. Empty when
-/// the manifest is absent or unreadable; unsafe and excess names are skipped.
+/// the manifest is absent or unreadable; unsafe names are skipped.
 fn readme_toplevels(files: &LatexFiles) -> Vec<PathBuf> {
     let Ok(bytes) = fs::read(files.root.join(README_JSON)) else {
         return Vec::new();
@@ -3565,9 +3565,6 @@ fn readme_toplevels(files: &LatexFiles) -> Vec<PathBuf> {
         let path = files.root.join(relative);
         if discovered.contains(&path) && seen.insert(path.clone()) {
             paths.push(path);
-            if paths.len() == MAX_TOPLEVEL_DOCUMENTS {
-                break;
-            }
         }
     }
     paths
@@ -3591,6 +3588,12 @@ fn main_documents(files: &LatexFiles) -> Result<Vec<(PathBuf, String)>, TruthErr
             .filter(|size| *size <= MAX_TOPLEVEL_SOURCE_BYTES)
             .ok_or(TruthError::ResourceLimit)?;
         if strip_comments(&text).contains(BEGIN_DOCUMENT) {
+            // Count only actual main documents: a manifest that lists many
+            // non-documents first must not hide the real ones, and one that
+            // lists too many real ones fails rather than silently truncates.
+            if docs.len() == MAX_TOPLEVEL_DOCUMENTS {
+                return Err(TruthError::ResourceLimit);
+            }
             docs.push((path, text));
         }
     }
@@ -6097,6 +6100,35 @@ Data from \cite{gamma} and \cite{beta, gamma}.
             single.paper.title.as_deref(),
             Some("Supporting Information")
         );
+    }
+
+    #[test]
+    fn manifest_with_too_many_main_documents_is_a_resource_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..=MAX_TOPLEVEL_DOCUMENTS)
+            .map(|i| format!("doc{i}.tex"))
+            .collect();
+        let mut sources = Vec::new();
+        for name in &names {
+            fs::write(dir.path().join(name), r"\begin{document}x\end{document}").unwrap();
+            sources.push(format!(
+                r#"{{ "usage" : "toplevel", "filename" : "{name}" }}"#
+            ));
+        }
+        fs::write(
+            dir.path().join(README_JSON),
+            format!(
+                r#"{{ "sources" : [ {} ], "spec_version" : 1 }}"#,
+                sources.join(", ")
+            ),
+        )
+        .unwrap();
+        let tex: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = files(dir.path(), &tex, &[], &[]);
+        assert!(matches!(
+            main_documents(&tree),
+            Err(TruthError::ResourceLimit)
+        ));
     }
 
     #[test]
