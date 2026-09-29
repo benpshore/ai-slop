@@ -23,6 +23,7 @@
     clippy::missing_errors_doc
 )]
 
+pub mod intake;
 pub mod keys;
 pub mod ledger;
 pub mod tpe_ai;

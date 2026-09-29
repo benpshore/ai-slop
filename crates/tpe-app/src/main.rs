@@ -18,15 +18,25 @@ mod gui;
 fn main() {
     use std::path::PathBuf;
 
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TPE_LEDGER").map(PathBuf::from));
-    let Some(path) = path else {
-        eprintln!("usage: tpe-app <ledger.sqlite>    (or set TPE_LEDGER)");
-        std::process::exit(2);
-    };
-    gui::run(path);
+    let mut ledger = std::env::var_os("TPE_LEDGER").map(PathBuf::from);
+    let mut documents = Vec::new();
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--ledger" {
+            let Some(value) = arguments.next() else {
+                eprintln!("--ledger requires a path");
+                std::process::exit(2);
+            };
+            ledger = Some(PathBuf::from(value));
+        } else {
+            documents.push(PathBuf::from(argument));
+        }
+    }
+    let ledger = ledger.unwrap_or_else(|| {
+        let home = std::env::var_os("HOME").unwrap_or_default();
+        PathBuf::from(home).join("Library/Application Support/Text Processing Engine/ledger.sqlite")
+    });
+    gui::run(ledger, documents);
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -71,6 +71,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Build and validate macOS application bundle
+        if: runner.os == 'macOS'
+        run: macos/package.sh dist
+      - name: Finder and relaunch integration smoke tests
+        if: runner.os == 'macOS'
+        run: macos/integration-test.sh 'dist/Text Processing Engine.app'
 
   swift:
     runs-on: ubuntu-latest
