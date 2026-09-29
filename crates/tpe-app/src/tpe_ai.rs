@@ -288,7 +288,9 @@ pub fn ask(
             request
         }
     };
-    let mut response = request.send(body)?;
+    let mut response = request
+        .header("content-type", "application/json")
+        .send(body)?;
     let code = response.status().as_u16();
     let text = response.body_mut().read_to_string()?;
     // Never propagate a credential echoed by a provider or intermediary.
