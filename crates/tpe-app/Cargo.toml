@@ -19,6 +19,7 @@ serde_json = "1"
 thiserror = "2"
 tpe-common = { path = "../tpe-common" }
 ureq = "3"
+url = "2"
 
 # GPUI is a macOS-only dependency. Its default features (`x11`, `wayland`,
 # `font-kit`; gpui-0.2.2/Cargo.toml [features] default) pull x11rb, wayland-client,
