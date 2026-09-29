@@ -253,6 +253,10 @@ const SCRIPT_OVERLAP: f32 = 0.5;
 /// Longest script fragment, in characters and in words.
 const SCRIPT_MAX_CHARS: usize = 16;
 const SCRIPT_MAX_WORDS: usize = 3;
+/// Maximum cumulative amount of existing line data copied while attaching
+/// script fragments on one page.  A hostile page can otherwise make every
+/// fragment target the same growing line and turn the pass quadratic.
+const SCRIPT_MERGE_WORK_LIMIT: usize = 1_000_000;
 /// Longest superscript or subscript fragment (`10, 11, 12`), in characters.
 const SUPERSCRIPT_MAX_CHARS: usize = 12;
 /// A detached superscript or subscript fragment (rule 3a) is at most this
@@ -908,17 +912,13 @@ fn alone_on_row(page: &PageText, w: &PageWork, index: usize) -> bool {
     })
 }
 
-/// Nearest body line before (`forward == false`) or after `index`.
-fn neighbour(w: &PageWork, index: usize, forward: bool) -> Option<usize> {
-    if forward {
-        (index + 1..w.state.len()).find(|j| w.is_body(*j))
-    } else {
-        (0..index).rev().find(|j| w.is_body(*j))
-    }
-}
-
 /// Rule 3: the body line a script fragment at `index` belongs to, if any.
-fn script_target(page: &PageText, w: &PageWork, geom: &PageGeom, index: usize) -> Option<usize> {
+fn script_target(
+    page: &PageText,
+    geom: &PageGeom,
+    index: usize,
+    candidates: [Option<usize>; 2],
+) -> Option<usize> {
     let line = page.lines.get(index)?;
     let text = line.text.trim();
     if text.is_empty()
@@ -931,7 +931,6 @@ fn script_target(page: &PageText, w: &PageWork, geom: &PageGeom, index: usize) -
     let size = geom.lines.get(index)?.size?;
     let height = (bbox.y1 - bbox.y0).max(f32::EPSILON);
     let mut best: Option<(usize, f32)> = None;
-    let candidates = [neighbour(w, index, true), neighbour(w, index, false)];
     for cand in candidates.into_iter().flatten() {
         let Some(other) = page.lines.get(cand) else {
             continue;
@@ -1390,20 +1389,50 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
     let mut superscripts: usize = 0;
     let mut geom = PageGeom::new(page);
     let mut window: Vec<usize> = Vec::new();
-    for k in 0..page.lines.len() {
+    // Forward neighbours never change while walking front to back. Cache
+    // them once instead of rescanning an ever-growing run of merged lines.
+    let mut next_body = vec![None; page.lines.len()];
+    let mut next = None;
+    for k in (0..page.lines.len()).rev() {
+        next_body[k] = next;
+        if w.is_body(k) {
+            next = Some(k);
+        }
+    }
+    let mut previous_body = None;
+    let mut merge_work = 0usize;
+    for (k, following_body) in next_body.iter().copied().enumerate() {
         if !w.is_body(k) {
             continue;
         }
-        if let Some((target, form)) = superscript_target(page, w, &geom, k, &mut window) {
+        let superscript = superscript_target(page, w, &geom, k, &mut window);
+        let general = superscript
+            .is_none()
+            .then(|| script_target(page, &geom, k, [following_body, previous_body]))
+            .flatten();
+        let target = superscript.as_ref().map(|(target, _)| *target).or(general);
+        let cost = target.map_or(0, |target| {
+            page.lines
+                .get(target)
+                .map_or(0, |line| line.text.len().saturating_add(line.spans.len()))
+        });
+        if target.is_some() && merge_work.saturating_add(cost) > SCRIPT_MERGE_WORK_LIMIT {
+            previous_body = Some(k);
+            continue;
+        }
+        merge_work = merge_work.saturating_add(cost);
+        if let Some((target, form)) = superscript {
             merge_superscript(page, k, target, &form);
             geom.refresh(page, target);
             w.mark(k, State::Merged);
             superscripts += 1;
-        } else if let Some(target) = script_target(page, w, &geom, k) {
+        } else if let Some(target) = general {
             merge_script(page, k, target);
             geom.refresh(page, target);
             w.mark(k, State::Merged);
             merged += 1;
+        } else {
+            previous_body = Some(k);
         }
     }
     (merged, superscripts)
@@ -4593,6 +4622,37 @@ mod tests {
             "papers from arXiv\u{2079}, ChemRxiv\u{00B9}\u{2070},\u{00B9}\u{00B9}, and 1999 data"
         );
         assert_eq!(pages[0].lines[0].spans, [0, 3, 1, 4, 2]);
+    }
+
+    #[test]
+    fn script_merging_has_a_per_page_work_budget() {
+        let fragments = 2_000u32;
+        let mut spans = Vec::with_capacity(fragments as usize + 1);
+        spans.push(span_at("base", 50.0, 398.0, 10.0, 0));
+        // Give the base the deliberately tall box used by the hostile case:
+        // every following small line overlaps it and selects it as a target.
+        spans[0].bbox = Some(BBox {
+            x0: 50.0,
+            y0: 390.0,
+            x1: 100.0,
+            y1: 420.0,
+        });
+        for seq in 1..=fragments {
+            spans.push(span_at("q", 60.0, 400.0, 1.0, seq));
+        }
+        let lines: Vec<Vec<u32>> = (0..=fragments).map(|seq| vec![seq]).collect();
+        let members: Vec<&[u32]> = lines.iter().map(Vec::as_slice).collect();
+        let mut pages = vec![page_with(spans, &members)];
+
+        let report = clean_document(&mut pages);
+
+        let merged = report.scripts_merged + report.superscripts_merged;
+        assert!(merged > 0);
+        assert!(merged < fragments as usize);
+        assert!(
+            pages[0].lines.len() > 1,
+            "over-budget fragments stay intact"
+        );
     }
 
     #[test]
