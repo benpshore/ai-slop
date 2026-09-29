@@ -196,11 +196,6 @@ struct SessionCache {
     /// Fonts written directly into a resources dictionary have no id and are
     /// resolved on every use.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
-    /// The text-relevant operators and painted paths of Form `XObject`
-    /// streams, keyed by stream id. Streams that fail
-    /// to lex are not cached, so their warning recurs exactly as it would
-    /// without the cache.
-    forms: HashMap<ObjectId, Rc<TextProgram>>,
 }
 
 struct LopdfSession {
@@ -2703,7 +2698,7 @@ impl<'a> Interpreter<'a> {
             return;
         };
         let label = lossy(name);
-        let Some((stream_id, stream)) = lookup_xobject(doc, contexts, name) else {
+        let Some((_, stream)) = lookup_xobject(doc, contexts, name) else {
             self.warn(format!("XObject {label}: not in resources"));
             return;
         };
@@ -2726,23 +2721,13 @@ impl<'a> Interpreter<'a> {
             ));
             return;
         }
-        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
-        let program = if let Some(program) = cached {
-            program
-        } else {
-            let content_bytes = match stream.get_plain_content() {
-                Ok(bytes) => bytes,
-                Err(_) => stream.content.clone(),
-            };
-            let Ok(program) = lex_content(&content_bytes) else {
-                self.warn(format!("XObject {label}: undecodable content stream"));
-                return;
-            };
-            let program = Rc::new(program);
-            if let Some(id) = stream_id {
-                self.cache.forms.insert(id, Rc::clone(&program));
-            }
-            program
+        let content_bytes = match stream.get_plain_content() {
+            Ok(bytes) => bytes,
+            Err(_) => stream.content.clone(),
+        };
+        let Ok(program) = lex_content(&content_bytes) else {
+            self.warn(format!("XObject {label}: undecodable content stream"));
+            return;
         };
         // Nothing in it shows text, paints or moves the text position, and
         // it cannot reach the caller's state, so running it would change
@@ -5461,7 +5446,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_form_xobject_is_decoded_once_and_yields_identical_spans() {
+    fn shared_form_xobject_yields_identical_spans() {
         let ops = vec![
             Operation::new("q", vec![]),
             cm_translate(200, 300),
@@ -5477,10 +5462,8 @@ mod tests {
 
         let mut cached = open_session(&bytes);
         let first = cached.page_text(1).unwrap();
-        assert_eq!(cached.cache.forms.len(), 1, "the form stream is cached");
         assert_eq!(cached.cache.fonts.len(), 1, "page and form share /F1");
         let second_cached = cached.page_text(2).unwrap();
-        assert_eq!(cached.cache.forms.len(), 1);
 
         let mut fresh = open_session(&bytes);
         let second_fresh = fresh.page_text(2).unwrap();
@@ -5766,7 +5749,7 @@ mod tests {
     }
 
     #[test]
-    fn pure_vector_form_is_cached_with_its_paths_and_mixed_form_still_recurses() {
+    fn pure_vector_form_draws_its_paths_and_mixed_form_still_recurses() {
         let page = vec![
             Operation::new("q", vec![]),
             cm_translate(200, 300),
@@ -5778,10 +5761,6 @@ mod tests {
         let result = session.page_text(1).unwrap();
         assert!(result.spans.is_empty());
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-        assert_eq!(session.cache.forms.len(), 1);
-        let cached = session.cache.forms.values().next().unwrap();
-        assert_eq!(cached.ops.len(), 200);
-        assert!(cached.ops.iter().all(|op| op.kind == OpKind::StrokePath));
         // The form's boxes (0,2)-(204,20) moved by the page's `cm`.
         assert_eq!(result.figures.len(), 1, "{:?}", result.figures);
         assert_box(&result.figures[0], 200.0, 302.0, 404.0, 320.0);
