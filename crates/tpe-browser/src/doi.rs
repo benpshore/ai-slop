@@ -68,13 +68,17 @@ pub fn is_doi_resolver(host: &str) -> bool {
 /// is not a DOI), ends at whitespace or one of `"<>`, and loses trailing
 /// sentence punctuation and unbalanced closing brackets.
 pub fn scan_dois(text: &str) -> Vec<String> {
-    let text = bounded_prefix(text, MAX_SCAN_BYTES);
+    let (text, truncated) = bounded_prefix(text, MAX_SCAN_BYTES);
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut found: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     let mut i = 0;
     while i < chars.len() {
         if let Some((next, candidate)) = doi_at(text, &chars, i) {
+            // A candidate cut by the byte limit is not an identifier.
+            if truncated && next >= chars.len() {
+                break;
+            }
             if normalize_doi(candidate).is_some() {
                 let doi = candidate.to_ascii_lowercase();
                 if seen.insert(doi.clone()) {
@@ -117,7 +121,7 @@ pub fn dois_in_url(url: &NormalizedUrl) -> Vec<String> {
 /// DOIs a page declares about itself in `<meta>` tags (see [`DOI_META_NAMES`]),
 /// most trustworthy names first.
 pub fn declared_dois_in_html(html: &str) -> Vec<String> {
-    let html = bounded_prefix(html, MAX_SCAN_BYTES);
+    let (html, _) = bounded_prefix(html, MAX_SCAN_BYTES);
     let mut out: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     for name in DOI_META_NAMES {
@@ -138,39 +142,52 @@ pub fn declared_dois_in_html(html: &str) -> Vec<String> {
 /// All DOIs on a page: declared ones first, then those in `<a href>` targets,
 /// then those mentioned in the visible text.
 pub fn dois_in_html(html: &str) -> Vec<String> {
-    let html = bounded_prefix(html, MAX_SCAN_BYTES);
+    let (html, _) = bounded_prefix(html, MAX_SCAN_BYTES);
     let mut out = declared_dois_in_html(html);
     let mut seen: HashSet<String> = out.iter().cloned().collect();
-    let mut push_all = |dois: Vec<String>| {
-        for doi in dois {
-            if out.len() == MAX_IDENTIFIERS {
-                break;
-            }
-            if seen.insert(doi.clone()) {
-                out.push(doi);
-            }
-        }
-    };
+    // Stop the whole traversal once the list is full: nothing more can be
+    // added, so the remaining links and the text scan are wasted work.
     for href in attribute_values(html, "a", "href") {
-        if let Ok(url) = NormalizedUrl::parse(&href) {
-            push_all(dois_in_url(&url));
-        } else {
-            push_all(scan_dois(&href));
+        if out.len() == MAX_IDENTIFIERS {
+            return out;
         }
+        let dois = if let Ok(url) = NormalizedUrl::parse(&href) {
+            dois_in_url(&url)
+        } else {
+            scan_dois(&href)
+        };
+        push_capped(&mut out, &mut seen, dois);
     }
-    push_all(scan_dois(&strip_tags(html)));
+    if out.len() < MAX_IDENTIFIERS {
+        push_capped(&mut out, &mut seen, scan_dois(&strip_tags(html)));
+    }
     out
 }
 
-fn bounded_prefix(text: &str, max_bytes: usize) -> &str {
+/// Append the new entries of `dois` to `out` until it holds
+/// [`MAX_IDENTIFIERS`].
+fn push_capped(out: &mut Vec<String>, seen: &mut HashSet<String>, dois: Vec<String>) {
+    for doi in dois {
+        if out.len() == MAX_IDENTIFIERS {
+            return;
+        }
+        if seen.insert(doi.clone()) {
+            out.push(doi);
+        }
+    }
+}
+
+/// `text` cut to at most `max_bytes` on a character boundary, and whether
+/// anything was cut.
+fn bounded_prefix(text: &str, max_bytes: usize) -> (&str, bool) {
     if text.len() <= max_bytes {
-        return text;
+        return (text, false);
     }
     let mut end = max_bytes;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    (&text[..end], true)
 }
 
 /// The arXiv identifier addressed by an `arxiv.org` URL (`/abs/`, `/pdf/`,
@@ -201,7 +218,7 @@ pub fn arxiv_id_in_url(url: &NormalizedUrl) -> Option<String> {
 /// prefix), normalised and deduplicated. Bare identifiers are not collected
 /// because a date such as `2024.12345` is indistinguishable from one.
 pub fn arxiv_ids_in_text(text: &str) -> Vec<String> {
-    let text = bounded_prefix(text, MAX_SCAN_BYTES);
+    let (text, truncated) = bounded_prefix(text, MAX_SCAN_BYTES);
     let lower = text.to_ascii_lowercase();
     let mut out: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
@@ -213,6 +230,10 @@ pub fn arxiv_ids_in_text(text: &str) -> Vec<String> {
                 c.is_whitespace() || matches!(c, '"' | '<' | '>' | ')' | ']' | ',' | ';')
             })
             .unwrap_or(tail.len());
+        if truncated && end == tail.len() {
+            // Cut by the byte limit: not a complete identifier.
+            break;
+        }
         let token = tail[..end].trim_end_matches('.');
         if let Some(id) = normalize_arxiv_id(token) {
             if seen.insert(id.clone()) {
@@ -376,6 +397,17 @@ mod tests {
         beyond_limit.push('é');
         beyond_limit.push_str(" 10.1000/hidden");
         assert!(scan_dois(&beyond_limit).is_empty());
+    }
+
+    #[test]
+    fn identifiers_cut_by_the_byte_limit_are_discarded() {
+        let mut text = "x".repeat(MAX_SCAN_BYTES - 11);
+        text.push_str(" 10.1000/abcdef");
+        assert!(scan_dois(&text).is_empty(), "{:?}", scan_dois(&text));
+
+        let mut text = "x".repeat(MAX_SCAN_BYTES - 17);
+        text.push_str(" arXiv:2502.008570");
+        assert!(arxiv_ids_in_text(&text).is_empty());
     }
 
     #[test]

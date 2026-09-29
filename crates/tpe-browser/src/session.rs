@@ -9,6 +9,8 @@
 //! page is the app's choice; for PDFs it should not, since Chromium's viewer
 //! would otherwise swallow the bytes the engine wants.
 
+use std::collections::HashSet;
+
 use crate::BrowserError;
 use crate::cookies::{Cookie, CookieJar};
 use crate::doi::{
@@ -266,13 +268,22 @@ pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
         .or_else(|| url_dois.first().cloned());
     let mut dois = dois_in_html(html);
     for doi in url_dois {
-        if dois.len() < MAX_IDENTIFIERS && !dois.contains(&doi) {
-            dois.push(doi);
+        if dois.contains(&doi) {
+            continue;
         }
+        // The page's own identifiers outrank the last mentioned one.
+        if dois.len() == MAX_IDENTIFIERS {
+            dois.pop();
+        }
+        dois.push(doi);
     }
     let mut arxiv_ids: Vec<String> = arxiv_id_in_url(url).into_iter().collect();
+    let mut seen_arxiv: HashSet<String> = arxiv_ids.iter().cloned().collect();
     for id in arxiv_ids_in_text(&strip_tags(html)) {
-        if !arxiv_ids.contains(&id) {
+        if arxiv_ids.len() == MAX_IDENTIFIERS {
+            break;
+        }
+        if seen_arxiv.insert(id.clone()) {
             arxiv_ids.push(id);
         }
     }
@@ -621,6 +632,25 @@ mod tests {
         assert!(s.cookie_header("nope", NOW).is_err());
         assert!(s.inspect_html("nope", "<p></p>").is_err());
         assert!(s.history().is_empty());
+    }
+
+    #[test]
+    fn capped_identifier_lists_keep_the_url_identifiers() {
+        use std::fmt::Write as _;
+        let mut html = String::new();
+        for i in 0..MAX_IDENTIFIERS + 5 {
+            write!(html, "<p>10.1000/m{i} arXiv:2401.{i:05}</p>").unwrap();
+        }
+        let url = NormalizedUrl::parse("https://doi.org/10.9999/from-url").unwrap();
+        let facts = inspect_page(&url, &html);
+        assert_eq!(facts.dois.len(), MAX_IDENTIFIERS);
+        assert!(facts.dois.iter().any(|doi| doi == "10.9999/from-url"));
+        assert_eq!(facts.primary_doi.as_deref(), Some("10.9999/from-url"));
+
+        let url = NormalizedUrl::parse("https://arxiv.org/abs/2312.99999").unwrap();
+        let facts = inspect_page(&url, &html);
+        assert_eq!(facts.arxiv_ids.len(), MAX_IDENTIFIERS);
+        assert_eq!(facts.arxiv_ids[0], "2312.99999");
     }
 
     #[test]
