@@ -26,6 +26,10 @@ const MAX_INPUT_DEPTH: u32 = 5;
 const MAX_INPUTS: usize = 10_000;
 /// Maximum size of a document after input expansion.
 const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum raw bytes read through input directives for one document,
+/// charged before a file is cleaned so an include that is mostly comments
+/// cannot be reprocessed without bound.
+const MAX_INPUT_RAW_BYTES: usize = 64 * 1024 * 1024;
 /// Upper bound on zero-argument macros expanded in the body text.
 const MAX_MACROS: usize = 200;
 /// Maximum number of distinct documents accepted from an arXiv manifest.
@@ -3367,6 +3371,7 @@ pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
 struct InputState {
     active: HashSet<PathBuf>,
     inputs: usize,
+    raw_bytes: usize,
     out: String,
 }
 
@@ -3379,6 +3384,7 @@ fn resolve_inputs_checked(
     let mut state = InputState {
         active: HashSet::new(),
         inputs: 0,
+        raw_bytes: main_tex.len(),
         out: String::with_capacity(main_tex.len().min(MAX_EXPANDED_BYTES)),
     };
     if let Some(path) = main_path.and_then(|path| path.canonicalize().ok()) {
@@ -3423,6 +3429,11 @@ fn expand_inputs(
         let Some((path, content)) = read_input(root, name) else {
             continue;
         };
+        state.raw_bytes = state
+            .raw_bytes
+            .checked_add(content.len())
+            .filter(|total| *total <= MAX_INPUT_RAW_BYTES)
+            .ok_or(TruthError::InputLimit)?;
         let canonical = path.canonicalize().unwrap_or(path);
         if !state.active.insert(canonical.clone()) {
             return Err(TruthError::CyclicInput(canonical));
@@ -5437,6 +5448,19 @@ Closing words.
 
         let error = resolve_inputs_checked(dir.path(), main, 0, Some(&path)).unwrap_err();
         assert!(matches!(error, TruthError::CyclicInput(_)));
+    }
+
+    #[test]
+    fn resolve_inputs_charges_raw_bytes_before_cleaning() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mostly comments: cleaned to almost nothing, so only a raw-byte
+        // budget stops it from being reprocessed hundreds of times.
+        let padding = "% padding\n".repeat(MAX_INPUT_RAW_BYTES / 256 / 10 + 1);
+        fs::write(dir.path().join("pad.tex"), &padding).unwrap();
+        let input = "\\input{pad}\n".repeat(300);
+
+        let error = resolve_inputs_checked(dir.path(), &input, 0, None).unwrap_err();
+        assert!(matches!(error, TruthError::InputLimit));
     }
 
     #[test]
