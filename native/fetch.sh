@@ -172,7 +172,7 @@ while IFS='|' read -r kind platform url member dest archive_pin pin; do
       fi
       rm -rf "$WORK/x"
       mkdir -p "$WORK/x"
-      tar -xzf "$archive" -C "$WORK/x" "$member"
+      tar --no-same-owner -xzf "$archive" -C "$WORK/x" "$member"
       mv "$WORK/x/$member" "$dest"
       rm -f "$archive"
     else

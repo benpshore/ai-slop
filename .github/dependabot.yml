@@ -3,36 +3,40 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
+      interval: daily
+    open-pull-requests-limit: 2
     groups:
       github-actions:
         patterns: ["*"]
   - package-ecosystem: uv
     directory: /
     schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
+      interval: daily
+    open-pull-requests-limit: 2
     groups:
       uv:
         patterns: ["*"]
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
+      interval: daily
+    open-pull-requests-limit: 3
+    ignore:
+      # Coordinated suite/identity updates use dependency-updates.yml.
+      - dependency-name: docling*
+      # Docling 1.74.1 still uses 0.8. Keep one native binding implementation;
+      # the 0.9 migration needs a separate integration review.
+      - dependency-name: pdfium-render
+        versions: [">=0.9"]
     groups:
       cargo:
         patterns: ["*"]
+        update-types: [minor, patch]
   - package-ecosystem: swift
     directory: /
     schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
+      interval: daily
+    open-pull-requests-limit: 2
     groups:
       swift:
         patterns: ["*"]
