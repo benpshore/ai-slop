@@ -253,6 +253,10 @@ const SCRIPT_OVERLAP: f32 = 0.5;
 /// Longest script fragment, in characters and in words.
 const SCRIPT_MAX_CHARS: usize = 16;
 const SCRIPT_MAX_WORDS: usize = 3;
+/// Maximum cumulative amount of existing line data copied while attaching
+/// script fragments on one page.  A hostile page can otherwise make every
+/// fragment target the same growing line and turn the pass quadratic.
+const SCRIPT_MERGE_WORK_LIMIT: usize = 1_000_000;
 /// Longest superscript or subscript fragment (`10, 11, 12`), in characters.
 const SUPERSCRIPT_MAX_CHARS: usize = 12;
 /// A detached superscript or subscript fragment (rule 3a) is at most this
@@ -912,17 +916,13 @@ fn alone_on_row(page: &PageText, w: &PageWork, index: usize) -> bool {
     })
 }
 
-/// Nearest body line before (`forward == false`) or after `index`.
-fn neighbour(w: &PageWork, index: usize, forward: bool) -> Option<usize> {
-    if forward {
-        (index + 1..w.state.len()).find(|j| w.is_body(*j))
-    } else {
-        (0..index).rev().find(|j| w.is_body(*j))
-    }
-}
-
 /// Rule 3: the body line a script fragment at `index` belongs to, if any.
-fn script_target(page: &PageText, w: &PageWork, geom: &PageGeom, index: usize) -> Option<usize> {
+fn script_target(
+    page: &PageText,
+    geom: &PageGeom,
+    index: usize,
+    candidates: [Option<usize>; 2],
+) -> Option<usize> {
     let line = page.lines.get(index)?;
     let text = line.text.trim();
     if text.is_empty()
@@ -935,7 +935,6 @@ fn script_target(page: &PageText, w: &PageWork, geom: &PageGeom, index: usize) -
     let size = geom.lines.get(index)?.size?;
     let height = (bbox.y1 - bbox.y0).max(f32::EPSILON);
     let mut best: Option<(usize, f32)> = None;
-    let candidates = [neighbour(w, index, true), neighbour(w, index, false)];
     for cand in candidates.into_iter().flatten() {
         let Some(other) = page.lines.get(cand) else {
             continue;
@@ -1204,22 +1203,36 @@ impl PageGeom {
     /// Body-line candidates among the first [`SUPERSCRIPT_SCAN_LIMIT`] index
     /// entries with a baseline in `low..=high`, returned in line-index order
     /// through `out`. Counting every entry inspected (including non-body lines)
-    /// keeps the work bounded even when the window contains much furniture.
-    fn window(&self, low: f32, high: f32, index: usize, w: &PageWork, out: &mut Vec<usize>) {
+    /// keeps the work bounded even when the window contains much furniture,
+    /// and the entries inspected are charged to the page's `work_left`; when
+    /// that budget cannot cover them nothing is collected and `false` is
+    /// returned.
+    fn window(
+        &self,
+        low: f32,
+        high: f32,
+        index: usize,
+        w: &PageWork,
+        out: &mut Vec<usize>,
+        work_left: &mut usize,
+    ) -> bool {
         out.clear();
         let start = self.by_baseline.partition_point(|(b, _)| *b < low);
-        for &(baseline, j) in self.by_baseline[start..]
-            .iter()
-            .take(SUPERSCRIPT_SCAN_LIMIT)
-        {
-            if baseline > high {
-                break;
-            }
+        let end =
+            start + self.by_baseline[start..].partition_point(|(baseline, _)| *baseline <= high);
+        let inspected = (end - start).min(SUPERSCRIPT_SCAN_LIMIT);
+        if inspected > *work_left {
+            *work_left = 0;
+            return false;
+        }
+        *work_left -= inspected;
+        for &(_, j) in &self.by_baseline[start..start + inspected] {
             if j != index && w.is_body(j) {
                 out.push(j);
             }
         }
         out.sort_unstable();
+        true
     }
 }
 
@@ -1243,6 +1256,7 @@ fn superscript_target(
     geom: &PageGeom,
     index: usize,
     window: &mut Vec<usize>,
+    work_left: &mut usize,
 ) -> Option<(usize, String)> {
     let line = page.lines.get(index)?;
     let raised_form = script_form(&line.text, true);
@@ -1260,13 +1274,16 @@ fn superscript_target(
     // <= RAISED_HIGH` and `size <= max_size`; the slack covers rounding.
     let reach = RAISED_HIGH.abs().max(LOWERED_LOW.abs()) * geom.max_size;
     let slack = 1e-3 * (bbox.y0.abs() + reach) + 1e-3;
-    geom.window(
+    if !geom.window(
         bbox.y0 - reach - slack,
         bbox.y0 + reach + slack,
         index,
         w,
         window,
-    );
+        work_left,
+    ) {
+        return None;
+    }
     let mut best: Option<(usize, f32, bool)> = None;
     for &j in &*window {
         let Some(other) = geom.lines.get(j) else {
@@ -1404,20 +1421,55 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
     let mut superscripts: usize = 0;
     let mut geom = PageGeom::new(page);
     let mut window: Vec<usize> = Vec::new();
-    for k in 0..page.lines.len() {
+    // Forward neighbours never change while walking front to back. Cache
+    // them once instead of rescanning an ever-growing run of merged lines.
+    let mut next_body = vec![None; page.lines.len()];
+    let mut next = None;
+    for k in (0..page.lines.len()).rev() {
+        next_body[k] = next;
+        if w.is_body(k) {
+            next = Some(k);
+        }
+    }
+    let mut previous_body = None;
+    let mut work_left = SCRIPT_MERGE_WORK_LIMIT;
+    for (k, following_body) in next_body.iter().copied().enumerate() {
         if !w.is_body(k) {
             continue;
         }
-        if let Some((target, form)) = superscript_target(page, w, &geom, k, &mut window) {
+        let superscript = if work_left == 0 {
+            None
+        } else {
+            superscript_target(page, w, &geom, k, &mut window, &mut work_left)
+        };
+        let general = superscript
+            .is_none()
+            .then(|| script_target(page, &geom, k, [following_body, previous_body]))
+            .flatten();
+        let target = superscript.as_ref().map(|(target, _)| *target).or(general);
+        let cost = target.map_or(0, |target| {
+            page.lines
+                .get(target)
+                .map_or(0, |line| line.text.len().saturating_add(line.spans.len()))
+        });
+        if target.is_some() && cost > work_left {
+            work_left = 0;
+            previous_body = Some(k);
+            continue;
+        }
+        work_left -= cost;
+        if let Some((target, form)) = superscript {
             merge_superscript(page, k, target, &form);
             geom.refresh(page, target);
             w.mark(k, State::Merged);
             superscripts += 1;
-        } else if let Some(target) = script_target(page, w, &geom, k) {
+        } else if let Some(target) = general {
             merge_script(page, k, target);
             geom.refresh(page, target);
             w.mark(k, State::Merged);
             merged += 1;
+        } else {
+            previous_body = Some(k);
         }
     }
     (merged, superscripts)
@@ -4610,6 +4662,39 @@ mod tests {
     }
 
     #[test]
+    fn script_merging_has_a_per_page_work_budget() {
+        let fragments = 2_000u32;
+        let mut spans = Vec::with_capacity(fragments as usize + 1);
+        spans.push(span_at("base", 50.0, 398.0, 10.0, 0));
+        // Give the base the deliberately tall box used by the hostile case:
+        // every following small line overlaps it and selects it as a target.
+        spans[0].bbox = Some(BBox {
+            x0: 50.0,
+            y0: 390.0,
+            x1: 100.0,
+            y1: 420.0,
+        });
+        for seq in 1..=fragments {
+            // A convertible digit forces superscript target discovery, so the
+            // candidate-window scans themselves must consume the work budget.
+            spans.push(span_at("1", 60.0, 400.0, 1.0, seq));
+        }
+        let lines: Vec<Vec<u32>> = (0..=fragments).map(|seq| vec![seq]).collect();
+        let members: Vec<&[u32]> = lines.iter().map(Vec::as_slice).collect();
+        let mut pages = vec![page_with(spans, &members)];
+
+        let report = clean_document(&mut pages);
+
+        let merged = report.scripts_merged + report.superscripts_merged;
+        assert!(merged > 0);
+        assert!(merged < fragments as usize);
+        assert!(
+            pages[0].lines.len() > 1,
+            "over-budget fragments stay intact"
+        );
+    }
+
+    #[test]
     fn raised_letters_and_body_size_numbers_stay() {
         // `ing` sits in the raised window but overlaps the base line too
         // little for the general script rule.
@@ -4693,8 +4778,9 @@ mod tests {
             let w = prepare(&page);
             let geom = PageGeom::new(&page);
             let mut window: Vec<usize> = Vec::new();
+            let mut work_left = usize::MAX;
             assert_eq!(
-                superscript_target(&page, &w, &geom, script, &mut window),
+                superscript_target(&page, &w, &geom, script, &mut window, &mut work_left,),
                 None,
                 "{script}"
             );
@@ -4775,9 +4861,10 @@ mod tests {
         assert!(w.eligible);
         let geom = PageGeom::new(page);
         let mut window: Vec<usize> = Vec::new();
+        let mut work_left = usize::MAX;
         for k in 0..page.lines.len() {
             assert_eq!(
-                superscript_target(page, &w, &geom, k, &mut window),
+                superscript_target(page, &w, &geom, k, &mut window, &mut work_left),
                 naive_target(page, &w, k),
                 "line {k}"
             );
@@ -4827,7 +4914,9 @@ mod tests {
         let w = prepare(&page);
         let geom = PageGeom::new(&page);
         let mut window: Vec<usize> = Vec::new();
-        let mut target = |k: usize| superscript_target(&page, &w, &geom, k, &mut window);
+        let mut work_left = usize::MAX;
+        let mut target =
+            |k: usize| superscript_target(&page, &w, &geom, k, &mut window, &mut work_left);
         assert_eq!(target(0), Some((3, "\u{2075}".to_string())));
         assert_eq!(target(1), Some((5, "\u{2077}".to_string())));
         assert_eq!(target(2), Some((8, "\u{2083}".to_string())));
@@ -4845,9 +4934,14 @@ mod tests {
         let w = prepare(&page);
         let geom = PageGeom::new(&page);
         let mut window = Vec::new();
+        let mut work_left = usize::MAX;
 
-        assert_eq!(superscript_target(&page, &w, &geom, 0, &mut window), None);
+        assert_eq!(
+            superscript_target(&page, &w, &geom, 0, &mut window, &mut work_left),
+            None
+        );
         assert_eq!(window.len(), SUPERSCRIPT_SCAN_LIMIT - 1);
+        assert_eq!(work_left, usize::MAX - SUPERSCRIPT_SCAN_LIMIT);
     }
 
     #[test]
@@ -4864,8 +4958,16 @@ mod tests {
         }
         let geom = PageGeom::new(&page);
         let mut window = Vec::new();
+        let mut work_left = usize::MAX;
 
-        geom.window(390.0, 410.0, page.lines.len() - 1, &w, &mut window);
+        assert!(geom.window(
+            390.0,
+            410.0,
+            page.lines.len() - 1,
+            &w,
+            &mut window,
+            &mut work_left
+        ));
 
         assert!(window.is_empty());
     }
