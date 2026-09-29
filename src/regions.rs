@@ -179,6 +179,10 @@ use crate::schema::{BBox, Line, PageText};
 
 /// Most lines a caption (start plus continuations) may take.
 pub const CAPTION_MAX_LINES: usize = 14;
+/// Most caption candidates processed on one page. Real pages contain far
+/// fewer; bounding attacker-controlled candidates prevents repeated region
+/// walks from becoming quadratic in the number of extracted lines.
+pub const CAPTION_CANDIDATE_MAX: usize = 64;
 /// Most caption lines through which untagged prose lines are skipped by
 /// the walk below a caption, and wide prose lines are taken under a
 /// sideways table label.
@@ -279,6 +283,12 @@ const LABEL_MIN_LINES: usize = 4;
 const LABEL_NEAR: f32 = 24.0;
 /// Fewest single-word lines in a column of stacked labels.
 const STACK_MIN_LINES: usize = 3;
+/// Most lines inspected for graphics-label clusters on one page.
+const LABEL_MAX_LINES: usize = 20_000;
+/// Most figure boxes inspected for graphics-label clusters on one page.
+const LABEL_MAX_FIGURES: usize = 256;
+/// Most pair comparisons used to connect stacked single-word labels.
+const STACK_MAX_COMPARISONS: usize = 1_000_000;
 /// Lowest `vector` figure box, in points, framing figure text on a page
 /// without a caption.
 const FRAME_MIN_HEIGHT: f32 = 100.0;
@@ -542,12 +552,21 @@ fn tag_page(page: &mut PageText, carry: Option<&[f32]>) -> RegionReport {
     let (caption, table) = tag_continued_table(page);
     report.caption += caption;
     report.table += table;
-    let captions: Vec<(usize, Kind)> = page
+    let mut captions: Vec<(usize, Kind)> = page
         .lines
         .iter()
         .enumerate()
         .filter_map(|(k, line)| caption_kind(line).map(|kind| (k, kind)))
+        .take(CAPTION_CANDIDATE_MAX + 1)
         .collect();
+    if captions.len() > CAPTION_CANDIDATE_MAX {
+        // Do not process a partial set: which captions happened to occur first
+        // must not determine the roles on a deliberately pathological page.
+        captions.clear();
+        page.warnings.push(format!(
+            "{WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
+        ));
+    }
     for &(k, kind) in &captions {
         let Some(b) = finite_box(&page.lines[k]) else {
             continue;
@@ -2435,12 +2454,15 @@ fn grown(b: BBox, d: f32) -> BBox {
 /// [`STACK_MIN_LINES`] single-word `body` lines (not caption starts)
 /// linked by lines directly above or below one another (x ranges
 /// overlapping, at most one line height apart), with at least one line
-/// overlapping `near`. Groups are built from all such lines on the page
-/// first, so a shorter label ending before `near` still counts.
-fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
+/// overlapping a figure's nearby area. Groups are built once from the
+/// bounded set of lines inspected by [`tag_label_clusters`] and reused for
+/// every figure, so a shorter label ending before the nearby area still
+/// counts without repeating the component search for every figure.
+fn stacked_word_groups(page: &PageText) -> Vec<Vec<usize>> {
     let cands: Vec<(usize, BBox)> = page
         .lines
         .iter()
+        .take(LABEL_MAX_LINES)
         .enumerate()
         .filter(|(_, line)| {
             line.role == ROLE_BODY && word_count(&line.text) == 1 && caption_kind(line).is_none()
@@ -2453,7 +2475,8 @@ fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
     };
     let n = cands.len();
     let mut seen: Vec<bool> = vec![false; n];
-    let mut picked: Vec<usize> = Vec::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut comparisons = 0usize;
     let mut start: usize = 0;
     while start < n {
         if seen[start] {
@@ -2463,43 +2486,51 @@ fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
         seen[start] = true;
         let mut stack: Vec<usize> = vec![start];
         let mut group: Vec<usize> = Vec::new();
-        let mut is_near = false;
         while let Some(a) = stack.pop() {
             group.push(cands[a].0);
-            is_near = is_near || overlap_area(cands[a].1, near) > 0.0;
             for (b, &(_, other)) in cands.iter().enumerate() {
+                comparisons += 1;
+                if comparisons > STACK_MAX_COMPARISONS {
+                    // Hostile pages can otherwise turn this component walk
+                    // into an unbounded all-pairs operation. The ordinary
+                    // short-label detector below still handles nearby text.
+                    return Vec::new();
+                }
                 if !seen[b] && touches(cands[a].1, other) {
                     seen[b] = true;
                     stack.push(b);
                 }
             }
         }
-        if is_near && group.len() >= STACK_MIN_LINES {
-            picked.extend(group);
+        if group.len() >= STACK_MIN_LINES {
+            groups.push(group);
         }
         start += 1;
     }
-    picked
+    groups
 }
 
 /// Tag clusters of graphics labels `figure`: at least
 /// [`LABEL_MIN_LINES`] `body` lines of at most 4 words whose boxes overlap
 /// a figure box, lie within [`LABEL_NEAR`] of it (not ending a sentence),
 /// or lie between it and its `Figure` caption (see [`label_zone`]), and
-/// stacked labels near it (see [`stacked_words`]); the count of lines
+/// stacked labels near it (see [`stacked_word_groups`]); the count of lines
 /// newly tagged.
 fn tag_label_clusters(page: &mut PageText, captions: &[CaptionBox]) -> usize {
     let (_, figures) = page_figures(page);
-    let mut picked: Vec<usize> = Vec::new();
-    for &(r, _) in &figures {
-        if r.x1 - r.x0 < LABEL_BOX_MIN || r.y1 - r.y0 < LABEL_BOX_MIN {
-            continue;
-        }
+    let stacked = stacked_word_groups(page);
+    let mut picked = vec![false; page.lines.len()];
+    for &(r, _) in figures
+        .iter()
+        .filter(|(r, _)| r.x1 - r.x0 >= LABEL_BOX_MIN && r.y1 - r.y0 >= LABEL_BOX_MIN)
+        .take(LABEL_MAX_FIGURES)
+    {
         let zone = label_zone(page, r, captions);
         let near = grown(r, LABEL_NEAR);
         let cluster: Vec<usize> = page
             .lines
             .iter()
+            .take(LABEL_MAX_LINES)
             .enumerate()
             .filter(|(_, line)| {
                 line.role == ROLE_BODY
@@ -2520,13 +2551,26 @@ fn tag_label_clusters(page: &mut PageText, captions: &[CaptionBox]) -> usize {
             })
             .collect();
         if cluster.len() >= LABEL_MIN_LINES {
-            picked.extend(cluster);
+            for k in cluster {
+                picked[k] = true;
+            }
         }
-        picked.extend(stacked_words(page, near));
+        for group in &stacked {
+            if group
+                .iter()
+                .any(|&k| finite_box(&page.lines[k]).is_some_and(|b| overlap_area(b, near) > 0.0))
+            {
+                for &k in group {
+                    picked[k] = true;
+                }
+            }
+        }
     }
     let mut n = 0;
-    for k in picked {
-        n += tag(&mut page.lines[k], Kind::Figure.role());
+    for (k, selected) in picked.into_iter().enumerate() {
+        if selected {
+            n += tag(&mut page.lines[k], Kind::Figure.role());
+        }
     }
     n
 }
@@ -3083,6 +3127,24 @@ mod tests {
         let first = pages.clone();
         let again = tag_regions(&mut pages);
         assert_eq!(again, RegionReport::default());
+        assert_eq!(pages, first);
+    }
+
+    #[test]
+    fn excessive_caption_candidates_skip_caption_based_tagging() {
+        let lines = (0..=CAPTION_CANDIDATE_MAX)
+            .map(|k| line("Algorithm 1", 72.0, 760.0 - k as f32 * 10.0, k as u32))
+            .collect();
+        let mut pages = vec![page_of(lines)];
+
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
+        assert!(pages[0].lines.iter().all(|line| line.role == ROLE_BODY));
+        assert!(pages[0].warnings.contains(&format!(
+            "{WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
+        )));
+
+        let first = pages.clone();
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
         assert_eq!(pages, first);
     }
 
