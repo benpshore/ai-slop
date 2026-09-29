@@ -2160,8 +2160,8 @@ fn record_path(
                 return;
             };
             if read_numbers(bytes, starts, slots) {
-                for point in slots.chunks_exact(2) {
-                    grow(path, point[0], point[1]);
+                for &[x, y] in slots.as_chunks::<2>().0 {
+                    grow(path, x, y);
                 }
             }
         }
