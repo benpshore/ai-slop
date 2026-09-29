@@ -2555,15 +2555,13 @@ fn ends_in_open_footnote(page: &PageText) -> bool {
     if last.role == ROLE_FOOTNOTE {
         return true;
     }
-    let mut run: usize = 0;
-    for line in std::iter::once(last).chain(lines) {
+    for (run, line) in std::iter::once(last).chain(lines).enumerate() {
         let member = line.column == last.column
             && (line.role == ROLE_BODY || line.role == ROLE_FOOTNOTE)
             && is_small_low(page, line, limit);
         if !member || run >= FOOTNOTE_MAX_LINES {
             return false;
         }
-        run += 1;
         if line.role == ROLE_FOOTNOTE || starts_footnote_marker(&line.text) {
             return true;
         }
