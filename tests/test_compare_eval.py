@@ -13,7 +13,15 @@ def paper(identity, elapsed=100):
         "chunks": 2,
         "ms_total": elapsed,
         "ms_per_chunk": elapsed / 2,
-        "timings": {"parse_ms": elapsed / 2},
+        "timings": {
+            "acquire_ms": elapsed / 2,
+            "parse_ms": elapsed / 2,
+            "order_ms": 0,
+            "metadata_ms": 0,
+            "citations_ms": 0,
+            "write_ms": 0,
+            "hash_ms": elapsed / 4,
+        },
         "truth_method": "bbl",
         "truth_refs": 10,
         "extracted_refs": 10,
@@ -67,6 +75,19 @@ def test_accuracy_decreases_do_not_claim_confirmed_regression():
     assert result["truth_indicator_changes"] == [{"id": "b", "changed_fields": ["truth_refs"]}]
 
 
+def test_doi_regression_is_visible_when_printed_coverage_disappears():
+    old = report(paper("a"))
+    old["papers"][0].update(doi_correct=1, doi_truth=1, doi_printed=1)
+    new = deepcopy(old)
+    new["papers"][0].update(doi_correct=0, doi_printed=0)
+    changes = compare(old, new)["observed_score_changes"]
+    assert len(changes) == 1
+    assert changes[0]["metric"] == "doi_accuracy"
+    assert changes[0]["before"] == 1.0
+    assert changes[0]["after"] == 0.0
+    assert changes[0]["direction"] == "decrease"
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, "100", True])
 def test_invalid_timings_rejected(value):
     old = report(paper("a"))
@@ -81,6 +102,32 @@ def test_metric_definition_mismatch_rejected():
     new = deepcopy(old)
     new["papers"][0]["ms_per_chunk"] = 99
     with pytest.raises(ValueError, match="incompatible ms_per_chunk"):
+        compare(old, new)
+
+
+def test_inconsistent_total_is_rejected_even_when_per_chunk_quotient_matches():
+    old = report(paper("a", 10))
+    new = deepcopy(old)
+    new["papers"][0]["timings"]["parse_ms"] = 1000
+    with pytest.raises(ValueError, match="ms_total differs from sequential stage sum"):
+        compare(old, new)
+
+
+def test_overlapping_hash_timing_is_excluded_from_stage_total():
+    old = report(paper("a", 100))
+    new = deepcopy(old)
+    new["papers"][0]["timings"]["hash_ms"] = 1000
+    result = compare(old, new)
+    assert result["timing"]["before"] == result["timing"]["after"]
+    assert result["timing"]["after"]["p50_nominal_ms_per_chunk"] == 50
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, "100", True])
+def test_invalid_component_stage_timings_rejected(value):
+    old = report(paper("a"))
+    new = deepcopy(old)
+    new["papers"][0]["timings"]["metadata_ms"] = value
+    with pytest.raises(ValueError, match="metadata_ms"):
         compare(old, new)
 
 

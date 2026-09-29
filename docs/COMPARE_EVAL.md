@@ -13,12 +13,21 @@ and per-paper accuracy score increases/decreases. Redirect stdout to retain the
 comparison as a review artifact. Missing accuracy fields and zero denominators
 remain unknown; they are not treated as zero accuracy.
 
+DOI changes include both `doi_correct / doi_truth` and the printed-only
+`doi_correct / doi_printed` diagnostic. The standard ratio keeps a loss of
+previously correct DOI extraction visible even when detected printed coverage
+falls to zero and the printed-only ratio becomes unknown.
+
 Timing and accuracy comparisons require status `complete` in both reports.
 Timing also requires identical page and chunk counts. Incomplete, failed, and
 changed-size papers remain visible in the output, so a
 speed improvement cannot conceal disappearing or failing papers. Malformed,
 non-finite or negative measurements, duplicate IDs, disjoint corpora, non-20-page
 chunk definitions, and inconsistent `ms_total / chunks` values are rejected.
+Each timed paper must also report finite, nonnegative `acquire_ms`, `parse_ms`,
+`order_ms`, `metadata_ms`, `citations_ms`, and `write_ms`; their sum must agree
+with `ms_total` within relative or absolute tolerance `1e-6`. The overlapping
+`hash_ms` duration is excluded from this sum, matching the evaluator.
 
 **These percentiles are across documents' summed stage time divided by nominal
 20-page chunk counts. They are not measured streaming chunk latency, warm service

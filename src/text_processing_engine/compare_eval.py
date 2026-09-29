@@ -21,6 +21,7 @@ TRUTH_FIELDS = (
 RATIOS = {
     "ref_recall": ("matched_refs", "truth_refs"),
     "ref_precision": ("matched_refs", "extracted_refs"),
+    "doi_accuracy": ("doi_correct", "doi_truth"),
     "doi_accuracy_printed": ("doi_correct", "doi_printed"),
     "year_accuracy": ("year_correct", "year_truth"),
     "marker_precision": ("marker_targets_correct", "resolved_targets"),
@@ -61,10 +62,23 @@ def timing(paper):
         raise ValueError(f"{paper['id']}: expected nominal 20-page chunks")
     total = number(paper["ms_total"], "ms_total")
     per_chunk = number(paper["ms_per_chunk"], "ms_per_chunk")
-    parse = number(paper["timings"]["parse_ms"], "parse_ms")
+    stages = {
+        name: number(paper["timings"][name], name)
+        for name in (
+            "acquire_ms",
+            "parse_ms",
+            "order_ms",
+            "metadata_ms",
+            "citations_ms",
+            "write_ms",
+        )
+    }
+    # Hashing overlaps parsing in the producer, so hash_ms is not added again.
+    if not math.isclose(total, sum(stages.values()), rel_tol=1e-6, abs_tol=1e-6):
+        raise ValueError(f"{paper['id']}: ms_total differs from sequential stage sum")
     if not math.isclose(per_chunk, total / chunks, rel_tol=1e-6, abs_tol=1e-6):
         raise ValueError(f"{paper['id']}: incompatible ms_per_chunk definition")
-    return parse, per_chunk
+    return stages["parse_ms"], per_chunk
 
 
 def percentile(values, fraction):
