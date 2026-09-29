@@ -134,9 +134,9 @@
 //!   wide and tall, lie within 24 pt of it (not ending a sentence), or lie
 //!   between it and its `Figure` caption (at most 120 pt below or above
 //!   it, with no prose-like line between), are tagged `figure`; so are
-//!   stacked labels: at least 3 single-word `body` lines within 24 pt of
-//!   such a box, each directly above or below another (x ranges
-//!   overlapping, at most one line height apart).
+//!   stacked labels: at least 3 single-word `body` lines, each directly
+//!   above or below another (x ranges overlapping, at most one line
+//!   height apart), at least one of them within 24 pt of such a box.
 //! - math: last, a `body` line with at most 2 ordinary words (letter runs
 //!   of 3 or more, not `log`, `max` and the like), at most 1 of them of 4
 //!   or more letters, and at least
@@ -2367,10 +2367,12 @@ fn grown(b: BBox, d: f32) -> BBox {
     }
 }
 
-/// Stacked labels near a figure box: single-word `body` lines (not
-/// caption starts) overlapping `near`, in groups of at least
-/// [`STACK_MIN_LINES`] linked by lines directly above or below one
-/// another (x ranges overlapping, at most one line height apart).
+/// Stacked labels near a figure box: groups of at least
+/// [`STACK_MIN_LINES`] single-word `body` lines (not caption starts)
+/// linked by lines directly above or below one another (x ranges
+/// overlapping, at most one line height apart), with at least one line
+/// overlapping `near`. Groups are built from all such lines on the page
+/// first, so a shorter label ending before `near` still counts.
 fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
     let cands: Vec<(usize, BBox)> = page
         .lines
@@ -2380,7 +2382,6 @@ fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
             line.role == ROLE_BODY && word_count(&line.text) == 1 && caption_kind(line).is_none()
         })
         .filter_map(|(k, line)| finite_box(line).map(|b| (k, b)))
-        .filter(|(_, b)| overlap_area(*b, near) > 0.0)
         .collect();
     let touches = |a: BBox, b: BBox| -> bool {
         let reach = (a.y1 - a.y0).max(b.y1 - b.y0);
@@ -2398,8 +2399,10 @@ fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
         seen[start] = true;
         let mut stack: Vec<usize> = vec![start];
         let mut group: Vec<usize> = Vec::new();
+        let mut is_near = false;
         while let Some(a) = stack.pop() {
             group.push(cands[a].0);
+            is_near = is_near || overlap_area(cands[a].1, near) > 0.0;
             for (b, &(_, other)) in cands.iter().enumerate() {
                 if !seen[b] && touches(cands[a].1, other) {
                     seen[b] = true;
@@ -2407,7 +2410,7 @@ fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
                 }
             }
         }
-        if group.len() >= STACK_MIN_LINES {
+        if is_near && group.len() >= STACK_MIN_LINES {
             picked.extend(group);
         }
         start += 1;
