@@ -19,18 +19,27 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::keys::services;
+use tpe_credentials::ApiKeys;
 
 /// Anthropic Messages endpoint.
 pub const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 /// `OpenAI` chat completions endpoint.
 pub const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
+/// Google Gemini generate-content endpoint.
+pub const GEMINI_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+/// Default trusted-local Ollama chat endpoint.
+pub const OLLAMA_URL: &str = "http://127.0.0.1:11434/api/chat";
 /// Required Anthropic API version header value.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic model id used by the panel.
 pub const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
 /// `OpenAI` model id used by the panel.
 pub const OPENAI_MODEL: &str = "gpt-5";
+/// Gemini model id used by the panel.
+pub const GEMINI_MODEL: &str = "gemini-2.5-flash";
+/// Ollama model id used by the panel.
+pub const OLLAMA_MODEL: &str = "llama3.2";
 /// Output token ceiling for a non-streaming answer in the panel.
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// End-to-end timeout for one request.
@@ -40,57 +49,100 @@ pub const USER_AGENT: &str = "tpe-app/0.1 (+https://github.com/benpshore/text-pr
 /// Longest error-body excerpt kept in an error message.
 const ERROR_EXCERPT_CHARS: usize = 300;
 
+/// Whether a provider endpoint is cloud-fixed or defaults to a trusted local service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointPolicy {
+    Cloud,
+    TrustedLocal,
+}
+/// Authentication expected by a provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Authentication {
+    RequiredBearer,
+    RequiredHeader,
+    OptionalBearer,
+}
+impl Authentication {
+    pub const fn required(self) -> bool {
+        !matches!(self, Self::OptionalBearer)
+    }
+}
+/// All metadata needed to address a model provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderMetadata {
+    pub label: &'static str,
+    pub credential_service: &'static str,
+    pub default_model: &'static str,
+    pub endpoint: &'static str,
+    pub endpoint_policy: EndpointPolicy,
+    pub authentication: Authentication,
+}
 /// Which model provider answers the question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provider {
-    /// Anthropic (Claude).
-    Anthropic,
-    /// `OpenAI` (`ChatGPT`).
     OpenAI,
+    Anthropic,
+    Gemini,
+    Ollama,
 }
-
 impl Provider {
-    /// Visible name.
+    pub const ALL: [Self; 4] = [Self::OpenAI, Self::Anthropic, Self::Gemini, Self::Ollama];
+    pub const fn metadata(self) -> &'static ProviderMetadata {
+        &PROVIDERS[self as usize]
+    }
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Anthropic => "Claude",
-            Self::OpenAI => "ChatGPT",
-        }
+        self.metadata().label
     }
-
-    /// Endpoint URL.
     pub fn endpoint(self) -> &'static str {
-        match self {
-            Self::Anthropic => ANTHROPIC_URL,
-            Self::OpenAI => OPENAI_URL,
-        }
+        self.metadata().endpoint
     }
-
-    /// Model id sent in the body.
     pub fn model(self) -> &'static str {
-        match self {
-            Self::Anthropic => ANTHROPIC_MODEL,
-            Self::OpenAI => OPENAI_MODEL,
-        }
+        self.metadata().default_model
     }
-
-    /// Credential service name the API key is stored under.
     pub fn credential_service(self) -> &'static str {
-        match self {
-            Self::Anthropic => services::ANTHROPIC,
-            Self::OpenAI => services::OPENAI,
-        }
+        self.metadata().credential_service
     }
-
-    /// The other provider.
+    /// Deterministically select the next entry in the provider registry.
     #[must_use]
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Anthropic => Self::OpenAI,
-            Self::OpenAI => Self::Anthropic,
-        }
+    pub fn next(self) -> Self {
+        Self::ALL[(self as usize + 1) % Self::ALL.len()]
     }
 }
+/// Canonical provider registry, ordered like [`Provider::ALL`].
+pub const PROVIDERS: [ProviderMetadata; 4] = [
+    ProviderMetadata {
+        label: "ChatGPT",
+        credential_service: ApiKeys::OPENAI,
+        default_model: OPENAI_MODEL,
+        endpoint: OPENAI_URL,
+        endpoint_policy: EndpointPolicy::Cloud,
+        authentication: Authentication::RequiredBearer,
+    },
+    ProviderMetadata {
+        label: "Claude",
+        credential_service: ApiKeys::ANTHROPIC,
+        default_model: ANTHROPIC_MODEL,
+        endpoint: ANTHROPIC_URL,
+        endpoint_policy: EndpointPolicy::Cloud,
+        authentication: Authentication::RequiredHeader,
+    },
+    ProviderMetadata {
+        label: "Gemini",
+        credential_service: ApiKeys::GEMINI,
+        default_model: GEMINI_MODEL,
+        endpoint: GEMINI_URL,
+        endpoint_policy: EndpointPolicy::Cloud,
+        authentication: Authentication::RequiredHeader,
+    },
+    ProviderMetadata {
+        label: "Ollama",
+        credential_service: ApiKeys::OLLAMA,
+        default_model: OLLAMA_MODEL,
+        endpoint: OLLAMA_URL,
+        endpoint_policy: EndpointPolicy::TrustedLocal,
+        authentication: Authentication::OptionalBearer,
+    },
+];
 
 /// Errors from [`ask`] and the parsers. Messages never include the API key.
 #[derive(Debug, Error)]
@@ -141,17 +193,23 @@ impl From<ureq::Error> for AiError {
 pub fn request_body(provider: Provider, system: &str, user: &str, max_tokens: u32) -> Value {
     match provider {
         Provider::Anthropic => json!({
-            "model": ANTHROPIC_MODEL,
+            "model": provider.model(),
             "max_tokens": max_tokens,
             "system": system,
             "messages": [{ "role": "user", "content": user }],
         }),
         Provider::OpenAI => json!({
-            "model": OPENAI_MODEL,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": user },
-            ],
+            "model": provider.model(),
+            "messages": [ { "role": "system", "content": system }, { "role": "user", "content": user } ],
+        }),
+        Provider::Gemini => json!({
+            "system_instruction": { "parts": [{ "text": system }] },
+            "contents": [{ "role": "user", "parts": [{ "text": user }] }],
+            "generationConfig": { "maxOutputTokens": max_tokens },
+        }),
+        Provider::Ollama => json!({
+            "model": provider.model(), "stream": false,
+            "messages": [ { "role": "system", "content": system }, { "role": "user", "content": user } ],
         }),
     }
 }
@@ -164,7 +222,14 @@ pub fn headers(provider: Provider, api_key: &str) -> Vec<(&'static str, String)>
             out.push(("x-api-key", api_key.to_owned()));
             out.push(("anthropic-version", ANTHROPIC_VERSION.to_owned()));
         }
-        Provider::OpenAI => out.push(("authorization", format!("Bearer {api_key}"))),
+        Provider::OpenAI => {
+            out.push(("authorization", format!("Bearer {api_key}")));
+        }
+        Provider::Gemini => out.push(("x-goog-api-key", api_key.to_owned())),
+        Provider::Ollama if !api_key.trim().is_empty() => {
+            out.push(("authorization", format!("Bearer {api_key}")));
+        }
+        Provider::Ollama => {}
     }
     out
 }
@@ -178,6 +243,8 @@ pub fn parse_response(provider: Provider, body: &str) -> Result<String, AiError>
     match provider {
         Provider::Anthropic => parse_anthropic(&value),
         Provider::OpenAI => parse_openai(&value),
+        Provider::Gemini => parse_gemini(&value),
+        Provider::Ollama => parse_ollama(&value),
     }
 }
 
@@ -233,6 +300,24 @@ fn parse_openai(value: &Value) -> Result<String, AiError> {
     Err(AiError::NoText)
 }
 
+fn parse_gemini(value: &Value) -> Result<String, AiError> {
+    value
+        .pointer("/candidates/0/content/parts/0/text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .ok_or(AiError::NoText)
+}
+
+fn parse_ollama(value: &Value) -> Result<String, AiError> {
+    value
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .ok_or(AiError::NoText)
+}
+
 /// `(type, message)` of a provider error object, for both providers' shapes.
 fn error_object(value: &Value) -> Option<(String, String)> {
     let error = value.get("error")?.as_object()?;
@@ -263,7 +348,7 @@ pub fn error_message(body: &str) -> String {
 
 /// Sends one question and returns the answer text (blocking).
 pub fn ask(provider: Provider, api_key: &str, system: &str, user: &str) -> Result<String, AiError> {
-    if api_key.trim().is_empty() {
+    if provider.metadata().authentication.required() && api_key.trim().is_empty() {
         return Err(AiError::EmptyKey);
     }
     if user.trim().is_empty() {
@@ -437,24 +522,52 @@ mod tests {
     }
 
     #[test]
-    fn provider_table_is_consistent() {
-        assert_eq!(Provider::Anthropic.toggle(), Provider::OpenAI);
-        assert_eq!(Provider::OpenAI.toggle(), Provider::Anthropic);
-        assert_ne!(
-            Provider::Anthropic.credential_service(),
-            Provider::OpenAI.credential_service()
+    fn provider_registry_uses_canonical_services_and_environment_fallbacks() {
+        let expected = [
+            (Provider::OpenAI, ApiKeys::OPENAI, "OPENAI_API_KEY"),
+            (Provider::Anthropic, ApiKeys::ANTHROPIC, "ANTHROPIC_API_KEY"),
+            (Provider::Gemini, ApiKeys::GEMINI, "GEMINI_API_KEY"),
+            (Provider::Ollama, ApiKeys::OLLAMA, "OLLAMA_API_KEY"),
+        ];
+        for (provider, service, environment) in expected {
+            assert_eq!(provider.credential_service(), service);
+            assert_eq!(
+                crate::keys::EnvKeyProvider::env_var(service),
+                Some(environment)
+            );
+        }
+        assert_eq!(Provider::OpenAI.next(), Provider::Anthropic);
+        assert_eq!(Provider::Ollama.next(), Provider::OpenAI);
+        assert_eq!(PROVIDERS.len(), Provider::ALL.len());
+    }
+
+    #[test]
+    fn gemini_and_ollama_protocol_shapes() {
+        assert_eq!(
+            request_body(Provider::Gemini, "sys", "hi", 10)["contents"][0]["parts"][0]["text"],
+            "hi"
         );
-        assert!(
-            Provider::Anthropic
-                .endpoint()
-                .starts_with("https://api.anthropic.com/")
+        assert_eq!(
+            request_body(Provider::Ollama, "sys", "hi", 10)["model"],
+            OLLAMA_MODEL
         );
-        assert!(
-            Provider::OpenAI
-                .endpoint()
-                .starts_with("https://api.openai.com/")
+        assert!(headers(Provider::Gemini, "key").contains(&("x-goog-api-key", "key".to_owned())));
+        assert_eq!(headers(Provider::Ollama, "").len(), 1);
+        assert_eq!(
+            parse_response(
+                Provider::Gemini,
+                r#"{"candidates":[{"content":{"parts":[{"text":"gem"}]}}]}"#
+            )
+            .unwrap(),
+            "gem"
         );
-        assert_eq!(Provider::Anthropic.label(), "Claude");
-        assert_eq!(Provider::OpenAI.label(), "ChatGPT");
+        assert_eq!(
+            parse_response(Provider::Ollama, r#"{"message":{"content":"local"}}"#).unwrap(),
+            "local"
+        );
+        assert!(matches!(
+            ask(Provider::Ollama, "", "sys", ""),
+            Err(AiError::EmptyQuestion)
+        ));
     }
 }

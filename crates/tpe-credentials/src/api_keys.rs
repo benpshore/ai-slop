@@ -28,11 +28,15 @@ impl ApiKeys {
     pub const ANTHROPIC: &'static str = "tpe.anthropic";
     /// `OpenAI` API key (`Authorization: Bearer`).
     pub const OPENAI: &'static str = "tpe.openai";
+    /// Google Gemini API key.
+    pub const GEMINI: &'static str = "tpe.gemini";
+    /// Ollama API key for authenticated remote deployments (optional locally).
+    pub const OLLAMA: &'static str = "tpe.ollama";
     /// Library proxy / link-resolver login (e.g. `EZproxy` password).
     pub const LIBRARY_PROXY: &'static str = "tpe.library-proxy";
 
     /// Every well-known service name, in declaration order.
-    pub const ALL: [&'static str; 9] = [
+    pub const ALL: [&'static str; 11] = [
         Self::OPENALEX,
         Self::CROSSREF_MAILTO,
         Self::SEMANTIC_SCHOLAR,
@@ -41,6 +45,8 @@ impl ApiKeys {
         Self::ZOTERO,
         Self::ANTHROPIC,
         Self::OPENAI,
+        Self::GEMINI,
+        Self::OLLAMA,
         Self::LIBRARY_PROXY,
     ];
 
@@ -89,26 +95,22 @@ mod tests {
     }
 
     #[test]
-    fn api_key_round_trip() {
+    fn every_api_key_is_configurable_retrievable_and_deletable() {
         let store = MemoryStore::new();
-        assert!(ApiKeys::get(&store, ApiKeys::ANTHROPIC).unwrap().is_none());
-        ApiKeys::set(&store, ApiKeys::ANTHROPIC, &Secret::new("sk-ant-test")).unwrap();
-        ApiKeys::set(&store, ApiKeys::NCBI, &Secret::new("ncbi-test")).unwrap();
-        assert_eq!(
-            ApiKeys::get(&store, ApiKeys::ANTHROPIC)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            "sk-ant-test"
-        );
-        assert_eq!(
-            ApiKeys::configured(&store).unwrap(),
-            vec![ApiKeys::NCBI, ApiKeys::ANTHROPIC]
-        );
-        assert!(ApiKeys::delete(&store, ApiKeys::NCBI).unwrap());
-        assert_eq!(
-            ApiKeys::configured(&store).unwrap(),
-            vec![ApiKeys::ANTHROPIC]
-        );
+        for service in ApiKeys::ALL {
+            assert!(ApiKeys::get(&store, service).unwrap().is_none());
+            ApiKeys::set(&store, service, &Secret::new(format!("key-for-{service}"))).unwrap();
+        }
+        assert_eq!(ApiKeys::configured(&store).unwrap(), ApiKeys::ALL);
+        for service in ApiKeys::ALL {
+            assert_eq!(
+                ApiKeys::get(&store, service).unwrap().unwrap().expose(),
+                format!("key-for-{service}")
+            );
+            assert!(ApiKeys::delete(&store, service).unwrap());
+            assert!(ApiKeys::get(&store, service).unwrap().is_none());
+            assert!(!ApiKeys::delete(&store, service).unwrap());
+        }
+        assert!(ApiKeys::configured(&store).unwrap().is_empty());
     }
 }

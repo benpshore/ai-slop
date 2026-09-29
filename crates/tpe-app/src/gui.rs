@@ -91,12 +91,26 @@ use gpui::{
     prelude::*, px, rgb, size, uniform_list,
 };
 
+#[cfg(target_os = "macos")]
+use tpe_app::keys::StoredKeyProvider;
 use tpe_app::keys::{self, EnvKeyProvider, KeyProvider};
 use tpe_app::ledger::{CorpusRow, DocumentDetail, LedgerReader};
 use tpe_app::tpe_ai::{self, Provider};
 use tpe_app::view::{
     self, AskRequest, AskTracker, CompletionVerdict, NumberedLine, Pane, TextScale,
 };
+#[cfg(target_os = "macos")]
+use tpe_credentials::KeychainStore;
+
+fn default_key_provider() -> Box<dyn KeyProvider> {
+    // The native persistent store wins; environment variables exist only for
+    // compatibility when an entry has not yet been saved.
+    #[cfg(target_os = "macos")]
+    if let Ok(store) = KeychainStore::new() {
+        return Box::new(StoredKeyProvider::new(store));
+    }
+    Box::new(EnvKeyProvider)
+}
 
 actions!(
     workbench,
@@ -178,7 +192,7 @@ impl Workbench {
         let ask_focus = cx.focus_handle().tab_index(3).tab_stop(true);
         window.focus(&corpus_focus);
         Self {
-            keys: Box::new(EnvKeyProvider),
+            keys: default_key_provider(),
             reader,
             corpus,
             selected: None,
@@ -315,11 +329,15 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let Some(key) = self.keys.api_key(provider.credential_service()) else {
-            self.answer = keys::missing_key_message(provider);
-            self.answer_from = None;
-            cx.notify();
-            return;
+        let key = match self.keys.api_key(provider.credential_service()) {
+            Some(key) => key,
+            None if !provider.metadata().authentication.required() => String::new(),
+            None => {
+                self.answer = keys::missing_key_message(provider);
+                self.answer_from = None;
+                cx.notify();
+                return;
+            }
         };
         let context = match self.detail.as_ref() {
             Some(detail) => view::document_context(detail, MAX_CONTEXT_CHARS),
@@ -408,7 +426,7 @@ impl Workbench {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.provider = self.provider.toggle();
+        self.provider = self.provider.next();
         cx.notify();
     }
 
