@@ -100,6 +100,10 @@ const MIN_VECTOR_SIDE: f32 = 8.0;
 /// Most painted boxes clustered on one page; beyond it the page gets one
 /// `vector` figure covering all of them.
 const MAX_CLUSTER_BOXES: usize = 2000;
+/// Most decoded Form `XObject` program data kept per session. A document
+/// with many distinct, highly compressible Forms could otherwise grow the
+/// cache without bound; Forms beyond the budget are decoded on every use.
+const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
@@ -196,6 +200,28 @@ struct SessionCache {
     /// Fonts written directly into a resources dictionary have no id and are
     /// resolved on every use.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
+    /// The text-relevant operators and painted paths of Form `XObject`
+    /// streams, keyed by stream id, up to [`MAX_FORM_CACHE_BYTES`] of
+    /// decoded program data. Streams that fail to lex are not cached, so
+    /// their warning recurs exactly as it would without the cache; streams
+    /// beyond the budget are decoded on every use.
+    forms: HashMap<ObjectId, Rc<TextProgram>>,
+    /// Estimated bytes held by `forms`.
+    form_bytes: usize,
+}
+
+impl SessionCache {
+    /// Retain `program` for `id` when it fits the remaining budget; returns
+    /// whether it was retained.
+    fn insert_form(&mut self, id: ObjectId, program: &Rc<TextProgram>) -> bool {
+        let bytes = program.estimated_bytes();
+        if self.form_bytes.saturating_add(bytes) > MAX_FORM_CACHE_BYTES {
+            return false;
+        }
+        self.form_bytes += bytes;
+        self.forms.insert(id, Rc::clone(program));
+        true
+    }
 }
 
 struct LopdfSession {
@@ -1550,6 +1576,25 @@ struct TextProgram {
 }
 
 impl TextProgram {
+    /// Rough size of the program in memory: the vectors' elements plus the
+    /// heap bytes of string, name and array operands.
+    fn estimated_bytes(&self) -> usize {
+        fn heap_bytes(object: &Object) -> usize {
+            match object {
+                Object::String(bytes, _) | Object::Name(bytes) => bytes.len(),
+                Object::Array(items) => items
+                    .iter()
+                    .map(|item| size_of::<Object>() + heap_bytes(item))
+                    .sum(),
+                _ => 0,
+            }
+        }
+        self.ops.len() * size_of::<TextOp>()
+            + self.operands.len() * size_of::<Object>()
+            + self.paths.len() * size_of::<[f32; 4]>()
+            + self.operands.iter().map(heap_bytes).sum::<usize>()
+    }
+
     /// The operands of `op` (none for a painted path).
     fn operands(&self, op: TextOp) -> &[Object] {
         if op.kind.is_path() {
@@ -2698,7 +2743,7 @@ impl<'a> Interpreter<'a> {
             return;
         };
         let label = lossy(name);
-        let Some((_, stream)) = lookup_xobject(doc, contexts, name) else {
+        let Some((stream_id, stream)) = lookup_xobject(doc, contexts, name) else {
             self.warn(format!("XObject {label}: not in resources"));
             return;
         };
@@ -2721,13 +2766,23 @@ impl<'a> Interpreter<'a> {
             ));
             return;
         }
-        let content_bytes = match stream.get_plain_content() {
-            Ok(bytes) => bytes,
-            Err(_) => stream.content.clone(),
-        };
-        let Ok(program) = lex_content(&content_bytes) else {
-            self.warn(format!("XObject {label}: undecodable content stream"));
-            return;
+        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
+        let program = if let Some(program) = cached {
+            program
+        } else {
+            let content_bytes = match stream.get_plain_content() {
+                Ok(bytes) => bytes,
+                Err(_) => stream.content.clone(),
+            };
+            let Ok(program) = lex_content(&content_bytes) else {
+                self.warn(format!("XObject {label}: undecodable content stream"));
+                return;
+            };
+            let program = Rc::new(program);
+            if let Some(id) = stream_id {
+                self.cache.insert_form(id, &program);
+            }
+            program
         };
         // Nothing in it shows text, paints or moves the text position, and
         // it cannot reach the caller's state, so running it would change
@@ -5446,7 +5501,30 @@ mod tests {
     }
 
     #[test]
-    fn shared_form_xobject_yields_identical_spans() {
+    fn form_cache_stops_growing_at_its_byte_budget() {
+        let mut cache = SessionCache::default();
+        let big = Rc::new(TextProgram {
+            ops: Vec::new(),
+            operands: vec![Object::string_literal(vec![
+                b'x';
+                MAX_FORM_CACHE_BYTES / 2 + 1
+            ])],
+            paths: Vec::new(),
+        });
+        assert!(cache.insert_form((1, 0), &big));
+        assert!(!cache.insert_form((2, 0), &big), "over budget");
+        assert_eq!(cache.forms.len(), 1);
+        let small = Rc::new(TextProgram {
+            ops: Vec::new(),
+            operands: Vec::new(),
+            paths: Vec::new(),
+        });
+        assert!(cache.insert_form((3, 0), &small));
+        assert_eq!(cache.forms.len(), 2);
+    }
+
+    #[test]
+    fn shared_form_xobject_is_decoded_once_and_yields_identical_spans() {
         let ops = vec![
             Operation::new("q", vec![]),
             cm_translate(200, 300),
@@ -5462,8 +5540,10 @@ mod tests {
 
         let mut cached = open_session(&bytes);
         let first = cached.page_text(1).unwrap();
+        assert_eq!(cached.cache.forms.len(), 1, "the form stream is cached");
         assert_eq!(cached.cache.fonts.len(), 1, "page and form share /F1");
         let second_cached = cached.page_text(2).unwrap();
+        assert_eq!(cached.cache.forms.len(), 1);
 
         let mut fresh = open_session(&bytes);
         let second_fresh = fresh.page_text(2).unwrap();
@@ -5749,7 +5829,7 @@ mod tests {
     }
 
     #[test]
-    fn pure_vector_form_draws_its_paths_and_mixed_form_still_recurses() {
+    fn pure_vector_form_is_cached_with_its_paths_and_mixed_form_still_recurses() {
         let page = vec![
             Operation::new("q", vec![]),
             cm_translate(200, 300),
@@ -5761,6 +5841,10 @@ mod tests {
         let result = session.page_text(1).unwrap();
         assert!(result.spans.is_empty());
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(session.cache.forms.len(), 1);
+        let cached = session.cache.forms.values().next().unwrap();
+        assert_eq!(cached.ops.len(), 200);
+        assert!(cached.ops.iter().all(|op| op.kind == OpKind::StrokePath));
         // The form's boxes (0,2)-(204,20) moved by the page's `cm`.
         assert_eq!(result.figures.len(), 1, "{:?}", result.figures);
         assert_box(&result.figures[0], 200.0, 302.0, 404.0, 320.0);
