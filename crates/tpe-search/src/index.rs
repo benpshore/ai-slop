@@ -27,6 +27,26 @@ const DEFAULT_STORE: &str = "usearch";
 #[cfg(not(feature = "usearch"))]
 const DEFAULT_STORE: &str = "flat";
 
+/// Bound `SQLite`'s page cache, disable mapping of database pages into the
+/// process, checkpoint regularly, and limit the WAL retained after a
+/// successful checkpoint during large indexing runs.
+const INDEX_PRAGMAS: &str = "PRAGMA journal_mode = WAL; \
+    PRAGMA synchronous = NORMAL; \
+    PRAGMA wal_autocheckpoint = 1000; \
+    PRAGMA journal_size_limit = 67108864; \
+    PRAGMA cache_size = -8192; \
+    PRAGMA mmap_size = 0; \
+    PRAGMA temp_store = FILE; \
+    PRAGMA busy_timeout = 5000;";
+
+/// Read-only ledger connections still get their own page cache. Do not use
+/// memory mapping or an unbounded default cache while walking a large corpus.
+const READER_PRAGMAS: &str = "PRAGMA query_only = ON; \
+    PRAGMA cache_size = -8192; \
+    PRAGMA mmap_size = 0; \
+    PRAGMA temp_store = FILE; \
+    PRAGMA busy_timeout = 5000;";
+
 const INDEX_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -169,6 +189,7 @@ impl SearchIndex {
     pub fn open(dir: &Path) -> Result<Self, SearchError> {
         fs::create_dir_all(dir)?;
         let conn = Connection::open(dir.join(INDEX_DB))?;
+        conn.execute_batch(INDEX_PRAGMAS)?;
         if let Err(e) = conn.execute_batch(INDEX_SCHEMA) {
             let message = e.to_string();
             if message.contains("fts5") {
@@ -220,6 +241,7 @@ impl SearchIndex {
             ledger_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        ledger.execute_batch(READER_PRAGMAS)?;
         let mut stats = IndexStats::default();
         if get_meta(&self.conn, "dirty")?.as_deref() == Some("1") {
             self.reset()?;
@@ -710,6 +732,31 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_database_applies_wal_memory_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SearchIndex::open(dir.path()).unwrap();
+
+        let mode: String = index
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        for (pragma, expected) in [
+            ("wal_autocheckpoint", 1000),
+            ("journal_size_limit", 67_108_864),
+            ("cache_size", -8192),
+            ("mmap_size", 0),
+            ("temp_store", 1),
+        ] {
+            let actual: i64 = index
+                .conn
+                .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(actual, expected, "unexpected PRAGMA {pragma}");
+        }
+    }
     use crate::embed::HashEmbedder;
 
     // Copied verbatim from `text-processing-engine/src/ledger.rs` (`SCHEMA_SQL`):
