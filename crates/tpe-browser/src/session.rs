@@ -12,8 +12,8 @@
 use crate::BrowserError;
 use crate::cookies::{Cookie, CookieJar};
 use crate::doi::{
-    arxiv_id_in_url, arxiv_ids_in_text, declared_dois_in_html, dois_in_html, dois_in_url,
-    is_doi_resolver,
+    MAX_IDENTIFIERS, MAX_SCAN_BYTES, arxiv_id_in_url, arxiv_ids_in_text, declared_dois_in_html,
+    dois_in_html, dois_in_url, is_doi_resolver,
 };
 use crate::hosts::{HostDecision, ResearchPolicy};
 use crate::html::strip_tags;
@@ -243,6 +243,12 @@ impl BrowserSession {
     /// Gather identifiers and PDF links from a loaded page and remember them.
     pub fn inspect_html(&mut self, raw_url: &str, html: &str) -> Result<PageFacts, BrowserError> {
         let url = NormalizedUrl::parse(raw_url)?;
+        if html.len() > MAX_SCAN_BYTES {
+            return Err(BrowserError::PageTooLarge {
+                actual: html.len(),
+                maximum: MAX_SCAN_BYTES,
+            });
+        }
         let facts = inspect_page(&url, html);
         self.pages.push(facts.clone());
         Ok(facts)
@@ -251,6 +257,7 @@ impl BrowserSession {
 
 /// Identifiers and PDF links of a page at `url`.
 pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
+    let html = bounded_html(html);
     let declared = declared_dois_in_html(html);
     let url_dois = dois_in_url(url);
     let primary_doi = declared
@@ -259,7 +266,7 @@ pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
         .or_else(|| url_dois.first().cloned());
     let mut dois = dois_in_html(html);
     for doi in url_dois {
-        if !dois.contains(&doi) {
+        if dois.len() < MAX_IDENTIFIERS && !dois.contains(&doi) {
             dois.push(doi);
         }
     }
@@ -276,6 +283,17 @@ pub fn inspect_page(url: &NormalizedUrl, html: &str) -> PageFacts {
         arxiv_ids,
         pdf_links: pdf_links_in_html(html, url),
     }
+}
+
+fn bounded_html(html: &str) -> &str {
+    if html.len() <= MAX_SCAN_BYTES {
+        return html;
+    }
+    let mut end = MAX_SCAN_BYTES;
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    &html[..end]
 }
 
 fn pdf_intercept(url: &str, cls: &LinkClassification) -> Option<Intercept> {
@@ -603,5 +621,16 @@ mod tests {
         assert!(s.cookie_header("nope", NOW).is_err());
         assert!(s.inspect_html("nope", "<p></p>").is_err());
         assert!(s.history().is_empty());
+    }
+
+    #[test]
+    fn page_inspection_rejects_oversized_html() {
+        let mut s = BrowserSession::open();
+        let html = "x".repeat(MAX_SCAN_BYTES + 1);
+        assert!(matches!(
+            s.inspect_html("https://example.com", &html),
+            Err(BrowserError::PageTooLarge { .. })
+        ));
+        assert!(s.pages().is_empty());
     }
 }

@@ -8,6 +8,8 @@
 //! `10.1000/a(b)`, whereas this module only removes unbalanced brackets.
 //! arXiv identifiers go through `tpe_common::normalize_arxiv_id`.
 
+use std::collections::HashSet;
+
 use tpe_common::{normalize_arxiv_id, normalize_doi};
 
 use crate::html::{attribute_values, meta_content, strip_tags};
@@ -15,6 +17,12 @@ use crate::url::{NormalizedUrl, host_in_domain, percent_decode};
 
 /// Hosts whose whole purpose is to resolve a DOI (or a handle) to a landing page.
 pub const DOI_RESOLVERS: &[&str] = &["doi.org", "hdl.handle.net"];
+
+/// Maximum number of bytes scanned by the public text and HTML extractors.
+pub const MAX_SCAN_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of identifiers returned by a single extraction operation.
+pub const MAX_IDENTIFIERS: usize = 1024;
 
 /// `<meta>` names publishers use to declare the page's own DOI, most specific first.
 pub const DOI_META_NAMES: &[&str] = &[
@@ -60,15 +68,20 @@ pub fn is_doi_resolver(host: &str) -> bool {
 /// is not a DOI), ends at whitespace or one of `"<>`, and loses trailing
 /// sentence punctuation and unbalanced closing brackets.
 pub fn scan_dois(text: &str) -> Vec<String> {
+    let text = bounded_prefix(text, MAX_SCAN_BYTES);
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut found: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let mut i = 0;
     while i < chars.len() {
         if let Some((next, candidate)) = doi_at(text, &chars, i) {
             if normalize_doi(candidate).is_some() {
                 let doi = candidate.to_ascii_lowercase();
-                if !found.contains(&doi) {
+                if seen.insert(doi.clone()) {
                     found.push(doi);
+                    if found.len() == MAX_IDENTIFIERS {
+                        break;
+                    }
                 }
             }
             i = next;
@@ -91,9 +104,10 @@ pub fn dois_in_url(url: &NormalizedUrl) -> Vec<String> {
         text.push_str(&percent_decode(v));
     }
     let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     for doi in scan_dois(&text) {
         let trimmed = trim_url_tail(&doi);
-        if !out.contains(&trimmed) {
+        if seen.insert(trimmed.clone()) {
             out.push(trimmed);
         }
     }
@@ -103,12 +117,17 @@ pub fn dois_in_url(url: &NormalizedUrl) -> Vec<String> {
 /// DOIs a page declares about itself in `<meta>` tags (see [`DOI_META_NAMES`]),
 /// most trustworthy names first.
 pub fn declared_dois_in_html(html: &str) -> Vec<String> {
+    let html = bounded_prefix(html, MAX_SCAN_BYTES);
     let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     for name in DOI_META_NAMES {
         for content in meta_content(html, name) {
             for doi in scan_dois(&content) {
-                if !out.contains(&doi) {
+                if seen.insert(doi.clone()) {
                     out.push(doi);
+                    if out.len() == MAX_IDENTIFIERS {
+                        return out;
+                    }
                 }
             }
         }
@@ -119,10 +138,15 @@ pub fn declared_dois_in_html(html: &str) -> Vec<String> {
 /// All DOIs on a page: declared ones first, then those in `<a href>` targets,
 /// then those mentioned in the visible text.
 pub fn dois_in_html(html: &str) -> Vec<String> {
+    let html = bounded_prefix(html, MAX_SCAN_BYTES);
     let mut out = declared_dois_in_html(html);
+    let mut seen: HashSet<String> = out.iter().cloned().collect();
     let mut push_all = |dois: Vec<String>| {
         for doi in dois {
-            if !out.contains(&doi) {
+            if out.len() == MAX_IDENTIFIERS {
+                break;
+            }
+            if seen.insert(doi.clone()) {
                 out.push(doi);
             }
         }
@@ -136,6 +160,17 @@ pub fn dois_in_html(html: &str) -> Vec<String> {
     }
     push_all(scan_dois(&strip_tags(html)));
     out
+}
+
+fn bounded_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// The arXiv identifier addressed by an `arxiv.org` URL (`/abs/`, `/pdf/`,
@@ -166,8 +201,10 @@ pub fn arxiv_id_in_url(url: &NormalizedUrl) -> Option<String> {
 /// prefix), normalised and deduplicated. Bare identifiers are not collected
 /// because a date such as `2024.12345` is indistinguishable from one.
 pub fn arxiv_ids_in_text(text: &str) -> Vec<String> {
+    let text = bounded_prefix(text, MAX_SCAN_BYTES);
     let lower = text.to_ascii_lowercase();
     let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     for (pos, _) in lower.match_indices("arxiv:") {
         let start = pos + "arxiv:".len();
         let tail = &text[start..];
@@ -177,10 +214,13 @@ pub fn arxiv_ids_in_text(text: &str) -> Vec<String> {
             })
             .unwrap_or(tail.len());
         let token = tail[..end].trim_end_matches('.');
-        if let Some(id) = normalize_arxiv_id(token)
-            && !out.contains(&id)
-        {
-            out.push(id);
+        if let Some(id) = normalize_arxiv_id(token) {
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
+            if out.len() == MAX_IDENTIFIERS {
+                break;
+            }
         }
     }
     out
@@ -283,6 +323,8 @@ fn count(s: &str, c: char) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use super::*;
 
     fn url(s: &str) -> NormalizedUrl {
@@ -320,6 +362,20 @@ mod tests {
         assert!(scan_dois("version 10.15 of 10.1000").is_empty());
         assert_eq!(scan_dois("10.1000/a 10.1000/A"), ["10.1000/a"]);
         assert!(scan_dois("").is_empty());
+    }
+
+    #[test]
+    fn scans_have_byte_and_identifier_limits() {
+        let many = (0..MAX_IDENTIFIERS + 10).fold(String::new(), |mut out, i| {
+            write!(out, "10.1000/id{i} ").unwrap();
+            out
+        });
+        assert_eq!(scan_dois(&many).len(), MAX_IDENTIFIERS);
+
+        let mut beyond_limit = "x".repeat(MAX_SCAN_BYTES - 1);
+        beyond_limit.push('é');
+        beyond_limit.push_str(" 10.1000/hidden");
+        assert!(scan_dois(&beyond_limit).is_empty());
     }
 
     #[test]
