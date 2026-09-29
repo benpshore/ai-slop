@@ -99,7 +99,9 @@ pub struct Figure {
     /// 0-based index of the figure on its page, in backend order.
     pub index: u32,
     pub bbox: Option<BBox>,
-    /// `raster`, `vector`, or `layout` (a model-detected picture region).
+    /// `raster` (an image), `vector` (a cluster of painted paths), `rule` (a
+    /// thin horizontal or vertical painted line, e.g. a table rule) or `layout`
+    /// (a model-detected picture region).
     pub kind: String,
     /// MIME type of the exported bytes when known, e.g. `image/png`.
     pub mime: Option<String>,

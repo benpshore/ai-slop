@@ -17,9 +17,19 @@
 //! materialises operands only for the operators the interpreter acts on
 //! (see [`OpKind`]); everything else is tokenised and dropped without
 //! allocating. A Form runs on a graphics-state stack of its own and its
-//! graphics state is restored afterwards, so only the text it shows and the
-//! text matrix outlive it; a Form stream in which no operator that shows
-//! text or moves the text matrix can occur is therefore not lexed or run.
+//! graphics state is restored afterwards, so only the text it shows, the
+//! graphics it paints and the text matrix outlive it.
+//!
+//! Figures are boxes, never bytes. The lexer folds each path's construction
+//! operators (`m l c v y re`) into one box in the stream's own coordinates
+//! and keeps it only when the path is painted (`S s f F f* B B* b b*`; `n`
+//! discards it, clipping is ignored), as one fill or stroke operation; the
+//! interpreter maps the box's corners through the CTM (exact for axis-aligned
+//! and quarter-turn CTMs, a covering box under skew). An Image `XObject`
+//! shown with `Do` is the unit square under the CTM. Each page then gets
+//! `rule` figures (thin horizontal or vertical painted boxes), `vector`
+//! figures (the other painted boxes merged where they lie within
+//! [`CLUSTER_GAP`] of each other) and `raster` figures, in that order.
 //!
 //! Text is normalised, never repaired: every non-ASCII string is put in NFC,
 //! and the Latin presentation-form ligatures U+FB00 to U+FB06 (`ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ
@@ -53,7 +63,7 @@ use lopdf::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
-use crate::schema::{BBox, BackendIdentity, PageText, Span, config_digest};
+use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest};
 
 /// The `lopdf` release this backend is built against. It is part of the
 /// [`BackendIdentity`], so a dependency bump must change it (a unit test
@@ -75,8 +85,21 @@ const LIGATURE_POLICY: &str = "expand";
 /// Revision of the content-stream extraction policy, part of the backend
 /// identity so ledger runs from different policies are never confused:
 /// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
-/// stack per Form.
-const CONTENT_POLICY: &str = "2";
+/// stack per Form; 3 = painted paths and Image `XObject`s become figures.
+const CONTENT_POLICY: &str = "3";
+
+/// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
+/// long is a `rule` figure.
+const RULE_THICKNESS: f32 = 2.0;
+/// Shortest `rule` figure, in points.
+const RULE_LENGTH: f32 = 30.0;
+/// Painted boxes closer than this (points) belong to one `vector` figure.
+const CLUSTER_GAP: f32 = 6.0;
+/// A `vector` cluster that fits in a square this wide (points) is dropped.
+const MIN_VECTOR_SIDE: f32 = 8.0;
+/// Most painted boxes clustered on one page; beyond it the page gets one
+/// `vector` figure covering all of them.
+const MAX_CLUSTER_BOXES: usize = 2000;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
@@ -173,8 +196,8 @@ struct SessionCache {
     /// Fonts written directly into a resources dictionary have no id and are
     /// resolved on every use.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
-    /// The text-relevant operators of Form `XObject` streams (empty for a
-    /// stream that cannot show text), keyed by stream id. Streams that fail
+    /// The text-relevant operators and painted paths of Form `XObject`
+    /// streams, keyed by stream id. Streams that fail
     /// to lex are not cached, so their warning recurs exactly as it would
     /// without the cache.
     forms: HashMap<ObjectId, Rc<TextProgram>>,
@@ -1395,10 +1418,11 @@ const MAX_NESTING: usize = 100;
 /// (`reader::MAX_BRACKET`).
 const MAX_PAREN_NESTING: usize = 100;
 
-/// The content-stream operators the interpreter acts on. Every other
-/// operator (path construction and painting, clipping, colour, line style,
-/// `gs`, marked content, shading, Type3 `d0`/`d1`, `ET`, inline images) is
-/// lexed and dropped without materialising its operands.
+/// The content-stream operators the interpreter acts on, plus the painted
+/// paths (`FillPath`, `StrokePath`) the lexer folds path operators into.
+/// Every other operator (clipping, colour, line style, `gs`, marked content,
+/// shading, Type3 `d0`/`d1`, `ET`, inline images) is lexed and dropped
+/// without materialising its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpKind {
     /// `q`
@@ -1439,6 +1463,11 @@ enum OpKind {
     ShowArray,
     /// `Do`
     Invoke,
+    /// A path painted by `f F f* B B* b b*`; its box is in
+    /// [`TextProgram::paths`]. Never returned by [`OpKind::from_operator`].
+    FillPath,
+    /// A path painted by `S s` only; its box is in [`TextProgram::paths`].
+    StrokePath,
 }
 
 impl OpKind {
@@ -1467,6 +1496,42 @@ impl OpKind {
         };
         Some(kind)
     }
+
+    /// Whether this is a painted path, whose `first` indexes
+    /// [`TextProgram::paths`] instead of the operands.
+    fn is_path(self) -> bool {
+        matches!(self, Self::FillPath | Self::StrokePath)
+    }
+}
+
+/// What a path operator does to the path under construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathOp {
+    /// `m`, `l` (one point), `v`, `y` (two) or `c` (three): the first
+    /// `2 × n` operands are the points.
+    Points(usize),
+    /// `re x y width height`.
+    Rect,
+    /// `S s` (`stroke`) or `f F f* B B* b b*`.
+    Paint { stroke: bool },
+    /// `n`: the path ends unpainted.
+    Discard,
+}
+
+/// The path operator `operator` names. `h` adds no point and `W`/`W*` only
+/// clip, so they are not path operators here.
+fn path_op(operator: &[u8]) -> Option<PathOp> {
+    let op = match operator {
+        b"m" | b"l" => PathOp::Points(1),
+        b"v" | b"y" => PathOp::Points(2),
+        b"c" => PathOp::Points(3),
+        b"re" => PathOp::Rect,
+        b"S" | b"s" => PathOp::Paint { stroke: true },
+        b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" => PathOp::Paint { stroke: false },
+        b"n" => PathOp::Discard,
+        _ => return None,
+    };
+    Some(op)
 }
 
 /// One kept operator and the range of its operands in
@@ -1479,16 +1544,32 @@ struct TextOp {
 }
 
 /// The operators of one content stream that the interpreter acts on, in
-/// stream order, with their operands exactly as `Content::decode` yields them.
+/// stream order, with their operands exactly as `Content::decode` yields them,
+/// and the painted paths among them.
 #[derive(Default)]
 struct TextProgram {
     ops: Vec<TextOp>,
     operands: Vec<Object>,
+    /// `[x0, y0, x1, y1]` of each painted path, in the stream's coordinates.
+    paths: Vec<[f32; 4]>,
 }
 
 impl TextProgram {
+    /// The operands of `op` (none for a painted path).
     fn operands(&self, op: TextOp) -> &[Object] {
+        if op.kind.is_path() {
+            return &[];
+        }
         self.operands.get(op.first..op.end).unwrap_or_default()
+    }
+
+    /// The box of a painted path.
+    fn path_box(&self, op: TextOp) -> Option<[f32; 4]> {
+        if op.kind.is_path() {
+            self.paths.get(op.first).copied()
+        } else {
+            None
+        }
     }
 }
 
@@ -1970,8 +2051,9 @@ fn invalid_content() -> LopdfError {
 }
 
 /// Read a content stream as `Content::decode` does and keep only the
-/// operators [`OpKind`] names, with their operands. Everything else is
-/// tokenised and dropped without allocating. Like `lopdf`, lexing stops
+/// operators [`OpKind`] names, with their operands, and one box per painted
+/// path (see [`record_path`]). Everything else is tokenised and dropped
+/// without allocating. Like `lopdf`, lexing stops
 /// quietly at the first token it cannot read, keeping what came before,
 /// and fails only where `lopdf` rejects the whole stream (an inline image
 /// without `ID` or `EI`, arrays or dictionaries nested too deep). The one
@@ -1980,6 +2062,7 @@ fn invalid_content() -> LopdfError {
 fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
     let mut program = TextProgram::default();
     let mut starts: Vec<usize> = Vec::new();
+    let mut path: Option<[f32; 4]> = None;
     let mut pos = skip_content_space(bytes, 0);
     loop {
         let mut at = pos;
@@ -2005,7 +2088,8 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
         if end == at {
             return Ok(program);
         }
-        if let Some(kind) = bytes.get(at..end).and_then(OpKind::from_operator) {
+        let operator = bytes.get(at..end).unwrap_or_default();
+        if let Some(kind) = OpKind::from_operator(operator) {
             let first = program.operands.len();
             for &start in &starts {
                 if let Ok((_, Some(operand))) = lex_object(bytes, start, MAX_NESTING, false, true) {
@@ -2018,26 +2102,246 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
                 first,
                 end: last,
             });
+        } else if let Some(op) = path_op(operator) {
+            record_path(&mut program, &mut path, op, bytes, &starts);
         }
         pos = skip_content_space(bytes, end);
     }
 }
 
-/// Whether a Form stream can show text or move the text position. It is
-/// false only when no `BT`, `Tj`, `TJ`, `Td`, `TD`, `Tm`, `T*`, `Do` or
-/// `BI` byte pair and no `'` or `"` byte occurs anywhere in it (a pure
-/// vector figure). Such a stream runs as a no-op, as a Form cannot pop the
-/// caller's graphics states, so it is not lexed at all.
-fn may_affect_text(bytes: &[u8]) -> bool {
-    bytes.iter().any(|&byte| matches!(byte, b'\'' | b'"'))
-        || bytes.windows(2).any(|pair| {
-            matches!(
-                pair,
-                [b'B', b'T' | b'I']
-                    | [b'T', b'j' | b'J' | b'd' | b'D' | b'm' | b'*']
-                    | [b'D', b'o']
-            )
-        })
+/// The first `out.len()` operands (starting at `starts`) as numbers; false
+/// when there are fewer or one of them is not a number.
+fn read_numbers(bytes: &[u8], starts: &[usize], out: &mut [f32]) -> bool {
+    if starts.len() < out.len() {
+        return false;
+    }
+    for (slot, &start) in out.iter_mut().zip(starts) {
+        *slot = match lex_number(bytes, start, true) {
+            Ok(Some((_, Some(Object::Integer(value))))) => value as f32,
+            Ok(Some((_, Some(Object::Real(value))))) => value,
+            _ => return false,
+        };
+    }
+    true
+}
+
+/// Widen `path` (`[x0, y0, x1, y1]`, `None` before its first point) to
+/// take in the point `(x, y)`.
+fn grow(path: &mut Option<[f32; 4]>, x: f32, y: f32) {
+    match path {
+        Some(bounds) => {
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].min(y);
+            bounds[2] = bounds[2].max(x);
+            bounds[3] = bounds[3].max(y);
+        }
+        None => *path = Some([x, y, x, y]),
+    }
+}
+
+/// Apply one path operator: construction widens the box of the current
+/// path (curve control points included), painting records it in `program`
+/// as one [`OpKind::FillPath`] or [`OpKind::StrokePath`] and starts a new
+/// path, `n` drops it. The operands are read from their `starts` into a
+/// fixed buffer; an operator whose operands are not numbers adds nothing.
+/// `cm`, `q`, `Q`, `Do` and text cannot occur inside a path object, so the
+/// box needs no CTM here.
+fn record_path(
+    program: &mut TextProgram,
+    path: &mut Option<[f32; 4]>,
+    op: PathOp,
+    bytes: &[u8],
+    starts: &[usize],
+) {
+    let mut values: [f32; 6] = [0.0; 6];
+    match op {
+        PathOp::Points(count) => {
+            let Some(slots) = values.get_mut(..count * 2) else {
+                return;
+            };
+            if read_numbers(bytes, starts, slots) {
+                for point in slots.chunks_exact(2) {
+                    grow(path, point[0], point[1]);
+                }
+            }
+        }
+        PathOp::Rect => {
+            if read_numbers(bytes, starts, &mut values[..4]) {
+                let [x, y, width, height, _, _] = values;
+                grow(path, x, y);
+                grow(path, x + width, y + height);
+            }
+        }
+        PathOp::Paint { stroke } => {
+            if let Some(bounds) = path.take() {
+                let kind = if stroke {
+                    OpKind::StrokePath
+                } else {
+                    OpKind::FillPath
+                };
+                let index = program.paths.len();
+                program.paths.push(bounds);
+                program.ops.push(TextOp {
+                    kind,
+                    first: index,
+                    end: index + 1,
+                });
+            }
+        }
+        PathOp::Discard => *path = None,
+    }
+}
+
+/// The smallest box holding every one of `corners`.
+fn box_of(corners: [(f32, f32); 4]) -> BBox {
+    let mut bbox = BBox {
+        x0: f32::MAX,
+        y0: f32::MAX,
+        x1: f32::MIN,
+        y1: f32::MIN,
+    };
+    for (x, y) in corners {
+        bbox.x0 = bbox.x0.min(x);
+        bbox.y0 = bbox.y0.min(y);
+        bbox.x1 = bbox.x1.max(x);
+        bbox.y1 = bbox.y1.max(y);
+    }
+    bbox
+}
+
+/// The smallest box holding both `a` and `b`.
+fn enclose(a: BBox, b: BBox) -> BBox {
+    BBox {
+        x0: a.x0.min(b.x0),
+        y0: a.y0.min(b.y0),
+        x1: a.x1.max(b.x1),
+        y1: a.y1.max(b.y1),
+    }
+}
+
+/// Whether `a` and `b` overlap or lie within `gap` of each other.
+fn near(a: BBox, b: BBox, gap: f32) -> bool {
+    a.x0 <= b.x1 + gap && b.x0 <= a.x1 + gap && a.y0 <= b.y1 + gap && b.y0 <= a.y1 + gap
+}
+
+/// Merge `boxes` into clusters: two boxes share a cluster when they (or
+/// the clusters grown so far around them) overlap or lie within
+/// [`CLUSTER_GAP`]. Each new box absorbs every cluster near it, rescanning
+/// after each merge, so no two clusters left are near each other (a fixed
+/// point). Clusters come top to bottom, then left to right.
+fn cluster(boxes: &[BBox]) -> Vec<BBox> {
+    let mut clusters: Vec<BBox> = Vec::new();
+    for &bbox in boxes {
+        let mut grown = bbox;
+        let mut at = 0;
+        while at < clusters.len() {
+            if near(clusters[at], grown, CLUSTER_GAP) {
+                grown = enclose(grown, clusters.swap_remove(at));
+                at = 0;
+            } else {
+                at += 1;
+            }
+        }
+        clusters.push(grown);
+    }
+    clusters.sort_by(|a, b| b.y1.total_cmp(&a.y1).then(a.x0.total_cmp(&b.x0)));
+    clusters
+}
+
+/// An Image `XObject` as placed on the page.
+struct Raster {
+    bbox: BBox,
+    width_px: Option<u32>,
+    height_px: Option<u32>,
+}
+
+/// Painted paths and images of one page, in page space, gathered while its
+/// content runs.
+#[derive(Default)]
+struct Graphics {
+    /// Thin painted boxes (see [`RULE_THICKNESS`]).
+    rules: Vec<BBox>,
+    /// The other painted boxes, at most [`MAX_CLUSTER_BOXES`].
+    shapes: Vec<BBox>,
+    /// Union of every box that is not a rule.
+    extent: Option<BBox>,
+    /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
+    overflow: bool,
+    rasters: Vec<Raster>,
+}
+
+impl Graphics {
+    fn add_path(&mut self, bbox: BBox) {
+        let width = bbox.x1 - bbox.x0;
+        let height = bbox.y1 - bbox.y0;
+        let horizontal = height < RULE_THICKNESS && width >= RULE_LENGTH;
+        let vertical = width < RULE_THICKNESS && height >= RULE_LENGTH;
+        if horizontal || vertical {
+            self.rules.push(bbox);
+            return;
+        }
+        self.extent = Some(match self.extent {
+            Some(so_far) => enclose(so_far, bbox),
+            None => bbox,
+        });
+        if self.shapes.len() < MAX_CLUSTER_BOXES {
+            self.shapes.push(bbox);
+        } else {
+            self.overflow = true;
+        }
+    }
+
+    /// `rule` figures, then `vector` clusters at least [`MIN_VECTOR_SIDE`]
+    /// wide or high, then `raster` figures; indexed in that order.
+    fn into_figures(self) -> Vec<Figure> {
+        let mut figures: Vec<Figure> = Vec::new();
+        for bbox in self.rules {
+            push_figure(&mut figures, "rule", bbox, None, None);
+        }
+        let clusters: Vec<BBox> = if self.overflow {
+            self.extent.into_iter().collect()
+        } else {
+            cluster(&self.shapes)
+        };
+        for bbox in clusters {
+            if bbox.x1 - bbox.x0 >= MIN_VECTOR_SIDE || bbox.y1 - bbox.y0 >= MIN_VECTOR_SIDE {
+                push_figure(&mut figures, "vector", bbox, None, None);
+            }
+        }
+        for raster in self.rasters {
+            let (width_px, height_px) = (raster.width_px, raster.height_px);
+            push_figure(&mut figures, "raster", raster.bbox, width_px, height_px);
+        }
+        figures
+    }
+}
+
+/// Append a figure of `kind` with the next index; no bytes are captured.
+fn push_figure(
+    figures: &mut Vec<Figure>,
+    kind: &str,
+    bbox: BBox,
+    width_px: Option<u32>,
+    height_px: Option<u32>,
+) {
+    let index = u32::try_from(figures.len()).unwrap_or(u32::MAX);
+    figures.push(Figure {
+        index,
+        bbox: Some(bbox),
+        kind: kind.to_string(),
+        mime: None,
+        width_px,
+        height_px,
+        sha256: None,
+        file: None,
+        caption: None,
+    });
+}
+
+/// A non-negative integer entry of an image dictionary, when it is direct.
+fn pixel_count(dict: &Dictionary, key: &[u8]) -> Option<u32> {
+    let value = dict.get(key).ok()?.as_i64().ok()?;
+    u32::try_from(value).ok()
 }
 
 struct Interpreter<'a> {
@@ -2054,6 +2358,7 @@ struct Interpreter<'a> {
     max_depth: u32,
     /// Ligatures expanded so far on this page.
     ligatures: u32,
+    graphics: Graphics,
 }
 
 impl<'a> Interpreter<'a> {
@@ -2063,8 +2368,11 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// The finished page, with the ligature count recorded as one warning.
+    /// The finished page, with its figures and the ligature count recorded
+    /// as one warning.
     fn finish(mut self) -> PageText {
+        let graphics = std::mem::take(&mut self.graphics);
+        self.page.figures = graphics.into_figures();
         if self.ligatures > 0 {
             let count = self.ligatures;
             self.page
@@ -2166,8 +2474,44 @@ impl<'a> Interpreter<'a> {
                 }
                 OpKind::ShowArray => self.show_array(operands, contexts),
                 OpKind::Invoke => self.do_xobject(operands, contexts, depth),
+                OpKind::FillPath | OpKind::StrokePath => {
+                    if let Some(bounds) = program.path_box(op) {
+                        self.paint(bounds);
+                    }
+                }
             }
         }
+    }
+
+    /// Record a painted path whose box in the current user space is
+    /// `[x0, y0, x1, y1]`, by the box around its corners in page space.
+    fn paint(&mut self, bounds: [f32; 4]) {
+        let [x0, y0, x1, y1] = bounds;
+        let ctm = self.state.ctm;
+        let bbox = box_of([
+            ctm.apply(x0, y0),
+            ctm.apply(x1, y0),
+            ctm.apply(x0, y1),
+            ctm.apply(x1, y1),
+        ]);
+        self.graphics.add_path(bbox);
+    }
+
+    /// Record an Image `XObject`: the unit square under the CTM, with the
+    /// pixel size its dictionary states directly. No bytes are read.
+    fn place_image(&mut self, stream: &Stream) {
+        let ctm = self.state.ctm;
+        let bbox = box_of([
+            ctm.apply(0.0, 0.0),
+            ctm.apply(1.0, 0.0),
+            ctm.apply(0.0, 1.0),
+            ctm.apply(1.0, 1.0),
+        ]);
+        self.graphics.rasters.push(Raster {
+            bbox,
+            width_px: pixel_count(&stream.dict, b"Width"),
+            height_px: pixel_count(&stream.dict, b"Height"),
+        });
     }
 
     fn set_font(&mut self, operands: &[Object]) {
@@ -2324,24 +2668,12 @@ impl<'a> Interpreter<'a> {
         let full = self.tm.then(self.state.ctm);
         let rise = self.state.rise;
         let size = self.state.size;
-        let corners = [
+        let bbox = box_of([
             full.apply(0.0, rise + DESCENT * size),
             full.apply(0.0, rise + ASCENT * size),
             full.apply(advance, rise + DESCENT * size),
             full.apply(advance, rise + ASCENT * size),
-        ];
-        let mut bbox = BBox {
-            x0: f32::MAX,
-            y0: f32::MAX,
-            x1: f32::MIN,
-            y1: f32::MIN,
-        };
-        for (x, y) in corners {
-            bbox.x0 = bbox.x0.min(x);
-            bbox.y0 = bbox.y0.min(y);
-            bbox.x1 = bbox.x1.max(x);
-            bbox.y1 = bbox.y1.max(y);
-        }
+        ]);
         // NFC and ligature expansion leave pure ASCII untouched, so the
         // common case skips both and their allocations. Ligatures are
         // expanded before NFC so the result is still NFC when a combining
@@ -2375,8 +2707,16 @@ impl<'a> Interpreter<'a> {
             self.warn(format!("XObject {label}: not in resources"));
             return;
         };
-        let subtype = stream.dict.get(b"Subtype").and_then(Object::as_name);
-        if !subtype.is_ok_and(|kind| kind == b"Form") {
+        let subtype = stream
+            .dict
+            .get(b"Subtype")
+            .and_then(Object::as_name)
+            .unwrap_or_default();
+        if subtype == b"Image" {
+            self.place_image(stream);
+            return;
+        }
+        if subtype != b"Form" {
             return;
         }
         if depth >= self.max_depth {
@@ -2394,14 +2734,9 @@ impl<'a> Interpreter<'a> {
                 Ok(bytes) => bytes,
                 Err(_) => stream.content.clone(),
             };
-            let program = if may_affect_text(&content_bytes) {
-                let Ok(program) = lex_content(&content_bytes) else {
-                    self.warn(format!("XObject {label}: undecodable content stream"));
-                    return;
-                };
-                program
-            } else {
-                TextProgram::default()
+            let Ok(program) = lex_content(&content_bytes) else {
+                self.warn(format!("XObject {label}: undecodable content stream"));
+                return;
             };
             let program = Rc::new(program);
             if let Some(id) = stream_id {
@@ -2409,8 +2744,9 @@ impl<'a> Interpreter<'a> {
             }
             program
         };
-        // Nothing in it can show text, move the text position or reach the
-        // caller's state, so running it would change nothing.
+        // Nothing in it shows text, paints or moves the text position, and
+        // it cannot reach the caller's state, so running it would change
+        // nothing.
         if program.ops.is_empty() {
             return;
         }
@@ -2505,6 +2841,7 @@ fn extract_page(
         seq: 0,
         max_depth,
         ligatures: 0,
+        graphics: Graphics::default(),
     };
     let mut contexts = vec![page_context];
     interpreter.run(&program, &mut contexts, 0);
@@ -4423,9 +4760,13 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "2".to_string());
+        config.insert("content".to_string(), "3".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
+        // Nor the digest from before figures.
+        config.insert("content".to_string(), "2".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "3".to_string());
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
@@ -5030,6 +5371,7 @@ mod tests {
             seq: 0,
             max_depth: 8,
             ligatures: 0,
+            graphics: Graphics::default(),
         };
         for &text in texts {
             interpreter.emit(text.to_string(), 1.0, None);
@@ -5181,17 +5523,21 @@ mod tests {
             OpKind::SpacingShow => "\"",
             OpKind::ShowArray => "TJ",
             OpKind::Invoke => "Do",
+            OpKind::FillPath => "f",
+            OpKind::StrokePath => "S",
         }
     }
 
     type OpList = Result<Vec<(String, Vec<Object>)>, String>;
 
-    /// The kept operators and their operands, from the streaming lexer.
+    /// The kept operators and their operands, from the streaming lexer
+    /// (painted paths left out).
     fn lexed(bytes: &[u8]) -> OpList {
         let program = lex_content(bytes).map_err(|err| format!("{err}"))?;
         let ops = program
             .ops
             .iter()
+            .filter(|op| !op.kind.is_path())
             .map(|&op| {
                 let name = operator_name(op.kind).to_string();
                 (name, program.operands(op).to_vec())
@@ -5377,7 +5723,7 @@ mod tests {
     }
 
     #[test]
-    fn path_operators_are_skipped_without_changing_spans() {
+    fn painted_paths_become_figures_without_changing_spans() {
         let text = text_ops(12, 100, 600, "Only text");
         let mut busy = vec![Operation::new("q", vec![])];
         busy.extend(vector_ops(500));
@@ -5395,21 +5741,32 @@ mod tests {
         let content = session.doc.get_page_content(session.pages[&2]);
         let program = lex_content(&content).unwrap();
         let kinds: Vec<OpKind> = program.ops.iter().map(|op| op.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                OpKind::Save,
-                OpKind::Restore,
-                OpKind::BeginText,
-                OpKind::Font,
-                OpKind::Move,
-                OpKind::Show,
-            ]
-        );
+        // Each round strokes one path (`m l c h S`); `re W n` is discarded
+        // and the `f*` after it has no path to paint.
+        let mut expected = vec![OpKind::Save];
+        expected.extend(std::iter::repeat_n(OpKind::StrokePath, 500));
+        expected.extend([
+            OpKind::Restore,
+            OpKind::BeginText,
+            OpKind::Font,
+            OpKind::Move,
+            OpKind::Show,
+        ]);
+        expected.extend(std::iter::repeat_n(OpKind::StrokePath, 500));
+        assert_eq!(kinds, expected);
+        assert_eq!(program.paths.len(), 1_000);
+        assert!(program.operands(program.ops[1]).is_empty());
+
+        // Every stroked box spans x 1..5, so all 1000 form one figure.
+        assert!(plain.figures.is_empty());
+        assert_eq!(busy_page.figures.len(), 1, "{:?}", busy_page.figures);
+        let figure = &busy_page.figures[0];
+        assert_eq!(figure.kind, "vector");
+        assert_box(figure, 0.0, 2.0, 504.0, 20.0);
     }
 
     #[test]
-    fn pure_vector_form_is_cached_empty_and_mixed_form_still_recurses() {
+    fn pure_vector_form_is_cached_with_its_paths_and_mixed_form_still_recurses() {
         let page = vec![
             Operation::new("q", vec![]),
             cm_translate(200, 300),
@@ -5423,7 +5780,13 @@ mod tests {
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         assert_eq!(session.cache.forms.len(), 1);
         let cached = session.cache.forms.values().next().unwrap();
-        assert!(cached.ops.is_empty());
+        assert_eq!(cached.ops.len(), 200);
+        assert!(cached.ops.iter().all(|op| op.kind == OpKind::StrokePath));
+        // The form's boxes (0,2)-(204,20) moved by the page's `cm`.
+        assert_eq!(result.figures.len(), 1, "{:?}", result.figures);
+        assert_box(&result.figures[0], 200.0, 302.0, 404.0, 320.0);
+        let again = session.page_text(1).unwrap();
+        assert_eq!(again.figures, result.figures);
 
         let mut mixed = vector_ops(200);
         mixed.extend(text_ops(10, 50, 50, "Form"));
@@ -5467,33 +5830,221 @@ mod tests {
         assert!(close(after_box.x0, 50.0), "x0 {}", after_box.x0);
     }
 
+    /// `figure`'s box is `(x0, y0)`-`(x1, y1)` and it carries no bytes.
+    fn assert_box(figure: &Figure, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let bbox = figure.bbox.unwrap();
+        let ok =
+            close(bbox.x0, x0) && close(bbox.y0, y0) && close(bbox.x1, x1) && close(bbox.y1, y1);
+        assert!(ok, "{figure:?}");
+        assert_eq!(figure.mime, None);
+        assert_eq!(figure.sha256, None);
+        assert_eq!(figure.file, None);
+    }
+
+    fn numbers(values: &[f32]) -> Vec<Object> {
+        values.iter().map(|&value| Object::Real(value)).collect()
+    }
+
+    /// `x y width height re` then `paint`.
+    fn rect_ops(x: f32, y: f32, width: f32, height: f32, paint: &str) -> Vec<Operation> {
+        vec![
+            Operation::new("re", numbers(&[x, y, width, height])),
+            Operation::new(paint, vec![]),
+        ]
+    }
+
     #[test]
-    fn text_free_streams_are_recognised() {
-        assert!(!may_affect_text(
-            b"q 1 0 0 1 5 5 cm 0 0 m 10 10 l S 0.5 g f Q"
-        ));
-        assert!(!may_affect_text(b"/GS1 gs [3 2] 0 d 0 0 10 10 re W n"));
-        for trigger in [
-            &b"BT"[..],
-            b"Tj",
-            b"TJ",
-            b"Td",
-            b"TD",
-            b"Tm",
-            b"T*",
-            b"'",
-            b"\"",
-            b"Do",
-            b"BI",
-        ] {
-            let mut bytes = b"0 0 m 1 1 l S ".to_vec();
-            bytes.extend_from_slice(trigger);
-            assert!(
-                may_affect_text(&bytes),
-                "{}",
-                String::from_utf8_lossy(trigger)
-            );
+    fn lexer_folds_painted_paths_into_boxes() {
+        let bytes = b"0 0 m 10 5 l S 1 1 2 2 re W n f 0 0 20 30 re 40 -2 m B* \
+            10 10 -5 -5 re f (a) 1 m 3 3 m 4 4 l s 9 9 m 1 2 3 4 5 6 c 7 8 9 10 v 0 1 2 3 y b 7 7 m";
+        let program = lex_content(bytes).unwrap();
+        let kinds: Vec<OpKind> = program.ops.iter().map(|op| op.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                OpKind::StrokePath,
+                OpKind::FillPath,
+                OpKind::FillPath,
+                OpKind::StrokePath,
+                OpKind::FillPath,
+            ]
+        );
+        let boxes: Vec<[f32; 4]> = program
+            .ops
+            .iter()
+            .map(|&op| program.path_box(op).unwrap())
+            .collect();
+        assert_eq!(
+            boxes,
+            vec![
+                [0.0, 0.0, 10.0, 5.0],
+                [0.0, -2.0, 40.0, 30.0],
+                [5.0, 5.0, 10.0, 10.0],
+                [3.0, 3.0, 4.0, 4.0],
+                [0.0, 1.0, 9.0, 10.0],
+            ]
+        );
+        assert!(program.operands.is_empty());
+    }
+
+    #[test]
+    fn nearby_filled_rectangles_are_one_vector_figure_and_text_is_unchanged() {
+        let text = text_ops(12, 100, 600, "Caption");
+        let mut drawn = rect_ops(100.0, 100.0, 50.0, 50.0, "f");
+        drawn.extend(text.clone());
+        drawn.extend(rect_ops(153.0, 100.0, 40.0, 50.0, "f"));
+        // Far away and too small on its own: dropped.
+        drawn.extend(rect_ops(400.0, 400.0, 5.0, 5.0, "f"));
+        // Clipping only: never a figure.
+        drawn.push(Operation::new("re", numbers(&[0.0, 0.0, 612.0, 792.0])));
+        drawn.push(Operation::new("W", vec![]));
+        drawn.push(Operation::new("n", vec![]));
+        let bytes = build_pdf(vec![text, drawn], None);
+        let mut session = LopdfBackend::default().open(&bytes, None).unwrap();
+        let plain = session.page_text(1).unwrap();
+        let page = session.page_text(2).unwrap();
+        assert_eq!(page.spans, plain.spans);
+        assert_eq!(page.warnings, plain.warnings);
+        assert_eq!(page.figures.len(), 1, "{:?}", page.figures);
+        let figure = &page.figures[0];
+        assert_eq!(figure.index, 0);
+        assert_eq!(figure.kind, "vector");
+        assert_box(figure, 100.0, 100.0, 193.0, 150.0);
+    }
+
+    #[test]
+    fn thin_rectangles_and_lines_are_rules() {
+        let mut ops = rect_ops(72.0, 400.0, 200.0, 0.5, "f");
+        // A vertical stroked line.
+        ops.push(Operation::new("m", numbers(&[300.0, 100.0])));
+        ops.push(Operation::new("l", numbers(&[300.0, 200.0])));
+        ops.push(Operation::new("S", vec![]));
+        // Too short for a rule and too small for a figure.
+        ops.extend(rect_ops(72.0, 300.0, 5.0, 0.5, "f"));
+        // A box far from both, emitted after the rules.
+        ops.extend(rect_ops(400.0, 600.0, 100.0, 80.0, "B"));
+        let bytes = build_pdf(vec![ops], None);
+        let mut session = LopdfBackend::default().open(&bytes, None).unwrap();
+        let page = session.page_text(1).unwrap();
+        let kinds: Vec<&str> = page.figures.iter().map(|f| f.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["rule", "rule", "vector"], "{:?}", page.figures);
+        let indexes: Vec<u32> = page.figures.iter().map(|f| f.index).collect();
+        assert_eq!(indexes, vec![0, 1, 2]);
+        assert_box(&page.figures[0], 72.0, 400.0, 272.0, 400.5);
+        assert_box(&page.figures[1], 300.0, 100.0, 300.0, 200.0);
+        assert_box(&page.figures[2], 400.0, 600.0, 500.0, 680.0);
+    }
+
+    #[test]
+    fn form_paths_are_placed_through_cm() {
+        let page = vec![
+            Operation::new("q", vec![]),
+            cm_translate(200, 300),
+            Operation::new("Do", vec!["X1".into()]),
+            Operation::new("Q", vec![]),
+        ];
+        let form = rect_ops(10.0, 20.0, 50.0, 40.0, "f");
+        let bytes = build_pdf(vec![page], Some(form));
+        let mut session = LopdfBackend::default().open(&bytes, None).unwrap();
+        let result = session.page_text(1).unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(result.figures.len(), 1, "{:?}", result.figures);
+        assert_eq!(result.figures[0].kind, "vector");
+        assert_box(&result.figures[0], 210.0, 320.0, 260.0, 360.0);
+    }
+
+    /// One page drawing `ops` with a 4 × 2 gray Image `XObject` `/Im1`.
+    fn build_image_pdf(ops: Vec<Operation>) -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let tree_id = doc.new_object_id();
+        let image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 4,
+            "Height" => 2,
+            "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceGray",
+        };
+        let image_id = doc.add_object(Stream::new(image_dict, vec![0x80; 8]));
+        let content = Content { operations: ops }.encode().unwrap();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => tree_id,
+            "Contents" => content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im1" => image_id } },
+        });
+        let tree = dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        };
+        doc.objects.insert(tree_id, Object::Dictionary(tree));
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => tree_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn image_xobject_is_a_raster_figure_under_the_ctm() {
+        let placement = vec![
+            100.into(),
+            0.into(),
+            0.into(),
+            50.into(),
+            72.into(),
+            700.into(),
+        ];
+        let ops = vec![
+            Operation::new("q", vec![]),
+            Operation::new("cm", placement),
+            Operation::new("Do", vec!["Im1".into()]),
+            Operation::new("Q", vec![]),
+        ];
+        let bytes = build_image_pdf(ops);
+        let mut session = LopdfBackend::default().open(&bytes, None).unwrap();
+        let page = session.page_text(1).unwrap();
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+        assert!(page.spans.is_empty());
+        assert_eq!(page.figures.len(), 1, "{:?}", page.figures);
+        let figure = &page.figures[0];
+        assert_eq!(figure.index, 0);
+        assert_eq!(figure.kind, "raster");
+        assert_eq!(figure.width_px, Some(4));
+        assert_eq!(figure.height_px, Some(2));
+        assert_box(figure, 72.0, 700.0, 172.0, 750.0);
+    }
+
+    #[test]
+    fn clusters_merge_to_a_fixed_point_and_overflow_to_one_union() {
+        let boxed = |x0: f32, y0: f32, x1: f32, y1: f32| BBox { x0, y0, x1, y1 };
+        // The third box bridges the first two only once they are merged.
+        let clusters = cluster(&[
+            boxed(0.0, 0.0, 10.0, 10.0),
+            boxed(30.0, 0.0, 40.0, 10.0),
+            boxed(14.0, 0.0, 26.0, 10.0),
+            boxed(0.0, 100.0, 10.0, 110.0),
+        ]);
+        assert_eq!(
+            clusters,
+            vec![boxed(0.0, 100.0, 10.0, 110.0), boxed(0.0, 0.0, 40.0, 10.0)]
+        );
+
+        let mut graphics = Graphics::default();
+        for step in 0..=MAX_CLUSTER_BOXES {
+            let x = (step * 20) as f32;
+            graphics.add_path(boxed(x, 0.0, x + 10.0, 10.0));
         }
+        let figures = graphics.into_figures();
+        assert_eq!(figures.len(), 1);
+        assert_eq!(figures[0].kind, "vector");
+        assert_box(&figures[0], 0.0, 0.0, 40_010.0, 10.0);
     }
 
     #[test]
