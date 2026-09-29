@@ -263,12 +263,10 @@ fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = library_dir {
         candidates.push(configured_library_file(dir)?);
-    } else {
-        if let Ok(configured) = std::env::var(ENV_LIBRARY_PATH)
-            && !configured.is_empty()
-        {
-            candidates.push(configured_library_file(&configured)?);
-        }
+    } else if let Ok(configured) = std::env::var(ENV_LIBRARY_PATH)
+        && !configured.is_empty()
+    {
+        candidates.push(configured_library_file(&configured)?);
     }
     let mut failures: Vec<String> = Vec::new();
     for candidate in &candidates {
