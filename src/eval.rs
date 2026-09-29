@@ -609,7 +609,7 @@ fn caption_start_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"^\s*(?i:figure|fig\.|table)\s*\d+(?:\.\d+)*[a-z]?(?:\s*[:.|](?:\s|$)|\s+\p{Lu}\p{Ll})",
+            r"^\s*(?i:figure|fig\.|table)\s*(?:[A-Z]{1,2}\.?)?\d+(?:\.\d+)*[a-z]?(?:\s*[:.|](?:\s|$)|\s+\p{Lu}\p{Ll})",
         )
         .expect("valid regex")
     })
@@ -5856,6 +5856,9 @@ mod tests {
             "Table 2 Results on the test split",
             "Figure 2: A caption here",
             "Table 1. Results of the run",
+            "Figure A.1: Appendix figure",
+            "Table S2. Supplementary results",
+            "Fig. B3 Overview of the pipeline",
         ] {
             assert!(caption_start_re().is_match(caption), "{caption}");
         }
