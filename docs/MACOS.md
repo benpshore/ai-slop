@@ -13,7 +13,7 @@ The native host and Share extension support **macOS 15.0 and later** and are bui
 | Rust GPUI compatibility UI | exactly `gpui 0.2.2` in `Cargo.toml` and `Cargo.lock` |
 | Deployment target | macOS 15.0 (Swift packages, compiler target and both bundle plists) |
 
-`.github/workflows/macos-26.yml` selects `/Applications/Xcode_26.0.app/Contents/Developer` and fails before compiling if any version differs. Moving to a point release or SDK is therefore a reviewed dependency update, not an ambient runner-image change. Cargo transitives are locked in `Cargo.lock`; both Swift packages have no external package dependencies. `macos/build-bundle.sh` invokes only the selected Xcode, embeds the extension, and signs inside-out.
+The `macos26` job in `.github/workflows/ci.yml` selects `/Applications/Xcode_26.0.app/Contents/Developer` and fails before compiling if any version differs. The required `ci` job depends on this validation, so automatic releases cannot begin until the native bundle passes. Moving to a point release or SDK is therefore a reviewed dependency update, not an ambient runner-image change. Cargo transitives are locked in `Cargo.lock`; both Swift packages have no external package dependencies. `macos/build-bundle.sh` invokes only the selected Xcode, embeds the extension, applies the same tag-derived marketing and build versions to both bundles, and signs inside-out.
 
 The repository version remains tag-derived. Validation uses `0.0.0` and a CI build number; release automation must inject the tag rather than edit a version field.
 

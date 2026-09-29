@@ -4,6 +4,10 @@ app=${1:?usage: validate-bundle.sh TPE.app}
 appex="$app/Contents/PlugIns/TPEShare.appex"
 test "$(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")" = 15.0
 test "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$appex/Contents/Info.plist")" = com.apple.share-services
+for version_key in CFBundleShortVersionString CFBundleVersion; do
+  test "$(plutil -extract "$version_key" raw "$app/Contents/Info.plist")" = \
+    "$(plutil -extract "$version_key" raw "$appex/Contents/Info.plist")"
+done
 activation=$(plutil -extract NSExtension.NSExtensionAttributes.NSExtensionActivationRule raw "$appex/Contents/Info.plist")
 grep -q 'UTI-CONFORMS-TO "com.adobe.pdf"' <<<"$activation"
 codesign --verify --deep --strict --verbose=2 "$app"

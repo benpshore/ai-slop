@@ -30,8 +30,10 @@ xcrun swiftc -swift-version 6 -sdk "$sdk" -target "$target" -O -application-exte
 
 cp "$root/macos/Configuration/App-Info.plist" "$app/Contents/Info.plist"
 cp "$root/macos/Configuration/Share-Info.plist" "$appex/Contents/Info.plist"
-plutil -replace CFBundleShortVersionString -string "${TPE_MARKETING_VERSION:-0.0.0}" "$app/Contents/Info.plist"
-plutil -replace CFBundleVersion -string "${GITHUB_RUN_NUMBER:-1}" "$app/Contents/Info.plist"
+for info_plist in "$app/Contents/Info.plist" "$appex/Contents/Info.plist"; do
+  plutil -replace CFBundleShortVersionString -string "${TPE_MARKETING_VERSION:-0.0.0}" "$info_plist"
+  plutil -replace CFBundleVersion -string "${GITHUB_RUN_NUMBER:-1}" "$info_plist"
+done
 
 # Ad-hoc signing makes local/CI launch tests possible and proves nested signing
 # order. Release automation replaces '-' with a Developer ID identity and adds
