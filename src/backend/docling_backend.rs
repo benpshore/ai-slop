@@ -73,6 +73,11 @@ const NO_ITEMS_WARNING: &str = "docling: no items on page";
 const DOC_NAME: &str = "doc";
 /// Bound on the `/Parent` walk used for inherited page attributes.
 const MAX_PARENT_DEPTH: u32 = 64;
+/// Bound recursive `Node` wrappers/groups even if an upstream parser emits a
+/// hostile tree. This also covers future non-PDF docling node producers.
+const MAX_NODE_DEPTH: usize = 256;
+/// Maximum total picture payload retained from one converted document.
+const FIGURE_BYTES_CAP: usize = 256 * 1024 * 1024;
 
 /// The docling extractor. `full == false` is the text-layer mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,7 +316,7 @@ impl DoclingSession {
             Ok(doc) => {
                 let mut walker = Walker::new(self.page_count);
                 for node in &doc.nodes {
-                    walker.visit(node, None);
+                    walker.visit(node, None, 0);
                 }
                 let (pages, figure_bytes) = walker.finish();
                 self.figure_bytes = figure_bytes;
@@ -481,6 +486,7 @@ struct Walker {
     current: Option<u32>,
     pages: BTreeMap<u32, PageBuild>,
     figure_bytes: HashMap<(u32, u32), Vec<u8>>,
+    retained_figure_bytes: usize,
 }
 
 impl Walker {
@@ -490,6 +496,7 @@ impl Walker {
             current: None,
             pages: BTreeMap::new(),
             figure_bytes: HashMap::new(),
+            retained_figure_bytes: 0,
         }
     }
 
@@ -549,7 +556,13 @@ impl Walker {
         page.height = height;
     }
 
-    fn visit(&mut self, node: &Node, bbox: Option<BBox>) {
+    fn visit(&mut self, node: &Node, bbox: Option<BBox>, depth: usize) {
+        if depth > MAX_NODE_DEPTH {
+            self.page().warnings.push(format!(
+                "docling: node nesting exceeds {MAX_NODE_DEPTH}; subtree skipped"
+            ));
+            return;
+        }
         match node {
             Node::PageInfo {
                 page_no,
@@ -560,20 +573,20 @@ impl Walker {
             Node::Located { location, inner } => {
                 let (width, height) = self.dims();
                 let located = grid_to_bbox(*location, width, height);
-                self.visit(inner, located.or(bbox));
+                self.visit(inner, located.or(bbox), depth + 1);
             }
             Node::Prov {
                 bbox: rect, inner, ..
             } => {
                 let (_, height) = self.dims();
-                self.visit(inner, Some(top_left_to_bbox(*rect, height)));
+                self.visit(inner, Some(top_left_to_bbox(*rect, height)), depth + 1);
             }
             Node::Commented { inner, .. }
             | Node::DoclangOnly(inner)
-            | Node::Furniture { inner, .. } => self.visit(inner, bbox),
+            | Node::Furniture { inner, .. } => self.visit(inner, bbox, depth + 1),
             Node::Group { children, .. } => {
                 for child in children {
-                    self.visit(child, None);
+                    self.visit(child, None, depth + 1);
                 }
             }
             Node::Paragraph { text } if text.as_str() == FORMULA_PLACEHOLDER => {
@@ -693,8 +706,15 @@ impl Walker {
             figure.width_px = Some(picture.width);
             figure.height_px = Some(picture.height);
             figure.sha256 = Some(sha256_hex(&picture.data));
-            self.figure_bytes
-                .insert((page_no, index), picture.data.clone());
+            if picture.data.len() <= FIGURE_BYTES_CAP.saturating_sub(self.retained_figure_bytes) {
+                self.retained_figure_bytes += picture.data.len();
+                self.figure_bytes
+                    .insert((page_no, index), picture.data.clone());
+            } else {
+                self.page().warnings.push(format!(
+                    "figure {index}: bytes not retained (cap of {FIGURE_BYTES_CAP} bytes reached)"
+                ));
+            }
         }
         self.page().figures.push(figure);
         if let Some(caption) = caption {

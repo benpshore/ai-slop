@@ -100,6 +100,20 @@ const MIN_VECTOR_SIDE: f32 = 8.0;
 /// Most painted boxes clustered on one page; beyond it the page gets one
 /// `vector` figure covering all of them.
 const MAX_CLUSTER_BOXES: usize = 2000;
+/// Most decompressed content bytes accepted from one page or Form `XObject`.
+/// This bounds compressed-stream bombs before the lexer sees their output.
+const MAX_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+/// Most retained operators in one content stream. A compact stream can contain
+/// millions of zero-operand operators, so the byte cap alone is insufficient.
+const MAX_CONTENT_OPS: usize = 250_000;
+/// Most retained operands in one content stream.
+const MAX_CONTENT_OPERANDS: usize = 1_000_000;
+/// Most memory charged to decoded Form programs retained for a document.
+/// Forms beyond this budget are still interpreted, but are not cached.
+const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Most rule and raster figures retained on one page. Vector shapes have the
+/// tighter [`MAX_CLUSTER_BOXES`] bound because clustering is quadratic.
+const MAX_PAGE_FIGURES: usize = 50_000;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
@@ -201,6 +215,37 @@ struct SessionCache {
     /// to lex are not cached, so their warning recurs exactly as it would
     /// without the cache.
     forms: HashMap<ObjectId, Rc<TextProgram>>,
+    /// Approximate allocated bytes retained by `forms`. The decoded stream
+    /// length is included in each charge to cover allocations inside operands.
+    form_bytes: usize,
+}
+
+impl SessionCache {
+    fn cache_form(&mut self, id: ObjectId, program: Rc<TextProgram>, decoded_bytes: usize) {
+        let charge = decoded_bytes
+            .saturating_add(
+                program
+                    .ops
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TextOp>()),
+            )
+            .saturating_add(
+                program
+                    .operands
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Object>()),
+            )
+            .saturating_add(
+                program
+                    .paths
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[f32; 4]>()),
+            );
+        if self.form_bytes.saturating_add(charge) <= MAX_FORM_CACHE_BYTES {
+            self.forms.insert(id, program);
+            self.form_bytes += charge;
+        }
+    }
 }
 
 struct LopdfSession {
@@ -2077,6 +2122,9 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
         loop {
             match lex_object(bytes, at, MAX_NESTING, false, false) {
                 Ok((end, _)) => {
+                    if starts.len() >= MAX_CONTENT_OPERANDS {
+                        return Err(invalid_content());
+                    }
                     starts.push(at);
                     at = skip_content_space(bytes, end);
                 }
@@ -2090,6 +2138,11 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
         }
         let operator = bytes.get(at..end).unwrap_or_default();
         if let Some(kind) = OpKind::from_operator(operator) {
+            if program.ops.len() >= MAX_CONTENT_OPS
+                || program.operands.len().saturating_add(starts.len()) > MAX_CONTENT_OPERANDS
+            {
+                return Err(invalid_content());
+            }
             let first = program.operands.len();
             for &start in &starts {
                 if let Ok((_, Some(operand))) = lex_object(bytes, start, MAX_NESTING, false, true) {
@@ -2103,7 +2156,7 @@ fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
                 end: last,
             });
         } else if let Some(op) = path_op(operator) {
-            record_path(&mut program, &mut path, op, bytes, &starts);
+            record_path(&mut program, &mut path, op, bytes, &starts)?;
         }
         pos = skip_content_space(bytes, end);
     }
@@ -2152,12 +2205,12 @@ fn record_path(
     op: PathOp,
     bytes: &[u8],
     starts: &[usize],
-) {
+) -> Result<(), LopdfError> {
     let mut values: [f32; 6] = [0.0; 6];
     match op {
         PathOp::Points(count) => {
             let Some(slots) = values.get_mut(..count * 2) else {
-                return;
+                return Ok(());
             };
             if read_numbers(bytes, starts, slots) {
                 for &[x, y] in slots.as_chunks::<2>().0 {
@@ -2174,6 +2227,9 @@ fn record_path(
         }
         PathOp::Paint { stroke } => {
             if let Some(bounds) = path.take() {
+                if program.ops.len() >= MAX_CONTENT_OPS {
+                    return Err(invalid_content());
+                }
                 let kind = if stroke {
                     OpKind::StrokePath
                 } else {
@@ -2190,6 +2246,7 @@ fn record_path(
         }
         PathOp::Discard => *path = None,
     }
+    Ok(())
 }
 
 /// The smallest box holding every one of `corners`.
@@ -2268,6 +2325,8 @@ struct Graphics {
     /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
     overflow: bool,
     rasters: Vec<Raster>,
+    /// More rule or raster figures were painted than can safely be retained.
+    figures_overflow: bool,
 }
 
 impl Graphics {
@@ -2277,7 +2336,11 @@ impl Graphics {
         let horizontal = height < RULE_THICKNESS && width >= RULE_LENGTH;
         let vertical = width < RULE_THICKNESS && height >= RULE_LENGTH;
         if horizontal || vertical {
-            self.rules.push(bbox);
+            if self.rules.len().saturating_add(self.rasters.len()) < MAX_PAGE_FIGURES {
+                self.rules.push(bbox);
+            } else {
+                self.figures_overflow = true;
+            }
             return;
         }
         self.extent = Some(match self.extent {
@@ -2288,6 +2351,14 @@ impl Graphics {
             self.shapes.push(bbox);
         } else {
             self.overflow = true;
+        }
+    }
+
+    fn add_raster(&mut self, raster: Raster) {
+        if self.rules.len().saturating_add(self.rasters.len()) < MAX_PAGE_FIGURES {
+            self.rasters.push(raster);
+        } else {
+            self.figures_overflow = true;
         }
     }
 
@@ -2372,6 +2443,11 @@ impl<'a> Interpreter<'a> {
     /// as one warning.
     fn finish(mut self) -> PageText {
         let graphics = std::mem::take(&mut self.graphics);
+        if graphics.figures_overflow {
+            self.page.warnings.push(format!(
+                "figures truncated at {MAX_PAGE_FIGURES} rules and rasters"
+            ));
+        }
         self.page.figures = graphics.into_figures();
         if self.ligatures > 0 {
             let count = self.ligatures;
@@ -2507,7 +2583,7 @@ impl<'a> Interpreter<'a> {
             ctm.apply(0.0, 1.0),
             ctm.apply(1.0, 1.0),
         ]);
-        self.graphics.rasters.push(Raster {
+        self.graphics.add_raster(Raster {
             bbox,
             width_px: pixel_count(&stream.dict, b"Width"),
             height_px: pixel_count(&stream.dict, b"Height"),
@@ -2730,9 +2806,15 @@ impl<'a> Interpreter<'a> {
         let program = if let Some(program) = cached {
             program
         } else {
-            let content_bytes = match stream.get_plain_content() {
+            let content_bytes = match stream.get_plain_content_with_limit(MAX_CONTENT_BYTES) {
                 Ok(bytes) => bytes,
-                Err(_) => stream.content.clone(),
+                Err(_) if stream.content.len() <= MAX_CONTENT_BYTES => stream.content.clone(),
+                Err(_) => {
+                    self.warn(format!(
+                        "XObject {label}: content exceeds {MAX_CONTENT_BYTES} byte limit; skipped"
+                    ));
+                    return;
+                }
             };
             let Ok(program) = lex_content(&content_bytes) else {
                 self.warn(format!("XObject {label}: undecodable content stream"));
@@ -2740,7 +2822,8 @@ impl<'a> Interpreter<'a> {
             };
             let program = Rc::new(program);
             if let Some(id) = stream_id {
-                self.cache.forms.insert(id, Rc::clone(&program));
+                self.cache
+                    .cache_form(id, Rc::clone(&program), content_bytes.len());
             }
             program
         };
@@ -2800,7 +2883,9 @@ fn extract_page(
         page_text.warnings.push(message);
     }
 
-    let content_bytes = doc.get_page_content(page_id);
+    let content_bytes = doc
+        .get_page_content_with_limit(page_id, MAX_CONTENT_BYTES)
+        .map_err(|err| page_error(page, format!("content stream exceeds safe limit: {err}")))?;
     let program = match lex_content(&content_bytes) {
         Ok(program) => program,
         Err(err) => return Err(page_error(page, format!("content stream: {err}"))),
@@ -5885,6 +5970,31 @@ mod tests {
             ]
         );
         assert!(program.operands.is_empty());
+    }
+
+    #[test]
+    fn lexer_limits_painted_paths_and_pending_operands() {
+        let paths = b"0 0 1 1 re f ".repeat(MAX_CONTENT_OPS + 1);
+        assert!(lex_content(&paths).is_err());
+
+        // The limit is enforced while collecting offsets, even if no
+        // operator ever arrives to consume the operands.
+        let pending = b"0 ".repeat(MAX_CONTENT_OPERANDS + 1);
+        assert!(lex_content(&pending).is_err());
+    }
+
+    #[test]
+    fn form_cache_has_one_document_wide_budget() {
+        let mut cache = SessionCache::default();
+        cache.cache_form(
+            (1, 0),
+            Rc::new(TextProgram::default()),
+            MAX_FORM_CACHE_BYTES,
+        );
+        cache.cache_form((2, 0), Rc::new(TextProgram::default()), 1);
+        assert_eq!(cache.forms.len(), 1);
+        assert!(cache.forms.contains_key(&(1, 0)));
+        assert_eq!(cache.form_bytes, MAX_FORM_CACHE_BYTES);
     }
 
     #[test]
