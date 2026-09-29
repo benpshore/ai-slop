@@ -1,4 +1,4 @@
-//! Backend built on `docling-pdf` / `docling-core` 1.69.2 (the `docling.rs`
+//! Backend built on `docling-pdf` / `docling-core` 1.74.1 (the `docling.rs`
 //! port of docling). Two modes share one implementation:
 //!
 //! * **text layer** (`docling-text`): `docling_pdf::convert_text_layer_pages`,
@@ -30,6 +30,9 @@
 //!   boxes are docling's 0–511 `<location>` grid denormalised exactly as
 //!   docling-core `json.rs` (`prov_json`) does, so they are 2-decimal
 //!   approximations of the region box, not glyph boxes.
+//! * A `KeyValueGraph` retains its cell text in node order, without boxes.
+//!   Its cell metadata and graph links cannot be represented by spans;
+//!   the containing page carries an explicit warning about that loss.
 //! * docling sanitises text (curly quotes to `'`, dashes to `-`, wrapped-word
 //!   hyphens removed, paragraphs reflowed) and merges a paragraph that
 //!   continues across a page break into the page where it started. The
@@ -59,7 +62,7 @@ use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest
 
 /// The `docling-pdf` release this backend is built against. Part of the
 /// [`BackendIdentity`]; a unit test checks it against `Cargo.lock`.
-const DOCLING_VERSION: &str = "1.69.2";
+const DOCLING_VERSION: &str = "1.74.1";
 /// Resolution of docling's `<location>` grid (`docling-core/src/json.rs`,
 /// `prov_json`: `x * width / 512.0`).
 const GRID: f64 = 512.0;
@@ -617,6 +620,17 @@ impl Walker {
                     }
                 }
             }
+            Node::KeyValueGraph { cells, links } => {
+                // Cells have no individual geometry. Do not assign the
+                // graph's region box or invent an order from its cell IDs.
+                for cell in cells {
+                    self.push_text(&cell.text, None);
+                }
+                self.page().warnings.push(format!(
+                    "docling: key-value graph flattened to cell text; cell metadata and {} graph link(s) not represented in spans",
+                    links.len()
+                ));
+            }
             Node::Table(table) => self.visit_table(table),
             Node::Chart { table, caption, .. } => {
                 if let Some(caption) = caption {
@@ -873,7 +887,7 @@ fn page_geometry(doc: &Document) -> Vec<PageGeometry> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use docling_core::CaptionParent;
+    use docling_core::{CaptionParent, GraphCell, GraphLink};
     use lopdf::content::{Content, Operation};
     use lopdf::{Stream, dictionary};
 
@@ -1228,6 +1242,80 @@ mod tests {
         assert!(close(third.width, 500.0));
         assert_eq!(third.spans.len(), 1);
         assert_eq!(third.spans[0].text, "Page three");
+    }
+
+    #[test]
+    fn walker_retains_key_value_graph_text_and_reports_flattening() {
+        let nodes = vec![
+            Node::PageInfo {
+                page_no: 1,
+                width: 612.0,
+                height: 792.0,
+            },
+            Node::Paragraph {
+                text: "Before graph".to_string(),
+            },
+            located(
+                [0, 0, 255, 255],
+                Node::KeyValueGraph {
+                    cells: vec![
+                        GraphCell {
+                            label: "key".to_string(),
+                            cell_id: 7,
+                            text: "Net revenue".to_string(),
+                            orig: "example:NetRevenue".to_string(),
+                        },
+                        GraphCell {
+                            label: "value".to_string(),
+                            cell_id: 2,
+                            text: "123.45".to_string(),
+                            orig: "123.45".to_string(),
+                        },
+                        GraphCell {
+                            label: "unspecified".to_string(),
+                            cell_id: 9,
+                            text: "  ".to_string(),
+                            orig: String::new(),
+                        },
+                    ],
+                    links: vec![GraphLink {
+                        label: "to_value".to_string(),
+                        source_cell_id: 7,
+                        target_cell_id: 2,
+                    }],
+                },
+            ),
+            Node::PageInfo {
+                page_no: 2,
+                width: 612.0,
+                height: 792.0,
+            },
+            Node::Paragraph {
+                text: "Following page".to_string(),
+            },
+        ];
+        let mut walker = Walker::new(2);
+        for node in &nodes {
+            walker.visit(node, None);
+        }
+        let (pages, figure_bytes) = walker.finish();
+        let first = pages[0].as_ref().unwrap();
+        let texts: Vec<&str> = first.spans.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(texts, ["Before graph", "Net revenue", "123.45"]);
+        for (index, span) in first.spans.iter().enumerate() {
+            assert_eq!(span.seq, u32::try_from(index).unwrap());
+            assert_eq!(span.bbox, None);
+        }
+        assert_eq!(
+            first.warnings,
+            [
+                "docling: key-value graph flattened to cell text; cell metadata and 1 graph link(s) not represented in spans"
+            ]
+        );
+        let second = pages[1].as_ref().unwrap();
+        assert_eq!(second.spans[0].text, "Following page");
+        assert!(second.warnings.is_empty());
+        assert!(figure_bytes.is_empty());
     }
 
     #[test]

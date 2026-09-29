@@ -85,8 +85,8 @@ Check the build log of the first Native run for these. Pinning ONNX Runtime
 | `DOCLING_LAYOUT_ONNX`, `DOCLING_OCR_DET_ONNX`, … | per-file overrides from docling.rs; they bypass the resolver entirely | unset |
 | `DOCLING_RS_FP32` | `1` forces the fp32 layout model, which is not provisioned here | unset |
 
-The resolution order comes from docling-core 1.69.2 (`assets.rs`) and
-docling-pdf 1.69.2 (`pdfium_backend.rs`, `layout.rs`). Running `tpe` from the
+The resolution order comes from docling-core 1.74.1 (`assets.rs`) and
+docling-pdf 1.74.1 (`pdfium_backend.rs`, `layout.rs`). Running `tpe` from the
 repository root after `fetch.sh` needs no variables. CI sets both variables to
 absolute paths, so tests and `tpe` do not depend on the CWD.
 

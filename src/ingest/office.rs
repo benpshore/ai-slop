@@ -106,7 +106,7 @@ pub(super) fn extract(mut bytes: Vec<u8>, options: &Options, record: &mut Record
         }
     }
     if record.format == Format::Html && !bytes.starts_with(b"\xef\xbb\xbf") {
-        // docling 1.69.2's HTML branch ignores SourceDocument.encoding and
+        // docling 1.74.1's HTML branch ignores SourceDocument.encoding and
         // gives a declared legacy charset priority over UTF-8. A BOM makes
         // our already-validated UTF-8 policy authoritative for that branch.
         bytes.splice(..0, [0xef, 0xbb, 0xbf]);
@@ -118,7 +118,7 @@ pub(super) fn extract(mut bytes: Vec<u8>, options: &Options, record: &mut Record
     };
     record.extractor = Some(identity(
         "docling-declarative",
-        "1.69.2",
+        "1.74.1",
         &record.policy_digest,
     ));
     // An in-memory source has no base directory. External images, scripts,

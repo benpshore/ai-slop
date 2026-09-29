@@ -9,7 +9,7 @@ cargo build --release --features formats
 tpe ingest paper.pdf report.docx workbook.xlsx page.html notes.txt > records.jsonl
 ```
 
-`formats` uses Docling **Rust** 1.69.2 with default features off. It adds no
+`formats` uses Docling **Rust** 1.74.1 with default features off. It adds no
 Python runtime, PDFium, ONNX, OCR/ASR models, browser, or HTTP image fetching.
 The default build supports PDF and UTF-8 text; Office/HTML needs `formats`.
 
@@ -58,7 +58,7 @@ must validate the actual stream when decoding it.
 
 ### Why Excel has its own adapter
 
-Pinned Docling 1.69.2's `backend/xlsx.rs` builds dense used-area rectangles.
+The Docling 1.69.2 audit found that `backend/xlsx.rs` builds dense used-area rectangles.
 Its default limit is 10 million cells. Oversized or unreadable sheets can be
 skipped while conversion continues. Document tables omit the formula metadata
 required by this ingestion contract.
@@ -80,8 +80,10 @@ nonexistent daylight-saving times. Duration cells remain durations, not dates.
 
 ### Word supplemental evidence and CSV dialect
 
-Pinned Docling 1.69.2 does not extract Word footnotes/endnotes or even-page
-headers into its document JSON. Its successful conversion status does not
+The Docling 1.69.2 audit found missing Word footnotes/endnotes and even-page
+headers in its document JSON. Version 1.74.1 now includes a footnote/endnote
+conversion pass; supplemental evidence remains available independently of
+the converter's coverage. A successful conversion status does not
 certify that these parts were consumed. TPE preserves `word/footnotes.xml`,
 `word/endnotes.xml`, and `word/header*.xml`, `word/footer*.xml` and
 `word/comments*.xml` in **`content.tpe_supplemental_parts`**, a TPE extension to
@@ -124,7 +126,7 @@ heuristic, not image recognition. It can flag photographs with short captions
 and miss tiled scans or incomplete OCR layers containing more text. It does
 not run OCR or establish transcription accuracy.
 
-Docling 1.69.2's HTML path can prioritize a declared legacy charset even when
+The audited Docling HTML path can prioritize a declared legacy charset even when
 `SourceDocument.encoding` is set. After strict UTF-8 validation, the adapter
 supplies a UTF-8 BOM to that converter. The source hash covers the original
 bytes. A fixture checks an outdated windows-1252 declaration with `Café α₂`.
