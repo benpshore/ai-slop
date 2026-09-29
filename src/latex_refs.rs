@@ -7,7 +7,7 @@
 //! Everything here is best-effort text processing of author-written sources.
 //! A field stays `None` unless the source contains it; nothing is invented.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -22,6 +22,14 @@ use crate::corpus::LatexFiles;
 
 /// Deepest `\input` nesting that is still inlined.
 const MAX_INPUT_DEPTH: u32 = 5;
+/// Maximum number of input directives expanded for one document.
+const MAX_INPUTS: usize = 10_000;
+/// Maximum size of a document after input expansion.
+const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum raw bytes read through input directives for one document,
+/// charged before a file is cleaned so an include that is mostly comments
+/// cannot be reprocessed without bound.
+const MAX_INPUT_RAW_BYTES: usize = 64 * 1024 * 1024;
 /// Upper bound on zero-argument macros expanded in the body text.
 const MAX_MACROS: usize = 200;
 /// Maximum number of distinct documents accepted from an arXiv manifest.
@@ -207,6 +215,10 @@ pub enum TruthError {
     NoBibliography,
     #[error("no .tex file contains \\begin{{document}}")]
     NoMainTex,
+    #[error("cyclic LaTeX input: {0}")]
+    CyclicInput(PathBuf),
+    #[error("LaTeX input expansion exceeded its resource limit")]
+    InputLimit,
     #[error("LaTeX source exceeds ground-truth resource limits")]
     ResourceLimit,
 }
@@ -3350,29 +3362,91 @@ pub fn paper_truth(main_tex_merged: &str) -> TruthPaper {
 /// and `\subfile` always require braces. Missing files are left as they
 /// are. Comments, `comment` environments and `\iffalse ... \fi` blocks are
 /// removed from every file before its own inputs are expanded, so nothing
-/// inside them is inlined.
+/// inside them is inlined. Cyclic or excessively large expansions produce an
+/// empty string; ground-truth generation reports those conditions as errors.
 pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
+    resolve_inputs_checked(root, main_tex, depth, None).unwrap_or_default()
+}
+
+struct InputState {
+    active: HashSet<PathBuf>,
+    inputs: usize,
+    raw_bytes: usize,
+    out: String,
+}
+
+fn resolve_inputs_checked(
+    root: &Path,
+    main_tex: &str,
+    depth: u32,
+    main_path: Option<&Path>,
+) -> Result<String, TruthError> {
+    let mut state = InputState {
+        active: HashSet::new(),
+        inputs: 0,
+        raw_bytes: main_tex.len(),
+        out: String::with_capacity(main_tex.len().min(MAX_EXPANDED_BYTES)),
+    };
+    if let Some(path) = main_path.and_then(|path| path.canonicalize().ok()) {
+        state.active.insert(path);
+    }
+    expand_inputs(root, main_tex, depth, &mut state)?;
+    Ok(state.out)
+}
+
+fn append_expanded(state: &mut InputState, text: &str) -> Result<(), TruthError> {
+    if state
+        .out
+        .len()
+        .checked_add(text.len())
+        .is_none_or(|len| len > MAX_EXPANDED_BYTES)
+    {
+        return Err(TruthError::InputLimit);
+    }
+    state.out.push_str(text);
+    Ok(())
+}
+
+fn expand_inputs(
+    root: &Path,
+    main_tex: &str,
+    depth: u32,
+    state: &mut InputState,
+) -> Result<(), TruthError> {
     let clean = remove_disabled(&strip_comments(main_tex));
     if depth > MAX_INPUT_DEPTH {
-        return clean;
+        return append_expanded(state, &clean);
     }
-    let mut out = String::with_capacity(clean.len());
     let mut last = 0;
     for caps in input_re().captures_iter(&clean) {
         let Some(whole) = caps.get(0) else { continue };
+        state.inputs += 1;
+        if state.inputs > MAX_INPUTS {
+            return Err(TruthError::InputLimit);
+        }
         let raw = caps.get(1).or(caps.get(2)).map_or("", |m| m.as_str());
         let name = raw.trim().trim_matches('"');
-        let Some(content) = read_input(root, name) else {
+        let Some((path, content)) = read_input(root, name) else {
             continue;
         };
-        out.push_str(&clean[last..whole.start()]);
-        out.push('\n');
-        out.push_str(&resolve_inputs(root, &content, depth + 1));
-        out.push('\n');
+        state.raw_bytes = state
+            .raw_bytes
+            .checked_add(content.len())
+            .filter(|total| *total <= MAX_INPUT_RAW_BYTES)
+            .ok_or(TruthError::InputLimit)?;
+        let canonical = path.canonicalize().unwrap_or(path);
+        if !state.active.insert(canonical.clone()) {
+            return Err(TruthError::CyclicInput(canonical));
+        }
+        append_expanded(state, &clean[last..whole.start()])?;
+        append_expanded(state, "\n")?;
+        let result = expand_inputs(root, &content, depth + 1, state);
+        state.active.remove(&canonical);
+        result?;
+        append_expanded(state, "\n")?;
         last = whole.end();
     }
-    out.push_str(&clean[last..]);
-    out
+    append_expanded(state, &clean[last..])
 }
 
 /// Resolves an `\input`/`\include`/`\subfile` argument to file bytes under
@@ -3381,7 +3455,7 @@ pub fn resolve_inputs(root: &Path, main_tex: &str, depth: u32) -> String {
 /// plain string concatenation (so a dotted basename like `3.1_method` is
 /// never mistaken for an extension), then `name` as written, then
 /// `Path::with_extension("tex")` as a last resort.
-fn read_input(root: &Path, name: &str) -> Option<String> {
+fn read_input(root: &Path, name: &str) -> Option<(PathBuf, String)> {
     if name.is_empty() || Path::new(name).is_absolute() || name.contains("..") {
         return None;
     }
@@ -3397,10 +3471,11 @@ fn read_input(root: &Path, name: &str) -> Option<String> {
             root.join(name).with_extension("tex"),
         ]
     };
-    candidates
-        .iter()
-        .find_map(|path| fs::read(path).ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    candidates.into_iter().find_map(|path| {
+        fs::read(&path)
+            .ok()
+            .map(|bytes| (path, String::from_utf8_lossy(&bytes).into_owned()))
+    })
 }
 
 fn read_lossy(path: &Path) -> Result<String, TruthError> {
@@ -3718,7 +3793,7 @@ fn document_truth(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(files.root.as_path());
-    let merged = resolve_inputs(root, main_text, 0);
+    let merged = resolve_inputs_checked(root, main_text, 0, Some(main_path))?;
     let citations = parse_cites(&merged);
     let body = body_text(&merged);
     let paper = paper_truth(&merged);
@@ -5362,6 +5437,37 @@ Closing words.
         let merged = resolve_inputs(dir.path(), "A \\input intro END", 0);
         assert!(merged.contains("Bare intro body"), "{merged}");
         assert!(merged.contains("END"), "{merged}");
+    }
+
+    #[test]
+    fn resolve_inputs_rejects_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = "\\begin{document}\\input{main}\\end{document}";
+        let path = dir.path().join("main.tex");
+        fs::write(&path, main).unwrap();
+
+        let error = resolve_inputs_checked(dir.path(), main, 0, Some(&path)).unwrap_err();
+        assert!(matches!(error, TruthError::CyclicInput(_)));
+    }
+
+    #[test]
+    fn resolve_inputs_charges_raw_bytes_before_cleaning() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mostly comments: cleaned to almost nothing, so only a raw-byte
+        // budget stops it from being reprocessed hundreds of times.
+        let padding = "% padding\n".repeat(MAX_INPUT_RAW_BYTES / 256 / 10 + 1);
+        fs::write(dir.path().join("pad.tex"), &padding).unwrap();
+        let input = "\\input{pad}\n".repeat(300);
+
+        let error = resolve_inputs_checked(dir.path(), &input, 0, None).unwrap_err();
+        assert!(matches!(error, TruthError::InputLimit));
+    }
+
+    #[test]
+    fn resolve_inputs_limits_include_operations() {
+        let input = "\\input{missing}\n".repeat(MAX_INPUTS + 1);
+        let error = resolve_inputs_checked(Path::new("."), &input, 0, None).unwrap_err();
+        assert!(matches!(error, TruthError::InputLimit));
     }
 
     #[test]
