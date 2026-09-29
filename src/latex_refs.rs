@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -28,6 +28,12 @@ const MAX_INPUTS: usize = 10_000;
 const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
 /// Upper bound on zero-argument macros expanded in the body text.
 const MAX_MACROS: usize = 200;
+/// Maximum number of distinct documents accepted from an arXiv manifest.
+const MAX_TOPLEVEL_DOCUMENTS: usize = 16;
+/// Maximum source text retained for all manifest documents together.
+const MAX_TOPLEVEL_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum accumulated text retained in generated ground truth.
+const MAX_GROUND_TRUTH_BYTES: usize = 64 * 1024 * 1024;
 /// `.bib` fields searched for an `arXiv` identifier when `eprint` is absent.
 const ARXIV_FALLBACK_FIELDS: &[&str] = &["journal", "eid", "note", "url", "pages", "volume"];
 
@@ -209,6 +215,8 @@ pub enum TruthError {
     CyclicInput(PathBuf),
     #[error("LaTeX input expansion exceeded its resource limit")]
     InputLimit,
+    #[error("LaTeX source exceeds ground-truth resource limits")]
+    ResourceLimit,
 }
 
 // ---------------------------------------------------------------------------
@@ -3569,10 +3577,10 @@ const README_JSON: &str = "00README.json";
 const BEGIN_DOCUMENT: &str = "\\begin{document}";
 
 /// The `toplevel` sources that `00README.json` at `root` declares, in file
-/// order, as paths under `root`. Empty when the manifest is absent or
-/// unreadable; absolute names and names containing `..` are skipped.
-fn readme_toplevels(root: &Path) -> Vec<PathBuf> {
-    let Ok(bytes) = fs::read(root.join(README_JSON)) else {
+/// order, as distinct paths among the discovered `.tex` files. Empty when
+/// the manifest is absent or unreadable; unsafe and excess names are skipped.
+fn readme_toplevels(files: &LatexFiles) -> Vec<PathBuf> {
+    let Ok(bytes) = fs::read(files.root.join(README_JSON)) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
@@ -3581,15 +3589,39 @@ fn readme_toplevels(root: &Path) -> Vec<PathBuf> {
     let Some(sources) = value.get("sources").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
-    sources
+    let discovered: BTreeSet<PathBuf> = files.tex.iter().cloned().collect();
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    for name in sources
         .iter()
         .filter(|source| {
             source.get("usage").and_then(serde_json::Value::as_str) == Some("toplevel")
         })
         .filter_map(|source| source.get("filename").and_then(serde_json::Value::as_str))
-        .filter(|name| !name.is_empty() && !Path::new(name).is_absolute() && !name.contains(".."))
-        .map(|name| root.join(name))
-        .collect()
+    {
+        let mut relative = PathBuf::new();
+        for component in Path::new(name).components() {
+            match component {
+                Component::Normal(part) => relative.push(part),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    relative.clear();
+                    break;
+                }
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let path = files.root.join(relative);
+        if discovered.contains(&path) && seen.insert(path.clone()) {
+            paths.push(path);
+            if paths.len() == MAX_TOPLEVEL_DOCUMENTS {
+                break;
+            }
+        }
+    }
+    paths
 }
 
 /// The documents the PDF is built from, each as (path, source text): every
@@ -3598,10 +3630,15 @@ fn readme_toplevels(root: &Path) -> Vec<PathBuf> {
 /// that contains `\begin{document}`.
 fn main_documents(files: &LatexFiles) -> Result<Vec<(PathBuf, String)>, TruthError> {
     let mut docs: Vec<(PathBuf, String)> = Vec::new();
-    for path in readme_toplevels(&files.root) {
+    let mut source_bytes = 0usize;
+    for path in readme_toplevels(files) {
         let Ok(text) = read_lossy(&path) else {
             continue;
         };
+        source_bytes = source_bytes
+            .checked_add(text.len())
+            .filter(|size| *size <= MAX_TOPLEVEL_SOURCE_BYTES)
+            .ok_or(TruthError::ResourceLimit)?;
         if strip_comments(&text).contains(BEGIN_DOCUMENT) {
             docs.push((path, text));
         }
@@ -3616,6 +3653,36 @@ fn main_documents(files: &LatexFiles) -> Result<Vec<(PathBuf, String)>, TruthErr
         }
     }
     Err(TruthError::NoMainTex)
+}
+
+fn ground_truth_bytes(truth: &GroundTruth) -> usize {
+    let reference_bytes: usize = truth
+        .references
+        .iter()
+        .map(|reference| {
+            reference.key.len()
+                + reference.label.as_ref().map_or(0, String::len)
+                + reference.text.len()
+                + reference.authors.iter().map(String::len).sum::<usize>()
+                + reference.title.as_ref().map_or(0, String::len)
+                + reference.doi.as_ref().map_or(0, String::len)
+                + reference.arxiv_id.as_ref().map_or(0, String::len)
+        })
+        .sum();
+    reference_bytes
+        + truth.body_text.len()
+        + truth
+            .citations
+            .cited_keys
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
+        + truth
+            .citations
+            .nocite_keys
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
 }
 
 /// `bibunits` `.bbl` files (`bu1.bbl`, `bu2.bbl`, ..., `bu10.bbl`) in unit
@@ -3792,6 +3859,13 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
             Err(TruthError::NoBibliography) if several => continue,
             Err(err) => return Err(err),
         };
+        let accumulated = combined.as_ref().map_or(0, ground_truth_bytes);
+        if accumulated
+            .checked_add(ground_truth_bytes(&truth))
+            .is_none_or(|size| size > MAX_GROUND_TRUTH_BYTES)
+        {
+            return Err(TruthError::ResourceLimit);
+        }
         combined = Some(match combined {
             None => truth,
             Some(so_far) => append_document(so_far, truth),
@@ -6005,7 +6079,9 @@ Johnson DS, Garey MR (1979) \emph{Computers and {I}ntractability: A {G}uide to
             r#"{
    "sources" : [
       { "usage" : "toplevel", "filename" : "paper.tex" },
+      { "usage" : "toplevel", "filename" : "./paper.tex" },
       { "usage" : "ignore", "filename" : "refs.bib" },
+      { "usage" : "toplevel", "filename" : "unlisted.tex" },
       { "usage" : "toplevel", "filename" : "a_si.tex" }
    ],
    "spec_version" : 1
@@ -6037,6 +6113,11 @@ Data from \cite{gamma} and \cite{beta, gamma}.
         )
         .unwrap();
         fs::write(dir.path().join("refs.bib"), REFS_BIB).unwrap();
+        fs::write(
+            dir.path().join("unlisted.tex"),
+            r"\begin{document}\cite{alpha}\bibliography{refs}\end{document}",
+        )
+        .unwrap();
         let tree = files(dir.path(), &["a_si.tex", "paper.tex"], &[], &["refs.bib"]);
         let truth = ground_truth(&tree).unwrap();
         assert_eq!(truth.method, "bib-cited");
