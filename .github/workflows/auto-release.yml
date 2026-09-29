@@ -18,7 +18,34 @@ permissions:
   contents: read
 
 jobs:
+  macos-app:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compute next release version
+        id: version
+        run: |
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+          IFS=. read -r major minor _patch <<<"${latest#v}"
+          echo "value=${major:-0}.$((${minor:-0} + 1)).0" >> "$GITHUB_OUTPUT"
+      - name: Build, sign and archive macOS application
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          macos/package.sh dist
+          ditto -c -k --sequesterRsrc --keepParent "dist/Text Processing Engine.app" dist/text-processing-engine-macos.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-app
+          path: dist/text-processing-engine-macos.zip
+          if-no-files-found: error
+
   release:
+    needs: macos-app
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -68,6 +95,11 @@ jobs:
           uv audit --locked --preview-features audit-command
           uv build
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          name: macos-app
+          path: dist
       - name: Push tag and publish
         if: steps.guard.outputs.skip != 'true'
         env:

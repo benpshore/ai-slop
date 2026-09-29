@@ -86,6 +86,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Div, ExternalPaths, FocusHandle, FontWeight,
@@ -157,6 +158,8 @@ pub struct Workbench {
     ask: AskTracker,
     status: String,
     intake: Arc<Mutex<DocumentIntake>>,
+    ledger_path: PathBuf,
+    extraction_in_progress: bool,
     root_focus: FocusHandle,
     corpus_focus: FocusHandle,
     document_focus: FocusHandle,
@@ -188,7 +191,7 @@ impl Workbench {
         let document_focus = cx.focus_handle().tab_index(2).tab_stop(true);
         let ask_focus = cx.focus_handle().tab_index(3).tab_stop(true);
         window.focus(&corpus_focus);
-        Self {
+        let workbench = Self {
             keys: Box::new(EnvKeyProvider),
             reader,
             corpus,
@@ -204,11 +207,94 @@ impl Workbench {
             ask: AskTracker::default(),
             status,
             intake,
+            ledger_path: ledger.to_path_buf(),
+            extraction_in_progress: false,
             root_focus: cx.focus_handle(),
             corpus_focus,
             document_focus,
             ask_focus,
+        };
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(Duration::from_millis(250)).await;
+                if this.update(cx, |this, cx| this.consume_intake(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        workbench
+    }
+
+    /// Drain every delivery source into one extraction process. The bundled
+    /// `tpe` executable writes the selected ledger, then the read-only reader
+    /// is reopened so the corpus immediately reflects the new runs.
+    fn consume_intake(&mut self, cx: &mut Context<Self>) {
+        if self.extraction_in_progress {
+            return;
         }
+        let items = match self.intake.lock() {
+            Ok(mut intake) => intake.drain().collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        if items.is_empty() {
+            return;
+        }
+        self.extraction_in_progress = true;
+        self.status = format!("Extracting {} PDF(s) ...", items.len());
+        cx.notify();
+
+        let ledger = self.ledger_path.clone();
+        let task = cx.background_executor().spawn(async move {
+            let executable = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("tpe")))
+                .unwrap_or_else(|| PathBuf::from("tpe"));
+            let mut command = Command::new(executable);
+            command.arg("extract").arg("--db").arg(&ledger);
+            command.args(items.iter().map(|item| &item.path));
+            command
+                .output()
+                .map_err(|error| error.to_string())
+                .and_then(|output| {
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                        Err(if stderr.is_empty() {
+                            format!("extractor exited with {}", output.status)
+                        } else {
+                            stderr
+                        })
+                    }
+                })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| this.finish_intake(result, cx));
+        })
+        .detach();
+    }
+
+    fn finish_intake(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        self.extraction_in_progress = false;
+        match result {
+            Ok(()) => match LedgerReader::open(&self.ledger_path)
+                .and_then(|reader| reader.corpus().map(|corpus| (reader, corpus)))
+            {
+                Ok((reader, corpus)) => {
+                    let count = corpus.len();
+                    self.reader = Some(reader);
+                    self.corpus = corpus;
+                    self.status = format!("Extraction complete; {count} documents in corpus");
+                }
+                Err(error) => self.status = format!("Cannot refresh corpus: {error}"),
+            },
+            Err(error) => self.status = format!("Extraction failed: {error}"),
+        }
+        cx.notify();
+        self.consume_intake(cx);
     }
 
     fn accept_paths(&mut self, paths: &[PathBuf], source: IntakeSource, cx: &mut Context<Self>) {
@@ -224,6 +310,7 @@ impl Workbench {
             }
         }
         self.status = format!("Submitted {accepted} PDF(s); {rejected} unsupported item(s)");
+        self.consume_intake(cx);
         cx.notify();
     }
 

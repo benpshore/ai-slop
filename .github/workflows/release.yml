@@ -10,7 +10,26 @@ permissions:
   contents: read
 
 jobs:
+  macos-app:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build, sign and archive macOS application
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}" macos/package.sh dist
+          ditto -c -k --sequesterRsrc --keepParent "dist/Text Processing Engine.app" dist/text-processing-engine-macos.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-app
+          path: dist/text-processing-engine-macos.zip
+          if-no-files-found: error
+
   release:
+    needs: macos-app
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -36,6 +55,12 @@ jobs:
           mkdir -p dist
           cp "target/release/text-processing-engine" "dist/text-processing-engine-$(uname -m)-linux"
           (cd dist && sha256sum -- * > SHA256SUMS)
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: macos-app
+          path: dist
+      - name: Refresh release checksums
+        run: (cd dist && sha256sum -- * > SHA256SUMS)
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
