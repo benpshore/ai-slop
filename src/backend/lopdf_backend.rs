@@ -5,8 +5,10 @@
 //! Per-document work is cached inside the session: a font dictionary is
 //! resolved (encoding, widths, flags) once per `ObjectId` and shared by
 //! every page and Form `XObject` that references it, and a Form `XObject`'s
-//! content stream is decompressed and lexed once. The caches hold only
-//! owned data, so they never borrow the [`Document`] they were built from.
+//! content stream is decompressed and lexed once while the decoded programs
+//! fit [`MAX_FORM_CACHE_BYTES`]; beyond that budget a Form is decoded on
+//! every use. The caches hold only owned data, so they never borrow the
+//! [`Document`] they were built from.
 //!
 //! Content streams are not parsed with `Content::decode`, which allocates
 //! an `Operation` (and every operand) for each of the many path and colour
