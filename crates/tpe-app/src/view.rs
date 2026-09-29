@@ -510,7 +510,7 @@ mod tests {
     fn numbered_lines_maps_offsets_with_one_page_index() {
         let text = "hé\nbody";
         let mut cites = Vec::new();
-        for offset in 0..=text.chars().count() as u32 {
+        for offset in 0..=u32::try_from(text.chars().count()).unwrap() {
             cites.push(citation(1, offset, &format!("[{offset}]"), &[offset]));
         }
         cites.push(citation(1, 99, "[outside]", &[]));
