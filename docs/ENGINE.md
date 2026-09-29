@@ -34,18 +34,25 @@ span in `seq` order; the others are ordered by the XY-cut.
 
 ## Measured status (2026-09-28)
 
-The `lopdf` backend's reference/metadata/marker/timing numbers from Eval run 36470860921
-(`dev`, 60 papers) and run 36472085645 (`holdout`, 10 papers), both after PR #32 on
+The `lopdf` backend's reference/metadata/marker/timing numbers from Eval run 36498236950
+(`dev`, 60 papers) and run 36498705659 (`holdout`, 10 papers), both after PR #36 on
 `ubuntu-24.04-arm`, are in [README.md](../README.md) and GitHub issue #15; per-loop
-taxonomies are in [docs/analysis/](analysis/). Body-text alignment (0.751 `dev` / 0.787
-`holdout`, body only) is far from the 99% error-free-chunk goal, and the loop-7 region tagger
-over-tags prose on some papers (loop 8 is fixing this); marker recall does not yet verify that
-a marker resolved to the *correct* entry.
+taxonomies are in [docs/analysis/](analysis/). Body-text alignment (0.877 `dev` / 0.883
+`holdout`, exact word LCS, appendices included) is far from the 99% error-free-chunk goal, and
+body word precision (82.3% `dev` / 82.0% `holdout`) is held down by untagged figure/table/math
+fragments; a few papers remain at 0.65–0.78 body alignment. Citation-marker precision (targets
+that resolve to the correct entry) is 99.5% `dev` / 99.9% `holdout`, and marker key recall is
+97.2% `dev` / 99.2% `holdout`. Perf loop (PR #35) took arm p50 from 35.4 ms to 18.7 ms, before
+loop 10's region tagging added about 4 ms back; p50 is now 22.9 ms `dev` / 20.8 ms `holdout`,
+a sub-30 ms diagnostic on these hosted runners; the M1 service-time target is not yet measured.
 
-The full `docling` pipeline is a routed exception at about 7.7 s/document, and `pdfium` is
-about 5x slower than `lopdf` on the reference-metrics path. Accuracy reports for `pdfium`,
-`docling-text` and `docling` come from the Native workflow (first docling comparison on issue
-#15) but are not summarised here.
+A pre-loop-10 three-backend comparison on the reference-metrics path (Native run 36491886979)
+found `lopdf` at 99.6%/99.7% with body alignment 0.738 at p50 18.7 ms; `pdfium` at 97.3%/99.6%
+with body alignment 0.714 at p50 109 ms, about 6x slower than `lopdf`; `docling-text` at
+78.1%/94.7%; and the full `docling` layout+OCR pipeline at 96.9%/98.8% with body alignment
+0.785 at p50 4892 ms (about 4.9 s per chunk), a routed exception. `lopdf` remains the fast
+path. Accuracy reports for `pdfium`, `docling-text` and `docling` come from the Native workflow
+(first docling comparison on issue #15).
 
 ## Figures
 

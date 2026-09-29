@@ -4,7 +4,7 @@ A native Rust engine for high-throughput, faithful text mining of academic PDFs,
 
 The eventual application is a compact, accessible, Zed-inspired Rust document workbench: corpus browser, PDF viewer, selectable extracted text, source highlighting, and job controls. The headless engine comes first and remains independently usable.
 
-**Status: early engine, measured accuracy, nothing production-ready.** A pure-Rust extraction engine (`tpe`) and an evaluation harness exist. As of 2026-09-28 (Eval runs 36470860921 dev / 36472085645 holdout, backend `lopdf`, `ubuntu-24.04-arm`, after PR #32), reference recall/precision are 99.5%/99.6% on the 60-paper `dev` split and 100%/100% on the 10-paper `holdout` split; see "What exists today" below for the full table. Body-text alignment (0.751 dev / 0.787 holdout, body only) remains far from the error-free-chunk target below, and no chunk-level exact-match rate has been measured yet: these are reference/metadata/marker diagnostics, not the acceptance measurement. The eval timing (whole-document eval time on hosted arm64 runners, averaged over nominal 20-page chunks, without durable ledger writes) is a diagnostic and is not comparable with the M1 service-time target. The PDFium and docling backends build and pass their unit tests in the Native workflow; the full `docling` pipeline is a routed exception at about 7.7 s/document, and `pdfium` is about 5x slower than `lopdf` on the reference-metrics path. Accuracy reports for these backends come from the Native workflow (first docling comparison on issue #15) but are not summarised here. The workbench crates are libraries with offline tests. The GUI is a skeleton, the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
+**Status: early engine, measured accuracy, nothing production-ready.** A pure-Rust extraction engine (`tpe`) and an evaluation harness exist. As of 2026-09-28 (Eval runs 36498236950 dev / 36498705659 holdout, backend `lopdf`, `ubuntu-24.04-arm`, after PR #36), reference recall/precision are 99.6%/99.7% on the 60-paper `dev` split and 100%/100% on the 10-paper `holdout` split; see "What exists today" below for the full table. Body-text alignment (0.877 dev / 0.883 holdout, body only; exact word LCS, appendices included) remains far from the error-free-chunk target below, and no chunk-level exact-match rate has been measured yet: these are reference/metadata/marker diagnostics, not the acceptance measurement. The eval timing (whole-document eval time on hosted arm64 runners, averaged over nominal 20-page chunks, without durable ledger writes) is a diagnostic and is not comparable with the M1 service-time target, though this diagnostic p50 is below 30 ms on these hosted arm64 runners (22.9 ms dev / 20.8 ms holdout); the M1 service-time target is not yet measured. The PDFium and docling backends build and pass their unit tests in the Native workflow; a pre-loop-10 three-backend comparison (Native run 36491886979) put the full `docling` pipeline at a routed exception of about 4.9 s per chunk, and `pdfium` at about 6x slower than `lopdf` on the reference-metrics path — see "What exists today" below for the full breakdown. The workbench crates are libraries with offline tests. The GUI is a skeleton, the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
 
 ## What exists today
 
@@ -16,45 +16,51 @@ The engine is the root crate `tpe` ([Engine](docs/ENGINE.md)):
 - Scanned-page fixture (`tests/scanned_fixture.rs`): a synthetic image-only page. `lopdf` must find no text, `pdfium` must report one raster figure, and docling OCR must read the text back.
 - Evaluation ([Eval](docs/EVAL.md)): `tpe eval` scores the engine against arXiv LaTeX sources. `corpus/manifest.json` pins 70 CC-BY 4.0 arXiv papers by version and SHA-256, 60 in `dev` and 10 in `holdout`.
 
-Measured status, 2026-09-28 (GitHub issue #15, backend `lopdf`, GitHub Actions `ubuntu-24.04-arm`, after PR #32; per-loop taxonomies in [docs/analysis/](docs/analysis/)):
+Measured status, 2026-09-28 (GitHub issue #15, backend `lopdf`, GitHub Actions `ubuntu-24.04-arm`, after PR #36; per-loop taxonomies in [docs/analysis/](docs/analysis/)):
 
-`dev` split (60 papers, tuned on) — Eval run 36470860921:
+`dev` split (60 papers, tuned on) — Eval run 36498236950:
 
 | metric | value |
 | --- | --- |
-| reference recall / precision | 99.5% / 99.6% |
-| reference-count exact | 91.7% |
-| reference title accuracy | 89.3% (60 title-less RSC entries excluded) |
+| reference recall / precision | 99.6% / 99.7% |
+| reference-count exact | 93.3% |
+| reference title accuracy | 94.4% (61 title-less RSC entries excluded) |
 | reference printed-DOI accuracy | 99.6% |
-| reference year accuracy | 99.7% |
+| reference year accuracy | 99.7%* |
 | paper title accuracy | 91.1% |
-| paper authors recall / precision | 98.4% / 96.1% |
-| paper DOI accuracy | 100% (5 of 5 stated) |
-| citation-marker resolution / marker recall | 99.9% / 93.1% |
-| body-text alignment, body only / raw | 0.751 / 0.633 |
-| eval time per nominal 20-page chunk, p50 / p95 (hosted arm64, no ledger write; not the M1 target measurement) | 33.8 ms / ~110 ms |
+| paper authors recall / precision | 98.4% / 96.1%* |
+| paper DOI accuracy | 100% (5 of 5 stated)* |
+| citation-marker precision (resolves to the correct entry) / marker key recall | 99.5% / 97.2% |
+| body-text alignment, body only / raw (exact word LCS, appendices included) | 0.877 / 0.724 |
+| body word recall / precision | 92.1% / 82.3% |
+| eval time per nominal 20-page chunk, p50 / p95 (hosted arm64, no ledger write; not the M1 target measurement) | 22.9 ms / 53.8 ms |
 
-`holdout` split (10 papers, reported only; parser rules are tuned on `dev`, though a failure taxonomy of this split was published once in `docs/analysis/eval-2026-09-28-holdout.md`, so it is not fully blind) — Eval run 36472085645:
+\* Not remeasured for run 36498236950; carried over from run 36470860921 (after PR #32).
+
+`holdout` split (10 papers, reported only; parser rules are tuned on `dev`, though a failure taxonomy of this split was published once in `docs/analysis/eval-2026-09-28-holdout.md`, so it is not fully blind) — Eval run 36498705659:
 
 | metric | value |
 | --- | --- |
 | reference recall / precision | 100% / 100% |
 | reference-count exact | 100% |
-| reference title accuracy | 95.5% |
-| reference printed-DOI accuracy | 100% |
+| reference title accuracy | 96.6% |
+| reference printed-DOI accuracy | 100%* |
 | reference year accuracy | not reported |
-| paper title accuracy | 100% |
-| paper authors recall / precision | 100% / 100% |
+| paper title accuracy | 100%* |
+| paper authors recall / precision | 100% / 100%* |
 | paper DOI accuracy | not reported |
-| citation-marker resolution / marker recall | 100% / 97.6% |
-| body-text alignment, body only / raw | 0.787 / 0.637 |
-| eval time per nominal 20-page chunk, p50 / p95 | 30.3 ms / 83.5 ms |
+| citation-marker precision (resolves to the correct entry) / marker key recall | 99.9% / 99.2% |
+| body-text alignment, body only / raw (exact word LCS, appendices included) | 0.883 / 0.714 |
+| body word recall / precision | 89.4% / 82.0% |
+| eval time per nominal 20-page chunk, p50 / p95 | 20.8 ms / 30.7 ms |
+
+\* Not remeasured for run 36498705659; carried over from run 36472085645 (after PR #32).
 
 These are diagnostics from two runs on shared CI hardware. They are not the acceptance measurement described below.
 
-Known gaps: body-text alignment is far from the 99% error-free-chunk goal below, and the loop-7 region tagger over-tags prose on some papers (being fixed in loop 8); marker recall does not yet verify that a marker resolved to the *correct* reference entry, only that it resolved to one; p50 is at or above the 30 ms target on these CI runners, and M1 numbers have not yet been measured; the full `docling` pipeline is a routed exception at about 7.7 s/document; `pdfium` is about 5x slower than `lopdf` on the reference-metrics path. See GitHub issue #15 for the running history and [docs/analysis/](docs/analysis/) for the per-loop taxonomies.
+Known gaps: body-text alignment (0.877 dev / 0.883 holdout, exact word LCS, appendices included) is still far from the 99% error-free-chunk goal below, and body word precision (82.3% dev / 82.0% holdout) is held down by untagged figure/table/math fragments; a few papers remain at 0.65–0.78 body alignment; marker key recall is 97.2% dev / 99.2% holdout; reference title accuracy is 94.4% dev. Perf loop (PR #35) took arm p50 from 35.4 ms to 18.7 ms, before loop 10's region tagging added about 4 ms back; the diagnostic p50 is below 30 ms on these hosted runners (22.9 ms dev / 20.8 ms holdout); the M1 service-time target, with durable writes, has not been measured. A pre-loop-10 comparison (Native run 36491886979) put the full `docling` pipeline at a routed exception of about 4.9 s per chunk, and `pdfium` at about 6x slower than `lopdf` on the reference-metrics path. See GitHub issue #15 for the running history and [docs/analysis/](docs/analysis/) for the per-loop taxonomies.
 
-Native workflow: with pinned PDFium and model assets, the `docling` and `pdfium` features build and their unit tests pass on `ubuntu-24.04-arm`. The docling OCR fixture result is not yet known.
+Native workflow: with pinned PDFium and model assets, the `docling` and `pdfium` features build and their unit tests pass on `ubuntu-24.04-arm`. A pre-loop-10 three-backend comparison on the reference-metrics path (Native run 36491886979) found: `lopdf` (the default) at 99.6%/99.7% reference recall/precision, body alignment 0.738, p50 18.7 ms; `pdfium` at 97.3%/99.6%, body alignment 0.714, p50 109 ms (about 6x slower than `lopdf`); `docling-text` at 78.1%/94.7%; and the full `docling` layout+OCR pipeline at 96.9%/98.8%, body alignment 0.785, p50 4892 ms (about 4.9 s per chunk) — `lopdf` is the fast path and `docling` remains a routed exception. The docling OCR fixture result is not yet known.
 
 Workbench crates under `crates/` (each is a library with offline tests; see [Tracks](docs/TRACKS.md)):
 
