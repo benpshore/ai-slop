@@ -4,6 +4,7 @@
 //! figures, and ledger publication to the existing extraction pipeline.
 
 use serde::Serialize;
+use std::collections::VecDeque;
 
 use crate::backend::{BackendError, Extractor};
 use crate::citations;
@@ -25,6 +26,16 @@ pub struct BibliographyScan {
     pub warnings: Vec<String>,
 }
 
+// Preserve the quick, page-at-a-time search close to the end of a document,
+// then inspect geometrically growing suffixes. This bounds the total number
+// of pages copied and analysed by the checkpoints to a constant multiple of
+// the document length.
+const LINEAR_SCAN_PAGES: usize = 8;
+
+fn should_check(scanned: usize, total: usize) -> bool {
+    scanned <= LINEAR_SCAN_PAGES || scanned == total || scanned.is_power_of_two()
+}
+
 /// Inspect the PDF's end, then prepend one page at a time until the start of
 /// the last qualified bibliography is present. All selected pages are ordered
 /// forward before segmentation; page failures abort rather than silently
@@ -38,7 +49,8 @@ pub fn scan_backward(
 ) -> Result<BibliographyScan, BackendError> {
     let mut session = extractor.open(bytes, password)?;
     let total_pages = session.page_count();
-    let mut pages: Vec<PageText> = Vec::new();
+    let total_pages_usize = usize::try_from(total_pages).unwrap_or(usize::MAX);
+    let mut pages: VecDeque<PageText> = VecDeque::new();
 
     for number in (1..=total_pages).rev() {
         let mut page = session.page_text(number)?;
@@ -47,20 +59,24 @@ pub fn scan_backward(
         } else {
             reading_order::order_page(&mut page);
         }
-        pages.insert(0, page);
+        pages.push_front(page);
+
+        // After a small exact search near the end, only re-run the
+        // whole-suffix analysis when its size doubles (and at EOF). Running it
+        // after every page makes a no-bibliography document quadratic.
+        if !should_check(pages.len(), total_pages_usize) {
+            continue;
+        }
 
         // Cleanup uses the selected document context. Keep the ordered source
         // pages untouched so an earlier page can change that context safely.
-        let mut checked = pages.clone();
+        let mut checked: Vec<PageText> = pages.iter().cloned().collect();
         text_cleanup::clean_document(&mut checked);
         regions::tag_regions(&mut checked);
         for section in citations::find_reference_sections(&checked)
             .into_iter()
             .rev()
         {
-            if section.first_page != number {
-                continue;
-            }
             let mut references = citations::segment_entries(&checked, &section);
             if references.len() < 3 {
                 continue;
@@ -109,7 +125,7 @@ mod tests {
     use lopdf::content::{Content, Operation};
     use lopdf::{Document, Object, Stream, dictionary};
 
-    use super::scan_backward;
+    use super::{LINEAR_SCAN_PAGES, scan_backward, should_check};
     use crate::backend::lopdf_backend::LopdfBackend;
 
     fn pdf(pages: &[&[&str]]) -> Vec<u8> {
@@ -239,5 +255,16 @@ mod tests {
                 .iter()
                 .all(|entry| entry.raw.contains("Final"))
         );
+    }
+
+    #[test]
+    fn suffix_analysis_work_is_linear() {
+        let total = 8_000;
+        let analysed_pages: usize = (1..=total)
+            .filter(|&scanned| should_check(scanned, total))
+            .sum();
+
+        assert!(analysed_pages <= total * 3 + LINEAR_SCAN_PAGES * LINEAR_SCAN_PAGES);
+        assert!(should_check(total, total));
     }
 }
