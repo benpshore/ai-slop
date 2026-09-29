@@ -1,8 +1,8 @@
-//! `tpe-app` binary: the GPUI workbench (macOS only).
+//! `tpe-app` binary: `PDFTextract`, the GPUI app (macOS only).
 //!
-//! `tpe-app <ledger.sqlite>` (or `TPE_LEDGER=<file> tpe-app`) opens the ledger
-//! read-only and shows the corpus list, the document view and the Ask panel.
-//! On other operating systems the binary prints a notice and exits 0 so the
+//! `tpe-app [paper.pdf ...]` opens the window and queues any given PDFs for
+//! text extraction; `tpe-app --version` prints the version and exits. On
+//! other operating systems the binary prints a notice and exits 0 so the
 //! workspace builds and the library tests run everywhere.
 
 #![allow(
@@ -13,23 +13,25 @@
 
 #[cfg(target_os = "macos")]
 mod gui;
+#[cfg(target_os = "macos")]
+mod services;
 
 #[cfg(target_os = "macos")]
 fn main() {
     use std::path::PathBuf;
 
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TPE_LEDGER").map(PathBuf::from));
-    let Some(path) = path else {
-        eprintln!("usage: tpe-app <ledger.sqlite>    (or set TPE_LEDGER)");
-        std::process::exit(2);
-    };
-    gui::run(path);
+    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    if args
+        .iter()
+        .any(|arg| arg == std::path::Path::new("--version"))
+    {
+        println!("tpe-app {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    gui::run(args);
 }
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    println!("GUI is macOS-only for now");
+    println!("PDFTextract is macOS-only for now");
 }

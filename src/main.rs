@@ -496,43 +496,29 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
             Ok::<_, anyhow::Error>(scan)
         }));
         let elapsed = elapsed_ms(started);
-        let mut record = serde_json::json!({
-            "path": file, "sha256": hash, "backend": extractor.identity(),
-            "status": "failed", "total_pages": null, "pages_scanned": null,
-            "section_page": null, "heading": null, "references": [],
-            "warnings": [], "elapsed_ms": elapsed, "error": null,
-        });
-        match result {
+        let identity = extractor.identity();
+        let record = match result {
             Ok(Ok(scan)) => {
                 any_failed |= !scan.found;
-                record = serde_json::json!({
-                    "path": file,
-                    "sha256": hash,
-                    "backend": extractor.identity(),
-                    "status": if scan.found { "found" } else { "not_found" },
-                    "total_pages": scan.total_pages,
-                    "pages_scanned": scan.pages_scanned,
-                    "section_page": scan.section_page,
-                    "heading": scan.heading,
-                    "references": scan.references,
-                    "warnings": scan.warnings,
-                    "elapsed_ms": elapsed,
-                    "error": null,
-                });
+                bibliography::Record::from_scan(
+                    &file,
+                    hash.unwrap_or_default(),
+                    identity,
+                    scan,
+                    elapsed,
+                )
             }
             Ok(Err(err)) => {
                 any_failed = true;
-                record["error"] = serde_json::json!(err.to_string());
-                record["warnings"] = serde_json::json!([err.to_string()]);
+                bibliography::Record::failed(&file, hash, identity, err.to_string(), elapsed)
             }
             Err(payload) => {
                 any_failed = true;
                 let message = format!("panic: {}", panic_message(&*payload));
-                record["error"] = serde_json::json!(message);
-                record["warnings"] = serde_json::json!([message]);
+                bibliography::Record::failed(&file, hash, identity, message, elapsed)
             }
-        }
-        println!("{record}");
+        };
+        println!("{}", serde_json::to_string(&record)?);
     }
     Ok(exit_code(any_failed))
 }

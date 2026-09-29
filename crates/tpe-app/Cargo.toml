@@ -3,7 +3,7 @@ name = "tpe-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GPUI workbench skeleton: corpus list, document view and an Ask Claude / ChatGPT panel over the engine ledger"
+description = "PDFTextract: the GPUI app over the engine (get text or bibliography per PDF), plus the workbench library modules"
 
 [lib]
 name = "tpe_app"
@@ -14,11 +14,16 @@ name = "tpe-app"
 path = "src/main.rs"
 
 [dependencies]
+futures = "0.3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1"
+text-processing-engine = { path = "../.." }
 thiserror = "2"
 tpe-common = { path = "../tpe-common" }
 ureq = "3"
+
+[dev-dependencies]
+tempfile = "3"
 
 # GPUI is a macOS-only dependency. Its default features (`x11`, `wayland`,
 # `font-kit`; gpui-0.2.2/Cargo.toml [features] default) pull x11rb, wayland-client,
@@ -27,6 +32,9 @@ ureq = "3"
 # the dependency target-scoped means Linux builds never fetch or compile it.
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui = "0.2"
+# The Finder Services provider (`services.rs`) is an Objective-C object
+# declared at run time; `objc` is already in the tree through gpui.
+objc = "0.2"
 
 [lints]
 workspace = true

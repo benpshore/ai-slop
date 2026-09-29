@@ -10,6 +10,7 @@ use crate::citations;
 use crate::pipeline::Progress;
 use crate::reading_order;
 use crate::regions;
+use crate::schema::BackendIdentity;
 use crate::schema::{PageText, ReferenceEntry};
 use crate::text_cleanup;
 
@@ -24,6 +25,101 @@ pub struct BibliographyScan {
     pub heading: Option<String>,
     pub references: Vec<ReferenceEntry>,
     pub warnings: Vec<String>,
+}
+
+/// The JSON record `tpe bibliography` prints per input PDF (docs/BIBLIOGRAPHY.md),
+/// so any caller (the app) publishes the same shape as the CLI. `status` is
+/// `found`, `not_found` or `failed`; a failed record keeps the hash and
+/// backend when they are known and carries the error in `error` and
+/// `warnings`.
+#[derive(Debug, Serialize)]
+pub struct Record {
+    pub path: String,
+    pub sha256: Option<String>,
+    pub backend: BackendIdentity,
+    pub status: &'static str,
+    pub total_pages: Option<u32>,
+    pub pages_scanned: Option<u32>,
+    pub section_page: Option<u32>,
+    pub heading: Option<String>,
+    pub references: Vec<ReferenceEntry>,
+    pub warnings: Vec<String>,
+    pub elapsed_ms: f64,
+    pub error: Option<String>,
+}
+
+impl Record {
+    /// A record for a completed scan (`found` or `not_found`).
+    pub fn from_scan(
+        path: &str,
+        sha256: String,
+        backend: BackendIdentity,
+        scan: BibliographyScan,
+        elapsed_ms: f64,
+    ) -> Self {
+        Self {
+            path: path.to_string(),
+            sha256: Some(sha256),
+            backend,
+            status: if scan.found { "found" } else { "not_found" },
+            total_pages: Some(scan.total_pages),
+            pages_scanned: Some(scan.pages_scanned),
+            section_page: scan.section_page,
+            heading: scan.heading,
+            references: scan.references,
+            warnings: scan.warnings,
+            elapsed_ms,
+            error: None,
+        }
+    }
+
+    /// A `failed` record; `sha256` is whatever was acquired before the failure.
+    pub fn failed(
+        path: &str,
+        sha256: Option<String>,
+        backend: BackendIdentity,
+        error: String,
+        elapsed_ms: f64,
+    ) -> Self {
+        Self {
+            path: path.to_string(),
+            sha256,
+            backend,
+            status: "failed",
+            total_pages: None,
+            pages_scanned: None,
+            section_page: None,
+            heading: None,
+            references: Vec::new(),
+            warnings: vec![error.clone()],
+            elapsed_ms,
+            error: Some(error),
+        }
+    }
+
+    /// Whether the scan found a list (`not_found` and `failed` are both false).
+    pub fn found(&self) -> bool {
+        self.status == "found"
+    }
+
+    /// One entry per line: the printed label (or `[index]`) and the raw text,
+    /// unchanged. Empty for an empty list.
+    pub fn plain_text(&self) -> String {
+        let mut text = String::new();
+        for entry in &self.references {
+            if let Some(label) = &entry.label {
+                text.push_str(label);
+            } else {
+                text.push('[');
+                text.push_str(&entry.index.to_string());
+                text.push(']');
+            }
+            text.push(' ');
+            text.push_str(&entry.raw);
+            text.push('\n');
+        }
+        text
+    }
 }
 
 /// Inspect the PDF's end, then prepend one page at a time until the start of
@@ -132,7 +228,8 @@ mod tests {
     use lopdf::content::{Content, Operation};
     use lopdf::{Document, Object, Stream, dictionary};
 
-    use super::{scan_backward, scan_backward_observed};
+    use super::{Record, scan_backward, scan_backward_observed};
+    use crate::backend::Extractor;
     use crate::backend::lopdf_backend::LopdfBackend;
     use crate::pipeline::Progress;
 
@@ -249,6 +346,46 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn record_keeps_the_cli_shape_and_renders_plain_text() {
+        let bytes = pdf(&[
+            &["Introduction"],
+            &["[1] A. One, First cited work, 2020."],
+            &[
+                "[2] B. Two, Second cited work, 2021.",
+                "[3] C. Three, Third cited work, 2022.",
+            ],
+        ]);
+        let backend = LopdfBackend::default();
+        let scan = scan_backward(&backend, &bytes, None).unwrap();
+        let record = Record::from_scan("p.pdf", "ab".repeat(32), backend.identity(), scan, 1.5);
+        assert!(record.found());
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["status"], "found");
+        assert_eq!(value["path"], "p.pdf");
+        assert_eq!(value["total_pages"], 3);
+        assert_eq!(value["pages_scanned"], 2);
+        assert_eq!(value["section_page"], 2);
+        assert_eq!(value["heading"], serde_json::Value::Null);
+        assert_eq!(value["backend"]["name"], "lopdf");
+        assert_eq!(value["error"], serde_json::Value::Null);
+        assert_eq!(value["references"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            record.plain_text(),
+            "[1] [1] A. One, First cited work, 2020.\n[2] [2] B. Two, Second cited work, 2021.\n[3] [3] C. Three, Third cited work, 2022.\n"
+        );
+
+        let failed = Record::failed("p.pdf", None, backend.identity(), "malformed".into(), 0.5);
+        assert!(!failed.found());
+        let value = serde_json::to_value(&failed).unwrap();
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["sha256"], serde_json::Value::Null);
+        assert_eq!(value["total_pages"], serde_json::Value::Null);
+        assert_eq!(value["warnings"], serde_json::json!(["malformed"]));
+        assert_eq!(value["error"], "malformed");
+        assert_eq!(failed.plain_text(), "");
     }
 
     #[test]
