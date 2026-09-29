@@ -1143,12 +1143,13 @@ fn identifier_open(text: &str) -> bool {
 /// ([`repeated_furniture`]) and page numbers, except a numeric line that
 /// continues a DOI or URL of the line before it and does not sit in a
 /// margin band.
-fn section_lines(
+/// Collect section lines with document-wide furniture already computed.
+fn section_lines_with_furniture(
     pages: &[PageText],
     section: &ReferenceSection,
     stop: Option<(u32, usize)>,
+    repeated: &[String],
 ) -> Vec<SectionLine> {
-    let repeated = repeated_furniture(pages);
     let mut lines: Vec<SectionLine> = Vec::new();
     'pages: for page in pages {
         if page.page < section.first_page {
@@ -1396,12 +1397,23 @@ fn labels_above_heading(pages: &[PageText], section: &ReferenceSection) -> Vec<L
 
 /// Collect, clean and cut the lines of the list that starts at `section`
 /// and stops before `stop`.
+#[cfg(test)]
 fn list_body(
     pages: &[PageText],
     section: &ReferenceSection,
     stop: Option<(u32, usize)>,
 ) -> ListBody {
-    let mut lines = section_lines(pages, section, stop);
+    let repeated = repeated_furniture(pages);
+    list_body_with_furniture(pages, section, stop, &repeated)
+}
+
+fn list_body_with_furniture(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+    repeated: &[String],
+) -> ListBody {
+    let mut lines = section_lines_with_furniture(pages, section, stop, repeated);
     let style = detect_style(&lines);
     // Labels the layout pass detached from their entries carry no text;
     // a detached list keeps their numbers (with their positions) to label
@@ -1630,7 +1642,17 @@ fn segment_list(
     section: &ReferenceSection,
     stop: Option<(u32, usize)>,
 ) -> Vec<ReferenceEntry> {
-    let body = list_body(pages, section, stop);
+    let repeated = repeated_furniture(pages);
+    segment_list_with_furniture(pages, section, stop, &repeated)
+}
+
+fn segment_list_with_furniture(
+    pages: &[PageText],
+    section: &ReferenceSection,
+    stop: Option<(u32, usize)>,
+    repeated: &[String],
+) -> Vec<ReferenceEntry> {
+    let body = list_body_with_furniture(pages, section, stop, repeated);
     match body.style {
         Style::AuthorYear => segment_author_year(&body.lines, &body.context),
         Style::Detached => {
@@ -5563,7 +5585,11 @@ struct ListExtent {
 }
 
 /// The extent of every list in `sections` (see [`ListExtent`]).
-fn list_extents(pages: &[PageText], sections: &[ReferenceSection]) -> Vec<ListExtent> {
+fn list_extents(
+    pages: &[PageText],
+    sections: &[ReferenceSection],
+    repeated: &[String],
+) -> Vec<ListExtent> {
     sections
         .iter()
         .enumerate()
@@ -5571,7 +5597,7 @@ fn list_extents(pages: &[PageText], sections: &[ReferenceSection]) -> Vec<ListEx
             let stop = sections
                 .get(k + 1)
                 .map(|next| (next.first_page, next.first_line));
-            let body = list_body(pages, section, stop);
+            let body = list_body_with_furniture(pages, section, stop, repeated);
             ListExtent {
                 start: (section.first_page, section.first_line),
                 end: body.end.or(stop),
@@ -5775,7 +5801,17 @@ fn markers_in_sections(
     if refs.is_empty() {
         return Vec::new();
     }
-    let extents = list_extents(pages, sections);
+    let repeated = repeated_furniture(pages);
+    markers_in_sections_with_furniture(pages, refs, sections, &repeated)
+}
+
+fn markers_in_sections_with_furniture(
+    pages: &[PageText],
+    refs: &[ReferenceEntry],
+    sections: &[ReferenceSection],
+    repeated: &[String],
+) -> Vec<CitationMarker> {
+    let extents = list_extents(pages, sections, repeated);
     let index = RefIndex::build(refs, &extents);
     let page_windows: Vec<Vec<Range<usize>>> = pages
         .iter()
@@ -5856,18 +5892,19 @@ fn markers_in_sections(
 /// vectors.
 pub fn extract_citations(pages: &[PageText]) -> (Vec<ReferenceEntry>, Vec<CitationMarker>) {
     let sections = find_reference_sections(pages);
+    let repeated = repeated_furniture(pages);
     let mut refs: Vec<ReferenceEntry> = Vec::new();
     for (k, section) in sections.iter().enumerate() {
         let stop = sections
             .get(k + 1)
             .map(|next| (next.first_page, next.first_line));
-        for mut entry in segment_list(pages, section, stop) {
+        for mut entry in segment_list_with_furniture(pages, section, stop, &repeated) {
             entry.index = u32::try_from(refs.len() + 1).unwrap_or(u32::MAX);
             parse_entry(&mut entry);
             refs.push(entry);
         }
     }
-    let markers = markers_in_sections(pages, &refs, &sections);
+    let markers = markers_in_sections_with_furniture(pages, &refs, &sections, &repeated);
     (refs, markers)
 }
 
@@ -9265,7 +9302,8 @@ mod tests {
         assert_eq!(indices, vec![1, 2, 3, 4, 5]);
 
         let sections = find_reference_sections(&pages);
-        let index = RefIndex::build(&refs, &list_extents(&pages, &sections));
+        let repeated = repeated_furniture(&pages);
+        let index = RefIndex::build(&refs, &list_extents(&pages, &sections, &repeated));
         assert!(index.numbered);
         assert_eq!(index.spaces.len(), 2);
         assert_eq!(index.spaces[0].end, Some((2, 4)));
