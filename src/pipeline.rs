@@ -242,23 +242,40 @@ fn parse_while_hashing(
             hash_state = HashState::Done(hashed);
         }
         let export: Option<(&Path, &str)> = figures_dir.map(|dir| (dir, run_dir.as_str()));
-        for page in first..=last {
-            match session.page_text(page) {
-                Ok(mut text) => {
-                    let figure_warnings = collect_figures(session.as_mut(), &mut text, export);
-                    warnings.extend(figure_warnings);
-                    pages.push(text);
+        // Ask incremental backends for one scheduling chunk at a time. Figure
+        // payloads are consumed (and therefore released) before advancing to
+        // the next page; no backend-owned page/figure batch crosses a chunk
+        // boundary. Whole-document backends advertise that fact so their own
+        // admission control can reject the conversion before this loop.
+        let _capabilities = extractor.capabilities();
+        let mut chunk_first = first;
+        while chunk_first <= last {
+            let chunk_boundary = chunk_first
+                .saturating_sub(1)
+                .checked_div(CHUNK_PAGES)
+                .unwrap_or_default()
+                .saturating_add(1)
+                .saturating_mul(CHUNK_PAGES);
+            let chunk_last = last.min(chunk_boundary);
+            for page in chunk_first..=chunk_last {
+                match session.page_text(page) {
+                    Ok(mut text) => {
+                        let figure_warnings = collect_figures(session.as_mut(), &mut text, export);
+                        warnings.extend(figure_warnings);
+                        pages.push(text);
+                    }
+                    Err(BackendError::Page { message, .. }) => {
+                        let warning = format!("failed: page {page}: {message}");
+                        let mut placeholder = PageText::new(page, 0.0, 0.0, 0);
+                        placeholder.warnings.push(warning.clone());
+                        warnings.push(warning);
+                        pages.push(placeholder);
+                        status = Status::Partial;
+                    }
+                    Err(other) => return Err(PipelineError::Backend(other)),
                 }
-                Err(BackendError::Page { message, .. }) => {
-                    let warning = format!("failed: page {page}: {message}");
-                    let mut placeholder = PageText::new(page, 0.0, 0.0, 0);
-                    placeholder.warnings.push(warning.clone());
-                    warnings.push(warning);
-                    pages.push(placeholder);
-                    status = Status::Partial;
-                }
-                Err(other) => return Err(PipelineError::Backend(other)),
             }
+            chunk_first = chunk_last.saturating_add(1);
         }
         let info: BTreeMap<String, String> = session.info();
         Ok(Parsed {

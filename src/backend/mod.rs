@@ -13,6 +13,25 @@ use thiserror::Error;
 
 use crate::schema::{BackendIdentity, PageText};
 
+/// Resource/streaming contract advertised before a session is opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    /// Pages can be requested and released independently.
+    pub incremental_pages: bool,
+    /// The backend can operate on an immutable memory-mapped snapshot.
+    pub memory_mapping: bool,
+    /// Page requests trigger conversion of the complete document.
+    pub whole_document_conversion: bool,
+}
+
+impl BackendCapabilities {
+    pub const INCREMENTAL: Self = Self {
+        incremental_pages: true,
+        memory_mapping: true,
+        whole_document_conversion: false,
+    };
+}
+
 #[cfg(feature = "docling")]
 pub mod docling_backend;
 pub mod lopdf_backend;
@@ -74,6 +93,10 @@ pub trait Extractor: Send + Sync {
         bytes: &[u8],
         password: Option<&str>,
     ) -> Result<Box<dyn DocumentSession>, BackendError>;
+    /// Declares the session's allocation and page-delivery behaviour.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::INCREMENTAL
+    }
     /// `true` when the spans of a page already come in reading order (by
     /// `seq`), so the engine must not re-order them geometrically.
     fn provides_reading_order(&self) -> bool {
@@ -214,6 +237,10 @@ mod tests {
     fn lopdf_does_not_provide_reading_order_and_opens_the_probe() {
         let backend = by_name("lopdf").expect("lopdf is always compiled in");
         assert!(!backend.provides_reading_order());
+        assert_eq!(
+            backend.capabilities(),
+            super::BackendCapabilities::INCREMENTAL
+        );
         let bytes = probe_pdf().expect("probe builds");
         let mut session = backend.open(&bytes, None).expect("probe opens");
         assert_eq!(session.page_count(), 1);

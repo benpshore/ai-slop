@@ -2,12 +2,123 @@
 //! hash and where they were observed. The file is stat'ed before and after
 //! the read so a concurrent modification is reported instead of hashed.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use thiserror::Error;
 
-use crate::schema::{ContentHash, SourceObservation, sha256_hex};
+#[cfg(test)]
+use crate::schema::sha256_hex;
+use crate::schema::{ContentHash, SourceObservation};
+use sha2::{Digest, Sha256};
+
+/// Hash an arbitrary reader without first collecting it into a contiguous
+/// allocation.  The fixed buffer is deliberately part of this API's
+/// contract: acquisition memory does not grow with the input.
+pub fn hash_reader(reader: &mut impl Read) -> Result<ContentHash, std::io::Error> {
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(ContentHash(hex::encode(digest.finalize())))
+}
+
+/// An identity-checked file snapshot.  It can be hashed through a bounded
+/// buffered reader and only materialises contiguous bytes when a backend
+/// explicitly needs them.
+#[derive(Debug)]
+pub struct SnapshotHandle {
+    file: File,
+    observed: Observed,
+    pub source: SourceObservation,
+}
+
+impl SnapshotHandle {
+    pub fn len(&self) -> u64 {
+        self.observed.size
+    }
+
+    /// Snapshot handles are never empty; acquisition rejects empty files.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    pub fn hash(&self) -> Result<ContentHash, AcquireError> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut reader = BufReader::with_capacity(64 * 1024, file);
+        let hash = hash_reader(&mut reader)?;
+        self.verify()?;
+        Ok(hash)
+    }
+
+    /// Supply contiguous bytes to legacy/native backends.  Callers that can
+    /// consume a reader need not pay this document-sized allocation.
+    pub fn with_contiguous<T>(&self, consume: impl FnOnce(&[u8]) -> T) -> Result<T, AcquireError> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::with_capacity(self.observed.size as usize);
+        file.read_to_end(&mut bytes)?;
+        self.verify_len(bytes.len() as u64)?;
+        Ok(consume(&bytes))
+    }
+
+    fn verify(&self) -> Result<(), AcquireError> {
+        self.verify_len(self.observed.size)
+    }
+
+    fn verify_len(&self, read_len: u64) -> Result<(), AcquireError> {
+        let after = observe(&self.file.metadata()?);
+        if after != self.observed || read_len != self.observed.size {
+            return Err(AcquireError::ChangedDuringRead);
+        }
+        Ok(())
+    }
+}
+
+/// Open and identify a file without reading its contents into memory.
+pub fn open_snapshot(path: &Path, max_bytes: Option<u64>) -> Result<SnapshotHandle, AcquireError> {
+    let file = File::open(path)?;
+    let before_meta = file.metadata()?;
+    validate_metadata(&before_meta, max_bytes)?;
+    let observed = observe(&before_meta);
+    let source = SourceObservation {
+        path: path.to_string_lossy().into_owned(),
+        inode: observed.inode,
+        device: observed.device,
+        mtime_unix: observed.mtime_unix,
+        size: observed.size,
+    };
+    Ok(SnapshotHandle {
+        file,
+        observed,
+        source,
+    })
+}
+
+fn validate_metadata(meta: &fs::Metadata, max_bytes: Option<u64>) -> Result<(), AcquireError> {
+    if !meta.is_file() {
+        return Err(AcquireError::NotAFile);
+    }
+    if meta.len() == 0 {
+        return Err(AcquireError::Empty);
+    }
+    if let Some(max) = max_bytes
+        && meta.len() > max
+    {
+        return Err(AcquireError::TooLarge {
+            size: meta.len(),
+            max,
+        });
+    }
+    Ok(())
+}
 
 /// Why a file could not be snapshotted.
 #[derive(Debug, Error)]
@@ -107,9 +218,14 @@ fn observe(meta: &fs::Metadata) -> Observed {
 /// [`AcquireError::ChangedDuringRead`]. `max_bytes` bounds the size accepted
 /// before anything is read.
 pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, AcquireError> {
-    let read = read_verified(path, max_bytes)?;
-    let hash = ContentHash(sha256_hex(&read.bytes));
-    Ok(read.into_snapshot(hash))
+    let handle = open_snapshot(path, max_bytes)?;
+    let hash = handle.hash()?;
+    let source = handle.source.clone();
+    handle.with_contiguous(|bytes| Snapshot {
+        bytes: bytes.to_vec(),
+        hash,
+        source,
+    })
 }
 
 /// [`snapshot`] without the hash: read `path` completely with the same
@@ -186,6 +302,45 @@ mod tests {
         let hash = ContentHash(sha256_hex(&read.bytes));
 
         assert_eq!(read.into_snapshot(hash), snap);
+    }
+
+    #[test]
+    fn handle_hashes_without_materialising_and_can_supply_contiguous_bytes() {
+        let file = NamedTempFile::new().unwrap();
+        let content = vec![0x5a; 3 * 64 * 1024 + 17];
+        fs::write(file.path(), &content).unwrap();
+
+        let handle = open_snapshot(file.path(), None).unwrap();
+        assert_eq!(handle.len(), content.len() as u64);
+        assert_eq!(handle.hash().unwrap(), ContentHash(sha256_hex(&content)));
+        let observed = handle
+            .with_contiguous(|bytes| (bytes.len(), sha256_hex(bytes)))
+            .unwrap();
+        assert_eq!(observed, (content.len(), sha256_hex(&content)));
+    }
+
+    #[test]
+    fn reader_hash_uses_streaming_reads() {
+        struct SmallReads<'a> {
+            remaining: &'a [u8],
+            largest: usize,
+        }
+        impl Read for SmallReads<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let count = output.len().min(997).min(self.remaining.len());
+                self.largest = self.largest.max(count);
+                output[..count].copy_from_slice(&self.remaining[..count]);
+                self.remaining = &self.remaining[count..];
+                Ok(count)
+            }
+        }
+        let input = vec![7; 2 * 1024 * 1024];
+        let mut reader = SmallReads {
+            remaining: &input,
+            largest: 0,
+        };
+        assert_eq!(hash_reader(&mut reader).unwrap().0, sha256_hex(&input));
+        assert!(reader.largest <= 997);
     }
 
     #[test]

@@ -54,7 +54,9 @@ use docling_pdf::{PdfError, Pipeline};
 use lopdf::{Dictionary, Document, Error as LopdfError, LoadOptions, Object};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
+use crate::backend::{
+    BackendCapabilities, BackendError, DocumentSession, EncryptionProblem, Extractor,
+};
 use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest, sha256_hex};
 
 /// The `docling-pdf` release this backend is built against. Part of the
@@ -73,6 +75,11 @@ const NO_ITEMS_WARNING: &str = "docling: no items on page";
 const DOC_NAME: &str = "doc";
 /// Bound on the `/Parent` walk used for inherited page attributes.
 const MAX_PARENT_DEPTH: u32 = 64;
+/// Environment variable bounding docling's separately accounted conversion
+/// working set. This is intentionally independent of the input byte limit.
+const ADMISSION_ENV: &str = "TPE_DOCLING_MAX_CONVERSION_BYTES";
+const TEXT_BYTES_PER_PAGE: u64 = 1024 * 1024;
+const FULL_BYTES_PER_PAGE: u64 = 16 * 1024 * 1024;
 
 /// The docling extractor. `full == false` is the text-layer mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +180,23 @@ impl Extractor for DoclingBackend {
             let count = u32::try_from(doc.get_pages().len()).unwrap_or(u32::MAX);
             (count, page_geometry(&doc), info_entries(&doc))
         };
+        if let Some(limit) = std::env::var(ADMISSION_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            let per_page = if self.full {
+                FULL_BYTES_PER_PAGE
+            } else {
+                TEXT_BYTES_PER_PAGE
+            };
+            let estimate =
+                (bytes.len() as u64).saturating_add(u64::from(page_count).saturating_mul(per_page));
+            if estimate > limit {
+                return Err(BackendError::Limit(format!(
+                    "docling whole-document estimate {estimate} bytes exceeds {ADMISSION_ENV}={limit}"
+                )));
+            }
+        }
         Ok(Box::new(DoclingSession {
             bytes: bytes.to_vec(),
             password: password.map(String::from),
@@ -183,6 +207,14 @@ impl Extractor for DoclingBackend {
             converted: None,
             figure_bytes: HashMap::new(),
         }))
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            incremental_pages: false,
+            memory_mapping: false,
+            whole_document_conversion: true,
+        }
     }
 
     /// docling orders items itself.
@@ -307,6 +339,11 @@ impl DoclingSession {
         } else {
             docling_pdf::convert_text_layer_pages(&self.bytes, DOC_NAME, None)
         };
+        // Conversion owns all page text and cropped figures from here on;
+        // retaining the complete PDF beside those results only duplicates a
+        // document-sized allocation.
+        self.bytes.clear();
+        self.bytes.shrink_to_fit();
         self.converted = Some(match result {
             Ok(doc) => {
                 let mut walker = Walker::new(self.page_count);
