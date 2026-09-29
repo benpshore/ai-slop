@@ -317,7 +317,8 @@ pub fn run_job_with(
     let mut timings = StageTimings::default();
 
     let acquire_start = Instant::now();
-    let read = acquire::read_verified(Path::new(&job.path), job.max_bytes)?;
+    let read =
+        acquire::read_verified_with_policy(Path::new(&job.path), job.max_bytes, job.acquisition)?;
     timings.acquire_ms = elapsed_ms(acquire_start);
 
     let parse_start = Instant::now();
@@ -547,6 +548,7 @@ mod tests {
             pages: None,
             password: None,
             max_bytes: None,
+            acquisition: crate::acquire::AcquisitionPolicy::LocalOnly,
             figures_dir: figures_dir.map(|dir| dir.to_string_lossy().into_owned()),
         }
     }
@@ -615,6 +617,7 @@ mod tests {
             pages,
             password: None,
             max_bytes: None,
+            acquisition: crate::acquire::AcquisitionPolicy::LocalOnly,
             figures_dir: None,
         }
     }
@@ -692,6 +695,7 @@ mod tests {
             pages: None,
             password: None,
             max_bytes: None,
+            acquisition: crate::acquire::AcquisitionPolicy::LocalOnly,
             figures_dir: None,
         };
         match run_job(&job) {

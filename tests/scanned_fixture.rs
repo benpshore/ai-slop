@@ -28,6 +28,7 @@ fn job_for(path: &Path, backend: &str) -> Job {
         pages: None,
         password: None,
         max_bytes: None,
+        acquisition: tpe::acquire::AcquisitionPolicy::LocalOnly,
         figures_dir: None,
     }
 }

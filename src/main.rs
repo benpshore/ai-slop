@@ -128,6 +128,12 @@ struct ExtractArgs {
     /// Reject inputs larger than this many bytes.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Allow macOS to download cloud placeholders on demand.
+    #[arg(long)]
+    hydrate: bool,
+    /// Maximum aggregate logical bytes that may be materialized in this batch.
+    #[arg(long, value_name = "N")]
+    materialization_budget: Option<u64>,
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
@@ -147,6 +153,12 @@ struct BibliographyArgs {
     /// Reject inputs larger than this many bytes.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Allow macOS to download cloud placeholders on demand.
+    #[arg(long)]
+    hydrate: bool,
+    /// Maximum aggregate logical bytes that may be materialized in this batch.
+    #[arg(long, value_name = "N")]
+    materialization_budget: Option<u64>,
 }
 
 #[derive(Args)]
@@ -179,6 +191,12 @@ struct BenchArgs {
     /// Number of `run_job` executions per file.
     #[arg(long, default_value_t = 5, value_name = "N")]
     iterations: usize,
+    /// Allow macOS to download cloud placeholders on demand.
+    #[arg(long)]
+    hydrate: bool,
+    /// Maximum aggregate logical bytes that may be materialized in this batch.
+    #[arg(long, value_name = "N")]
+    materialization_budget: Option<u64>,
 }
 
 #[derive(Args)]
@@ -315,6 +333,42 @@ fn figures_dir_field(dir: Option<&Path>) -> Option<String> {
     dir.map(|path| path.to_string_lossy().into_owned())
 }
 
+fn acquisition_policy(hydrate: bool) -> tpe::acquire::AcquisitionPolicy {
+    if hydrate {
+        tpe::acquire::AcquisitionPolicy::AllowHydration
+    } else {
+        tpe::acquire::AcquisitionPolicy::LocalOnly
+    }
+}
+
+/// Reserve logical sizes for a hydrating batch, leaving a small filesystem
+/// safety margin even when no explicit limit was supplied.
+fn materialization_budget(
+    hydrate: bool,
+    requested: Option<u64>,
+    filesystem: &Path,
+) -> anyhow::Result<Option<tpe::acquire::MaterializationBudget>> {
+    if !hydrate {
+        return Ok(None);
+    }
+    let available = tpe::acquire::available_space(filesystem)?;
+    let margin = (available / 20).max(64 * 1024 * 1024);
+    let safe = available.saturating_sub(margin);
+    Ok(Some(tpe::acquire::MaterializationBudget::new(
+        requested.unwrap_or(safe).min(safe),
+    )))
+}
+
+fn reserve_path(
+    budget: &mut Option<tpe::acquire::MaterializationBudget>,
+    path: &Path,
+) -> Result<(), tpe::acquire::AcquireError> {
+    if let Some(budget) = budget {
+        budget.reserve(tpe::acquire::logical_size(path)?)?;
+    }
+    Ok(())
+}
+
 /// Process exit code for a batch: failure when any item failed.
 fn exit_code(any_failed: bool) -> ExitCode {
     if any_failed {
@@ -374,6 +428,7 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         pages: args.pages,
         password: args.password.clone(),
         max_bytes: args.max_bytes,
+        acquisition: acquisition_policy(args.hydrate),
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let start = Instant::now();
@@ -399,7 +454,33 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
             .with_context(|| format!("creating output directory {}", dir.display()))?;
     }
 
-    let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
+    let mut budget = materialization_budget(
+        args.hydrate,
+        args.materialization_budget,
+        args.db.parent().unwrap_or(Path::new(".")),
+    )?;
+    let mut accepted = VecDeque::new();
+    let mut any_deferred = false;
+    for path in &args.paths {
+        match reserve_path(&mut budget, path) {
+            Ok(()) => accepted.push_back(path.clone()),
+            Err(err) => {
+                any_deferred = true;
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"status":"deferred", "path":path, "error":err.to_string()})
+                    );
+                } else {
+                    println!(
+                        "deferred\t-\t0p\t0 refs\t0 cites\t0.0 ms\t{}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(accepted);
     let workers = args.jobs.clamp(1, args.paths.len().max(1));
     let (sender, receiver) = mpsc::channel::<Outcome>();
 
@@ -427,7 +508,7 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
         Ok(any_failed)
     })?;
 
-    Ok(exit_code(any_failed))
+    Ok(exit_code(any_failed || any_deferred))
 }
 
 /// A bibliography-only result does not enter the full-document ledger: it
@@ -440,11 +521,18 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
     let extractor = backend::by_name(&args.backend)
         .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?;
     let mut any_failed = false;
+    let mut budget =
+        materialization_budget(args.hydrate, args.materialization_budget, Path::new("."))?;
     for path in &args.paths {
         let started = Instant::now();
         let mut hash = None;
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
+            reserve_path(&mut budget, path)?;
+            let snapshot = tpe::acquire::snapshot_with_policy(
+                path,
+                args.max_bytes,
+                acquisition_policy(args.hydrate),
+            )?;
             hash = Some(snapshot.hash.0);
             let scan = bibliography::scan_backward(
                 extractor.as_ref(),
@@ -481,6 +569,18 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
             }
             Ok(Err(err)) => {
                 any_failed = true;
+                if err
+                    .downcast_ref::<tpe::acquire::AcquireError>()
+                    .is_some_and(|e| {
+                        matches!(
+                            e,
+                            tpe::acquire::AcquireError::Dataless
+                                | tpe::acquire::AcquireError::MaterializationBudget { .. }
+                        )
+                    })
+                {
+                    record["status"] = serde_json::json!("deferred");
+                }
                 record["error"] = serde_json::json!(err.to_string());
                 record["warnings"] = serde_json::json!([err.to_string()]);
             }
@@ -525,16 +625,23 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
         }
         Err(err) => {
             eprintln!("{path_display}: {err}");
+            let deferred = err.contains("cloud placeholder is not materialized")
+                || err.contains("materialization deferred");
+            let status = if deferred {
+                "deferred"
+            } else {
+                Status::Failed.as_str()
+            };
             if args.json {
                 let line = serde_json::json!({
-                    "status": Status::Failed.as_str(),
+                    "status": status,
                     "path": path_display,
                     "error": err.clone(),
                     "ms": wall_ms,
                 });
                 println!("{line}");
             } else {
-                println!("failed\t-\t0p\t0 refs\t0 cites\t{wall_ms:.1} ms\t{path_display}");
+                println!("{status}\t-\t0p\t0 refs\t0 cites\t{wall_ms:.1} ms\t{path_display}");
             }
             Ok(true)
         }
@@ -748,13 +855,20 @@ fn run_bench(args: &BenchArgs) -> anyhow::Result<()> {
     pipeline::warm_up();
     let iterations = args.iterations.max(1);
     let mut all_samples: Vec<f64> = Vec::new();
+    let mut budget =
+        materialization_budget(args.hydrate, args.materialization_budget, Path::new("."))?;
     for path in &args.paths {
+        if let Err(err) = reserve_path(&mut budget, path) {
+            println!("{}\tdeferred: {err}", path.display());
+            continue;
+        }
         let job = Job {
             path: path.to_string_lossy().into_owned(),
             backend: args.backend.clone(),
             pages: None,
             password: None,
             max_bytes: None,
+            acquisition: acquisition_policy(args.hydrate),
             figures_dir: None,
         };
         match bench_file(&job, iterations) {
@@ -893,6 +1007,7 @@ fn eval_item(args: &EvalArgs, item: &ManifestItem) -> Evaluated {
         pages: None,
         password: None,
         max_bytes: None,
+        acquisition: tpe::acquire::AcquisitionPolicy::LocalOnly,
         figures_dir: figures_dir_field(args.figures_dir.as_deref()),
     };
     let result = match pipeline::run_job(&job) {
