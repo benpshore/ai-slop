@@ -25,3 +25,4 @@ stated. No track is production-ready.
 - Measured numbers come only from Eval or Native workflow artifacts. Give the run id, backend, split and runner.
 - No README status change without a measurement behind it.
 - Resolve every Codex review thread with a reference to the commit that addresses it.
+- When Codex PRs overlap or compete, follow the [PR consolidation workflow](PR_CONSOLIDATION.md): inventory each source PR, retain its regression coverage, select one implementation per behavior, and close superseded PRs only after the integration PR is open.
