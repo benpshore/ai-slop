@@ -338,10 +338,16 @@ const JOIN_PREFIXES: &[&str] = &[
 /// Shortest unattested right half that still joins after a
 /// [`JOIN_PREFIXES`] entry (`pre-` + `serving`).
 const PREFIX_JOIN_MIN_RIGHT: usize = 5;
-/// Longest capitalised left half (`Multi-`, `Cross-`, `Self-`) whose hyphen
-/// before a lowercase attested word is kept unless the joined word
-/// dominates (see [`hyphen_policy_counted`]).
-const CAPITALISED_PREFIX_MAX: usize = 6;
+/// Capitalised left halves (`Multi-`, `Cross-`, `Dual-`), compared lower
+/// cased, whose hyphen before a lowercase attested word is kept unless the
+/// joined word dominates (see [`hyphen_policy_counted`]). Any other
+/// capitalised word (`Every-` + `body`) is left to the later rules.
+const CAPITALISED_COMPOUND_PREFIXES: &[&str] = &[
+    "multi", "cross", "self", "semi", "non", "pre", "post", "co", "sub", "inter", "intra", "meta",
+    "anti", "bi", "tri", "dual", "single", "low", "high", "long", "short", "real", "open", "two",
+    "three", "zero", "few", "one", "fine", "coarse", "end", "full", "half", "well", "ill", "state",
+    "large", "small", "deep", "wide",
+];
 /// The joined word dominates the hyphenated pair when it occurs at least
 /// this many times as often.
 const JOINED_DOMINANCE: usize = 2;
@@ -1539,14 +1545,13 @@ fn printed_compound(left: &str, right: &str) -> bool {
         || (left_len <= 5 && right_len == 3 && vowelless(right))
 }
 
-/// Whether `left` is a capitalised short word (`Multi`, `Cross`, `Self`:
-/// a capital, then lowercase letters, `CAPITALISED_PREFIX_MAX` letters at
-/// most) and `right` is all lowercase (`agent`): in a title or at a
-/// sentence start such a pair is far more often a compound than a broken
-/// word.
+/// Whether `left` is a capitalised compound prefix (`Multi`, `Cross`,
+/// `Dual`: a capital, then lowercase letters, and a
+/// `CAPITALISED_COMPOUND_PREFIXES` entry when lower cased) and `right` is
+/// all lowercase (`agent`): in a title or at a sentence start such a pair
+/// is far more often a compound than a broken word.
 fn capitalised_prefix(left: &str, right: &str) -> bool {
-    let left_len = left.chars().count();
-    (2..=CAPITALISED_PREFIX_MAX).contains(&left_len)
+    CAPITALISED_COMPOUND_PREFIXES.contains(&left.to_lowercase().as_str())
         && left.chars().next().is_some_and(char::is_uppercase)
         && left.chars().skip(1).all(char::is_lowercase)
         && !right.is_empty()
@@ -1583,11 +1588,12 @@ pub fn hyphen_policy(left: &str, right: &str, attested: &dyn Fn(&str) -> bool) -
 /// The first matching rule wins:
 /// 1. the hyphenated pair is attested at least as often as the joined word
 ///    → keep (`noise-regularized` seen);
-/// 2. a capitalised left half of at most `CAPITALISED_PREFIX_MAX` letters
-///    before a lowercase right half that is an attested word of at least
+/// 2. a capitalised `CAPITALISED_COMPOUND_PREFIXES` entry before a
+///    lowercase right half that is an attested word of at least
 ///    `MIN_ATTESTED_HALF` letters, not an `AMBIGUOUS_HALVES` entry → keep
 ///    (`Multi-` + `agent`), unless the joined word is attested and occurs
-///    at least `JOINED_DOMINANCE` times as often as the pair;
+///    at least `JOINED_DOMINANCE` times as often as the pair; any other
+///    capitalised left half (`Every-` + `body`) goes on to the later rules;
 /// 3. the joined word is attested → join (`with-` + `out`, `without` seen);
 /// 4. the left half is a `COMPOUND_PREFIXES` entry (`self-`) → keep;
 /// 5. the left half is a `JOIN_PREFIXES` entry and the right half is all
@@ -3145,10 +3151,10 @@ mod tests {
         assert_eq!(counted("opti", "mization", &[("optimization", 1)]), Join);
     }
 
-    /// A capitalised short left half before an attested lowercase word
+    /// A capitalised compound prefix before an attested lowercase word
     /// keeps its hyphen unless the joined word occurs at least twice as
-    /// often as the pair; broken words whose right half is no word still
-    /// join.
+    /// often as the pair; broken words whose right half is no word, and
+    /// capitalised words that are no compound prefix, still join.
     #[test]
     fn hyphen_policy_keeps_capitalised_prefix_compounds() {
         use HyphenPolicy::{Join, Keep};
@@ -3156,7 +3162,13 @@ mod tests {
         assert_eq!(counted("Multi", "agent", &[("agent", 3)]), Keep);
         assert_eq!(counted("multi", "agent", &[("agent", 3)]), Join);
         assert_eq!(counted("Cross", "domain", &[("domain", 1)]), Keep);
-        assert_eq!(counted("Super", "resolution", &[("resolution", 2)]), Keep);
+        assert_eq!(counted("Dual", "channel", &[("channel", 1)]), Keep);
+        // `Super` is no compound prefix: the bound-prefix rule joins it.
+        assert_eq!(counted("Super", "resolution", &[("resolution", 2)]), Join);
+        // An ordinary capitalised word split at the line end joins, also
+        // when its right half occurs elsewhere.
+        assert_eq!(counted("Every", "body", &[("body", 2)]), Join);
+        assert_eq!(counted("Over", "all", &[("all", 3)]), Join);
         // The joined word below twice the pair's count keeps the hyphen.
         let close = [("agent", 1), ("multi-agent", 2), ("multiagent", 3)];
         assert_eq!(counted("Multi", "agent", &close), Keep);
@@ -3174,7 +3186,7 @@ mod tests {
         assert_eq!(counted("Addi", "tionally", &[]), Join);
         assert_eq!(counted("How", "ever", &[("ever", 1), ("however", 1)]), Join);
         assert_eq!(counted("Pro", "ing", &[("ing", 1)]), Join);
-        // Longer or all-capital left halves are not covered.
+        // Other or all-capital left halves are not covered.
         assert_eq!(counted("Presence", "only", &[("only", 4)]), Join);
         assert_eq!(counted("MULTI", "agent", &[("agent", 1)]), Join);
     }
@@ -3227,8 +3239,9 @@ mod tests {
         assert_eq!(vocab.count("step"), 1);
     }
 
-    /// Capitalised compounds, pairs attested as often as the joined word and
-    /// all-capital breaks through the whole pass.
+    /// Capitalised compounds, pairs attested as often as the joined word,
+    /// all-capital breaks and a capitalised word that is no compound prefix
+    /// (`Every-` + `body`, `body` seen) through the whole pass.
     #[test]
     fn capitalised_and_all_capital_hyphens_in_the_document_pass() {
         let mut pages = vec![page_of(
@@ -3247,17 +3260,20 @@ mod tests {
                 ),
                 ("see the Proto-", 60.0, 528.0, 0),
                 ("Indo text.", 60.0, 516.0, 0),
+                ("so Every-", 60.0, 504.0, 0),
+                ("body agrees on one body plan.", 60.0, 492.0, 0),
             ],
         )];
         let report = clean_document(&mut pages);
-        assert_eq!(report.hyphens_joined, 1);
+        assert_eq!(report.hyphens_joined, 2);
         assert_eq!(report.hyphens_kept, 2);
         assert_eq!(
             pages[0].text,
             "the Multi-\nagent planner and one agent per task.\n\
              OUR EFFICIENT\nMODELS\n\
              a multi-\ntask model, a multi-task loss and multitask data.\n\
-             see the Proto-\nIndo text."
+             see the Proto-\nIndo text.\n\
+             so Everybody\nagrees on one body plan."
         );
     }
 
