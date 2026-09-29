@@ -774,15 +774,12 @@ fn superscript_marker_re() -> &'static Regex {
 
 /// A line holding nothing but a superscript citation that text cleanup
 /// left detached from its word: a Unicode superscript run (`⁵`, `⁵⁻⁷`,
-/// `¹⁰,¹¹`) or plain digits it could not attach (`5`, `5–7`, `10,11`).
+/// `¹⁰,¹¹`), which text cleanup produces only for raised fragments. Plain
+/// digits on a line of their own (`5`, `10`) are figure axis ticks or
+/// labels as often as citations, so they never count.
 fn detached_fragment_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"^(?:[⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:[,⁻–][⁰¹²³⁴⁵⁶⁷⁸⁹]+)*|\d{1,3}(?:\s*[,–\-−]\s*\d{1,3}){0,5})$",
-        )
-        .expect("valid regex")
-    })
+    RE.get_or_init(|| Regex::new(r"^[⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:[,⁻–][⁰¹²³⁴⁵⁶⁷⁸⁹]+)*$").expect("valid regex"))
 }
 
 /// A `;`-separated clause of a parenthetical that is only years
@@ -1816,17 +1813,27 @@ fn hyphen_break(previous: &str, next: &str, context: &str) -> HyphenJoin {
     }
 }
 
-/// Is `first` a short capitalised first half of a title-case compound
-/// (`Multi-` + `turn`, `Dual-` + `channel`): four or five letters, a capital
-/// then lowercase, before a lowercase word of four or more letters? Shorter
-/// halves (`Gen-` + `erate`, `Red-` + `field`) and shorter endings
-/// (`Learn-` + `ing`) are word breaks.
+/// First halves of title-case compounds (lower case) that keep their
+/// hyphen before an unattested lowercase word ([`capitalised_prefix`]).
+const CAPITALISED_COMPOUND_PREFIXES: &[&str] = &[
+    "multi", "cross", "self", "semi", "non", "pre", "post", "co", "sub", "inter", "intra", "meta",
+    "anti", "bi", "tri", "dual", "single", "low", "high", "long", "short", "real", "open", "two",
+    "three", "zero", "few", "one", "fine", "coarse", "end", "full", "half", "well", "ill", "state",
+];
+
+/// Is `first` the capitalised first half of a title-case compound
+/// (`Multi-` + `turn`, `Dual-` + `channel`): a [`CAPITALISED_COMPOUND_PREFIXES`]
+/// entry set as a capital then lowercase, before a lowercase word of four
+/// or more letters? Any other capitalised half (`Every-` + `body`, `Gen-` +
+/// `erative`) and shorter endings (`Learn-` + `ing`) are word breaks; a
+/// hyphenated pair attested in the section already keeps its hyphen in
+/// [`hyphen_policy`].
 fn capitalised_prefix(first: &str, second: &str) -> bool {
     let mut chars = first.chars();
     let capital = chars.next().is_some_and(char::is_uppercase);
     capital
         && chars.all(char::is_lowercase)
-        && (4..=5).contains(&first.chars().count())
+        && CAPITALISED_COMPOUND_PREFIXES.contains(&first.to_lowercase().as_str())
         && second.chars().count() >= 4
         && second.chars().all(char::is_lowercase)
 }
@@ -2845,6 +2852,12 @@ fn lower_venue_word_re() -> &'static Regex {
 /// clause with venue words (`ieee transactions on …`) and a one-word or
 /// numbered clause (`nature, 529`, `eneuro 12`) do not.
 fn title_goes_on(after: &str) -> bool {
+    // An identifier masked to spaces follows the period (`Suite.
+    // https://www.ibm.com/products/ maximo Accessed: …`): the title ends
+    // there, whatever text trails the identifier.
+    if after.starts_with("  ") {
+        return false;
+    }
     let rest = after.trim_start_matches(['.', ' ']);
     if lower_roman_re().is_match(rest) {
         return true;
@@ -3715,9 +3728,13 @@ fn comma_style(masked: &str) -> Option<CommaSplit> {
     let stripped = part.trim_start();
     let first_char = stripped.chars().next()?;
     // A quoted title opens the part (IEEE); a quoted phrase that the title
-    // runs on from (`“Direct search” solution of …`) does not.
+    // runs on from (`“Direct search” solution of …`) does not. The closing
+    // quote may lie past later commas (`“Time-efficient, high-resolution
+    // …,” Magnetic resonance in medicine`), so look for it in the rest of
+    // the entry, not in this comma part alone.
+    let part_start = range.start + (part.len() - stripped.len());
     if matches!(first_char, '“' | '"' | '„' | '‘')
-        && find_quoted(stripped).is_some_and(|(quote, _)| quote.start == 0)
+        && find_quoted(&masked[part_start..]).is_some_and(|(quote, _)| quote.start == 0)
     {
         return None;
     }
@@ -3768,7 +3785,7 @@ fn comma_style(masked: &str) -> Option<CommaSplit> {
         }
     }
     // `et al.` opening the part belongs to the authors.
-    let mut title_start = range.start + (part.len() - stripped.len());
+    let mut title_start = part_start;
     if let Some(lead) = et_al_lead_re().find(stripped) {
         title_start += lead.end();
     }
@@ -4438,10 +4455,6 @@ struct RefIndex {
     max_number: u32,
     /// (first-author surname, lower case; year; entry index).
     by_author_year: Vec<(String, u16, u32)>,
-    /// Some numbered entry has a bare label (`1`, `1.`, `1)`), as in the
-    /// RSC and Nature styles whose text cites by superscripts; detached
-    /// plain-digit superscript lines are read only then.
-    bare_labels: bool,
     /// Entry index -> the shape of its parsed author list, for entries
     /// with at least one parsed author.
     shapes: BTreeMap<u32, AuthorShape>,
@@ -4697,17 +4710,12 @@ impl RefIndex {
         let mut spaces: Vec<NumberSpace> = Vec::new();
         let mut last_number: Option<u32> = None;
         let mut by_author_year: Vec<(String, u16, u32)> = Vec::new();
-        let mut bare_labels = false;
         let mut shapes: BTreeMap<u32, AuthorShape> = BTreeMap::new();
         for entry in refs {
             if let Some(shape) = author_shape(entry) {
                 shapes.insert(entry.index, shape);
             }
             if let Some(number) = printed_number(entry) {
-                bare_labels |= entry
-                    .label
-                    .as_deref()
-                    .is_some_and(|label| !label.starts_with('['));
                 let restart = last_number.is_some_and(|previous| number <= previous);
                 if spaces.is_empty() || restart {
                     spaces.push(NumberSpace {
@@ -4774,7 +4782,6 @@ impl RefIndex {
             spaces,
             max_number,
             by_author_year,
-            bare_labels,
             shapes,
         }
     }
@@ -5251,8 +5258,8 @@ fn is_prose_line(line: &str) -> bool {
 /// (arXiv:2510.26824, RSC): a run of lines holding only a superscript
 /// fragment ([`detached_fragment_re`]) right after a prose line, which
 /// text cleanup could not attach to its word. Each fragment is a marker at
-/// its own line; plain digits (`5`, `10,11`) count only when a list has
-/// bare labels (`1`, `1.`), Unicode superscripts always. The run is
+/// its own line; plain digits (`5`, `10,11`) never count (axis ticks
+/// between prose lines look the same). The run is
 /// dropped when a blank line separates it from the prose line above, when
 /// any fragment does not cite the list (`0`, a number above it), when it
 /// is longer than [`MAX_DETACHED_RUN`], or when neither a prose line nor
@@ -5276,17 +5283,12 @@ fn detached_superscript_markers(
             if !after_prose {
                 continue;
             }
-            let plain = trimmed.starts_with(|c: char| c.is_ascii_digit());
             let ascii: String = trimmed
                 .chars()
                 .filter(|c| !c.is_whitespace())
                 .map(superscript_ascii)
                 .collect();
-            let numbers = if plain && !index.bare_labels {
-                None
-            } else {
-                cited_numbers(&ascii, index.max_number)
-            };
+            let numbers = cited_numbers(&ascii, index.max_number);
             let at = start + (line.len() - line.trim_start().len());
             let space = home_space(ends, at);
             let found = numbers.and_then(|numbers| {
@@ -6537,6 +6539,17 @@ mod loop12_parse_tests {
             HyphenJoin::Drop
         );
         assert_eq!(hyphen_break("Deep Learn-", "ing", ""), HyphenJoin::Drop);
+        assert_eq!(
+            hyphen_break("Dual-", "channel attention", ""),
+            HyphenJoin::Keep
+        );
+        // A capitalised half outside the compound prefixes is a word break
+        // unless the hyphenated pair is attested.
+        assert_eq!(hyphen_break("Every-", "body counts", ""), HyphenJoin::Drop);
+        assert_eq!(
+            hyphen_break("Every-", "body counts", "every-body"),
+            HyphenJoin::Keep
+        );
     }
 }
 
@@ -10847,11 +10860,12 @@ mod tests {
             vec![(text.to_string(), targets.to_vec())]
         }
 
-        /// arXiv:2510.26824 (RSC, bare labels `1`–`90`): superscript
-        /// numbers that text cleanup left on lines of their own between
-        /// body lines, plain (`1`, `2`) or Unicode (`⁵⁻⁷`), cite the list at
-        /// their own line; a Unicode run opening a line before `, which`
-        /// closes the line above (`Semantic Scholar⏎¹⁰,¹¹, which`).
+        /// arXiv:2510.26824 (RSC, bare labels `1`–`90`): Unicode superscript
+        /// runs that text cleanup left on lines of their own between body
+        /// lines (`⁵⁻⁷`) cite the list at their own line; plain digits on
+        /// lines of their own (`1`, `2`) do not (they read the same as axis
+        /// ticks); a Unicode run opening a line before `, which` closes the
+        /// line above (`Semantic Scholar⏎¹⁰,¹¹, which`).
         #[test]
         fn superscript_lines_of_their_own_cite_a_numbered_list() {
             let refs = labelled_refs(12, bare_label);
@@ -10867,17 +10881,7 @@ mod tests {
                 .iter()
                 .map(|m| (m.text.as_str(), m.targets.clone()))
                 .collect();
-            assert_eq!(
-                got,
-                vec![
-                    ("1", vec![1]),
-                    ("2", vec![2]),
-                    ("3", vec![3]),
-                    ("4", vec![4]),
-                    ("⁵⁻⁷", vec![5, 6, 7]),
-                    ("¹⁰,¹¹", vec![10, 11]),
-                ]
-            );
+            assert_eq!(got, vec![("⁵⁻⁷", vec![5, 6, 7]), ("¹⁰,¹¹", vec![10, 11])]);
             assert_marker_offsets(&body, &markers);
 
             let text = "Semantic Scholar\n¹⁰,¹¹, which";
@@ -10898,9 +10902,9 @@ mod tests {
         }
 
         /// Detached fragments are read only after a prose line and before a
-        /// prose line or the page end; plain digits need a list with bare
-        /// labels; a run with `0` (axis ticks) or a blank line before it is
-        /// no citation.
+        /// prose line or the page end; plain digits never count, whatever
+        /// the labels (axis ticks between prose lines); a run with `0` or a
+        /// blank line before it is no citation.
         #[test]
         fn detached_superscript_lines_need_prose_around_them() {
             let bare = RefIndex::build(&labelled_refs(90, bare_label), &[]);
@@ -10908,31 +10912,33 @@ mod tests {
 
             let text = "Some prose text is here\n3\nMore prose text is here\n⁴\nFinal prose line";
             assert_eq!(detached_in(text, text.len(), &bracketed), one("⁴", &[4]));
-            assert_eq!(
-                detached_in(text, text.len(), &bare),
-                vec![("3".to_string(), vec![3]), ("⁴".to_string(), vec![4])]
-            );
+            assert_eq!(detached_in(text, text.len(), &bare), one("⁴", &[4]));
             let text = "Figure 2 shows the loss curves\n0\n20\n40\nEpoch count on the axis";
             assert!(detached_in(text, text.len(), &bare).is_empty());
-            let text = "The figure caption goes here\n2\n4\nx";
+            // Axis ticks between two prose lines are no citations.
+            let text = "The loss falls over training\n5\n10\nEpoch count on the axis";
             assert!(detached_in(text, text.len(), &bare).is_empty());
-            let text = "Prose line is here now\n\n5\nProse again is here";
+            let text = "The figure caption goes here\n²\n⁴\nx";
+            assert!(detached_in(text, text.len(), &bare).is_empty());
+            let text = "Prose line is here now\n\n⁵\nProse again is here";
             assert!(detached_in(text, text.len(), &bare).is_empty());
             let text = "Two or more words\n5–7\n10,11";
+            assert!(detached_in(text, text.len(), &bare).is_empty());
+            let text = "Two or more words\n⁵⁻⁷\n¹⁰,¹¹";
             assert_eq!(
                 detached_in(text, text.len(), &bare),
                 vec![
-                    ("5–7".to_string(), vec![5, 6, 7]),
-                    ("10,11".to_string(), vec![10, 11])
+                    ("⁵⁻⁷".to_string(), vec![5, 6, 7]),
+                    ("¹⁰,¹¹".to_string(), vec![10, 11])
                 ]
             );
             // A run cut off by the end of the scan window (a label column
             // above a heading) is not a citation; at the page end it is.
-            let text = "Prose words are here\n5\nReferences";
+            let text = "Prose words are here\n⁵\nReferences";
             let cut = text.find("References").expect("heading");
             assert!(detached_in(text, cut, &bare).is_empty());
-            let text = "Prose words are here\n5";
-            assert_eq!(detached_in(text, text.len(), &bare), one("5", &[5]));
+            let text = "Prose words are here\n⁵";
+            assert_eq!(detached_in(text, text.len(), &bare), one("⁵", &[5]));
         }
 
         /// arXiv:2506.23487, 2509.04183, 2603.04445, 2306.11313: entries
