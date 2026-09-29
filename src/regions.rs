@@ -15,16 +15,26 @@
 //! Captions: a line tagged `caption` whose text starts with `Figure`,
 //! `Fig.`, `Table` or `Algorithm` (any case), or an untagged `body` line in
 //! that shape that is not itself prose (`TABLE I`, `Algorithm 1 Name`,
-//! `Table 2 Results`: a number followed by a capitalised word).
-//! Continuation lines below a caption start, with no blank separator, are
-//! tagged `caption` up to the first continuation line ending a sentence
-//! (at most [`CAPTION_MAX_LINES`] lines in all). A continuation stops at a
-//! prose-like line that opens a sentence (an uppercase first word and at
-//! least 10 words) and, under a caption spanning the middle of a
-//! two-column page, at a line that does not span it too. An untagged
-//! caption start is tagged `caption` once a region is found under it. A
-//! caption start directly under a prose line (no blank separator) is
-//! ignored.
+//! `Table 2 Results`: a label followed by a capitalised word). Labels are
+//! numbers (`2`, `3.1`), a capital letter and a number (`A.1`, `S2`,
+//! `B3`), roman numerals (`II`) or a number and a lowercase letter
+//! (`2a`); `Table 1 continued from previous page` and `Table 3
+//! (continued)` are table caption starts too. Continuation lines below a
+//! caption start, in its band, with no blank separator, are tagged
+//! `caption` (at most [`CAPTION_MAX_LINES`] lines in all) while they are
+//! prose or end a sentence (or, in a closed block, are prose-like), are
+//! not numbered headings or caption starts, and keep the start's font
+//! size (when both sizes are known). The block is *closed* when the lines
+//! from the start down to the first blank separator are at most
+//! [`CAPTION_MAX_LINES`]: a caption set off from what follows. After a
+//! line ending a sentence (the start's own full stop included), the next
+//! line continues only when it starts lowercase or the block is closed;
+//! otherwise a prose-like line that opens a sentence (an uppercase first
+//! word and at least 10 words) stops it unless the block is closed. Under
+//! a caption spanning the middle of a two-column page, a line that does
+//! not span it too stops it. An untagged caption start is tagged `caption`
+//! once a region is found under it. A caption start directly under a prose
+//! line (no blank separator) is ignored.
 //!
 //! Regions:
 //! - figure: the lines above a figure caption up to the nearest prose
@@ -52,7 +62,20 @@
 //!   prose continuation lines (tagged `caption`), every line that is not
 //!   prose-like is tagged `table`, up to the next `Table` label or the
 //!   first prose-like line spanning at least 40 % of the turned page
-//!   width. The other region walks and footnotes are skipped there.
+//!   width (or another caption start). The other region walks and
+//!   footnotes are skipped there. A sideways page without a table region
+//!   of its own, following a sideways page with `table` lines, continues
+//!   that table when the column starts of its `body` lines match those of
+//!   the previous page's `table` lines (at least 2 starts within 6 pt,
+//!   and at least half of the larger set): every line from the top is
+//!   taken the same way.
+//! - continued tables: on a page whose `Table N continued from previous
+//!   page` (or `Table N (continued)`) label has no prose-like `body` line
+//!   above it, every `body` line above the label, and below it every line
+//!   that is not prose-like up to the next caption start or the first
+//!   prose-like line spanning at least 40 % of the page width (a
+//!   `longtable` page), is tagged `table` and the label `caption`, before
+//!   the other walks and with no line cap.
 //! - shredded sideways pages: when the lines are not vertical but the
 //!   spans are (at least 10 spans of 4 or more characters, 60 % of those
 //!   with a telling shape, have boxes taller than wide), the lines are
@@ -98,14 +121,22 @@
 //!   overlapping x range, or through a box stacked that close to such a
 //!   box), `figure` when it has none. Prose-like lines are tagged only when
 //!   the box has a caption (a framed prompt or dialogue box in a figure
-//!   float); a box covering at least 70 % of the page width and height
+//!   float) or is a frame: a `vector` box at least 100 pt tall holding at
+//!   least 3 short lines (at most 4 words, or numeric) on a page with no
+//!   caption. A box covering at least 70 % of the page width and height
 //!   needs a caption to be used at all, and one covering 95 % of the page
-//!   area (a scan under its text layer) is never used.
+//!   area (a scan under its text layer) is never used. Guard: a run of at
+//!   least 3 consecutive prose-like lines inside the box of at least 12
+//!   words each, with no caption block within 36 pt of the run, is running
+//!   prose the box happens to cover and is not tagged.
 //! - graphics labels: at least 4 `body` lines of at most 4 words (not
 //!   numbered headings) whose boxes overlap a figure box at least 20 pt
-//!   wide and tall, or lie between it and its `Figure` caption (at most
-//!   120 pt below or above it, with no prose-like line between), are
-//!   tagged `figure`.
+//!   wide and tall, lie within 24 pt of it (not ending a sentence), or lie
+//!   between it and its `Figure` caption (at most 120 pt below or above
+//!   it, with no prose-like line between), are tagged `figure`; so are
+//!   stacked labels: at least 3 single-word `body` lines, each directly
+//!   above or below another (x ranges overlapping, at most one line
+//!   height apart), at least one of them within 24 pt of such a box.
 //! - math: last, a `body` line with at most 2 ordinary words (letter runs
 //!   of 3 or more, not `log`, `max` and the like), at most 1 of them of 4
 //!   or more letters, and at least
@@ -127,10 +158,11 @@
 //! `algorithm` by the caption walks (pseudo-code marker lines excepted
 //! under an `Algorithm` caption), and every walk stops at the first one.
 //! The exceptions rest on drawn evidence, not on a walk: lines inside a
-//! captioned figure box, between the rules or in the column pattern of a
-//! table with paragraph cells, and monospace code lines. Figure and table
-//! regions need at least [`MIN_REGION_LINES`] lines, and a region longer
-//! than [`REGION_MAX_LINES`] lines is dropped, not tagged. A page that
+//! captioned figure box or a frame, between the rules or in the column
+//! pattern of a table with paragraph cells, and monospace code lines.
+//! Figure and table regions need at least [`MIN_REGION_LINES`] lines, and
+//! a region longer than [`REGION_MAX_LINES`] lines is dropped, not tagged
+//! (continued tables excepted). A page that
 //! already carries a `regions:` warning is not tagged again.
 
 use std::cmp::Ordering;
@@ -139,7 +171,17 @@ use crate::reading_order::median;
 use crate::schema::{BBox, Line, PageText};
 
 /// Most lines a caption (start plus continuations) may take.
-pub const CAPTION_MAX_LINES: usize = 6;
+pub const CAPTION_MAX_LINES: usize = 14;
+/// Most caption lines through which untagged prose lines are skipped by
+/// the walk below a caption, and wide prose lines are taken under a
+/// sideways table label.
+const PROSE_CAPTION_LINES: usize = 6;
+/// Largest font size difference, in points, between a caption start and
+/// its continuation lines.
+const CAPTION_SIZE_SLACK: f32 = 0.5;
+/// Largest distance, in points, between two table column starts matched
+/// across pages.
+const COLUMN_MATCH: f32 = 6.0;
 /// Fewest lines a figure or table region needs to be tagged.
 pub const MIN_REGION_LINES: usize = 2;
 /// Most lines a figure, table or algorithm region may take; a longer walk
@@ -225,6 +267,23 @@ const PAGE_BACKGROUND: f32 = 0.95;
 const CAPTION_REACH: f32 = 36.0;
 /// Fewest short lines in a graphics-label cluster.
 const LABEL_MIN_LINES: usize = 4;
+/// Largest distance, in points, from a figure box to graphics labels that
+/// do not touch it.
+const LABEL_NEAR: f32 = 24.0;
+/// Fewest single-word lines in a column of stacked labels.
+const STACK_MIN_LINES: usize = 3;
+/// Lowest `vector` figure box, in points, framing figure text on a page
+/// without a caption.
+const FRAME_MIN_HEIGHT: f32 = 100.0;
+/// Fewest short lines inside such a frame.
+const FRAME_MIN_SHORT: usize = 3;
+/// Fewest words in each line of a run of running prose inside a figure
+/// box.
+const BOX_PROSE_WORDS: usize = 12;
+/// Fewest lines in a run of running prose inside a figure box.
+const BOX_PROSE_LINES: usize = 3;
+/// Figure kind the backend gives a cluster of painted paths.
+const KIND_VECTOR: &str = "vector";
 /// Tallest gap, in points, between a figure box and its caption in which
 /// graphics labels are looked for.
 const LABEL_ZONE_MAX: f32 = 120.0;
@@ -401,8 +460,10 @@ struct PageGeometry {
 /// and a page without one had nothing to tag.
 pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
     let mut total = RegionReport::default();
+    let mut carry: Option<Vec<f32>> = None;
     for page in pages {
-        let report = tag_page(page);
+        let report = tag_page(page, carry.as_deref());
+        carry = sideways_table_starts(page);
         total.caption += report.caption;
         total.figure += report.figure;
         total.table += report.table;
@@ -431,8 +492,10 @@ pub fn tag_regions(pages: &mut [PageText]) -> RegionReport {
     total
 }
 
-/// Tag one page; the counts are of lines newly tagged.
-fn tag_page(page: &mut PageText) -> RegionReport {
+/// Tag one page; the counts are of lines newly tagged. `carry` holds the
+/// table column starts of the previous page when it was a sideways table
+/// page (see [`sideways_table_starts`]).
+fn tag_page(page: &mut PageText, carry: Option<&[f32]>) -> RegionReport {
     let mut report = RegionReport::default();
     if page.width <= 0.0 || page.lines.is_empty() {
         return report;
@@ -442,6 +505,11 @@ fn tag_page(page: &mut PageText) -> RegionReport {
     }
     if is_sideways(page) {
         report = tag_sideways(page);
+        if report.table == 0
+            && let Some(starts) = carry
+        {
+            report.table += tag_sideways_continuation(page, starts);
+        }
         report.math += tag_math(page);
         return report;
     }
@@ -454,6 +522,9 @@ fn tag_page(page: &mut PageText) -> RegionReport {
     }
     let geometry = measure(page);
     report.footnote += tag_footnotes(page, &geometry);
+    let (caption, table) = tag_continued_table(page);
+    report.caption += caption;
+    report.table += table;
     let captions: Vec<(usize, Kind)> = page
         .lines
         .iter()
@@ -691,10 +762,11 @@ fn caption_kind(line: &Line) -> Option<Kind> {
     let number = words.next()?;
     let core = number.trim_end_matches([':', '.', '|']);
     let punctuated = core.len() < number.len();
-    let digits = !core.is_empty() && core.chars().all(|c| c.is_ascii_digit() || c == '.');
-    let roman = !core.is_empty() && core.chars().all(|c| matches!(c, 'I' | 'V' | 'X' | 'L'));
-    if !(digits || (roman && kind == Kind::Table)) {
+    if !is_label_number(core) {
         return None;
+    }
+    if kind == Kind::Table && continued_marker(text) {
+        return Some(kind);
     }
     if is_prose(text) {
         return None;
@@ -712,18 +784,77 @@ fn caption_kind(line: &Line) -> Option<Kind> {
     }
 }
 
+/// A caption label: a number (`2`, `3.1`), a capital letter and a number
+/// (`A.1`, `S2`, `B3`), a roman numeral (`II`) or a number and one
+/// lowercase letter (`2a`).
+fn is_label_number(core: &str) -> bool {
+    if core.is_empty() {
+        return false;
+    }
+    if core.chars().all(|c| matches!(c, 'I' | 'V' | 'X' | 'L')) {
+        return true;
+    }
+    let rest = core
+        .strip_prefix(|c: char| c.is_ascii_uppercase())
+        .map_or(core, |r| r.strip_prefix('.').unwrap_or(r));
+    let number = rest
+        .strip_suffix(|c: char| c.is_ascii_lowercase())
+        .unwrap_or(rest);
+    number.starts_with(|c: char| c.is_ascii_digit())
+        && number.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// One of the two words after the label is `continued` (punctuation
+/// ignored): `Table 1 continued from previous page`, `Table 3
+/// (continued)`, `Table 2: Continued`.
+fn continued_marker(text: &str) -> bool {
+    text.split_whitespace().skip(2).take(2).any(|token| {
+        token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .eq_ignore_ascii_case("continued")
+    })
+}
+
+/// The first letter or digit of `text` is lowercase.
+fn starts_lowercase(text: &str) -> bool {
+    text.chars()
+        .find(|c| c.is_alphanumeric())
+        .is_some_and(char::is_lowercase)
+}
+
+/// The lines from the caption start at `entries[pos]` down to the first
+/// blank separator (furniture skipped, the end of the band counting as
+/// one) are at most [`CAPTION_MAX_LINES`]: the caption is set off from
+/// what follows it.
+fn caption_block_closed(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> bool {
+    let mut count: usize = 1;
+    let mut prev = entries[pos];
+    for &i in entries.iter().skip(pos + 1) {
+        if page.lines[i].role == ROLE_FURNITURE {
+            continue;
+        }
+        if gap(page, prev, i) > blank {
+            return true;
+        }
+        count += 1;
+        if count > CAPTION_MAX_LINES {
+            return false;
+        }
+        prev = i;
+    }
+    true
+}
+
 /// The line may continue a caption in `band`: it does not open a prose
 /// sentence and spans the gutter when the caption does.
 fn continues_caption(line: &Line, band: Band) -> bool {
     !opens_sentence(&line.text) && finite_box(line).is_some_and(|b| band.crossed_by(b))
 }
 
-/// Body lines continuing the caption at `entries[pos]`: below it with no
-/// blank separator, prose-like or ending a sentence, through the first
-/// one that ends a sentence (the start's own full stop, as in
-/// `Table 1: Main Leaderboard.`, does not end the caption). Under an
-/// `Algorithm` caption a pseudo-code line ends it; so does a line that
-/// cannot continue a caption (see [`continues_caption`]).
+/// Body lines continuing the caption at `entries[pos]` (see the module
+/// documentation): below it in `band` with no blank separator, through
+/// sentence ends, at most [`CAPTION_MAX_LINES`] lines in all. Under an
+/// `Algorithm` caption a pseudo-code line ends it.
 fn caption_continuation(
     page: &PageText,
     entries: &[usize],
@@ -732,8 +863,12 @@ fn caption_continuation(
     band: Band,
     blank: f32,
 ) -> Vec<usize> {
+    let start = entries[pos];
+    let start_size = line_size(page, &page.lines[start]);
+    let closed = caption_block_closed(page, entries, pos, blank);
+    let mut sentence_done = ends_sentence(&page.lines[start].text);
     let mut more: Vec<usize> = Vec::new();
-    let mut prev = entries[pos];
+    let mut prev = start;
     for &i in entries.iter().skip(pos + 1) {
         if more.len() + 1 >= CAPTION_MAX_LINES {
             break;
@@ -742,22 +877,34 @@ fn caption_continuation(
         if line.role != ROLE_BODY || gap(page, prev, i) > blank {
             break;
         }
-        if !continues_caption(line, band) {
+        let text = line.text.as_str();
+        let crossed = finite_box(line).is_some_and(|b| band.crossed_by(b));
+        if !crossed || is_numbered_heading(text) || caption_kind(line).is_some() {
             break;
         }
-        let text = line.text.as_str();
         if kind == Kind::Algorithm && is_algorithm_line(text) {
             break;
         }
+        let resized = match (start_size, line_size(page, line)) {
+            (Some(a), Some(b)) => (a - b).abs() > CAPTION_SIZE_SLACK,
+            _ => false,
+        };
+        if resized {
+            break;
+        }
         let ends = ends_sentence(text);
-        if !(ends || is_prose(text)) {
+        let wordy = ends || is_prose(text) || (closed && is_prose_like(text));
+        let fits = if sentence_done {
+            closed || starts_lowercase(text)
+        } else {
+            closed || !opens_sentence(text)
+        };
+        if !(wordy && fits) {
             break;
         }
         more.push(i);
         prev = i;
-        if ends {
-            break;
-        }
+        sentence_done = ends;
     }
     more
 }
@@ -857,7 +1004,8 @@ fn walk_up(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> Vec<us
 }
 
 /// Body lines below the caption at `entries[pos]` (after its continuation
-/// lines, at most [`CAPTION_MAX_LINES`] in all) up to the next prose
+/// lines: `caption` lines up to [`CAPTION_MAX_LINES`] in all, untagged
+/// prose lines up to [`PROSE_CAPTION_LINES`]) up to the next prose
 /// paragraph or prose-like line. With `algorithm`, marker lines never
 /// count as prose. Stops once past [`REGION_MAX_LINES`] lines.
 fn walk_down(
@@ -887,13 +1035,13 @@ fn walk_down(
         }
         let gap_above = gap(page, above, i);
         if in_caption {
-            let room = caption_lines < CAPTION_MAX_LINES;
-            let continues = line.role == ROLE_CAPTION
-                || (line.role == ROLE_BODY
-                    && gap_above <= blank
-                    && prose(i)
-                    && continues_caption(line, band));
-            if room && continues {
+            let tagged = line.role == ROLE_CAPTION && caption_lines < CAPTION_MAX_LINES;
+            let skipped = line.role == ROLE_BODY
+                && caption_lines < PROSE_CAPTION_LINES
+                && gap_above <= blank
+                && prose(i)
+                && continues_caption(line, band);
+            if tagged || skipped {
                 caption_lines += 1;
                 above = i;
                 continue;
@@ -1333,7 +1481,7 @@ fn tag_sideways(page: &mut PageText) -> RegionReport {
         let mut prev = k;
         let mut next = pos + 1;
         while let Some(&i) = entries.get(next) {
-            if more.len() + 1 >= CAPTION_MAX_LINES {
+            if more.len() + 1 >= PROSE_CAPTION_LINES {
                 break;
             }
             let line = &view.lines[i];
@@ -1348,26 +1496,7 @@ fn tag_sideways(page: &mut PageText) -> RegionReport {
             prev = i;
             next += 1;
         }
-        let mut region: Vec<usize> = Vec::new();
-        for &i in entries.iter().skip(next) {
-            let line = &view.lines[i];
-            if line.role == ROLE_FURNITURE {
-                continue;
-            }
-            if is_table_label(&line.text) {
-                break;
-            }
-            if line.role != ROLE_BODY {
-                continue;
-            }
-            if is_prose_like(&line.text) {
-                if is_wide(i) {
-                    break;
-                }
-                continue;
-            }
-            region.push(i);
-        }
+        let region = table_run(&view, &entries, next, wide);
         if region.is_empty() {
             continue;
         }
@@ -1382,6 +1511,137 @@ fn tag_sideways(page: &mut PageText) -> RegionReport {
         report.table += tag(&mut page.lines[i], ROLE_TABLE);
     }
     report
+}
+
+/// The band holding every line of a page `width` points wide.
+fn whole_band(width: f32) -> Band {
+    Band {
+        lo: f32::NEG_INFINITY,
+        hi: f32::INFINITY,
+        width,
+        cross: None,
+    }
+}
+
+/// Table lines of `view` from `entries[from]` down: every `body` line that
+/// is not prose-like, up to a `Table` label, another caption start or the
+/// first prose-like line at least `wide` points wide. Narrow prose-like
+/// lines are left out; furniture and lines of other roles are skipped.
+fn table_run(view: &PageText, entries: &[usize], from: usize, wide: f32) -> Vec<usize> {
+    let mut region: Vec<usize> = Vec::new();
+    for &i in entries.iter().skip(from) {
+        let line = &view.lines[i];
+        if line.role == ROLE_FURNITURE {
+            continue;
+        }
+        if is_table_label(&line.text) || caption_kind(line).is_some() {
+            break;
+        }
+        if line.role != ROLE_BODY {
+            continue;
+        }
+        if is_prose_like(&line.text) {
+            if finite_box(line).is_some_and(|b| b.x1 - b.x0 >= wide) {
+                break;
+            }
+            continue;
+        }
+        region.push(i);
+    }
+    region
+}
+
+/// At least 2 of the column starts `b` lie within [`COLUMN_MATCH`] of a
+/// start in `a`, and they are at least half of the larger set.
+fn same_columns(a: &[f32], b: &[f32]) -> bool {
+    let matched = b
+        .iter()
+        .filter(|&&x| a.iter().any(|&y| (x - y).abs() <= COLUMN_MATCH))
+        .count();
+    matched >= 2 && matched * 2 >= a.len().max(b.len())
+}
+
+/// Column starts, in the turned frame, of the `table` lines of a sideways
+/// page, when there are at least 2: what a following sideways page
+/// without a table label is matched against.
+fn sideways_table_starts(page: &PageText) -> Option<Vec<f32>> {
+    if page.width <= 0.0 || !is_sideways(page) {
+        return None;
+    }
+    let view = turned_view(page);
+    let lines: Vec<usize> = view
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.role == ROLE_TABLE)
+        .map(|(k, _)| k)
+        .collect();
+    let starts = column_starts(&view, &lines);
+    (starts.len() >= 2).then_some(starts)
+}
+
+/// Continue the previous page's sideways table on this sideways page when
+/// the column starts of its `body` lines match `starts` (see
+/// [`same_columns`]): its table lines from the top (see [`table_run`]) are
+/// tagged `table`; the count of lines newly tagged.
+fn tag_sideways_continuation(page: &mut PageText, starts: &[f32]) -> usize {
+    let view = turned_view(page);
+    let entries = band_entries(&view, whole_band(view.width));
+    let body: Vec<usize> = entries
+        .iter()
+        .copied()
+        .filter(|&i| view.lines[i].role == ROLE_BODY)
+        .collect();
+    if !same_columns(starts, &column_starts(&view, &body)) {
+        return 0;
+    }
+    let region = table_run(&view, &entries, 0, SIDEWAYS_PARAGRAPH_WIDTH * view.width);
+    let mut n = 0;
+    for i in region {
+        n += tag(&mut page.lines[i], ROLE_TABLE);
+    }
+    n
+}
+
+/// A table caption start marked as continued (see [`continued_marker`]).
+fn is_continued_label(line: &Line) -> bool {
+    caption_kind(line) == Some(Kind::Table) && continued_marker(&line.text)
+}
+
+/// Tag a `longtable` continuation page (see the module documentation);
+/// the counts of caption and table lines newly tagged.
+fn tag_continued_table(page: &mut PageText) -> (usize, usize) {
+    let entries = band_entries(page, whole_band(page.width));
+    let Some(pos) = entries
+        .iter()
+        .position(|&i| is_continued_label(&page.lines[i]))
+    else {
+        return (0, 0);
+    };
+    let prose_above = entries.iter().take(pos).any(|&i| {
+        let line = &page.lines[i];
+        line.role == ROLE_BODY && is_prose_like(&line.text)
+    });
+    if prose_above {
+        return (0, 0);
+    }
+    let mut region: Vec<usize> = entries
+        .iter()
+        .take(pos)
+        .copied()
+        .filter(|&i| page.lines[i].role == ROLE_BODY)
+        .collect();
+    let wide = SIDEWAYS_PARAGRAPH_WIDTH * page.width;
+    region.extend(table_run(page, &entries, pos + 1, wide));
+    if region.is_empty() {
+        return (0, 0);
+    }
+    let caption = tag(&mut page.lines[entries[pos]], ROLE_CAPTION);
+    let mut table = 0;
+    for i in region {
+        table += tag(&mut page.lines[i], ROLE_TABLE);
+    }
+    (caption, table)
 }
 
 /// A numbered section heading: `3 Method`, `3.1 Problem Setup`, `A.2
@@ -1830,12 +2090,13 @@ fn is_rule_box(b: BBox) -> bool {
 
 /// The page's figure boxes with ordered, finite corners, split into rules
 /// (kind `rule`, or any thin horizontal box) and regions (every other
-/// kind: `vector`, `raster`, `layout`). A region covering at least
-/// [`PAGE_BACKGROUND`] of the page is a background and left out.
-fn page_figures(page: &PageText) -> (Vec<BBox>, Vec<BBox>) {
+/// kind: `vector`, `raster`, `layout`), each with whether it is `vector`.
+/// A region covering at least [`PAGE_BACKGROUND`] of the page is a
+/// background and left out.
+fn page_figures(page: &PageText) -> (Vec<BBox>, Vec<(BBox, bool)>) {
     let page_area = page.width.max(0.0) * page.height.max(0.0);
     let mut rules: Vec<BBox> = Vec::new();
-    let mut regions: Vec<BBox> = Vec::new();
+    let mut regions: Vec<(BBox, bool)> = Vec::new();
     for figure in &page.figures {
         let Some(b) = figure.bbox.and_then(ordered_box) else {
             continue;
@@ -1847,7 +2108,7 @@ fn page_figures(page: &PageText) -> (Vec<BBox>, Vec<BBox>) {
         if page_area > 0.0 && area(b) >= PAGE_BACKGROUND * page_area {
             continue;
         }
-        regions.push(b);
+        regions.push((b, figure.kind == KIND_VECTOR));
     }
     (rules, regions)
 }
@@ -1959,18 +2220,60 @@ fn box_kinds(regions: &[BBox], captions: &[CaptionBox]) -> Vec<Option<Kind>> {
     kinds
 }
 
+/// The lines of `inside` (the `body` lines in one figure box) in runs of
+/// at least [`BOX_PROSE_LINES`] consecutive prose-like lines (top first)
+/// of at least [`BOX_PROSE_WORDS`] words each with no caption block within
+/// [`CAPTION_REACH`] of the run: running prose the box happens to cover.
+fn long_prose_runs(page: &PageText, inside: &[usize], captions: &[CaptionBox]) -> Vec<usize> {
+    let mut order: Vec<(usize, BBox)> = inside
+        .iter()
+        .filter_map(|&k| finite_box(&page.lines[k]).map(|b| (k, b)))
+        .collect();
+    order.sort_by(|a, b| top_first(a.1, b.1));
+    let mut runs: Vec<Vec<(usize, BBox)>> = vec![Vec::new()];
+    for &(k, b) in &order {
+        let text = page.lines[k].text.as_str();
+        if word_count(text) >= BOX_PROSE_WORDS && is_prose_like(text) {
+            if let Some(run) = runs.last_mut() {
+                run.push((k, b));
+            }
+        } else if runs.last().is_some_and(|run| !run.is_empty()) {
+            runs.push(Vec::new());
+        }
+    }
+    let mut guarded: Vec<usize> = Vec::new();
+    for run in runs {
+        if run.len() < BOX_PROSE_LINES {
+            continue;
+        }
+        let Some(span) = run.iter().map(|&(_, b)| b).reduce(union) else {
+            continue;
+        };
+        let captioned = captions
+            .iter()
+            .any(|c| x_overlap(span, c.bbox) && vertical_distance(span, c.bbox) <= CAPTION_REACH);
+        if !captioned {
+            guarded.extend(run.iter().map(|&(k, _)| k));
+        }
+    }
+    guarded
+}
+
 /// Tag the `body` lines inside figure boxes (see the module
 /// documentation): with the role of the caption the box belongs to
-/// (`figure` when none), prose-like lines only when the box has a caption,
-/// and in a box covering the whole page only when it has one.
+/// (`figure` when none), prose-like lines only when the box has a caption
+/// or is a frame on a page without captions, never runs of running prose
+/// (see [`long_prose_runs`]), and in a box covering the whole page only
+/// when it has a caption.
 fn tag_figure_boxes(page: &mut PageText, captions: &[CaptionBox], report: &mut RegionReport) {
-    let (_, regions) = page_figures(page);
-    if regions.is_empty() {
+    let (_, figures) = page_figures(page);
+    if figures.is_empty() {
         return;
     }
+    let regions: Vec<BBox> = figures.iter().map(|&(b, _)| b).collect();
     let kinds = box_kinds(&regions, captions);
     let mut picked: Vec<(usize, Kind)> = Vec::new();
-    for (&r, &kind) in regions.iter().zip(kinds.iter()) {
+    for (&(r, vector), &kind) in figures.iter().zip(kinds.iter()) {
         let width = r.x1 - r.x0;
         let height = r.y1 - r.y0;
         if height < FIGURE_MIN_HEIGHT {
@@ -1980,17 +2283,33 @@ fn tag_figure_boxes(page: &mut PageText, captions: &[CaptionBox], report: &mut R
         if whole && kind.is_none() {
             continue;
         }
-        for (k, line) in page.lines.iter().enumerate() {
-            if line.role != ROLE_BODY {
+        let inside: Vec<usize> = page
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.role == ROLE_BODY && finite_box(line).is_some_and(|b| mostly_inside(b, r))
+            })
+            .map(|(k, _)| k)
+            .collect();
+        let short = inside
+            .iter()
+            .filter(|&&k| {
+                let text = page.lines[k].text.as_str();
+                !text.trim().is_empty() && is_fragment(text)
+            })
+            .count();
+        let framed = kind.is_none()
+            && captions.is_empty()
+            && vector
+            && height >= FRAME_MIN_HEIGHT
+            && short >= FRAME_MIN_SHORT;
+        let guarded = long_prose_runs(page, &inside, captions);
+        for k in inside {
+            if guarded.contains(&k) {
                 continue;
             }
-            let Some(b) = finite_box(line) else {
-                continue;
-            };
-            if !mostly_inside(b, r) {
-                continue;
-            }
-            if kind.is_none() && is_prose_like(&line.text) {
+            if kind.is_none() && !framed && is_prose_like(&page.lines[k].text) {
                 continue;
             }
             picked.push((k, kind.unwrap_or(Kind::Figure)));
@@ -2038,18 +2357,82 @@ fn label_zone(page: &PageText, r: BBox, captions: &[CaptionBox]) -> Option<(f32,
     if prose { None } else { Some((lo, hi)) }
 }
 
+/// `b` grown by `d` on every side.
+fn grown(b: BBox, d: f32) -> BBox {
+    BBox {
+        x0: b.x0 - d,
+        y0: b.y0 - d,
+        x1: b.x1 + d,
+        y1: b.y1 + d,
+    }
+}
+
+/// Stacked labels near a figure box: groups of at least
+/// [`STACK_MIN_LINES`] single-word `body` lines (not caption starts)
+/// linked by lines directly above or below one another (x ranges
+/// overlapping, at most one line height apart), with at least one line
+/// overlapping `near`. Groups are built from all such lines on the page
+/// first, so a shorter label ending before `near` still counts.
+fn stacked_words(page: &PageText, near: BBox) -> Vec<usize> {
+    let cands: Vec<(usize, BBox)> = page
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.role == ROLE_BODY && word_count(&line.text) == 1 && caption_kind(line).is_none()
+        })
+        .filter_map(|(k, line)| finite_box(line).map(|b| (k, b)))
+        .collect();
+    let touches = |a: BBox, b: BBox| -> bool {
+        let reach = (a.y1 - a.y0).max(b.y1 - b.y0);
+        x_overlap(a, b) && vertical_distance(a, b) <= reach
+    };
+    let n = cands.len();
+    let mut seen: Vec<bool> = vec![false; n];
+    let mut picked: Vec<usize> = Vec::new();
+    let mut start: usize = 0;
+    while start < n {
+        if seen[start] {
+            start += 1;
+            continue;
+        }
+        seen[start] = true;
+        let mut stack: Vec<usize> = vec![start];
+        let mut group: Vec<usize> = Vec::new();
+        let mut is_near = false;
+        while let Some(a) = stack.pop() {
+            group.push(cands[a].0);
+            is_near = is_near || overlap_area(cands[a].1, near) > 0.0;
+            for (b, &(_, other)) in cands.iter().enumerate() {
+                if !seen[b] && touches(cands[a].1, other) {
+                    seen[b] = true;
+                    stack.push(b);
+                }
+            }
+        }
+        if is_near && group.len() >= STACK_MIN_LINES {
+            picked.extend(group);
+        }
+        start += 1;
+    }
+    picked
+}
+
 /// Tag clusters of graphics labels `figure`: at least
 /// [`LABEL_MIN_LINES`] `body` lines of at most 4 words whose boxes overlap
-/// a figure box, or lie between it and its `Figure` caption (see
-/// [`label_zone`]); the count of lines newly tagged.
+/// a figure box, lie within [`LABEL_NEAR`] of it (not ending a sentence),
+/// or lie between it and its `Figure` caption (see [`label_zone`]), and
+/// stacked labels near it (see [`stacked_words`]); the count of lines
+/// newly tagged.
 fn tag_label_clusters(page: &mut PageText, captions: &[CaptionBox]) -> usize {
-    let (_, regions) = page_figures(page);
+    let (_, figures) = page_figures(page);
     let mut picked: Vec<usize> = Vec::new();
-    for &r in &regions {
+    for &(r, _) in &figures {
         if r.x1 - r.x0 < LABEL_BOX_MIN || r.y1 - r.y0 < LABEL_BOX_MIN {
             continue;
         }
         let zone = label_zone(page, r, captions);
+        let near = grown(r, LABEL_NEAR);
         let cluster: Vec<usize> = page
             .lines
             .iter()
@@ -2064,16 +2447,18 @@ fn tag_label_clusters(page: &mut PageText, captions: &[CaptionBox]) -> usize {
             .filter_map(|(k, line)| {
                 let b = finite_box(line)?;
                 let on_box = overlap_area(b, r) > 0.0;
+                let close = overlap_area(b, near) > 0.0 && !ends_sentence(&line.text);
                 let between = zone.is_some_and(|(lo, hi)| {
                     let cy = centre_y(b);
                     cy > lo && cy < hi && x_overlap(b, r)
                 });
-                (on_box || between).then_some(k)
+                (on_box || close || between).then_some(k)
             })
             .collect();
         if cluster.len() >= LABEL_MIN_LINES {
             picked.extend(cluster);
         }
+        picked.extend(stacked_words(page, near));
     }
     let mut n = 0;
     for k in picked {
@@ -3994,5 +4379,393 @@ mod tests {
         assert!(is_monospace_font("NimbusMonoPS-Regular"));
         assert!(is_monospace_font("Courier-Bold"));
         assert!(!is_monospace_font("CMR10"));
+    }
+
+    const CAPTION_START: &str = "Figure 3: Accuracy per seed over the training run, for each of";
+    const CAPTION_MORE: [&str; 3] = [
+        "the five seeds that we report in the main text of this paper.",
+        "The shaded band shows one standard deviation around the mean and the",
+        "dashed line marks the human baseline from the earlier study.",
+    ];
+
+    /// Prose, a tagged caption start at baseline 620, `more` below it at
+    /// 12 pt leading, then `after` (capitalised prose, no blank separator)
+    /// and [`AFTER_PROSE`] after a blank separator.
+    fn caption_page(more: &[&str], after: &[String]) -> PageText {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        lines.push(captioned(CAPTION_START, 72.0, 620.0, 1));
+        let mut baseline = 620.0;
+        for text in more {
+            baseline -= 12.0;
+            lines.push(line(text, 72.0, baseline, 1));
+        }
+        for text in after {
+            baseline -= 12.0;
+            lines.push(line(text, 72.0, baseline, 1));
+        }
+        baseline -= 36.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 2));
+            baseline -= 12.0;
+        }
+        page_of(lines)
+    }
+
+    #[test]
+    fn a_caption_continues_through_sentence_ends_in_a_closed_block() {
+        let mut pages = vec![caption_page(&CAPTION_MORE, &[])];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for text in CAPTION_MORE {
+            assert_eq!(role_of(page, text), "caption", "{text}");
+        }
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.caption, 3);
+        assert_eq!(report.figure, 0);
+
+        // Capitalised prose glued below (the block runs past the cap): the
+        // caption ends at its first sentence end.
+        let glued: Vec<String> = (0..16)
+            .map(|k| format!("Line {k} of the body text runs on with more words here"))
+            .collect();
+        let mut pages = vec![caption_page(&CAPTION_MORE[..2], &glued)];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        assert_eq!(role_of(page, CAPTION_MORE[0]), "caption");
+        assert_eq!(role_of(page, CAPTION_MORE[1]), "body");
+        for text in &glued {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.caption, 1);
+    }
+
+    #[test]
+    fn a_caption_stops_at_a_line_in_another_font_size() {
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            push_sized(&mut page, text, baseline, 10.0);
+            baseline -= 12.0;
+        }
+        let start = "Figure 3: Accuracy per seed.";
+        let more = "the shaded band shows one standard deviation around the mean.";
+        let body = "The next paragraph is set in the body size and it starts right here.";
+        push_sized(&mut page, start, 620.0, 9.0);
+        push_sized(&mut page, more, 608.0, 9.0);
+        push_sized(&mut page, body, 596.0, 10.0);
+        let mut baseline = 560.0;
+        for text in AFTER_PROSE {
+            push_sized(&mut page, text, baseline, 10.0);
+            baseline -= 12.0;
+        }
+        page.text = page
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        assert_eq!(role_of(&pages[0], more), "caption");
+        assert_eq!(role_of(&pages[0], body), "body");
+        assert_eq!(report.caption, 1);
+    }
+
+    #[test]
+    fn letter_numbered_and_continued_labels_are_caption_starts() {
+        let body = |text: &str| line(text, 72.0, 500.0, 0);
+        for (text, kind) in [
+            ("Figure A.1: Rubbermind deal closure", Kind::Figure),
+            ("Table S2: Results", Kind::Table),
+            ("Fig. B3. Overview", Kind::Figure),
+            ("Table II: Results", Kind::Table),
+            ("Figure II: Overview", Kind::Figure),
+            ("Figure 2a: Panel", Kind::Figure),
+            ("Table 1 continued from previous page", Kind::Table),
+            ("Table 3 (continued)", Kind::Table),
+        ] {
+            assert_eq!(caption_kind(&body(text)), Some(kind), "{text}");
+        }
+        for text in [
+            "Figure A shows the model",
+            "Table S2 lists the",
+            "Figure 2a shows the results of the model",
+            "Figure 1 continued",
+        ] {
+            assert_eq!(caption_kind(&body(text)), None, "{text}");
+        }
+        for core in ["3", "3.1", "A.1", "A.12", "S2", "S1.2", "B3", "II", "2a"] {
+            assert!(is_label_number(core), "{core}");
+        }
+        for core in ["", "A", "ab", "2ab", "a1", "Ia"] {
+            assert!(!is_label_number(core), "{core}");
+        }
+    }
+
+    const CONTINUED_LABEL: &str = "Table 1 continued from previous page";
+    const CONTINUED_PARAGRAPH: [&str; 2] = [
+        "the paragraph after the table discusses the review results in more detail",
+        "and the next lines of this page continue the running text of the review",
+    ];
+
+    /// A `longtable` continuation page: a header cell above the
+    /// [`CONTINUED_LABEL`], 45 rows of three cells, a two-line paragraph
+    /// and a short line after it; `prose_above` puts a prose line on top.
+    fn continued_page(prose_above: bool) -> (PageText, Vec<String>) {
+        let mut lines: Vec<Line> = Vec::new();
+        if prose_above {
+            lines.push(line(LEFT_PROSE[0], 72.0, 776.0, 0));
+        }
+        lines.push(line("Company", 72.0, 760.0, 0));
+        lines.push(line(CONTINUED_LABEL, 72.0, 740.0, 1));
+        let mut cells: Vec<String> = Vec::new();
+        let mut baseline = 720.0;
+        for k in 0..45 {
+            for (c, x0) in [(0, 72.0), (1, 200.0), (2, 330.0)] {
+                let text = format!("cell {k}.{c} value");
+                lines.push(line(&text, x0, baseline, 2 + c));
+                cells.push(text);
+            }
+            baseline -= 12.0;
+        }
+        for text in CONTINUED_PARAGRAPH {
+            lines.push(line(text, 72.0, baseline, 5));
+            baseline -= 12.0;
+        }
+        lines.push(line("Other cell text", 72.0, baseline - 4.0, 6));
+        (page_of(lines), cells)
+    }
+
+    #[test]
+    fn a_continued_table_page_is_table_text_through_its_last_row() {
+        let (page, cells) = continued_page(false);
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        assert_eq!(role_of(page, CONTINUED_LABEL), "caption");
+        assert_eq!(role_of(page, "Company"), "table");
+        for text in &cells {
+            assert_eq!(role_of(page, text), "table", "{text}");
+        }
+        for text in CONTINUED_PARAGRAPH {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(role_of(page, "Other cell text"), "body");
+        assert_eq!(report.table, cells.len() + 1);
+        assert_eq!(report.caption, 1);
+
+        let (mut page, _) = continued_page(true);
+        assert_eq!(tag_continued_table(&mut page), (0, 0));
+    }
+
+    #[test]
+    fn a_sideways_page_after_a_sideways_table_page_continues_it() {
+        let mut pages = vec![sideways_page(true), sideways_page(false)];
+        let report = tag_regions(&mut pages);
+        let next = &pages[1];
+        for text in SIDEWAYS_CELLS {
+            assert_eq!(role_of(next, text), "table", "{text}");
+        }
+        assert_eq!(role_of(next, SIDEWAYS_PROSE_CELL), "body");
+        assert_eq!(role_of(next, SIDEWAYS_PARAGRAPH), "body");
+        assert_eq!(role_of(next, SIDEWAYS_LATE_CELL), "body");
+        assert_eq!(report.table, 2 * SIDEWAYS_CELLS.len());
+
+        // Other column starts: no continuation.
+        let mut moved = sideways_page(false);
+        for l in &mut moved.lines {
+            if let Some(b) = l.bbox.as_mut() {
+                b.y0 += 50.0;
+                b.y1 += 50.0;
+            }
+        }
+        let mut pages = vec![sideways_page(true), moved];
+        let report = tag_regions(&mut pages);
+        assert_eq!(report.table, SIDEWAYS_CELLS.len());
+        assert!(pages[1].lines.iter().all(|l| l.role == "body"));
+
+        // A sideways page without table lines carries nothing.
+        let mut pages = vec![sideways_page(false), sideways_page(false)];
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
+        assert!(same_columns(&[100.0, 280.0, 460.0], &[102.0, 279.0, 600.0]));
+        assert!(!same_columns(
+            &[100.0, 280.0, 460.0],
+            &[150.0, 330.0, 510.0]
+        ));
+    }
+
+    /// Prose above and below a `kind` figure box (100..500 x 400..560).
+    fn label_page(kind: &str, labels: &[(&str, f32, f32)]) -> PageText {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        for (text, x0, baseline) in labels {
+            lines.push(line(text, *x0, *baseline, 1));
+        }
+        let mut baseline = 340.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 2));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures
+            .push(figure(0, kind, 100.0, 400.0, 500.0, 560.0));
+        page
+    }
+
+    #[test]
+    fn stacked_and_nearby_labels_of_a_figure_box_are_figure_text() {
+        // Three stacked words 10 pt left of the box, and a lone word.
+        let stacked = [
+            ("Material", 50.0, 500.0),
+            ("Category", 50.0, 490.0),
+            ("Type", 50.0, 480.0),
+            ("Legend", 300.0, 300.0),
+        ];
+        let mut pages = vec![label_page("vector", &stacked)];
+        let report = tag_regions(&mut pages);
+        for (text, _, _) in &stacked[..3] {
+            assert_eq!(role_of(&pages[0], text), "figure", "{text}");
+        }
+        assert_eq!(role_of(&pages[0], "Legend"), "body");
+        assert_eq!(report.figure, 3);
+
+        // A legend 7 pt under the box, and a paragraph end 8 pt above it.
+        let legend = [
+            ("Baseline", 110.0, 385.0),
+            ("Ours (full)", 200.0, 385.0),
+            ("Oracle", 290.0, 385.0),
+            ("Random seed", 380.0, 385.0),
+            ("the results.", 110.0, 570.0),
+        ];
+        let mut pages = vec![label_page("vector", &legend)];
+        let report = tag_regions(&mut pages);
+        for (text, _, _) in &legend[..4] {
+            assert_eq!(role_of(&pages[0], text), "figure", "{text}");
+        }
+        assert_eq!(role_of(&pages[0], "the results."), "body");
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(&pages[0], text), "body", "{text}");
+        }
+        assert_eq!(report.figure, 4);
+    }
+
+    const FRAME_SHORT: [&str; 3] = ["Input", "Query rewrite", "Answer"];
+    const FRAME_PROSE: [&str; 2] = [
+        "An example showing the workflow for creating a custom dataset",
+        "with two instances and the hints that were written for them",
+    ];
+
+    /// A page without captions: prose, a `kind` box (80..560 x 450..600)
+    /// holding [`FRAME_SHORT`] and [`FRAME_PROSE`], prose.
+    fn frame_page(kind: &str) -> PageText {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 720.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        let mut baseline = 580.0;
+        for text in FRAME_SHORT {
+            lines.push(line(text, 90.0, baseline, 1));
+            baseline -= 20.0;
+        }
+        let mut baseline = 510.0;
+        for text in FRAME_PROSE {
+            lines.push(line(text, 90.0, baseline, 1));
+            baseline -= 12.0;
+        }
+        let mut baseline = 420.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 2));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures
+            .push(figure(0, kind, 80.0, 450.0, 560.0, 600.0));
+        page
+    }
+
+    #[test]
+    fn a_tall_vector_frame_without_a_caption_is_figure_text() {
+        for text in FRAME_PROSE {
+            assert!(is_prose_like(text), "{text}");
+        }
+        let mut pages = vec![frame_page("vector")];
+        let report = tag_regions(&mut pages);
+        for text in FRAME_SHORT.iter().chain(FRAME_PROSE.iter()) {
+            assert_eq!(role_of(&pages[0], text), "figure", "{text}");
+        }
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(&pages[0], text), "body", "{text}");
+        }
+        assert_eq!(report.figure, 5);
+
+        // A raster box is no frame: its prose stays body.
+        let mut pages = vec![frame_page("raster")];
+        let report = tag_regions(&mut pages);
+        for text in FRAME_PROSE {
+            assert_eq!(role_of(&pages[0], text), "body", "{text}");
+        }
+        assert_eq!(report.figure, FRAME_SHORT.len());
+    }
+
+    const BOX_RUN: [&str; 3] = [
+        "we describe the running text of the section that a large figure box happens to cover",
+        "and the reader should still see these lines in the body text of the paper here",
+        "because they are ordinary prose that runs on across the width of the whole column",
+    ];
+    const BOX_LINE: &str = "the decoder maps the latent code back to the image";
+
+    #[test]
+    fn long_prose_runs_inside_a_captioned_figure_box_stay_body() {
+        for text in BOX_RUN {
+            assert!(word_count(text) >= BOX_PROSE_WORDS, "{text}");
+            assert!(is_prose_like(text), "{text}");
+        }
+        let mut lines: Vec<Line> = Vec::new();
+        let mut baseline = 760.0;
+        for text in LEFT_PROSE {
+            lines.push(line(text, 72.0, baseline, 0));
+            baseline -= 12.0;
+        }
+        let mut baseline = 540.0;
+        for text in BOX_RUN {
+            lines.push(line(text, 70.0, baseline, 1));
+            baseline -= 12.0;
+        }
+        lines.push(line("Encoder", 100.0, 420.0, 2));
+        lines.push(line(BOX_LINE, 100.0, 320.0, 3));
+        lines.push(captioned("Figure 3: Example.", 60.0, 285.0, 4));
+        let mut baseline = 250.0;
+        for text in AFTER_PROSE {
+            lines.push(line(text, 72.0, baseline, 5));
+            baseline -= 12.0;
+        }
+        let mut page = page_of(lines);
+        page.figures
+            .push(figure(0, "vector", 60.0, 300.0, 560.0, 560.0));
+        let mut pages = vec![page];
+        let report = tag_regions(&mut pages);
+        let page = &pages[0];
+        for text in BOX_RUN {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(role_of(page, "Encoder"), "figure");
+        assert_eq!(role_of(page, BOX_LINE), "figure");
+        for text in LEFT_PROSE.iter().chain(AFTER_PROSE.iter()) {
+            assert_eq!(role_of(page, text), "body", "{text}");
+        }
+        assert_eq!(report.figure, 2);
     }
 }

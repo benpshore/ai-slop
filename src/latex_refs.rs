@@ -1874,8 +1874,10 @@ pub fn parse_cites(tex: &str) -> TruthCitations {
 /// zero-argument `\newcommand` macro first (so an alias such as
 /// `\newcommand{\be}{\begin{equation}}` is removed like `equation`), then
 /// removes the front matter (see [`remove_front_matter`]; the abstract is
-/// kept), citation commands, floats, display environments and author
-/// biographies (see [`is_dropped_env`]), footnotes and box, listing and
+/// kept), citation commands, floats, display environments, verbatim and
+/// code listings and author biographies (see [`is_dropped_env`]), the
+/// listing environments the document defines itself (see
+/// [`verbatim_env_names`]), footnotes and box, listing and
 /// colour settings (see [`BODY_DROPPED_COMMANDS`]), `key=value` options of
 /// any environment (see [`remove_environment_options`]) and all math
 /// (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`, see [`remove_math`]), turns
@@ -1885,11 +1887,12 @@ pub fn parse_cites(tex: &str) -> TruthCitations {
 pub fn body_text(main_tex: &str) -> String {
     let clean = strip_comments(main_tex);
     let macros = collect_macros(&clean);
+    let listing_envs = verbatim_env_names(&clean);
     let body = remove_definitions(document_body(&clean));
     let body = expand_macros(&expand_macros(&body, &macros), &macros);
     let body = remove_front_matter(&body);
     let body = remove_cites(&body);
-    let body = remove_environments(&body);
+    let body = remove_environments(&body, &listing_envs);
     let body = remove_commands(&body, BODY_DROPPED_COMMANDS);
     let body = remove_environment_options(&body);
     let body = remove_math(&body);
@@ -2132,7 +2135,11 @@ fn remove_cites(body: &str) -> String {
     out
 }
 
-/// Environments whose contents never appear as running text.
+/// Environments whose contents never appear as running text. Verbatim and
+/// code listings (`verbatim`, fancyvrb `Verbatim`, `lstlisting`, `minted`,
+/// `alltt`, tcolorbox `tcblisting`, ...) are among them: the extracted
+/// side tags their monospace lines `code` and leaves them out. Prose boxes
+/// (`tcolorbox`, `mdframed`) are kept.
 fn is_dropped_env(name: &str) -> bool {
     matches!(
         name.trim_end_matches('*'),
@@ -2154,7 +2161,19 @@ fn is_dropped_env(name: &str) -> bool {
             | "displaymath"
             | "lstlisting"
             | "verbatim"
+            | "Verbatim"
+            | "BVerbatim"
+            | "LVerbatim"
             | "minted"
+            | "alltt"
+            | "spverbatim"
+            | "listing"
+            | "code"
+            | "python"
+            | "pycode"
+            | "sourcecode"
+            | "tcblisting"
+            | "tcbverbatim"
             | "tikzpicture"
             | "wrapfigure"
             | "wraptable"
@@ -2170,12 +2189,44 @@ fn is_dropped_env(name: &str) -> bool {
     )
 }
 
-fn remove_environments(body: &str) -> String {
+/// `\newtcblisting`, `\DeclareTCBListing`, `\DefineVerbatimEnvironment`
+/// or `\lstnewenvironment` (and their `renew`/`New` forms), with any
+/// `[...]` options before the brace argument; group 1 is the name of the
+/// listing environment it defines.
+fn verbatim_env_def_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(concat!(
+            r"\\(?:newtcblisting|renewtcblisting|DeclareTCBListing|NewTCBListing|RenewTCBListing",
+            r"|DefineVerbatimEnvironment|lstnewenvironment)",
+            r"\s*(?:\[[^\]]*\]\s*)?\{\s*([A-Za-z]+\*?)\s*\}",
+        ))
+        .expect("valid regex")
+    })
+}
+
+/// Names (without a trailing `*`) of the environments `clean` defines as
+/// verbatim or code listings (see [`verbatim_env_def_re`]). `body_text`
+/// drops them like the listings of [`is_dropped_env`]. Environments made
+/// with `\newenvironment` or `\newtcolorbox` are not among them.
+fn verbatim_env_names(clean: &str) -> BTreeSet<String> {
+    verbatim_env_def_re()
+        .captures_iter(clean)
+        .map(|caps| caps[1].trim_end_matches('*').to_string())
+        .collect()
+}
+
+/// `body` without every environment that [`is_dropped_env`] names or whose
+/// name (without a trailing `*`) is in `listing_envs`.
+fn remove_environments(body: &str, listing_envs: &BTreeSet<String>) -> String {
     let mut out = String::with_capacity(body.len());
     let mut last = 0;
     for caps in begin_re().captures_iter(body) {
         let Some(whole) = caps.get(0) else { continue };
-        if whole.start() < last || !is_dropped_env(&caps[1]) {
+        let name = &caps[1];
+        if whole.start() < last
+            || !(is_dropped_env(name) || listing_envs.contains(name.trim_end_matches('*')))
+        {
             continue;
         }
         out.push_str(&body[last..whole.start()]);
@@ -3476,6 +3527,7 @@ pub fn warm_up() {
         series_suffix_re,
         input_re,
         begin_re,
+        verbatim_env_def_re,
         heading_re,
         par_re,
         blank_line_re,
@@ -4598,6 +4650,105 @@ Plain bio words.
                 "bio words",
             ],
         );
+    }
+
+    const LISTING_TEX: &str = r#"\documentclass{article}
+\usepackage{fancyvrb}
+\DefineVerbatimEnvironment{prompt}{Verbatim}{}
+\newtcblisting[auto counter]{codebox}{listing only}
+\lstnewenvironment{pylisting}[1][]{\lstset{language=Python}}{}
+\newenvironment{promptbox}{\begin{center}}{\end{center}}
+\newtcolorbox{notebox}{colback=white}
+\begin{document}
+Intro words.
+\begin{prompt}
+You are a helpful assistant. Answer the {question} below.
+\end{prompt}
+\begin{codebox}
+print("hidden code")
+\end{codebox}
+\begin{pylisting}[caption=x]
+def hidden(): pass
+\end{pylisting}
+\begin{promptbox}
+Kept prompt box words.
+\end{promptbox}
+\begin{notebox}
+Kept note words.
+\end{notebox}
+\begin{tcolorbox}
+Box prose words.
+\begin{Verbatim}[fontsize=\small]
+Hidden verbatim line.
+\end{Verbatim}
+\end{tcolorbox}
+\begin{alltt}
+hidden alltt
+\end{alltt}
+\begin{minted}{python}
+hidden minted
+\end{minted}
+\begin{lstlisting}
+hidden lstlisting
+\end{lstlisting}
+Closing words.
+\end{document}
+"#;
+
+    #[test]
+    fn verbatim_env_names_reads_listing_definitions_only() {
+        let names = verbatim_env_names(&strip_comments(LISTING_TEX));
+        let expected = BTreeSet::from(["codebox", "prompt", "pylisting"].map(String::from));
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn body_text_drops_verbatim_and_defined_listing_environments() {
+        let out = body_text(LISTING_TEX);
+        let flat: Vec<&str> = out.split_whitespace().collect();
+        assert_eq!(
+            flat.join(" "),
+            "Intro words. Kept prompt box words. Kept note words. Box prose words. Closing words."
+        );
+        assert_absent(
+            &out,
+            &[
+                "assistant",
+                "question",
+                "hidden",
+                "print",
+                "Verbatim",
+                "fontsize",
+                "caption",
+            ],
+        );
+    }
+
+    #[test]
+    fn listing_environments_are_dropped_and_prose_boxes_kept() {
+        for name in [
+            "verbatim",
+            "Verbatim",
+            "Verbatim*",
+            "BVerbatim",
+            "LVerbatim",
+            "lstlisting",
+            "minted",
+            "alltt",
+            "spverbatim",
+            "listing",
+            "code",
+            "python",
+            "pycode",
+            "sourcecode",
+            "tcblisting",
+            "tcbverbatim",
+        ] {
+            assert!(is_dropped_env(name), "{name:?}");
+        }
+        for name in ["tcolorbox", "mdframed", "promptbox", "theorem"] {
+            assert!(!is_dropped_env(name), "{name:?}");
+        }
     }
 
     #[test]

@@ -28,8 +28,16 @@
 //! lines before the abstract `front` (the standalone `Abstract` line itself
 //! `heading`), stopping at the first run of prose lines and skipping long
 //! lines (or sentence lines of 12 words with a verb-like word) that are
-//! neither affiliations nor lists of names. Only lines still tagged
-//! `body` are retagged, except that `furniture` wins over any tag.
+//! neither affiliations nor lists of names (on page 2 as well when page 1
+//! is a title page). On those pages licence and copyright blocks, `ACM
+//! Reference Format:` and contact blocks, `Keywords` / `Index Terms` /
+//! `CCS Concepts` blocks and lettered affiliation lines are `front` too.
+//! Author biographies after the references (a name, then `received`, an
+//! IEEE membership grade or a confirmed `is a`) are `biography`; lines under
+//! a short footnote rule at a column foot, and a small-font run carried over
+//! from a page that ended inside a footnote, are `footnote`. Only lines
+//! still tagged `body` are retagged, except that `furniture` wins over any
+//! tag.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
@@ -98,6 +106,142 @@ const ROLE_TOC: &str = "toc";
 const ROLE_CAPTION: &str = "caption";
 const ROLE_FRONT: &str = "front";
 const ROLE_HEADING: &str = "heading";
+const ROLE_BIOGRAPHY: &str = "biography";
+const ROLE_FOOTNOTE: &str = "footnote";
+/// Most lines of one front-matter block (licence, `ACM Reference Format:`,
+/// contact information) tagged after its opening line.
+const FRONT_BLOCK_MAX_LINES: usize = 12;
+/// Most lines of a `Keywords` / `Index Terms` / `CCS Concepts` block,
+/// its label line included.
+const KEYWORDS_MAX_LINES: usize = 6;
+/// Most words on a page 1 that is a title page (a highlights or cover page)
+/// before the paper's own front matter on page 2.
+const TITLE_PAGE_MAX_WORDS: usize = 300;
+/// Words, after a lettered affiliation's letter, searched for an
+/// institution word (see [`AFFILIATION_WORDS`]).
+const AFFILIATION_WORD_REACH: usize = 3;
+/// Fewest commas in a plain-letter affiliation line (`a Department of X,
+/// University Y, City`).
+const AFFILIATION_MIN_COMMAS: usize = 2;
+/// Institution words that open a lettered affiliation.
+const AFFILIATION_WORDS: [&str; 12] = [
+    "Department",
+    "School",
+    "Faculty",
+    "University",
+    "Institute",
+    "College",
+    "Laboratory",
+    "Center",
+    "Centre",
+    "Division",
+    "Hospital",
+    "Academy",
+];
+/// Most lines tagged `biography` from one biography start (or one
+/// continuation paragraph).
+const BIOGRAPHY_MAX_LINES: usize = 40;
+/// Most name tokens before a biography cue.
+const BIOGRAPHY_MAX_NAME_TOKENS: usize = 5;
+/// Fewest name tokens before a biography cue.
+const BIOGRAPHY_MIN_NAME_TOKENS: usize = 2;
+/// Pages at the end of the document searched for biographies even before
+/// (or without) a references heading.
+const BIOGRAPHY_TAIL_PAGES: usize = 2;
+/// Lowercase particles allowed inside a name (`Ludwig van Beethoven`).
+const NAME_PARTICLES: [&str; 13] = [
+    "de", "van", "von", "der", "den", "da", "del", "di", "la", "le", "du", "dos", "y",
+];
+/// Capitalised words that never open a person's name.
+const NOT_NAMES: [&str; 24] = [
+    "The",
+    "This",
+    "That",
+    "These",
+    "Those",
+    "Our",
+    "We",
+    "It",
+    "Its",
+    "In",
+    "On",
+    "For",
+    "A",
+    "An",
+    "Each",
+    "Table",
+    "Figure",
+    "Algorithm",
+    "Section",
+    "Appendix",
+    "Lemma",
+    "Theorem",
+    "Proof",
+    "Model",
+];
+/// Cues after a name that start a biography on their own.
+const BIOGRAPHY_STRONG_CUES: [&str; 2] = ["received", "was born"];
+/// Cues after a name that start a biography when the line or the next one
+/// also holds a [`BIOGRAPHY_CONFIRMATIONS`] word.
+const BIOGRAPHY_WEAK_CUES: [&str; 5] = ["is a ", "is an ", "is the ", "is currently", "is with"];
+/// Words that confirm a weak biography cue.
+const BIOGRAPHY_CONFIRMATIONS: [&str; 14] = [
+    "received",
+    "degree",
+    "Ph.D",
+    "PhD",
+    "M.Sc",
+    "MSc",
+    "B.Sc",
+    "BSc",
+    "rofessor",
+    "esearch",
+    "University",
+    "Institute",
+    "Foundation",
+    "Laboratory",
+];
+/// Openers of a biography's later paragraph (right after a biography).
+const BIOGRAPHY_PARAGRAPH_OPENERS: [&str; 7] = [
+    "His research interests",
+    "Her research interests",
+    "He received",
+    "She received",
+    "He is ",
+    "She is ",
+    "Dr. ",
+];
+/// Largest font size, as a share of the page's body size, of a footnote
+/// line (as in `regions`).
+const FOOTNOTE_SIZE_RATIO: f32 = 0.92;
+/// Share of the page height, from the bottom, where footnotes sit.
+const FOOTNOTE_ZONE: f32 = 0.35;
+/// Most lines in a footnote run continued from the previous page.
+const FOOTNOTE_MAX_LINES: usize = 10;
+/// Most lines below a footnote rule.
+const RULED_FOOTNOTE_MAX_LINES: usize = 15;
+/// Fewest words in a line that measures a page's body font size.
+const BODY_SIZE_MIN_WORDS: usize = 6;
+/// Fewest such lines needed to measure it.
+const BODY_SIZE_MIN_LINES: usize = 3;
+/// A figure box lower than this, in points, and at least
+/// [`RULE_MIN_WIDTH`] wide is a horizontal rule.
+const RULE_HEIGHT: f32 = 3.0;
+/// Narrowest rule, in points.
+const RULE_MIN_WIDTH: f32 = 30.0;
+/// Widest footnote rule, as a share of the page width (a table rule set
+/// across the text block is wider).
+const RULE_MAX_PAGE_SHARE: f32 = 0.6;
+/// Largest distance, in points, from a footnote rule down to the top of
+/// the first footnote line.
+const RULE_REACH: f32 = 24.0;
+/// How far, in points, a footnote line may start left of its rule.
+const RULE_X_BEFORE: f32 = 3.0;
+/// How far, in points, a footnote line may start right of its rule's left
+/// end (the indented first line of a note).
+const RULE_X_INDENT: f32 = 20.0;
+/// How far, in points, a footnote line's top may reach above its rule.
+const RULE_OVERLAP: f32 = 1.0;
 /// A repeated edge line counts as furniture only up to this multiple of the
 /// document's median span size (a display title is not a running head).
 const HEADER_SIZE_SLACK: f32 = 1.1;
@@ -220,10 +364,18 @@ pub struct CleanupReport {
     pub role_toc: usize,
     /// Lines newly tagged `caption`.
     pub role_caption: usize,
-    /// Page-1 lines newly tagged `front`.
+    /// Lines newly tagged `front`: page-1 front matter, and licence,
+    /// keyword, reference-format and lettered-affiliation blocks (on page 2
+    /// too when page 1 is a title page).
     pub role_front: usize,
     /// Lines newly tagged `heading` (the standalone `Abstract` line).
     pub role_heading: usize,
+    /// Lines newly tagged `biography` (author biographies after the
+    /// references).
+    pub role_biography: usize,
+    /// Lines newly tagged `footnote` (notes under a footnote rule, and
+    /// notes carried over from the previous page).
+    pub role_footnote: usize,
 }
 
 /// Role of a line during the pass.
@@ -339,6 +491,97 @@ fn caption_bare_re() -> &'static Regex {
             r"^(?:Figure|FIGURE|Fig\.|FIG\.|Table|TABLE)\s*(?:[A-Z]?\d+(?:\.\d+)*|[IVXL]+)\s+\p{Lu}\p{Ll}",
         )
         .expect("valid regex")
+    })
+}
+
+/// A line that opens a licence or copyright block of the front matter.
+fn licence_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:Permission to make digital or hard copies|This work is licensed under|\x{00A9}\s?(?:19|20)\d{2}|Copyright\s+(?:\x{00A9}\s?)?(?:19|20)\d{2}|ACM ISBN|https?://doi\.org/10\.1145/|Publication rights licensed to)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// The `ACM Reference Format:` label.
+fn reference_format_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^ACM Reference [Ff]ormat\b").expect("valid regex"))
+}
+
+/// The `Authors' Contact Information:` / `Authors' addresses:` label.
+fn contact_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^authors?['\x{2019}]?\s+(?:contact\s+information|addresses?)\s*:")
+            .expect("valid regex")
+    })
+}
+
+/// A `Keywords`, `Index Terms`, `CCS Concepts` or `Additional Key Words
+/// and Phrases` label, alone or followed by `:`, `.`, a dash or a bullet.
+fn keywords_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:key\s?words|index\s+terms|ccs\s+concepts|additional\s+key\s+words(?:\s+and\s+phrases)?)\s*(?:$|[:.\x{2014}\x{2013}\x{2022}-])",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A short numbered heading (`1 Introduction`, `II. RELATED WORK`).
+fn numbered_heading_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(?:\d{1,2}(?:\.\d{1,2})*|[IVX]{1,5})\.?\s+\p{Lu}\S*(?:\s+\S+){0,7}$")
+            .expect("valid regex")
+    })
+}
+
+/// A superscript affiliation letter after a comma and before a capital
+/// (`USA,ᵇ Entalpic`).
+fn affiliation_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"[,;]\s?[\x{02B0}-\x{02B8}\x{1D2C}-\x{1D61}\x{1D9C}-\x{1DBF}\x{2071}\x{207F}]\s?\p{Lu}",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A references heading (`REFERENCES`, `7 References`, `Bibliography`).
+fn references_heading_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:(?:\d+|[ivx]+)\.?\s*)?(?:r\s?eferences|b\s?ibliography|works\s+cited|literature\s+cited)\s*$",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A biographies heading (`BIOGRAPHIES`, `About the Authors`).
+fn biographies_heading_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:authors?['\x{2019}]?\s+)?(?:biographies|biography|about\s+the\s+authors?)\s*$",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// An IEEE membership grade in parentheses (`(Member, IEEE)`, `(Senior
+/// Member, IEEE)`, `(Life Fellow, IEEE)`).
+fn membership_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\((?:[A-Za-z]+\s+){0,3}(?:Member|Fellow)\b[^()]{0,24}\)")
+            .expect("valid regex")
     })
 }
 
@@ -1760,11 +2003,12 @@ fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
     }
 }
 
-/// Text-based roles on the final lines: `toc`, `caption`, and page-1
-/// `front`/`heading`. A bare caption start (see [`is_bare_caption`]) is a
-/// caption only when it does not continue the paragraph above it (see
-/// [`continues_paragraph`]). Never changes `text`.
-fn tag_roles(page: &mut PageText, report: &mut CleanupReport) {
+/// Text-based roles on the final lines: `toc`, `caption`, and on the page
+/// that holds the paper's front matter (`front_page`) `front`/`heading`
+/// (see [`tag_front`] and [`tag_front_blocks`]). A bare caption start (see
+/// [`is_bare_caption`]) is a caption only when it does not continue the
+/// paragraph above it (see [`continues_paragraph`]). Never changes `text`.
+fn tag_roles(page: &mut PageText, front_page: bool, report: &mut CleanupReport) {
     let kinds: Vec<(bool, bool)> = page
         .lines
         .iter()
@@ -1788,8 +2032,609 @@ fn tag_roles(page: &mut PageText, report: &mut CleanupReport) {
             report.role_caption += 1;
         }
     }
-    if page.page == 1 {
+    if front_page {
         tag_front(page, report);
+        tag_front_blocks(page, report);
+    }
+}
+
+/// Kind of a front-matter block that runs on past its opening line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrontBlock {
+    /// Licence, permission and copyright lines.
+    Licence,
+    /// `ACM Reference Format:` and the citation under it.
+    ReferenceFormat,
+    /// `Authors' Contact Information:` and the addresses under it.
+    Contact,
+    /// `Keywords`, `Index Terms`, `CCS Concepts` and their terms.
+    Keywords,
+}
+
+impl FrontBlock {
+    /// Most lines of the block, its opening line included.
+    fn max_lines(self) -> usize {
+        match self {
+            Self::Keywords => KEYWORDS_MAX_LINES,
+            Self::Licence | Self::ReferenceFormat | Self::Contact => FRONT_BLOCK_MAX_LINES,
+        }
+    }
+}
+
+/// The front-matter block `text` opens, if any.
+fn front_block_start(text: &str) -> Option<FrontBlock> {
+    if licence_re().is_match(text) {
+        Some(FrontBlock::Licence)
+    } else if reference_format_re().is_match(text) {
+        Some(FrontBlock::ReferenceFormat)
+    } else if contact_re().is_match(text) {
+        Some(FrontBlock::Contact)
+    } else if keywords_re().is_match(text) {
+        Some(FrontBlock::Keywords)
+    } else {
+        None
+    }
+}
+
+/// A superscript letter such as the `ᵃ` of an affiliation mark.
+fn is_superscript_letter(c: char) -> bool {
+    matches!(
+        c,
+        '\u{02B0}'..='\u{02B8}'
+            | '\u{1D2C}'..='\u{1D61}'
+            | '\u{1D9C}'..='\u{1DBF}'
+            | '\u{2071}'
+            | '\u{207F}'
+    )
+}
+
+/// A lettered affiliation line: a superscript letter and a capitalised
+/// word with a comma or an affiliation signal after it (`ᵃSchool of
+/// Physics, ...`); a plain letter `a`-`h`, a space, an institution word
+/// among the next [`AFFILIATION_WORD_REACH`] words and at least
+/// [`AFFILIATION_MIN_COMMAS`] commas (`a Department of Physics, University
+/// of X, Paris`); or a line with two or more superscript letters between a
+/// comma and a capital (`USA,ᵇ Entalpic, Paris, France,ᶜ ...`).
+fn is_lettered_affiliation(text: &str) -> bool {
+    let text = text.trim();
+    if affiliation_marker_re().find_iter(text).count() >= 2 {
+        return true;
+    }
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let rest = chars.as_str();
+    if is_superscript_letter(first) {
+        let opens_capital = rest
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(char::is_uppercase);
+        return opens_capital && (rest.contains(',') || has_affiliation_signal(rest));
+    }
+    if !matches!(first, 'a'..='h') || !rest.starts_with(' ') {
+        return false;
+    }
+    let institution = rest
+        .split_whitespace()
+        .take(AFFILIATION_WORD_REACH)
+        .any(|word| AFFILIATION_WORDS.contains(&word.trim_end_matches(',')));
+    institution && rest.matches(',').count() >= AFFILIATION_MIN_COMMAS
+}
+
+/// Whether a paragraph starts at each line of `page`: from the separators
+/// in `text` when they can be recovered (a line not found there starts
+/// one), else from a column change or a vertical gap taller than the line.
+fn paragraph_starts(page: &PageText) -> Vec<bool> {
+    if let Some((seps, found)) = separators(page) {
+        return (0..page.lines.len())
+            .map(|k| k == 0 || k >= found || seps.get(k).is_some_and(|sep| is_paragraph_break(sep)))
+            .collect();
+    }
+    let mut starts: Vec<bool> = Vec::with_capacity(page.lines.len());
+    for (k, line) in page.lines.iter().enumerate() {
+        let Some(prev) = k.checked_sub(1).and_then(|j| page.lines.get(j)) else {
+            starts.push(true);
+            continue;
+        };
+        let gap = match (prev.bbox.map(norm), line.bbox.map(norm)) {
+            (Some(upper), Some(lower)) => upper.y0 - lower.y1 > lower.y1 - lower.y0,
+            _ => false,
+        };
+        starts.push(prev.column != line.column || gap);
+    }
+    starts
+}
+
+/// The line ends a sentence: its last character is `.`, `!` or `?`.
+fn ends_sentence(text: &str) -> bool {
+    text.trim_end().ends_with(['.', '!', '?'])
+}
+
+/// The first letter of the line is lowercase.
+fn starts_lowercase(text: &str) -> bool {
+    text.chars()
+        .find(|c| c.is_alphabetic())
+        .is_some_and(char::is_lowercase)
+}
+
+/// Front-matter blocks on the page that holds the paper's front matter:
+/// licence and copyright blocks (see [`licence_re`]), `ACM Reference
+/// Format:` and `Authors' Contact Information:` blocks, each through the
+/// next paragraph break (at most [`FRONT_BLOCK_MAX_LINES`] lines);
+/// `Keywords` / `Index Terms` / `CCS Concepts` blocks, which also stop after
+/// a line ending with `.` (at most [`KEYWORDS_MAX_LINES`] lines); and
+/// lettered affiliation lines (see [`is_lettered_affiliation`]) anywhere on
+/// the page. A block never runs into an abstract line or a numbered
+/// heading. Tagged `front`.
+fn tag_front_blocks(page: &mut PageText, report: &mut CleanupReport) {
+    let heads = paragraph_starts(page);
+    let mut picked: Vec<usize> = Vec::new();
+    let mut block: Option<(FrontBlock, usize)> = None;
+    for (k, line) in page.lines.iter().enumerate() {
+        if line.role == ROLE_FURNITURE {
+            continue;
+        }
+        let text = line.text.trim();
+        if let Some(kind) = front_block_start(text) {
+            picked.push(k);
+            let closed = kind == FrontBlock::Keywords && text.ends_with('.');
+            block = if closed { None } else { Some((kind, 1)) };
+            continue;
+        }
+        if is_lettered_affiliation(text) {
+            picked.push(k);
+            block = None;
+            continue;
+        }
+        let Some((kind, count)) = block else {
+            continue;
+        };
+        let stop = heads.get(k).copied().unwrap_or(true)
+            || count >= kind.max_lines()
+            || abstract_re().is_match(text)
+            || introduction_re().is_match(text)
+            || numbered_heading_re().is_match(text);
+        if stop {
+            block = None;
+            continue;
+        }
+        picked.push(k);
+        let closed = kind == FrontBlock::Keywords && text.ends_with('.');
+        block = if closed {
+            None
+        } else {
+            Some((kind, count + 1))
+        };
+    }
+    for k in picked {
+        if let Some(line) = page.lines.get_mut(k)
+            && tag(line, ROLE_FRONT)
+        {
+            report.role_front += 1;
+        }
+    }
+}
+
+/// Page 1 is a title page (a highlights or cover page) and page 2 holds the
+/// paper's front matter: page 1 has no abstract line and no introduction
+/// heading and fewer than [`TITLE_PAGE_MAX_WORDS`] words, and page 2 has an
+/// abstract line within its first [`FRONT_MAX_LINES`] lines.
+fn is_title_page(first: &PageText, second: &PageText) -> bool {
+    if first.page != 1 || second.page != 2 {
+        return false;
+    }
+    let mut words: usize = 0;
+    for line in first.lines.iter().filter(|l| l.role != ROLE_FURNITURE) {
+        let text = line.text.trim();
+        if abstract_re().is_match(text) || introduction_re().is_match(text) {
+            return false;
+        }
+        words += text.split_whitespace().count();
+    }
+    words < TITLE_PAGE_MAX_WORDS
+        && second
+            .lines
+            .iter()
+            .filter(|l| l.role != ROLE_FURNITURE)
+            .take(FRONT_MAX_LINES)
+            .any(|l| abstract_re().is_match(l.text.trim()))
+}
+
+/// A word of a person's name: capitalised (`Samuel`, `COOGAN`, `W.`,
+/// `Veres-Vitályos`), letters with combining accents, `-`, `.` and
+/// apostrophes only, and not one of [`NOT_NAMES`]; after the first word a
+/// lowercase particle (`van`, `de`) also counts.
+fn is_name_token(token: &str, first: bool) -> bool {
+    let word = token.trim_end_matches(',');
+    if !first && NAME_PARTICLES.contains(&word) {
+        return true;
+    }
+    let mut chars = word.chars();
+    let Some(head) = chars.next() else {
+        return false;
+    };
+    head.is_uppercase()
+        && !NOT_NAMES.contains(&word)
+        && chars.all(|c| {
+            c.is_alphabetic()
+                || matches!(c, '\u{0300}'..='\u{036F}' | '-' | '.' | '\'' | '\u{2019}')
+        })
+}
+
+/// The words after a name open a biography: an IEEE membership grade
+/// (`(Senior Member, IEEE)`), a strong cue ([`BIOGRAPHY_STRONG_CUES`]), or
+/// a weak one ([`BIOGRAPHY_WEAK_CUES`]) confirmed by a
+/// [`BIOGRAPHY_CONFIRMATIONS`] word in `rest`.
+fn biography_cue(rest: &str) -> bool {
+    let rest = rest.trim_start_matches([',', ' ']);
+    if membership_re().is_match(rest) || BIOGRAPHY_STRONG_CUES.iter().any(|c| rest.starts_with(c)) {
+        return true;
+    }
+    BIOGRAPHY_WEAK_CUES.iter().any(|c| rest.starts_with(c))
+        && BIOGRAPHY_CONFIRMATIONS.iter().any(|w| rest.contains(w))
+}
+
+/// The line opens an author biography: [`BIOGRAPHY_MIN_NAME_TOKENS`] to
+/// [`BIOGRAPHY_MAX_NAME_TOKENS`] name words (see [`is_name_token`]) and
+/// then a biography cue (see [`biography_cue`]), read on into `following`
+/// (the next line of the paragraph, or empty) when the cue wraps.
+fn is_biography_start(text: &str, following: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let names = tokens
+        .iter()
+        .take(BIOGRAPHY_MAX_NAME_TOKENS)
+        .enumerate()
+        .take_while(|(n, token)| is_name_token(token, *n == 0))
+        .count();
+    (BIOGRAPHY_MIN_NAME_TOKENS..=names).rev().any(|m| {
+        let rest = format!("{} {following}", tokens[m..].join(" "));
+        biography_cue(&rest)
+    })
+}
+
+/// The line opens a later paragraph of a biography (see
+/// [`BIOGRAPHY_PARAGRAPH_OPENERS`]).
+fn opens_biography_paragraph(text: &str) -> bool {
+    BIOGRAPHY_PARAGRAPH_OPENERS
+        .iter()
+        .any(|opener| text.starts_with(opener))
+}
+
+/// Trimmed text of the line at `seq[pos]` (`(page index, line index,
+/// paragraph start)`), or empty.
+fn seq_text<'a>(pages: &'a [PageText], seq: &[(usize, usize, bool)], pos: usize) -> &'a str {
+    seq.get(pos)
+        .and_then(|&(p, k, _)| pages.get(p).and_then(|page| page.lines.get(k)))
+        .map_or("", |line| line.text.trim())
+}
+
+/// Trimmed text of the line after `seq[pos]` when it continues the same
+/// paragraph, else empty.
+fn seq_following<'a>(pages: &'a [PageText], seq: &[(usize, usize, bool)], pos: usize) -> &'a str {
+    match seq.get(pos + 1) {
+        Some(&(_, _, false)) => seq_text(pages, seq, pos + 1),
+        _ => "",
+    }
+}
+
+/// Author biographies, as `(page index, line index)` pairs: in reading
+/// order from the last references heading (or from the last
+/// [`BIOGRAPHY_TAIL_PAGES`] pages, whichever starts first), each paragraph
+/// that opens with a biography start (see [`is_biography_start`]) through
+/// the next paragraph break or biography start, at most
+/// [`BIOGRAPHY_MAX_LINES`] lines. A paragraph break does not end a
+/// biography when the line before it does not end a sentence and the line
+/// after it starts lowercase (a biography carried to the next column or
+/// page), and a paragraph right after a biography that opens with
+/// [`BIOGRAPHY_PARAGRAPH_OPENERS`] is one more. A biographies heading right
+/// above a biography start is included.
+fn collect_biographies(pages: &[PageText]) -> Vec<(usize, usize)> {
+    let mut heading: Option<(usize, usize)> = None;
+    for (p, page) in pages.iter().enumerate() {
+        for (k, line) in page.lines.iter().enumerate() {
+            if line.role != ROLE_FURNITURE && references_heading_re().is_match(line.text.trim()) {
+                heading = Some((p, k + 1));
+            }
+        }
+    }
+    let tail = (pages.len().saturating_sub(BIOGRAPHY_TAIL_PAGES), 0);
+    let from = heading.map_or(tail, |at| at.min(tail));
+    let mut seq: Vec<(usize, usize, bool)> = Vec::new();
+    for (p, page) in pages.iter().enumerate().skip(from.0) {
+        let heads = paragraph_starts(page);
+        let mut first = true;
+        for (k, line) in page.lines.iter().enumerate() {
+            if line.role == ROLE_FURNITURE || (p == from.0 && k < from.1) {
+                continue;
+            }
+            seq.push((p, k, first || heads.get(k).copied().unwrap_or(true)));
+            first = false;
+        }
+    }
+    let mut picked: Vec<(usize, usize)> = Vec::new();
+    let mut current: Option<usize> = None;
+    let mut after_biography = false;
+    let mut prev_unfinished = false;
+    for (pos, &(p, k, start)) in seq.iter().enumerate() {
+        let text = seq_text(pages, &seq, pos);
+        let unfinished = !ends_sentence(text);
+        if is_biography_start(text, seq_following(pages, &seq, pos)) {
+            picked.push((p, k));
+            current = Some(1);
+            after_biography = true;
+        } else if biographies_heading_re().is_match(text)
+            && is_biography_start(
+                seq_text(pages, &seq, pos + 1),
+                seq_following(pages, &seq, pos + 1),
+            )
+        {
+            picked.push((p, k));
+            current = None;
+        } else if let Some(count) = current.filter(|count| {
+            *count < BIOGRAPHY_MAX_LINES && (!start || (prev_unfinished && starts_lowercase(text)))
+        }) {
+            picked.push((p, k));
+            current = Some(count + 1);
+        } else if start && after_biography && opens_biography_paragraph(text) {
+            picked.push((p, k));
+            current = Some(1);
+        } else {
+            current = None;
+            if start {
+                after_biography = false;
+            }
+        }
+        prev_unfinished = unfinished;
+    }
+    picked
+}
+
+/// Tag author biographies `biography` (see [`collect_biographies`]).
+fn tag_biographies(pages: &mut [PageText], report: &mut CleanupReport) {
+    for (p, k) in collect_biographies(pages) {
+        if let Some(line) = pages.get_mut(p).and_then(|page| page.lines.get_mut(k))
+            && tag(line, ROLE_BIOGRAPHY)
+        {
+            report.role_biography += 1;
+        }
+    }
+}
+
+/// Median font size of the page's non-furniture lines of at least
+/// [`BODY_SIZE_MIN_WORDS`] words; `None` with fewer than
+/// [`BODY_SIZE_MIN_LINES`] such lines.
+fn page_body_size(page: &PageText) -> Option<f32> {
+    let mut sizes: Vec<f32> = page
+        .lines
+        .iter()
+        .filter(|line| {
+            line.role != ROLE_FURNITURE
+                && line.text.split_whitespace().count() >= BODY_SIZE_MIN_WORDS
+        })
+        .filter_map(|line| line_size(page, line))
+        .collect();
+    if sizes.len() < BODY_SIZE_MIN_LINES {
+        return None;
+    }
+    sizes.sort_unstable_by(f32::total_cmp);
+    Some(sizes[sizes.len() / 2])
+}
+
+/// The line opens with a footnote marker: `*`, `∗`, `†`, `‡`, `§`, `¶`, a
+/// superscript digit or letter, or 1 or 2 digits, a space and a letter.
+fn starts_footnote_marker(text: &str) -> bool {
+    let text = text.trim_start();
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if matches!(
+        first,
+        '*' | '\u{2217}' | '\u{2020}' | '\u{2021}' | '\u{00A7}' | '\u{00B6}'
+    ) || SUPERSCRIPT_DIGITS.contains(&first)
+        || is_superscript_letter(first)
+    {
+        return true;
+    }
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    if !(1..=2).contains(&digits) {
+        return false;
+    }
+    let rest = &text[digits..];
+    rest.starts_with(' ')
+        && rest
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(char::is_alphabetic)
+}
+
+/// The line sits in the footnote zone (see [`FOOTNOTE_ZONE`]) and is set
+/// at most `limit` points.
+fn is_small_low(page: &PageText, line: &Line, limit: f32) -> bool {
+    let small = line_size(page, line).is_some_and(|s| s <= limit);
+    let low = line
+        .bbox
+        .map(norm)
+        .is_some_and(|b| b.y0.midpoint(b.y1) <= FOOTNOTE_ZONE * page.height);
+    small && low
+}
+
+/// Horizontal rules in the page's footnote zone no wider than
+/// [`RULE_MAX_PAGE_SHARE`] of the page: figure boxes lower than
+/// [`RULE_HEIGHT`] and at least [`RULE_MIN_WIDTH`] wide.
+fn footnote_rules(page: &PageText) -> Vec<BBox> {
+    page.figures
+        .iter()
+        .filter_map(|figure| figure.bbox.map(norm))
+        .filter(|b| {
+            let width = b.x1 - b.x0;
+            b.y1 - b.y0 < RULE_HEIGHT
+                && width >= RULE_MIN_WIDTH
+                && width <= RULE_MAX_PAGE_SHARE * page.width
+                && b.y0.midpoint(b.y1) <= FOOTNOTE_ZONE * page.height
+        })
+        .collect()
+}
+
+/// Footnotes under a footnote rule: every non-furniture line below a rule
+/// from [`footnote_rules`] that starts within its left end (from
+/// [`RULE_X_BEFORE`] left of it to [`RULE_X_INDENT`] right of it). They
+/// are tagged `footnote`, markers or not, when there is at least one and
+/// at most [`RULED_FOOTNOTE_MAX_LINES`], the first starts within
+/// [`RULE_REACH`] of the rule, and every one is a `body` (or `footnote`)
+/// line set at most [`FOOTNOTE_SIZE_RATIO`] times the page's body size.
+fn tag_ruled_footnotes(page: &mut PageText, report: &mut CleanupReport) {
+    if !page.height.is_finite() || page.height <= 0.0 {
+        return;
+    }
+    let Some(body) = page_body_size(page) else {
+        return;
+    };
+    let limit = FOOTNOTE_SIZE_RATIO * body;
+    let mut picked: Vec<usize> = Vec::new();
+    for rule in footnote_rules(page) {
+        let mut below: Vec<usize> = Vec::new();
+        let mut top: f32 = f32::NEG_INFINITY;
+        for (k, line) in page.lines.iter().enumerate() {
+            if line.role == ROLE_FURNITURE {
+                continue;
+            }
+            let Some(b) = line.bbox.map(norm) else {
+                continue;
+            };
+            let aligned = b.x0 >= rule.x0 - RULE_X_BEFORE && b.x0 <= rule.x0 + RULE_X_INDENT;
+            if aligned && b.y1 <= rule.y0 + RULE_OVERLAP {
+                below.push(k);
+                top = top.max(b.y1);
+            }
+        }
+        let fits = !below.is_empty()
+            && below.len() <= RULED_FOOTNOTE_MAX_LINES
+            && top >= rule.y0 - RULE_REACH
+            && below.iter().all(|&k| {
+                let line = &page.lines[k];
+                (line.role == ROLE_BODY || line.role == ROLE_FOOTNOTE)
+                    && line_size(page, line).is_some_and(|s| s <= limit)
+            });
+        if fits {
+            picked.extend(below);
+        }
+    }
+    for k in picked {
+        if let Some(line) = page.lines.get_mut(k)
+            && tag(line, ROLE_FOOTNOTE)
+        {
+            report.role_footnote += 1;
+        }
+    }
+}
+
+/// The page ends inside a footnote: its last non-furniture line in reading
+/// order is a small line in the footnote zone (see [`is_small_low`]) that
+/// does not end a sentence, and it is tagged `footnote` or belongs to a
+/// run of such lines in its column, at most [`FOOTNOTE_MAX_LINES`] long,
+/// that opens with a footnote marker (see [`starts_footnote_marker`]).
+fn ends_in_open_footnote(page: &PageText) -> bool {
+    let Some(body) = page_body_size(page) else {
+        return false;
+    };
+    let limit = FOOTNOTE_SIZE_RATIO * body;
+    let mut lines = page
+        .lines
+        .iter()
+        .rev()
+        .filter(|line| line.role != ROLE_FURNITURE);
+    let Some(last) = lines.next() else {
+        return false;
+    };
+    if ends_sentence(&last.text) || !is_small_low(page, last, limit) {
+        return false;
+    }
+    if last.role == ROLE_FOOTNOTE {
+        return true;
+    }
+    for (run, line) in std::iter::once(last).chain(lines).enumerate() {
+        let member = line.column == last.column
+            && (line.role == ROLE_BODY || line.role == ROLE_FOOTNOTE)
+            && is_small_low(page, line, limit);
+        if !member || run >= FOOTNOTE_MAX_LINES {
+            return false;
+        }
+        if line.role == ROLE_FOOTNOTE || starts_footnote_marker(&line.text) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A footnote carried over from the previous page: when that page ends
+/// inside a footnote (see [`ends_in_open_footnote`]), the bottom run of the
+/// first column (in reading order) that has one: its last `body` lines set
+/// at most [`FOOTNOTE_SIZE_RATIO`] times the body size in the footnote
+/// zone, at most [`FOOTNOTE_MAX_LINES`] of them, below a larger line and
+/// opening without a footnote marker. The whole run is tagged `footnote`
+/// (so the marker notes below the carried text stay one run).
+fn tag_footnote_continuations(pages: &mut [PageText], report: &mut CleanupReport) {
+    for i in 1..pages.len() {
+        let consecutive = pages[i - 1].page.checked_add(1) == Some(pages[i].page);
+        if !consecutive || !ends_in_open_footnote(&pages[i - 1]) {
+            continue;
+        }
+        let page = &pages[i];
+        if !page.height.is_finite() || page.height <= 0.0 {
+            continue;
+        }
+        let Some(body) = page_body_size(page) else {
+            continue;
+        };
+        let limit = FOOTNOTE_SIZE_RATIO * body;
+        let mut columns: Vec<u32> = Vec::new();
+        for line in page.lines.iter().filter(|l| l.role != ROLE_FURNITURE) {
+            if !columns.contains(&line.column) {
+                columns.push(line.column);
+            }
+        }
+        let mut picked: Vec<usize> = Vec::new();
+        for column in columns {
+            let members: Vec<usize> = page
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.role != ROLE_FURNITURE && l.column == column)
+                .map(|(k, _)| k)
+                .collect();
+            let mut run: Vec<usize> = Vec::new();
+            let mut above_large = false;
+            for &k in members.iter().rev() {
+                let line = &page.lines[k];
+                if line.role == ROLE_BODY && is_small_low(page, line, limit) {
+                    run.push(k);
+                    continue;
+                }
+                above_large = line_size(page, line).is_some_and(|s| s > limit);
+                break;
+            }
+            if run.is_empty() {
+                continue;
+            }
+            run.reverse();
+            let carried = run
+                .first()
+                .is_some_and(|&k| !starts_footnote_marker(&page.lines[k].text));
+            if above_large && carried && run.len() <= FOOTNOTE_MAX_LINES {
+                picked = run;
+            }
+            break;
+        }
+        for k in picked {
+            if let Some(line) = pages[i].lines.get_mut(k)
+                && tag(line, ROLE_FOOTNOTE)
+            {
+                report.role_footnote += 1;
+            }
+        }
     }
 }
 
@@ -1799,8 +2644,10 @@ fn tag_roles(page: &mut PageText, report: &mut CleanupReport) {
 /// running heads), rule 3 (sub/superscript fragments
 /// merged into their base line) and rule 2 (line-end hyphenation within a
 /// column and across a page break), in that order; then tags line roles
-/// (`furniture`, `toc`, `caption`, page-1 `front` and `heading`) without
-/// changing `text`. Requires `lines` and `text` from `reading_order`; never
+/// (`furniture`, `toc`, `caption`, `front` and `heading` on page 1, or on
+/// page 2 after a title page, `biography` after the references, and
+/// `footnote` under a footnote rule or carried over from the previous page)
+/// without changing `text`. Requires `lines` and `text` from `reading_order`; never
 /// touches `spans`. See the module documentation for how removed lines are
 /// kept.
 pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
@@ -1838,9 +2685,16 @@ pub fn clean_document(pages: &mut [PageText]) -> CleanupReport {
             }
         }
     }
+    let title_page = pages.len() >= 2 && is_title_page(&pages[0], &pages[1]);
     for page in pages.iter_mut() {
-        tag_roles(page, &mut report);
+        let front_page = page.page == 1 || (title_page && page.page == 2);
+        tag_roles(page, front_page, &mut report);
     }
+    tag_biographies(pages, &mut report);
+    for page in pages.iter_mut() {
+        tag_ruled_footnotes(page, &mut report);
+    }
+    tag_footnote_continuations(pages, &mut report);
     report
 }
 
@@ -1856,6 +2710,15 @@ pub fn warm_up() {
         introduction_re,
         caption_re,
         caption_bare_re,
+        licence_re,
+        reference_format_re,
+        contact_re,
+        keywords_re,
+        numbered_heading_re,
+        affiliation_marker_re,
+        references_heading_re,
+        biographies_heading_re,
+        membership_re,
     ];
     for accessor in accessors {
         accessor();
@@ -1865,7 +2728,7 @@ pub fn warm_up() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::Span;
+    use crate::schema::{Figure, Span};
 
     fn span_at(text: &str, x0: f32, y0: f32, size: f32, seq: u32) -> Span {
         let width = 0.5 * size * text.chars().count() as f32;
@@ -2867,6 +3730,471 @@ mod tests {
         assert_eq!(line.role, "figure");
         assert!(tag(&mut line, ROLE_FURNITURE));
         assert_eq!(line.role, "furniture");
+    }
+
+    /// `page.text` rebuilt from its lines with a paragraph break before
+    /// each line index in `breaks`.
+    fn with_breaks(mut page: PageText, breaks: &[usize]) -> PageText {
+        let mut text = String::new();
+        for (k, line) in page.lines.iter().enumerate() {
+            if k > 0 {
+                text.push_str(if breaks.contains(&k) { "\n\n" } else { "\n" });
+            }
+            text.push_str(&line.text);
+        }
+        page.text = text;
+        page
+    }
+
+    /// A US Letter page with one line per row `(text, x0, y0, size)`, all in
+    /// column 0.
+    fn sized_page(number: u32, rows: &[(&str, f32, f32, f32)]) -> PageText {
+        let mut page = PageText::new(number, 612.0, 792.0, 0);
+        for (i, (text, x0, y0, size)) in rows.iter().enumerate() {
+            let seq = u32::try_from(i).unwrap();
+            let span = span_at(text, *x0, *y0, *size, seq);
+            page.lines.push(Line {
+                text: (*text).to_string(),
+                bbox: span.bbox,
+                column: 0,
+                spans: vec![seq],
+                role: ROLE_BODY.to_string(),
+            });
+            page.spans.push(span);
+        }
+        page.text = joined(&page.lines);
+        page
+    }
+
+    fn rule_figure(x0: f32, y0: f32, x1: f32) -> Figure {
+        Figure {
+            index: 0,
+            bbox: Some(BBox {
+                x0,
+                y0,
+                x1,
+                y1: y0 + 0.4,
+            }),
+            kind: "rule".to_string(),
+            mime: None,
+            width_px: None,
+            height_px: None,
+            sha256: None,
+            file: None,
+            caption: None,
+        }
+    }
+
+    #[test]
+    fn biography_starts() {
+        assert!(is_biography_start(
+            "SAMUEL COOGAN (Senior Member, IEEE) received",
+            "the B.S. degree"
+        ));
+        assert!(is_biography_start("JOEL W. BURDICK (Member, IEEE) the", ""));
+        assert!(is_biography_start(
+            "MANORANJAN MAJJI (Senior Member, IEEE),",
+            "received the B.E. (Hons) in mechanical engineering"
+        ));
+        assert!(is_biography_start(
+            "\u{00C1}lmos Veres-Vit\u{00E1}lyos received an MSc degree in",
+            ""
+        ));
+        assert!(is_biography_start(
+            "Gen\u{0131}\u{0301}s Castillo G\u{00F3}mez-Raya received a double BSc",
+            ""
+        ));
+        assert!(is_biography_start(
+            "Filip Lemic is a senior researcher at the i2Cat Foundation",
+            ""
+        ));
+        assert!(is_biography_start(
+            "Xavier Costa P\u{00E9}rez is an ICREA Research Professor",
+            ""
+        ));
+        assert!(is_biography_start(
+            "Jane Doe was born in Oslo, Norway, in 1980.",
+            ""
+        ));
+        assert!(!is_biography_start(
+            "The model is a simple baseline for tests.",
+            ""
+        ));
+        assert!(!is_biography_start(
+            "Kalman Filter is a recursive estimator.",
+            ""
+        ));
+        assert!(!is_biography_start("Samuel received the award.", ""));
+        assert!(!is_biography_start(
+            "[1] A. Author, B. Writer, and C. Reader.",
+            ""
+        ));
+    }
+
+    #[test]
+    fn author_biographies_after_the_references_are_tagged() {
+        let page_one = page_of(
+            1,
+            &[
+                ("Body text of the first page is here.", 60.0, 600.0, 0),
+                (
+                    "Ann Other received the Ph.D. degree in 2010.",
+                    60.0,
+                    588.0,
+                    0,
+                ),
+            ],
+        );
+        let page_two = page_of(2, &[("More body text on the second page.", 60.0, 600.0, 0)]);
+        let page_three = with_breaks(
+            page_of(
+                3,
+                &[
+                    ("REFERENCES", 60.0, 700.0, 0),
+                    (
+                        "[1] A. Author, \u{201C}A title,\u{201D} J. Tests, 2020.",
+                        60.0,
+                        688.0,
+                        0,
+                    ),
+                    (
+                        "SAMUEL COOGAN (Senior Member, IEEE) received",
+                        60.0,
+                        650.0,
+                        0,
+                    ),
+                    ("the B.S. degree in electrical engineering", 60.0, 638.0, 0),
+                    ("from the Georgia Institute of Technology.", 60.0, 626.0, 0),
+                    ("His research interests include control.", 60.0, 600.0, 0),
+                    ("Filip Lemic is a senior researcher at the", 60.0, 570.0, 0),
+                    ("i2Cat Foundation.", 60.0, 558.0, 0),
+                    ("The model is a simple baseline for tests.", 60.0, 530.0, 0),
+                    (
+                        "Bea Writer received the M.Sc. degree in 2012.",
+                        60.0,
+                        518.0,
+                        0,
+                    ),
+                ],
+            ),
+            &[2, 5, 6, 8],
+        );
+        let mut pages = vec![page_one, page_two, page_three];
+        let before: Vec<String> = pages.iter().map(|p| p.text.clone()).collect();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_biography, 7);
+        assert_eq!(
+            roles(&pages[0]),
+            ["body", "body"],
+            "not after the references"
+        );
+        assert_eq!(
+            roles(&pages[2]),
+            [
+                "body",
+                "body",
+                "biography",
+                "biography",
+                "biography",
+                "biography",
+                "biography",
+                "biography",
+                "body",
+                "biography"
+            ]
+        );
+        let after: Vec<String> = pages.iter().map(|p| p.text.clone()).collect();
+        assert_eq!(after, before, "tags never remove text");
+        let again = clean_document(&mut pages);
+        assert_eq!(again.role_biography, 0);
+        assert_eq!(roles(&pages[2])[9], "biography");
+    }
+
+    #[test]
+    fn a_biography_heading_is_tagged_and_long_biographies_are_capped() {
+        let mut rows: Vec<(String, f32, f32, u32)> = vec![
+            ("BIOGRAPHIES".to_string(), 60.0, 700.0, 0),
+            (
+                "Jane Doe received the Ph.D. degree from the".to_string(),
+                60.0,
+                688.0,
+                0,
+            ),
+        ];
+        let extra = u16::try_from(BIOGRAPHY_MAX_LINES + 5).expect("small cap");
+        for k in 0..extra {
+            let y = 676.0 - 12.0 * f32::from(k);
+            rows.push((
+                format!("continued biography line number {k} of the text"),
+                60.0,
+                y,
+                0,
+            ));
+        }
+        let borrowed: Vec<(&str, f32, f32, u32)> = rows
+            .iter()
+            .map(|(text, x0, y0, column)| (text.as_str(), *x0, *y0, *column))
+            .collect();
+        let mut pages = vec![with_breaks(page_of(1, &borrowed), &[1])];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_biography, 1 + BIOGRAPHY_MAX_LINES);
+        let tagged = roles(&pages[0]);
+        assert_eq!(tagged[0], "biography");
+        assert!(
+            tagged[1..=BIOGRAPHY_MAX_LINES]
+                .iter()
+                .all(|r| *r == "biography")
+        );
+        assert!(
+            tagged[BIOGRAPHY_MAX_LINES + 1..]
+                .iter()
+                .all(|r| *r == "body")
+        );
+    }
+
+    #[test]
+    fn licence_keyword_and_affiliation_blocks_are_front_matter() {
+        let page = with_breaks(
+            page_of(
+                1,
+                &[
+                    ("A Study of Things", 60.0, 700.0, 0),
+                    ("Ann Author", 60.0, 680.0, 0),
+                    ("Abstract", 60.0, 660.0, 0),
+                    ("We study things in depth here.", 60.0, 648.0, 0),
+                    ("Keywords", 60.0, 620.0, 0),
+                    ("audio description, item response theory,", 60.0, 608.0, 0),
+                    ("quality evaluation", 60.0, 596.0, 0),
+                    ("ACM Reference Format:", 60.0, 584.0, 0),
+                    (
+                        "Ann Author. 2026. A Study of Things. In Proc.",
+                        60.0,
+                        572.0,
+                        0,
+                    ),
+                    (
+                        "Permission to make digital or hard copies of all",
+                        60.0,
+                        540.0,
+                        0,
+                    ),
+                    ("or part of this work is granted.", 60.0, 528.0, 0),
+                    (
+                        "\u{00A9} 2026 Copyright held by the owner/author(s).",
+                        60.0,
+                        516.0,
+                        0,
+                    ),
+                    (
+                        "a Department of Physics, University of Somewhere, Paris, France",
+                        60.0,
+                        490.0,
+                        0,
+                    ),
+                    ("1 Introduction", 60.0, 460.0, 0),
+                    ("Things matter a great deal to everyone.", 60.0, 448.0, 0),
+                ],
+            ),
+            &[4, 9, 12, 13],
+        );
+        let mut pages = vec![page];
+        let before = pages[0].text.clone();
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_front, 11);
+        assert_eq!(
+            roles(&pages[0]),
+            [
+                "front", "front", "heading", "body", "front", "front", "front", "front", "front",
+                "front", "front", "front", "front", "body", "body"
+            ]
+        );
+        assert_eq!(pages[0].text, before);
+        let again = clean_document(&mut pages);
+        assert_eq!(again.role_front, 0);
+    }
+
+    #[test]
+    fn keyword_blocks_stop_at_a_full_stop_and_need_a_label() {
+        let page = with_breaks(
+            page_of(
+                1,
+                &[
+                    ("A Study of Things", 60.0, 700.0, 0),
+                    ("Abstract", 60.0, 680.0, 0),
+                    ("We study things in depth here.", 60.0, 668.0, 0),
+                    ("Index Terms\u{2014}control, safety.", 60.0, 640.0, 0),
+                    ("A body line that follows directly here.", 60.0, 628.0, 0),
+                    (
+                        "Keywords are extracted from the text by the model.",
+                        60.0,
+                        600.0,
+                        0,
+                    ),
+                    (
+                        "a new method, which is simple, fast, and robust.",
+                        60.0,
+                        588.0,
+                        0,
+                    ),
+                ],
+            ),
+            &[3, 5],
+        );
+        let mut pages = vec![page];
+        clean_document(&mut pages);
+        assert_eq!(
+            roles(&pages[0]),
+            ["front", "heading", "body", "front", "body", "body", "body"]
+        );
+        assert!(is_lettered_affiliation(
+            "\u{1D43}School of Information Engineering, Xi'an Jiaotong University"
+        ));
+        assert!(is_lettered_affiliation(
+            "Tech, Atlanta, Georgia, USA,\u{2071} University of California,\u{02B2} Chalmers"
+        ));
+        assert!(!is_lettered_affiliation(
+            "a Department of Energy grant funded this."
+        ));
+    }
+
+    #[test]
+    fn keywords_on_page_two_after_a_title_page_are_front_matter() {
+        let title = page_of(
+            1,
+            &[
+                ("Highlights", 60.0, 700.0, 0),
+                ("\u{2022} A short highlight about things.", 60.0, 680.0, 0),
+            ],
+        );
+        let second = with_breaks(
+            page_of(
+                2,
+                &[
+                    ("A Study of Things", 60.0, 700.0, 0),
+                    ("Ann Author\u{1D43}", 60.0, 680.0, 0),
+                    (
+                        "\u{1D43}School of Physics, University of Somewhere, Paris",
+                        60.0,
+                        668.0,
+                        0,
+                    ),
+                    ("Abstract", 60.0, 640.0, 0),
+                    ("We study things.", 60.0, 628.0, 0),
+                    ("Keywords:", 60.0, 600.0, 0),
+                    ("things, stuff.", 60.0, 588.0, 0),
+                    ("1 Introduction", 60.0, 560.0, 0),
+                    ("Body text follows.", 60.0, 548.0, 0),
+                ],
+            ),
+            &[5, 7],
+        );
+        let third = page_of(3, &[("Keywords:", 60.0, 600.0, 0)]);
+        let mut pages = vec![title, second, third];
+        clean_document(&mut pages);
+        assert_eq!(roles(&pages[0]), ["body", "body"]);
+        assert_eq!(
+            roles(&pages[1]),
+            [
+                "front", "front", "front", "heading", "body", "front", "front", "body", "body"
+            ]
+        );
+        assert_eq!(roles(&pages[2]), ["body"], "only the front-matter page");
+    }
+
+    /// Page `number` with three body lines at 10 pt and then `notes` at
+    /// 8 pt near the foot of the page.
+    fn page_with_notes(number: u32, notes: &[&str], note_size: f32) -> PageText {
+        let first = format!("The first body line of page {number} is here.");
+        let second = format!("The second body line of page {number} is here.");
+        let third = format!("The third body line of page {number} ends it.");
+        let mut rows: Vec<(&str, f32, f32, f32)> = vec![
+            (first.as_str(), 60.0, 500.0, 10.0),
+            (second.as_str(), 60.0, 488.0, 10.0),
+            (third.as_str(), 60.0, 476.0, 10.0),
+        ];
+        for (k, note) in notes.iter().enumerate() {
+            let y = 186.0 - 10.0 * f32::from(u16::try_from(k).unwrap());
+            rows.push((*note, 60.0, y, note_size));
+        }
+        sized_page(number, &rows)
+    }
+
+    #[test]
+    fn lines_under_a_footnote_rule_are_footnotes() {
+        let notes = [
+            "Work done while at the lab and elsewhere.",
+            "See the project page.",
+        ];
+        let mut ruled = page_with_notes(2, &notes, 8.0);
+        ruled.figures.push(rule_figure(60.0, 200.0, 160.0));
+        let mut pages = vec![ruled];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_footnote, 2);
+        assert_eq!(
+            roles(&pages[0]),
+            ["body", "body", "body", "footnote", "footnote"]
+        );
+        let again = clean_document(&mut pages);
+        assert_eq!(again.role_footnote, 0);
+
+        let mut body_size = page_with_notes(2, &notes, 10.0);
+        body_size.figures.push(rule_figure(60.0, 200.0, 160.0));
+        let mut wide = page_with_notes(3, &notes, 8.0);
+        wide.figures.push(rule_figure(60.0, 200.0, 560.0));
+        let mut pages = vec![body_size, wide];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_footnote, 0, "a table rule or a wide rule");
+        assert_eq!(roles(&pages[0])[3], "body");
+        assert_eq!(roles(&pages[1])[3], "body");
+    }
+
+    #[test]
+    fn a_footnote_carried_to_the_next_page_is_tagged() {
+        let open = page_with_notes(
+            2,
+            &[
+                "1 A footnote that runs on to the next",
+                "page of the paper and",
+            ],
+            8.0,
+        );
+        let carried = page_with_notes(
+            3,
+            &[
+                "continues here without a marker.",
+                "2 A second note on this page.",
+            ],
+            8.0,
+        );
+        let mut pages = vec![open, carried];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_footnote, 2);
+        assert_eq!(roles(&pages[0])[3..], ["body", "body"], "left to regions");
+        assert_eq!(roles(&pages[1])[3..], ["footnote", "footnote"]);
+
+        let closed = page_with_notes(
+            2,
+            &[
+                "1 A footnote that runs on to the next",
+                "page of the paper.",
+            ],
+            8.0,
+        );
+        let next = page_with_notes(
+            3,
+            &[
+                "continues here without a marker.",
+                "2 A second note on this page.",
+            ],
+            8.0,
+        );
+        let mut pages = vec![closed, next];
+        let report = clean_document(&mut pages);
+        assert_eq!(
+            report.role_footnote, 0,
+            "the previous page ended a sentence"
+        );
+        assert_eq!(roles(&pages[1])[3..], ["body", "body"]);
     }
 
     /// Page 1 with `spans` and one body line per entry of `lines` (span
