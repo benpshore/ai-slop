@@ -11,6 +11,7 @@ The eventual application is a compact, accessible, Zed-inspired Rust document wo
 The engine is the root crate `tpe` ([Engine](docs/ENGINE.md)):
 
 - `tpe extract` writes page text with span geometry, reading order, metadata, references, citation markers, chunks and figures to one SQLite ledger. Runs are keyed by input hash and backend identity.
+- On-disk ledgers use a configurable WAL/storage policy with bounded checkpoints and preflight capacity checks. WAL limits reduce write amplification; they do not replace backups or filesystem-health and free-space monitoring.
 - `tpe bibliography` scans backward for the final reference list and emits one JSON record per PDF without populating the full-document ledger ([behavior and limits](docs/BIBLIOGRAPHY.md)).
 - Backends: `lopdf` (pure Rust, the default and only backend in the default build), `pdfium` behind feature `pdfium`, and `docling-text` / `docling` behind feature `docling`. Provisioning of the native libraries and models is in [Native](docs/NATIVE.md).
 - Figures: images never enter page text. Each page lists its figures, and `--figures-dir` writes their bytes.
