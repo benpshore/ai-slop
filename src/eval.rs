@@ -206,7 +206,8 @@ pub struct PaperEval {
     /// body, both prepared by `alignment_texts`: the extracted side is the
     /// page text without the reference lists (text after a list, such as
     /// an appendix, is kept), with lines tagged with a non-body role,
-    /// citation markers, caption paragraphs and math-heavy lines removed, the truth side has math-heavy lines removed. `None`
+    /// citation markers, caption paragraphs and math-heavy lines removed, the truth side has math-heavy lines removed; both
+    /// sides are tokenized without math tokens (see `is_math_token`). `None`
     /// when the truth has no body text.
     pub body_alignment: Option<f32>,
     /// [`word_alignment`] of all extracted page text (pages joined by `\n`)
@@ -502,7 +503,7 @@ fn lcs_bounded(left: &[u32], right: &[u32], max_words: usize) -> Option<(usize, 
 /// [`LCS_MAX_WORDS`]). Returns 1.0 when
 /// both sides have no tokens and 0.0 when exactly one side has none.
 pub fn word_alignment(a: &str, b: &str) -> f32 {
-    alignment_score(align_counts(a, b))
+    alignment_score(token_counts(a, b, words))
 }
 
 /// Word tokens and their matches behind [`word_alignment`].
@@ -516,14 +517,21 @@ struct AlignCounts {
     matched: usize,
 }
 
-/// Token counts and LCS length of `a` against `b`, as [`word_alignment`]
-/// computes them. A side longer than [`MAX_ALIGN_TOKENS`] is cut to its
+/// Token counts and LCS length of `a` against `b` for the body alignment:
+/// [`token_counts`] over [`alignment_words`], so math tokens on either side
+/// are left out.
+fn align_counts(a: &str, b: &str) -> AlignCounts {
+    token_counts(a, b, alignment_words)
+}
+
+/// Token counts and LCS length of `a` against `b`, both split into tokens
+/// by `tokenize`. A side longer than [`MAX_ALIGN_TOKENS`] is cut to its
 /// first `MAX_ALIGN_TOKENS` tokens, with a warning on stderr; when the LCS
 /// match masks of the two sides would exceed [`LCS_MAX_WORDS`], both sides
 /// are cut to their first [`LCS_FALLBACK_TOKENS`] tokens, with a warning.
-fn align_counts(a: &str, b: &str) -> AlignCounts {
-    let mut left_words = words(a);
-    let mut right_words = words(b);
+fn token_counts(a: &str, b: &str, tokenize: fn(&str) -> Vec<String>) -> AlignCounts {
+    let mut left_words = tokenize(a);
+    let mut right_words = tokenize(b);
     if left_words.len() > MAX_ALIGN_TOKENS || right_words.len() > MAX_ALIGN_TOKENS {
         eprintln!(
             "warning: word alignment input over {MAX_ALIGN_TOKENS} tokens ({} and {}); \
@@ -656,6 +664,95 @@ fn is_math_heavy(line: &str) -> bool {
     other > 0 && other >= letters
 }
 
+/// Whether `c` marks a token as math for [`is_math_token`]: an
+/// [`is_math_char`] symbol, one of `±×÷√∞∝`, a superscript or subscript
+/// (U+2070–U+209F, `¹²³`) or one of the `LaTeX` math characters `=`, `^`,
+/// `_` and `\`.
+fn is_math_token_char(c: char) -> bool {
+    is_math_char(c)
+        || ('\u{2070}'..='\u{209F}').contains(&c)
+        || matches!(
+            c,
+            '\u{00B9}'
+                | '\u{00B2}'
+                | '\u{00B3}'
+                | '±'
+                | '×'
+                | '÷'
+                | '√'
+                | '∞'
+                | '∝'
+                | '='
+                | '^'
+                | '_'
+                | '\\'
+        )
+}
+
+/// Letter suffixes that keep a digits-then-letters token (`2nd`, `1990s`,
+/// `10km`, `3D`, `4K`, `7B`) a word: ordinals, decades, dimensions and
+/// units. Compared lower-case.
+const NUMBER_SUFFIXES: &[&str] = &[
+    "st", "nd", "rd", "th", "s", "d", "k", "m", "b", "km", "cm", "mm", "kg", "kb", "mb", "gb",
+    "tb", "ms", "hz", "khz", "mhz", "ghz", "px", "pt",
+];
+
+/// Hyphens that keep a digits-and-letters token a word (`COVID-19`) and
+/// split a token holding math (`top-𝑘`) in [`alignment_words`].
+const HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{2011}'];
+
+/// Whether `core` is ASCII digits followed by a [`NUMBER_SUFFIXES`] suffix.
+fn is_ordinal_or_unit(core: &str) -> bool {
+    let digits = core
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(core.len());
+    digits > 0 && NUMBER_SUFFIXES.contains(&core[digits..].to_lowercase().as_str())
+}
+
+/// Whether a token is math rather than a word, on either side of the body
+/// alignment: it holds an [`is_math_token_char`] character, or its
+/// alphanumeric core (the token without leading and trailing punctuation)
+/// is a single letter other than `a`, `A`, `i` or `I`, or mixes digits and
+/// letters (`x0`, `vij2`) while the token has no hyphen and the core is not
+/// an ordinal or unit ([`is_ordinal_or_unit`]).
+fn is_math_token(token: &str) -> bool {
+    if token.chars().any(is_math_token_char) {
+        return true;
+    }
+    let core = token.trim_matches(|c: char| !c.is_alphanumeric());
+    let mut chars = core.chars();
+    if let (Some(only), None) = (chars.next(), chars.next()) {
+        return only.is_alphabetic() && !matches!(only, 'a' | 'A' | 'i' | 'I');
+    }
+    core.chars().any(char::is_numeric)
+        && core.chars().any(char::is_alphabetic)
+        && !token.contains(HYPHENS)
+        && !is_ordinal_or_unit(core)
+}
+
+/// The body-alignment tokens of `s`: its whitespace-separated tokens that
+/// are not [`is_math_token`], split into [`words`], without the words that
+/// are themselves math tokens (`f(x)` keeps neither `f` nor `x`). A token
+/// holding an [`is_math_token_char`] is first split at its hyphens, so
+/// `top-𝑘`, `𝑛-gram` and `ε-greedy` keep `top`, `gram` and `greedy` as the
+/// detexed `top-$k$` does.
+fn alignment_words(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in s.split_whitespace() {
+        let pieces: Vec<&str> = if token.chars().any(is_math_token_char) {
+            token.split(HYPHENS).collect()
+        } else {
+            vec![token]
+        };
+        for piece in pieces {
+            if !is_math_token(piece) {
+                out.extend(words(piece).into_iter().filter(|word| !is_math_token(word)));
+            }
+        }
+    }
+    out
+}
+
 /// `text` without its math-heavy lines (see [`is_math_heavy`]).
 fn drop_math_lines(text: &str) -> String {
     text.split('\n')
@@ -665,8 +762,12 @@ fn drop_math_lines(text: &str) -> String {
 }
 
 /// Most lines a caption paragraph may run past its [`caption_start_re`]
-/// line when no blank line or sentence end closes it first.
-const CAPTION_MAX_EXTRA_LINES: usize = 3;
+/// line when no blank line or prose paragraph closes it first.
+const CAPTION_MAX_EXTRA_LINES: usize = 8;
+
+/// Prose lines that must follow a new-paragraph line inside a caption for
+/// that line to end the caption (see [`caption_ends_before`]).
+const CAPTION_END_PROSE_LINES: usize = 2;
 
 /// Whether the line ends a sentence or a parenthetical (`.`, `!`, `?` or
 /// `)` after trailing whitespace).
@@ -674,36 +775,59 @@ fn ends_sentence(line: &str) -> bool {
     line.trim_end().ends_with(['.', '!', '?', ')'])
 }
 
+/// Whether a line reads as prose after a caption: not blank, not a
+/// [`caption_start_re`] line and not [`is_math_heavy`].
+fn is_prose_line(line: &str) -> bool {
+    !line.trim().is_empty() && !caption_start_re().is_match(line) && !is_math_heavy(line)
+}
+
+/// Whether `lines[k]`, a line inside a caption, starts the prose after it:
+/// it starts a new paragraph (an upper-case start after a line that ends a
+/// sentence, see [`ends_sentence`]) and the next
+/// [`CAPTION_END_PROSE_LINES`] lines are all [`is_prose_line`]s.
+fn caption_ends_before(lines: &[&str], k: usize) -> bool {
+    k > 0
+        && ends_sentence(lines[k - 1])
+        && lines[k]
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(char::is_uppercase)
+        && lines
+            .get(k + 1..=k + CAPTION_END_PROSE_LINES)
+            .is_some_and(|next| next.iter().all(|line| is_prose_line(line)))
+}
+
 /// `text` without caption paragraphs and without math-heavy lines. A
 /// caption paragraph is a [`caption_start_re`] line plus at most
 /// `CAPTION_MAX_EXTRA_LINES` further lines; it ends early at a blank line or
-/// after the first line (the start line included) that ends a sentence, so
-/// prose that follows a caption without a blank line is kept.
+/// before the first line that starts a prose paragraph (see
+/// [`caption_ends_before`]), so prose that follows a caption without a
+/// blank line is kept while a caption of several sentences is dropped
+/// whole. A new paragraph followed by fewer prose lines (one short
+/// paragraph glued to the caption) is dropped with it.
 fn drop_caption_and_math_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
     let mut kept: Vec<&str> = Vec::new();
     // `Some(n)`: inside a caption that may drop `n` more lines.
     let mut caption_left: Option<usize> = None;
-    for line in text.split('\n') {
+    for (k, &line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             caption_left = None;
             kept.push(line);
             continue;
         }
         if caption_start_re().is_match(line) {
-            caption_left = if ends_sentence(line) {
-                None
-            } else {
-                Some(CAPTION_MAX_EXTRA_LINES)
-            };
+            caption_left = Some(CAPTION_MAX_EXTRA_LINES);
             continue;
         }
         if let Some(left) = caption_left {
-            caption_left = if ends_sentence(line) || left <= 1 {
-                None
+            if caption_ends_before(&lines, k) {
+                caption_left = None;
             } else {
-                Some(left - 1)
-            };
-            continue;
+                caption_left = Some(left - 1).filter(|&n| n > 0);
+                continue;
+            }
         }
         if !is_math_heavy(line) {
             kept.push(line);
@@ -989,8 +1113,9 @@ fn reference_extents(pages: &[PageText]) -> Vec<ReferenceExtent> {
 /// Where the reference list that starts at `start` ends (see
 /// [`reference_extents`]): the first [`is_reference_end`] line after
 /// `start` that is on or after the page of the last segmented entry
-/// (`last_entry`, a position in `pages`) and that no numbered entry
-/// ([`entry_label_re`]) follows within [`LIST_RESUME_LINES`] lines (a list
+/// (`last_entry`, a position in `pages`) and that no entry start, numbered
+/// or author-year ([`is_entry_start`]), follows within
+/// [`LIST_RESUME_LINES`] lines (a list
 /// interrupted by a caption or table resumes, as in `citations`); else,
 /// when the last entry wraps onto the following page(s), the end that
 /// [`continuation_end`] finds there; else the start of the page after
@@ -1040,8 +1165,9 @@ fn reference_end(
     bound
 }
 
-/// Lines past the page of the last reference entry that
-/// [`continuation_end`] may still count as that entry's continuation.
+/// Non-blank lines in a row that start no entry (see [`continuation_end`])
+/// past the page of the last reference entry that may still count as the
+/// list's continuation.
 const CONTINUATION_MAX_LINES: usize = 12;
 
 /// A line that reads like the rest of a reference entry: it starts with a
@@ -1065,19 +1191,28 @@ struct ContinuationLine<'a> {
     /// Whether a blank line separates it from the text before it on its
     /// page.
     paragraph_start: bool,
+    /// Whether it starts a reference entry ([`is_entry_start`]).
+    entry: bool,
+    /// Whether it starts an entry or is a label of one: [`is_entry_start`]
+    /// or [`continuation_label_re`].
+    label: bool,
 }
 
 /// Where a reference list ends when its last entry started on the page
 /// before `from` (the start of the following page) and may wrap onto it.
-/// The following lines, up to `limit`, count as the entry's continuation
+/// The following lines, up to `limit`, count as the list's continuation
 /// only when the list's last line (`tail`) does not end with `.` or the
-/// first following line reads like an entry's rest ([`entry_tail_re`]);
-/// the continuation then runs until the first [`is_reference_end`] line
-/// (a heading, a caption or a line set clearly larger than the list's
-/// `median`) or the first line of a blank-separated prose paragraph (two
-/// lines of at least 8 words each), at most [`CONTINUATION_MAX_LINES`]
-/// non-blank lines, or to `limit` when that comes first. Returns `from`
-/// when nothing continues the entry.
+/// first following line reads like an entry's rest ([`entry_tail_re`]) or
+/// starts an entry ([`is_entry_start`]: a numbered or bracketed label, or
+/// an unlabeled author-year entry, so a list that goes on over the page
+/// continues). The continuation then runs until the first
+/// [`is_reference_end`] line (a heading, a caption or a line set clearly
+/// larger than the list's `median`), the first line of a blank-separated
+/// prose paragraph (two lines of at least 8 words each, neither starting
+/// an entry nor a [`continuation_label_re`] label) or the line after
+/// [`CONTINUATION_MAX_LINES`] non-blank lines in a row that start no entry
+/// and are no label, or to `limit` when that comes first.
+/// Returns `from` when nothing continues the list.
 fn continuation_end(
     pages: &[PageText],
     from: (usize, usize),
@@ -1086,6 +1221,9 @@ fn continuation_end(
     tail: Option<&str>,
 ) -> (usize, usize) {
     let mut window: Vec<ContinuationLine<'_>> = Vec::new();
+    // Non-blank lines in a row that start no entry; the scan stops one line
+    // past the cap (the prose test looks one line ahead).
+    let mut since_entry = 0_usize;
     'pages: for (pos, page) in pages.iter().enumerate().take(limit.0 + 1).skip(from.0) {
         for line in page_line_starts(page) {
             if (pos, line.offset) >= limit {
@@ -1097,12 +1235,17 @@ fn continuation_end(
             let paragraph_start = page.text[..line.offset]
                 .trim_end_matches([' ', '\t'])
                 .ends_with("\n\n");
+            let entry = is_entry_start(line.text);
+            let label = entry || continuation_label_re().is_match(line.text);
+            since_entry = if label { 0 } else { since_entry + 1 };
             window.push(ContinuationLine {
                 pos,
                 line,
                 paragraph_start,
+                entry,
+                label,
             });
-            if window.len() > CONTINUATION_MAX_LINES {
+            if since_entry > CONTINUATION_MAX_LINES + 1 {
                 break 'pages;
             }
         }
@@ -1111,30 +1254,34 @@ fn continuation_end(
         return from;
     };
     let unfinished = tail.is_some_and(|text| !text.ends_with('.'));
-    if !unfinished && !entry_tail_re().is_match(first.line.text) {
+    if !unfinished && !first.entry && !entry_tail_re().is_match(first.line.text) {
         return from;
     }
-    let is_prose = |text: &str| text.split_whitespace().count() >= 8;
-    for (k, item) in window.iter().enumerate().take(CONTINUATION_MAX_LINES) {
+    let is_prose =
+        |item: &ContinuationLine<'_>| !item.label && item.line.text.split_whitespace().count() >= 8;
+    let mut run = 0_usize;
+    for (k, item) in window.iter().enumerate() {
         if is_reference_end(item.line.text, item.line.size, median) {
             return (item.pos, item.line.offset);
         }
+        run = if item.label { 0 } else { run + 1 };
+        if run > CONTINUATION_MAX_LINES {
+            return (item.pos, item.line.offset);
+        }
         let prose_paragraph = item.paragraph_start
-            && is_prose(item.line.text)
+            && is_prose(item)
             && window
                 .get(k + 1)
-                .is_some_and(|next| !next.paragraph_start && is_prose(next.line.text));
+                .is_some_and(|next| !next.paragraph_start && is_prose(next));
         if prose_paragraph {
             return (item.pos, item.line.offset);
         }
     }
-    window
-        .get(CONTINUATION_MAX_LINES)
-        .map_or(limit, |item| (item.pos, item.line.offset))
+    limit
 }
 
-/// Non-blank lines after a candidate list end within which a numbered entry
-/// means the list resumes.
+/// Non-blank lines after a candidate list end within which an entry start
+/// ([`is_entry_start`]) means the list resumes.
 const LIST_RESUME_LINES: usize = 30;
 
 /// A numbered reference entry's first line: `[12] ...` or `12. ...`.
@@ -1143,14 +1290,45 @@ fn entry_label_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\s*(?:\[\d+\]|\d+\.)\s+\S").expect("valid regex"))
 }
 
-/// Whether a numbered entry ([`entry_label_re`]) starts one of the first
+/// An unlabeled author-year entry's first line: a surname (with optional
+/// particles such as `van` or `de`, and up to one more capitalised part)
+/// then a comma and initials (`Hu, W.`, `Smith, J.-P.`), and later on the
+/// line either a parenthesised year (`(2021)`, `(2019a)`) or, when the
+/// author list wraps, a line end after `,`, `&` or `and`.
+fn author_year_entry_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:van|von|de|der|den|del|della|di|da|du|le|la|dos|das)\s+)*\p{Lu}[\p{L}'’-]+(?:[ -]\p{Lu}[\p{L}'’-]+)?,\s*\p{Lu}\.(?:\s*-?\s*\p{Lu}\.)*(?:.*\((?:19|20)\d{2}[a-z]?\)|.*(?:,|&|\band)\s*$)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A reference label that only [`continuation_end`] counts as an entry
+/// start: an RSC-style bare number before a capitalised word (`12 Smith`)
+/// or a detached `[12]` alone on its line. Too loose for [`list_resumes`],
+/// where a stray number would swallow an appendix.
+fn continuation_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(?:\d{1,4}\s+\p{Lu}|\[\d+\]\s*$)").expect("valid regex"))
+}
+
+/// Whether `text` starts a reference entry: a numbered or bracketed label
+/// ([`entry_label_re`]) or an unlabeled author-year entry
+/// ([`author_year_entry_re`]).
+fn is_entry_start(text: &str) -> bool {
+    entry_label_re().is_match(text) || author_year_entry_re().is_match(text)
+}
+
+/// Whether an entry ([`is_entry_start`]) starts one of the first
 /// [`LIST_RESUME_LINES`] non-blank `lines`.
 fn list_resumes(lines: &[(usize, TextLine<'_>)]) -> bool {
     lines
         .iter()
         .filter(|(_, line)| !line.text.trim().is_empty())
         .take(LIST_RESUME_LINES)
-        .any(|(_, line)| entry_label_re().is_match(line.text))
+        .any(|(_, line)| is_entry_start(line.text))
 }
 
 /// A line of `page.text` as [`reference_end`] scans it.
@@ -3635,7 +3813,9 @@ mod tests {
                 edited.push("inserted".to_string());
             }
         }
-        let counts = align_counts(&original.join(" "), &edited.join(" "));
+        // `w123`-style tokens mix digits and letters, so they go through
+        // the plain tokenizer (`align_counts` would drop them as math).
+        let counts = token_counts(&original.join(" "), &edited.join(" "), words);
         assert_eq!(
             counts,
             AlignCounts {
@@ -5389,20 +5569,54 @@ mod tests {
                     Figure 3: Accuracy against model size for\n\
                     all three datasets.\n\
                     The prose resumes here.\n\
-                    More prose follows.";
+                    More prose follows.\n\
+                    And a third line.";
         assert_eq!(
             drop_caption_and_math_lines(text),
-            "Body one.\nThe prose resumes here.\nMore prose follows."
+            "Body one.\nThe prose resumes here.\nMore prose follows.\nAnd a third line."
         );
-        let one_line = "Table 2: Results.\nProse after the table.";
+        let one_line = "Table 2: Results.\nProse after the table.\nIt goes on.\nAnd on.";
         assert_eq!(
             drop_caption_and_math_lines(one_line),
-            "Prose after the table."
+            "Prose after the table.\nIt goes on.\nAnd on."
         );
-        let paren = "Figure 1: Results (left) and (right)\nProse here.";
-        assert_eq!(drop_caption_and_math_lines(paren), "Prose here.");
-        let long = "Figure 1: a\nb\nc\nd\nkept line\nkept too";
+        let paren = "Figure 1: Results (left) and (right)\nProse here.\nMore.\nEnd.";
+        assert_eq!(
+            drop_caption_and_math_lines(paren),
+            "Prose here.\nMore.\nEnd."
+        );
+        // A new paragraph with fewer than two prose lines after it is still
+        // caption (a caption of several sentences).
+        let glued = "Figure 1: Results (left) and (right)\nProse here.";
+        assert_eq!(drop_caption_and_math_lines(glued), "");
+        // Without a boundary at most 8 lines follow the start line.
+        let long = "Figure 1: a\nb\nc\nd\ne\nf\ng\nh\ni\nkept line\nkept too";
         assert_eq!(drop_caption_and_math_lines(long), "kept line\nkept too");
+    }
+
+    #[test]
+    fn caption_of_several_sentences_is_dropped_whole() {
+        let text = "Figure 4: Accuracy per model size.\n\
+                    Shaded bands show the spread over five seeds.\n\
+                    Dashed lines mark the baseline.\n\
+                    \n\
+                    Body resumes here.";
+        assert_eq!(drop_caption_and_math_lines(text), "\nBody resumes here.");
+        // A new paragraph followed by two prose lines ends the caption.
+        let text = "Figure 4: Accuracy per model size.\n\
+                    We now turn to the second experiment.\n\
+                    It uses the same data.\n\
+                    Results follow below.";
+        assert_eq!(
+            drop_caption_and_math_lines(text),
+            "We now turn to the second experiment.\nIt uses the same data.\nResults follow below."
+        );
+        // A math-heavy line is not prose, so it does not end the caption.
+        let text = "Figure 4: Accuracy per model size.\n\
+                    Shaded bands show the spread.\n\
+                    x = 2 + 3\n\
+                    last caption words";
+        assert_eq!(drop_caption_and_math_lines(text), "");
     }
 
     #[test]
@@ -5425,6 +5639,122 @@ mod tests {
         assert!(is_math_heavy("12"));
         assert!(!is_math_heavy("In 2019, 45 of the 1234 runs failed"));
         assert!(!is_math_heavy(""));
+    }
+
+    #[test]
+    fn math_tokens_are_recognised() {
+        for math in [
+            "𝑥",
+            "μ(vij)",
+            "(v_ij)",
+            "x^2",
+            "a=b",
+            "\\alpha",
+            "10⁻²",
+            "x²",
+            "∀x",
+            "±1",
+            "x",
+            "(x,",
+            "f",
+            "x0",
+            "v1",
+            "l2",
+            "GPT4",
+            "(2020a)",
+            "θ̂(x0),",
+        ] {
+            assert!(is_math_token(math), "{math:?}");
+        }
+        for word in [
+            "a",
+            "A",
+            "I",
+            "i",
+            "(a)",
+            "word",
+            "Word,",
+            "2nd",
+            "21st",
+            "10km",
+            "3D",
+            "2D",
+            "4K",
+            "1990s",
+            "7B",
+            "2020",
+            "3",
+            "COVID-19",
+            "GPT-4o",
+            "x0-dependent",
+            "e.g.,",
+        ] {
+            assert!(!is_math_token(word), "{word:?}");
+        }
+    }
+
+    #[test]
+    fn alignment_words_drop_math_tokens_on_both_sides() {
+        assert_eq!(
+            alignment_words("Let 𝑋𝑖 = (Age𝑖, Sex𝑖) and f(x) be the 2nd map in 3D x0-dependent"),
+            vec![
+                "let",
+                "and",
+                "be",
+                "the",
+                "2nd",
+                "map",
+                "in",
+                "3d",
+                "dependent"
+            ]
+        );
+        assert_eq!(
+            alignment_words("Let X_i = (Age_i, Sex_i) and f(x) be the 2nd map in 3D x0-dependent"),
+            vec![
+                "let",
+                "and",
+                "be",
+                "the",
+                "2nd",
+                "map",
+                "in",
+                "3d",
+                "dependent"
+            ]
+        );
+        // The plain tokenizer keeps them.
+        assert_eq!(words("f(x) x0"), vec!["f", "x", "x0"]);
+        // Hyphenated math compounds keep their word part on both sides.
+        assert_eq!(
+            alignment_words("top-𝑘 𝑛-gram ε-greedy"),
+            vec!["top", "gram", "greedy"]
+        );
+        assert_eq!(
+            alignment_words("top- -gram -greedy"),
+            vec!["top", "gram", "greedy"]
+        );
+    }
+
+    #[test]
+    fn body_alignment_strips_math_tokens_but_raw_keeps_them() {
+        let result = body_result(
+            vec![page(1, "We bound μ(vij) by 𝜃 for each x in the set")],
+            Vec::new(),
+        );
+        let truth = truth_with(Vec::new(), "We bound (v_ij) by for each in the set");
+        let eval = evaluate("math-tokens", &result, &truth);
+        let alignment = eval.body_alignment.expect("body text present");
+        assert!(close(alignment, 1.0), "got {alignment}");
+        // we bound by for each in the set
+        assert_eq!(eval.body_words_extracted, 8);
+        assert_eq!(eval.body_words_truth, 8);
+        assert_eq!(eval.body_words_matched, 8);
+        // Raw: 12 extracted tokens (we bound μ vij by 𝜃 for each x in the
+        // set) against 10 truth tokens (we bound v ij by for each in the
+        // set), 8 matched.
+        let raw = eval.body_alignment_raw.expect("body text present");
+        assert!(close(raw, 16.0 / 22.0), "got {raw}");
     }
 
     #[test]
@@ -5621,6 +5951,79 @@ mod tests {
             words(&body_text_extracted(&[head, tail])),
             words("Body text. line 13 line 14 line 15")
         );
+    }
+
+    #[test]
+    fn unlabeled_author_year_entries_continue_the_list_over_the_page() {
+        let head = lined_page(
+            1,
+            &[
+                "Body text.",
+                "References",
+                "Adams, B. (2019). A first title about regression models in practice.",
+                "Baker, C., & Cole, D. (2020). A second title about sparse estimation",
+            ],
+        );
+        // Page 2 is a second page of references: 14 blank-separated
+        // unlabeled author-year entries of at least 8 words each (the prose
+        // rule and the 12-line cap would each have ended the list here),
+        // then the supplement.
+        let mut text = String::from("methods. Journal of Statistics, 12, 1-20.");
+        for i in 0..14 {
+            text.push_str(&format!(
+                "\n\nHu, W., Pan, T., Kong, D. & Shen, W. (2021). Nonparametric matrix \
+                 response regression number {i}\nwith application to brain imaging data \
+                 analysis. Annals of Statistics, 49, 1-30."
+            ));
+        }
+        text.push_str(
+            "\n\nSupplementary material\n\nA. Additional simulations\n\
+             The supplement text is kept.",
+        );
+        let pages = [head, page(2, &text)];
+        // The segmented list ends on page 1, so the end on page 2 is
+        // `continuation_end`'s.
+        let sections = find_reference_sections(&pages);
+        let last = segment_entries(&pages, &sections[0]).last().map(|e| e.page);
+        assert_eq!(last, Some(1));
+        let body = body_text_extracted(&pages);
+        assert_eq!(
+            words(&body),
+            words(
+                "Body text. Supplementary material A. Additional simulations \
+                 The supplement text is kept."
+            )
+        );
+        assert!(is_entry_start(
+            "Hu, W., Pan, T., Kong, D. & Shen, W. (2021). Title"
+        ));
+        assert!(is_entry_start("Smith, J., & Lee, K. (2019a). Title here."));
+        assert!(is_entry_start(
+            "van der Vaart, A. W. (1998). Asymptotic statistics."
+        ));
+        assert!(is_entry_start("Van Cooten, B., Morand, V.,"));
+        assert!(is_entry_start("[12] A. Author. Title."));
+        assert!(is_entry_start("12. A. Author. Title."));
+        assert!(!is_entry_start("Smith, J. argued in 2020 that this holds."));
+        assert!(!is_entry_start(
+            "We now prove the main theorem in full detail."
+        ));
+    }
+
+    #[test]
+    fn author_year_entry_after_a_caption_resumes_the_list() {
+        let pages = vec![lined_page(
+            1,
+            &[
+                "Body words.",
+                "References",
+                "Adams, B. (2019). First title. Journal, 1, 2-3.",
+                "Table 3: Results of the run",
+                "",
+                "Baker, C., & Cole, D. (2020). Second title. Journal, 4, 5-6.",
+            ],
+        )];
+        assert_eq!(words(&body_text_extracted(&pages)), vec!["body", "words"]);
     }
 
     #[test]

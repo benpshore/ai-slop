@@ -1869,24 +1869,32 @@ pub fn parse_cites(tex: &str) -> TruthCitations {
 
 /// Detexed body of a document for alignment diagnostics.
 ///
-/// Takes the text between `\begin{document}` and `\end{document}`, removes
-/// the front matter (see [`remove_front_matter`]; the abstract is kept),
-/// citation commands, floats and display environments (figure, table,
-/// tabular, algorithm, equation, align, listings, verbatim, ...) and `\[...\]`,
-/// turns `\section{X}` (and chapter, subsection, paragraph) into a paragraph
-/// of its own, expands zero-argument `\newcommand` macros, then detexes each
-/// blank-line-separated paragraph. Paragraphs are joined with `"\n\n"`.
+/// Takes the text between `\begin{document}` and `\end{document}`, drops
+/// the zero-argument macro definitions made there and expands every
+/// zero-argument `\newcommand` macro first (so an alias such as
+/// `\newcommand{\be}{\begin{equation}}` is removed like `equation`), then
+/// removes the front matter (see [`remove_front_matter`]; the abstract is
+/// kept), citation commands, floats, display environments and author
+/// biographies (see [`is_dropped_env`]), footnotes and box, listing and
+/// colour settings (see [`BODY_DROPPED_COMMANDS`]), `key=value` options of
+/// any environment (see [`remove_environment_options`]) and all math
+/// (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`, see [`remove_math`]), turns
+/// `\section{X}` (and chapter, subsection, paragraph) into a paragraph of
+/// its own, then detexes each blank-line-separated paragraph. Paragraphs
+/// are joined with `"\n\n"`.
 pub fn body_text(main_tex: &str) -> String {
     let clean = strip_comments(main_tex);
     let macros = collect_macros(&clean);
-    let body = document_body(&clean);
-    let body = remove_front_matter(body);
+    let body = remove_definitions(document_body(&clean));
+    let body = expand_macros(&expand_macros(&body, &macros), &macros);
+    let body = remove_front_matter(&body);
     let body = remove_cites(&body);
     let body = remove_environments(&body);
-    let body = remove_display_math(&body);
+    let body = remove_commands(&body, BODY_DROPPED_COMMANDS);
+    let body = remove_environment_options(&body);
+    let body = remove_math(&body);
     let body = replace_headings(&body);
     let body = par_re().replace_all(&body, "\n\n");
-    let body = expand_macros(&expand_macros(&body, &macros), &macros);
     let mut paragraphs: Vec<String> = Vec::new();
     for para in blank_line_re().split(&body) {
         let text = latex_to_text(para);
@@ -2038,6 +2046,48 @@ fn remove_front_environments(body: &str) -> String {
 }
 
 fn remove_front_commands(body: &str) -> String {
+    remove_commands(body, FRONT_MATTER_COMMANDS)
+}
+
+/// Commands removed from the document body with their arguments, as
+/// `(name, brace arguments)`, besides the front matter: footnotes (the
+/// extracted side tags footnote lines and leaves them out) and the
+/// settings of boxes, listings, `TikZ`, colours, lists and theorems, whose
+/// `key=value` arguments would otherwise survive as text.
+const BODY_DROPPED_COMMANDS: &[(&str, usize)] = &[
+    ("footnote", 1),
+    ("footnotetext", 1),
+    ("newtcolorbox", 2),
+    ("renewtcolorbox", 2),
+    ("newtcblisting", 2),
+    ("renewtcblisting", 2),
+    ("DeclareTColorBox", 3),
+    ("tcbset", 1),
+    ("tcbuselibrary", 1),
+    ("newmdenv", 1),
+    ("mdfsetup", 1),
+    ("mdfdefinestyle", 2),
+    ("surroundwithmdframed", 1),
+    ("lstset", 1),
+    ("lstdefinestyle", 2),
+    ("lstdefinelanguage", 2),
+    ("tikzset", 1),
+    ("usetikzlibrary", 1),
+    ("pgfplotsset", 1),
+    ("definecolor", 3),
+    ("colorlet", 2),
+    ("hypersetup", 1),
+    ("captionsetup", 1),
+    ("setlist", 1),
+    ("newtheorem", 2),
+    ("theoremstyle", 1),
+];
+
+/// `body` without every `\name` of `commands` and its arguments: `[...]`
+/// optional arguments before each of its brace arguments go with it. A
+/// command whose brace arguments are missing loses only those found. A
+/// removal that fills its lines also takes the line end.
+fn remove_commands(body: &str, commands: &[(&str, usize)]) -> String {
     let mut out = String::with_capacity(body.len());
     let mut last = 0;
     for caps in command_re().captures_iter(body) {
@@ -2046,14 +2096,16 @@ fn remove_front_commands(body: &str) -> String {
             continue;
         }
         let name = &caps[1];
-        let Some(&(_, args)) = FRONT_MATTER_COMMANDS.iter().find(|entry| entry.0 == name) else {
+        let Some(&(_, args)) = commands.iter().find(|entry| entry.0 == name) else {
             continue;
         };
         let mut i = whole.end();
         if args > 0 {
             i = skip_optional(body, i);
             for _ in 0..args {
-                let Some((_, past_group)) = brace_group(body, skip_ws(body, i)) else {
+                let Some((_, past_group)) =
+                    brace_group(body, skip_ws(body, skip_optional(body, i)))
+                else {
                     break;
                 };
                 i = past_group;
@@ -2112,6 +2164,9 @@ fn is_dropped_env(name: &str) -> bool {
             | "thebibliography"
             | "filecontents"
             | "comment"
+            | "IEEEbiography"
+            | "IEEEbiographynophoto"
+            | "biography"
     )
 }
 
@@ -2327,15 +2382,112 @@ fn find_control(body: &str, from: usize, symbol: u8) -> Option<usize> {
     None
 }
 
-/// Remove `\[ ... \]` display math.
-fn remove_display_math(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    let mut i = 0;
-    while let Some(open) = find_control(body, i, b'[') {
-        out.push_str(&body[i..open]);
-        i = find_control(body, open + 2, b']').map_or(body.len(), |close| close + 2);
+/// Index just past the `$` (or, for `display`, the `$$`) that closes math
+/// opened before `from`, skipping control symbols such as `\$`. Inline math
+/// never runs past a blank line. `None` when it is not closed.
+fn math_close(body: &str, from: usize, display: bool) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'$' if !display => return Some(i + 1),
+            b'$' if bytes.get(i + 1) == Some(&b'$') => return Some(i + 2),
+            b'\n'
+                if !display
+                    && body[i + 1..]
+                        .trim_start_matches([' ', '\t', '\r'])
+                        .starts_with('\n') =>
+            {
+                return None;
+            }
+            _ => i += 1,
+        }
     }
-    out.push_str(&body[i..]);
+    None
+}
+
+/// Remove all math: `$$ ... $$`, `\[ ... \]`, `\( ... \)` and inline
+/// `$ ... $`, each replaced by one space. Control symbols (`\$`, `\\`) are
+/// skipped, so `\\[2pt]` is not display math. A `$` or `$$` that is never
+/// closed is dropped alone; an unclosed `\[` or `\(` runs to the end.
+fn remove_math(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = match (bytes[i], bytes.get(i + 1)) {
+            (b'\\', Some(b'[')) => {
+                find_control(body, i + 2, b']').map_or(body.len(), |close| close + 2)
+            }
+            (b'\\', Some(b'(')) => {
+                find_control(body, i + 2, b')').map_or(body.len(), |close| close + 2)
+            }
+            (b'\\', _) => {
+                i += 2;
+                continue;
+            }
+            (b'$', Some(b'$')) => math_close(body, i + 2, true).unwrap_or(i + 2),
+            (b'$', _) => math_close(body, i + 1, false).unwrap_or(i + 1),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        out.push_str(&body[copied..i]);
+        out.push(' ');
+        copied = end;
+        i = end;
+    }
+    out.push_str(&body[copied..]);
+    out
+}
+
+/// Remove the zero-argument macro definitions ([`newcommand_re`]) made in
+/// the document body, so that expanding the macros does not rewrite the
+/// definitions themselves.
+fn remove_definitions(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut last = 0;
+    for whole in newcommand_re().find_iter(body) {
+        if whole.start() < last {
+            continue;
+        }
+        let Some(close) = matching_close(body, whole.end() - 1) else {
+            continue;
+        };
+        out.push_str(&body[last..whole.start()]);
+        last = past_removed_line(body, whole.start(), close + 1);
+    }
+    out.push_str(&body[last..]);
+    out
+}
+
+/// Remove a `[...]` option list holding a `key=value` pair (`[colback=...]`,
+/// `[leftmargin=*]`) after `\begin{name}`, also when whitespace or a line
+/// end comes first. A `[...]` without `=` (a theorem's name) is kept.
+fn remove_environment_options(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut last = 0;
+    for whole in begin_re().find_iter(body) {
+        if whole.start() < last {
+            continue;
+        }
+        let open = skip_ws(body, whole.end());
+        if body.as_bytes().get(open) != Some(&b'[') {
+            continue;
+        }
+        let Some(close) = matching_close(body, open) else {
+            continue;
+        };
+        if !body[open..close].contains('=') {
+            continue;
+        }
+        out.push_str(&body[last..whole.end()]);
+        last = close + 1;
+    }
+    out.push_str(&body[last..]);
     out
 }
 
@@ -4061,7 +4213,9 @@ H.~H. Barrett and K.~J. Myers, \emph{Foundations of Image Science}.\hskip 1em
             out.starts_with("Introduction\n\nWe present FooNet here"),
             "{out}"
         );
-        assert!(out.contains("Second paragraph with x^2."), "{out}");
+        // Inline math is removed with its contents.
+        assert!(out.contains("Second paragraph with ."), "{out}");
+        assert!(!out.contains("x^2"), "{out}");
         assert!(!out.contains("caption"), "{out}");
         assert!(!out.contains("mc^2"), "{out}");
         assert!(!out.contains("Trailing"), "{out}");
@@ -4312,6 +4466,149 @@ Plain body words.
                 "radio, speed",
             ],
         );
+    }
+
+    const MATH_TEX: &str = r"\documentclass{article}
+\newcommand{\be}{\begin{equation}}
+\newcommand{\ee}{\end{equation}}
+\def\bea{\begin{eqnarray}}
+\def\eea{\end{eqnarray}}
+\begin{document}
+\newcommand{\myword}{Widget}
+\def\other{Gadget}
+Before the display.
+\be\label{eq:one}
+K_s = 108 \alpha
+\ee
+After the \myword{} and \other{} display with $x_i = 2$ inline, $$y^2$$ shown, \(z_k\) and \[w + 1\] math.
+\bea a_1 &=& b_1 \eea
+Price is \$5 and \$6 total.
+A line break\\[2pt]
+stays text.
+Open $ dollar
+
+Next paragraph.
+\end{document}
+";
+
+    #[test]
+    fn body_text_expands_equation_aliases_and_removes_all_math() {
+        let out = body_text(MATH_TEX);
+        for kept in [
+            "Before the display.",
+            "After the Widget and Gadget display with inline, shown, and math.",
+            "Price is $5 and $6 total.",
+            "A line break stays text.",
+            "Open dollar",
+            "Next paragraph.",
+        ] {
+            assert!(out.contains(kept), "{kept:?} missing from {out}");
+        }
+        assert_absent(
+            &out,
+            &[
+                "K_s",
+                "108",
+                "alpha",
+                "eq:one",
+                "x_i",
+                "y^2",
+                "z_k",
+                "w + 1",
+                "a_1",
+                "b_1",
+                "&",
+                "newcommand",
+                "Widget}",
+                "equation",
+                "eqnarray",
+            ],
+        );
+    }
+
+    const FOOTNOTE_TEX: &str = r"\begin{document}
+We study cats.\footnote{See the {appendix} for $n$ dogs.} Then more.\footnotemark[2]\footnotetext[2]{Hidden text.} End.
+\footnotesize Small words.
+\end{document}
+";
+
+    #[test]
+    fn body_text_drops_footnotes() {
+        assert_eq!(
+            body_text(FOOTNOTE_TEX),
+            "We study cats. Then more. End. Small words."
+        );
+    }
+
+    const BOX_NOISE_TEX: &str = r"\begin{document}
+\newtcolorbox{findingbox}{enhanced, breakable, colback = blue!10, colframe = blue!10!black}
+\newtcblisting{motivationbox}[1][]{listing only, colback=codebg, boxrule=0.5pt}
+\lstset{basicstyle=\ttfamily, breaklines=true}
+\tikzset{promptstyle/.style={breakable, colback=gray!10}}
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\colorlet{shade}{gray!20}
+\begin{tcolorbox}
+[colback=white, title={Key finding}]
+Boxed finding words.
+\end{tcolorbox}
+\begin{mdframed} [linecolor=black]
+Framed words.
+\end{mdframed}
+\begin{theorem}
+Theorem words.
+\end{theorem}
+Body words.
+\begin{IEEEbiography}[{\includegraphics{a.png}}]{Grace Hopper}
+received her degree in 1934.
+\end{IEEEbiography}
+\begin{IEEEbiographynophoto}{Alan Turing}
+was born in London.
+\end{IEEEbiographynophoto}
+\begin{biography}
+Plain bio words.
+\end{biography}
+\end{document}
+";
+
+    #[test]
+    fn body_text_drops_box_settings_options_and_biographies() {
+        let out = body_text(BOX_NOISE_TEX);
+        assert_eq!(
+            out,
+            "Boxed finding words. Framed words. Theorem words. Body words."
+        );
+        assert_absent(
+            &out,
+            &[
+                "colback",
+                "colframe",
+                "enhanced",
+                "basicstyle",
+                "style",
+                "rgb",
+                "0.95",
+                "gray",
+                "codebg",
+                "Key finding",
+                "linecolor",
+                "Grace",
+                "1934",
+                "Turing",
+                "London",
+                "bio words",
+            ],
+        );
+    }
+
+    #[test]
+    fn remove_math_handles_escapes_and_unclosed_delimiters() {
+        assert_eq!(remove_math(r"a $x$ b"), "a   b");
+        assert_eq!(remove_math(r"cost \$3 and \$4"), r"cost \$3 and \$4");
+        assert_eq!(remove_math(r"a $$x$$ b"), "a   b");
+        assert_eq!(remove_math(r"a \(x\) b \[y\] c"), "a   b   c");
+        assert_eq!(remove_math(r"line\\[2pt] next"), r"line\\[2pt] next");
+        assert_eq!(remove_math("open $ x\n\nnext $y$"), "open   x\n\nnext  ");
+        assert_eq!(remove_math(r"$\$$ kept"), "  kept");
     }
 
     #[test]
