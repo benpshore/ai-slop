@@ -63,11 +63,12 @@ const FRONT_RUN_WORDS: usize = 10;
 /// Consecutive prose lines of at least `FRONT_RUN_WORDS` words that end the
 /// front matter.
 const FRONT_RUN_LINES: usize = 2;
-/// A page-1 line with at least this many words is never front matter unless
-/// it carries an affiliation signal or reads like a list of names.
+/// A page-1 line after the abstract (or on a page without one) with at
+/// least this many words is never front matter unless it carries an
+/// affiliation signal or reads like a list of names.
 const FRONT_LONG_WORDS: usize = 14;
-/// A page-1 line with at least this many words and a verb-like word (see
-/// [`has_verb_ending`]) is never front matter unless it carries an
+/// A page-1 line with at least this many words and verb evidence (see
+/// [`is_long_body_line`]) is never front matter unless it carries an
 /// affiliation signal or reads like a list of names.
 const FRONT_SENTENCE_WORDS: usize = 12;
 /// Fewest words in each line of the shorter prose run that also ends the
@@ -1615,28 +1616,81 @@ fn is_short_front_prose(text: &str) -> bool {
     total >= FRONT_SHORT_RUN_WORDS && lower * 2 >= total && !has_affiliation_signal(text)
 }
 
-/// The line holds a verb-like word: all letters, at least 4 of them,
-/// starting lowercase and ending in `ed`, `ing` or `s`.
+/// Lowercase auxiliaries, modals and sentence cues that mark a line as
+/// running prose rather than a title (see [`has_verb_cue`]).
+const VERB_CUES: [&str; 15] = [
+    "is",
+    "are",
+    "was",
+    "were",
+    "has",
+    "have",
+    "can",
+    "will",
+    "show",
+    "shows",
+    "propose",
+    "present",
+    "introduce",
+    "we",
+    "our",
+];
+
+/// The line holds a verb-like word: all letters, at least 5 of them,
+/// starting lowercase and ending in `ed` or `ing`. A plural noun
+/// (`models`, `systems`) is no verb evidence.
 fn has_verb_ending(text: &str) -> bool {
     text.split_whitespace().any(|token| {
         let word = token.trim_matches(|c: char| !c.is_alphabetic());
-        word.chars().count() >= 4
+        word.chars().count() >= 5
             && word.chars().all(char::is_alphabetic)
             && word.chars().next().is_some_and(char::is_lowercase)
-            && (word.ends_with("ed") || word.ends_with("ing") || word.ends_with('s'))
+            && (word.ends_with("ed") || word.ends_with("ing"))
     })
 }
 
-/// A long page-1 line that is not front matter: no affiliation signal, not
-/// a list of names (at least 30 % of its words start lowercase), and at
-/// least `FRONT_LONG_WORDS` words, or at least `FRONT_SENTENCE_WORDS` with
-/// a verb-like word (see [`has_verb_ending`]).
-fn is_long_body_line(text: &str) -> bool {
+/// The line holds one of the lowercase [`VERB_CUES`] as a whole word.
+fn has_verb_cue(text: &str) -> bool {
+    text.split_whitespace().any(|token| {
+        let word = token.trim_matches(|c: char| !c.is_alphabetic());
+        VERB_CUES.contains(&word)
+    })
+}
+
+/// The line ends a sentence and goes on: a word of at least 3 letters
+/// followed by `.`, `?` or `!`, then a word that starts with an
+/// upper-case letter (`here. We`). Initials (`J.`), `al.` and `e.g.` do
+/// not count.
+fn has_sentence_break(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        let word = pair[0].trim_end_matches(['.', '?', '!']);
+        word.len() < pair[0].len()
+            && word.chars().count() >= 3
+            && word.chars().all(char::is_alphabetic)
+            && pair[1].chars().next().is_some_and(char::is_uppercase)
+    })
+}
+
+/// A long page-1 line that is not front matter: no affiliation signal and
+/// not a list of names (at least 30 % of its words start lowercase). Before
+/// a recognised abstract line (`before_abstract`) it needs at least
+/// `FRONT_SENTENCE_WORDS` words and a verb cue ([`has_verb_cue`]) or a
+/// sentence break ([`has_sentence_break`]), so a long sentence-case title
+/// stays front matter. Elsewhere it needs at least `FRONT_LONG_WORDS`
+/// words, or at least `FRONT_SENTENCE_WORDS` with any of those or a
+/// verb-like word ([`has_verb_ending`]).
+fn is_long_body_line(text: &str, before_abstract: bool) -> bool {
     let (total, lower) = lowercase_words(text);
     if has_affiliation_signal(text) || lower * 10 < total * 3 {
         return false;
     }
-    total >= FRONT_LONG_WORDS || (total >= FRONT_SENTENCE_WORDS && has_verb_ending(text))
+    let sentence = total >= FRONT_SENTENCE_WORDS;
+    let strong = has_verb_cue(text) || has_sentence_break(text);
+    if before_abstract {
+        return sentence && strong;
+    }
+    total >= FRONT_LONG_WORDS || (sentence && (strong || has_verb_ending(text)))
 }
 
 /// Page-1 front matter: the non-furniture lines before the abstract when it
@@ -1646,8 +1700,8 @@ fn is_long_body_line(text: &str) -> bool {
 /// consecutive prose lines (see [`is_front_prose`]) or of
 /// `FRONT_SHORT_RUN_LINES` shorter ones (see [`is_short_front_prose`]), an
 /// unlabelled abstract or first paragraph, and a long line that is neither
-/// an affiliation nor a list of names (see [`is_long_body_line`]) is never
-/// tagged.
+/// an affiliation nor a list of names (see [`is_long_body_line`], stricter
+/// before an abstract line) is never tagged.
 fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
     let order: Vec<usize> = page
         .lines
@@ -1683,9 +1737,10 @@ fn tag_front(page: &mut PageText, report: &mut CleanupReport) {
         .position(|w| w.iter().all(|k| is_short_front_prose(text_of(*k))));
     let end = run_at.map_or(end, |run| end.min(run));
     let end = short_run_at.map_or(end, |run| end.min(run));
+    let before_abstract = abstract_at.is_some();
     let long: Vec<bool> = order
         .iter()
-        .map(|k| is_long_body_line(text_of(*k)))
+        .map(|k| is_long_body_line(text_of(*k), before_abstract))
         .collect();
     for (pos, k) in order.iter().enumerate().take(end) {
         if long[pos] {
@@ -2698,7 +2753,8 @@ mod tests {
             "we thank the department of physics at the University of Somewhere for"
         ));
         assert!(!is_long_body_line(
-            "Carl Coauthor, Dana Doe, Eve Example, Finn Fourth, Gail Fifth, Hal Sixth, Ida Seventh"
+            "Carl Coauthor, Dana Doe, Eve Example, Finn Fourth, Gail Fifth, Hal Sixth, Ida Seventh",
+            false
         ));
     }
 
@@ -2727,6 +2783,47 @@ mod tests {
         assert!(has_verb_ending(notice));
         assert!(!has_verb_ending("A Study of Things and Their Uses"));
         assert!(!has_verb_ending("we saw it all"));
+    }
+
+    #[test]
+    fn a_long_title_with_plural_nouns_before_the_abstract_is_front_matter() {
+        let title =
+            "Sparse graph models for robust control of large power systems and their networks";
+        let sentence =
+            "We show that sparse graph models improve the control of large power systems.";
+        let mut pages = vec![page_of(
+            1,
+            &[
+                (title, 60.0, 700.0, 0),
+                ("Ann Author", 60.0, 676.0, 0),
+                ("Abstract", 60.0, 640.0, 0),
+                (sentence, 60.0, 628.0, 0),
+            ],
+        )];
+        let report = clean_document(&mut pages);
+        assert_eq!(report.role_front, 2);
+        assert_eq!(roles(&pages[0]), ["front", "front", "heading", "body"]);
+        assert_eq!(title.split_whitespace().count(), 13);
+        assert_eq!(sentence.split_whitespace().count(), 13);
+        assert!(!has_verb_ending(title));
+        assert!(!has_verb_cue(title));
+        assert!(!is_long_body_line(title, true));
+        assert!(!is_long_body_line(title, false));
+        assert!(is_long_body_line(sentence, false));
+        assert!(has_verb_cue(sentence));
+        // Before the abstract an `-ed`/`-ing` word alone is no evidence.
+        let learned = "Learning sparse graph models for robust control of large distributed \
+                       power systems";
+        assert!(has_verb_ending(learned));
+        assert!(!is_long_body_line(learned, true));
+        assert!(is_long_body_line(learned, false));
+        assert!(has_sentence_break(
+            "the results hold here. We then prove it"
+        ));
+        assert!(!has_sentence_break(
+            "J. Smith and A. Jones et al. Sparse models"
+        ));
+        assert!(!has_sentence_break("models for Fig. 3 of the paper"));
     }
 
     #[test]

@@ -1203,9 +1203,10 @@ struct ContinuationLine<'a> {
 /// The following lines, up to `limit`, count as the list's continuation
 /// only when the list's last line (`tail`) does not end with `.` or the
 /// first following line reads like an entry's rest ([`entry_tail_re`]) or
-/// starts an entry ([`is_entry_start`]: a numbered or bracketed label, or
-/// an unlabeled author-year entry, so a list that goes on over the page
-/// continues). The continuation then runs until the first
+/// starts an entry or is a label of one ([`is_entry_start`]: a numbered or
+/// bracketed label, or an unlabeled author-year entry; or
+/// [`continuation_label_re`]: a detached `[12]` or an RSC-style `12 Smith`),
+/// so a list that goes on over the page continues. The continuation then runs until the first
 /// [`is_reference_end`] line (a heading, a caption or a line set clearly
 /// larger than the list's `median`), the first line of a blank-separated
 /// prose paragraph (two lines of at least 8 words each, neither starting
@@ -1254,7 +1255,7 @@ fn continuation_end(
         return from;
     };
     let unfinished = tail.is_some_and(|text| !text.ends_with('.'));
-    if !unfinished && !first.entry && !entry_tail_re().is_match(first.line.text) {
+    if !unfinished && !first.label && !entry_tail_re().is_match(first.line.text) {
         return from;
     }
     let is_prose =
@@ -5921,6 +5922,70 @@ mod tests {
     }
 
     #[test]
+    fn detached_label_after_a_finished_entry_continues_the_list_over_the_page() {
+        let pages = vec![
+            lined_page(
+                1,
+                &[
+                    "Body text.",
+                    "References",
+                    "[10] A. Author. First title. Journal, 1, 2-3.",
+                    "[11] B. Author. Second title. Journal, 4, 5-6.",
+                ],
+            ),
+            lined_page(
+                2,
+                &[
+                    "[12]",
+                    "C. Author. Third title. Journal, 7, 8-9.",
+                    "[13]",
+                    "D. Author. Fourth title. Journal, 10, 11-12.",
+                    "Appendix A",
+                    "Proof text of the appendix here.",
+                ],
+            ),
+        ];
+        // The detached `[12]` is only a `continuation_label_re` label.
+        assert!(!is_entry_start("[12]"));
+        assert!(continuation_label_re().is_match("[12]"));
+        assert!(!entry_tail_re().is_match("[12]"));
+        let tail = Some("[11] B. Author. Second title. Journal, 4, 5-6.");
+        let appendix = pages[1].text.find("Appendix A").expect("appendix line");
+        assert_eq!(
+            continuation_end(&pages, (1, 0), (2, 0), None, tail),
+            (1, appendix)
+        );
+        // An RSC-style `12 Smith` label without a year continues it too.
+        let rsc = [
+            pages[0].clone(),
+            lined_page(
+                2,
+                &[
+                    "12 Smith, J. Third title. Journal, 7, 8-9.",
+                    "13 Jones, K. Fourth title. Journal, 10, 11-12.",
+                    "Appendix A",
+                    "Proof text of the appendix here.",
+                ],
+            ),
+        ];
+        assert!(!is_entry_start(&rsc[1].lines[0].text));
+        assert!(!entry_tail_re().is_match(&rsc[1].lines[0].text));
+        let appendix = rsc[1].text.find("Appendix A").expect("appendix line");
+        assert_eq!(
+            continuation_end(&rsc, (1, 0), (2, 0), None, tail),
+            (1, appendix)
+        );
+        let body = body_text_extracted(&pages);
+        assert_eq!(
+            words(&body),
+            vec![
+                "body", "text", "appendix", "a", "proof", "text", "of", "the", "appendix", "here"
+            ]
+        );
+        assert!(!body.contains("Third title"), "{body:?}");
+    }
+
+    #[test]
     fn wrapped_last_entry_ends_at_a_prose_paragraph_or_the_line_cap() {
         let head = lined_page(
             1,
@@ -5968,14 +6033,17 @@ mod tests {
         // unlabeled author-year entries of at least 8 words each (the prose
         // rule and the 12-line cap would each have ended the list here),
         // then the supplement.
+        let entries: String = (0..14)
+            .map(|i| {
+                format!(
+                    "\n\nHu, W., Pan, T., Kong, D. & Shen, W. (2021). Nonparametric matrix \
+                     response regression number {i}\nwith application to brain imaging data \
+                     analysis. Annals of Statistics, 49, 1-30."
+                )
+            })
+            .collect();
         let mut text = String::from("methods. Journal of Statistics, 12, 1-20.");
-        for i in 0..14 {
-            text.push_str(&format!(
-                "\n\nHu, W., Pan, T., Kong, D. & Shen, W. (2021). Nonparametric matrix \
-                 response regression number {i}\nwith application to brain imaging data \
-                 analysis. Annals of Statistics, 49, 1-30."
-            ));
-        }
+        text.push_str(&entries);
         text.push_str(
             "\n\nSupplementary material\n\nA. Additional simulations\n\
              The supplement text is kept.",
