@@ -1,7 +1,7 @@
 name: Native
 
 # Builds and tests the engine with the native backends (`docling`, `pdfium`)
-# against the artifacts pinned in native/manifest.json, then runs the docling
+# against the artifacts pinned in native/manifest.json, then runs each backend
 # evaluation on the dev split (docs/NATIVE.md, docs/EVAL.md). Not part of the
 # required `ci` check: it needs the network for PDFium, the docling models, ONNX
 # Runtime and the corpus, and the metrics are diagnostic.
@@ -101,21 +101,33 @@ jobs:
       - name: Fetch the corpus (cached items are reused)
         if: ${{ !cancelled() }}
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
+      - name: Evaluate the lopdf baseline on the same runner and corpus
+        if: ${{ !cancelled() }}
+        run: python3 native/measure_eval.py --backend lopdf --out eval-native/lopdf
       - name: Evaluate the pdfium backend
         if: ${{ !cancelled() }}
-        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend pdfium --split dev --out eval-native/pdfium --dump-dir eval-native/pdfium/dumps
+        run: python3 native/measure_eval.py --backend pdfium --out eval-native/pdfium
       - name: Evaluate the docling-text backend
         if: ${{ !cancelled() }}
-        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling-text --split dev --out eval-native/docling-text --dump-dir eval-native/docling-text/dumps
+        run: python3 native/measure_eval.py --backend docling-text --out eval-native/docling-text
       - name: Evaluate the docling backend (full layout + OCR)
         if: ${{ !cancelled() }}
-        run: ./target/release/tpe eval --manifest corpus/manifest.json --cache .corpus-cache --backend docling --split dev --out eval-native/docling --dump-dir eval-native/docling/dumps
+        run: python3 native/measure_eval.py --backend docling --out eval-native/docling
+      - name: Require complete successful evaluation coverage
+        if: ${{ !cancelled() }}
+        run: |
+          for b in lopdf pdfium docling-text docling; do
+            python3 native/validate_eval.py --manifest corpus/manifest.json --split dev --backend "$b" --report "eval-native/$b/report.json"
+          done
       - name: Publish the reports in the job summary
         if: ${{ !cancelled() }}
         run: |
-          for b in pdfium docling-text docling; do
+          for b in lopdf pdfium docling-text docling; do
             if [ -f "eval-native/$b/report.md" ]; then
               { echo "# $b"; cat "eval-native/$b/report.md"; echo; } >> "$GITHUB_STEP_SUMMARY"
+              if [ -f "eval-native/$b/resources.json" ]; then
+                { echo; echo '```json'; cat "eval-native/$b/resources.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              fi
             else
               echo "# $b: no report" >> "$GITHUB_STEP_SUMMARY"
             fi
