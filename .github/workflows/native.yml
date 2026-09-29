@@ -53,6 +53,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
       - run: rustup component add clippy rustfmt
       - run: rustc --version --verbose && uname -m
       # ONNX Runtime is not provisioned by native/fetch.sh: the `ort` crate
@@ -103,21 +107,21 @@ jobs:
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
       - name: Evaluate the lopdf baseline on the same runner and corpus
         if: ${{ !cancelled() }}
-        run: python3 native/measure_eval.py --backend lopdf --out eval-native/lopdf
+        run: uv run python native/measure_eval.py --backend lopdf --out eval-native/lopdf
       - name: Evaluate the pdfium backend
         if: ${{ !cancelled() }}
-        run: python3 native/measure_eval.py --backend pdfium --out eval-native/pdfium
+        run: uv run python native/measure_eval.py --backend pdfium --out eval-native/pdfium
       - name: Evaluate the docling-text backend
         if: ${{ !cancelled() }}
-        run: python3 native/measure_eval.py --backend docling-text --out eval-native/docling-text
+        run: uv run python native/measure_eval.py --backend docling-text --out eval-native/docling-text
       - name: Evaluate the docling backend (full layout + OCR)
         if: ${{ !cancelled() }}
-        run: python3 native/measure_eval.py --backend docling --out eval-native/docling
+        run: uv run python native/measure_eval.py --backend docling --out eval-native/docling
       - name: Require complete successful evaluation coverage
         if: ${{ !cancelled() }}
         run: |
           for b in lopdf pdfium docling-text docling; do
-            python3 native/validate_eval.py --manifest corpus/manifest.json --split dev --backend "$b" --report "eval-native/$b/report.json"
+            uv run python native/validate_eval.py --manifest corpus/manifest.json --split dev --backend "$b" --report "eval-native/$b/report.json"
           done
       - name: Publish the reports in the job summary
         if: ${{ !cancelled() }}
