@@ -1356,12 +1356,40 @@ fn without_suffix<'a>(text: &'a str, re: &Regex) -> &'a str {
         .map_or(text, |m| text[..m.start()].trim_end())
 }
 
+/// Lower-case abbreviations whose period does not end a sentence.
+const NON_FINAL_ABBREVIATIONS: [&str; 10] = [
+    "e.g", "i.e", "vs", "dr", "st", "no", "vol", "fig", "al", "cf",
+];
+
+/// Whether the period right after `before` (the text up to it) belongs to an
+/// abbreviation or an initial rather than ending a sentence: the word before
+/// it is a single letter (`J.`, the `S` of `U.S.`), already contains a
+/// period (`U.S`, `e.g`), or is in [`NON_FINAL_ABBREVIATIONS`].
+fn abbreviation_period(before: &str) -> bool {
+    let word = before
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .trim_start_matches(['(', '[', '{', '"', '\u{201C}']);
+    let mut chars = word.chars();
+    let single_letter = chars.next().is_some_and(char::is_alphabetic) && chars.next().is_none();
+    single_letter
+        || word.contains('.')
+        || NON_FINAL_ABBREVIATIONS.contains(&word.to_lowercase().as_str())
+}
+
 /// `text` up to its first sentence end: a `.`, `?` or `!` followed by
 /// whitespace and then an uppercase letter or `[`. A closing `?` or `!` stays,
-/// a period is dropped. The whole `text` when there is none.
+/// a period is dropped. A period inside a token (no whitespace after it) or
+/// after an abbreviation or initial (see [`abbreviation_period`]: `U.S.`,
+/// `Dr.`, `e.g.`) does not end the sentence. The whole `text` when there is
+/// none.
 fn first_sentence(text: &str) -> &str {
     for (at, c) in text.char_indices() {
         if !matches!(c, '.' | '?' | '!') {
+            continue;
+        }
+        if c == '.' && abbreviation_period(&text[..at]) {
             continue;
         }
         let after = &text[at + c.len_utf8()..];
@@ -4262,6 +4290,35 @@ A.~Author, Some title words, Journal 5 (2020) pages one to ten.
         // A digit before the year (a volume) is not an author list.
         assert_eq!(refs[1].title, None);
         assert!(refs[1].authors.is_empty());
+    }
+
+    #[test]
+    fn author_year_inline_keeps_abbreviation_periods() {
+        let bbl = r"\begin{thebibliography}{1}
+\bibitem[{Abrevaya(2017)}]{abrevaya2017}
+Abrevaya J (2017) A study of U.S. Policy after Dr. Smith. \emph{Journal}
+  12(3):45--67.
+\end{thebibliography}
+";
+        let refs = parse_bbl(bbl);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].title.as_deref(),
+            Some("A study of U.S. Policy after Dr. Smith")
+        );
+        assert_eq!(refs[0].authors, ["Abrevaya J"]);
+        assert_eq!(refs[0].year, Some(2017));
+        // The sentence still ends at a real period, not at an abbreviation.
+        assert_eq!(
+            first_sentence("Trade e.g. Steel vs. Iron. Technical report"),
+            "Trade e.g. Steel vs. Iron"
+        );
+        assert_eq!(
+            first_sentence("Results in Fig. Two and No. Three. Working paper"),
+            "Results in Fig. Two and No. Three"
+        );
+        assert_eq!(first_sentence("Web 2.0 Tools. Report"), "Web 2.0 Tools");
+        assert_eq!(first_sentence("Plain title. Next"), "Plain title");
     }
 
     /// Title blocks with a trailing year or descriptor, or only a URL

@@ -2503,33 +2503,100 @@ const TEX_DROPPED: [char; 6] = ['_', '^', '$', '{', '}', '\\'];
 /// Title comparison form of `s`: NFKC (mathematical alphanumerics such as
 /// `𝑥` become `x`, `³`/`₂` become digits), `−` folded to `-`, then
 /// [`normalize_title`]. With `tex`, the characters in [`TEX_DROPPED`] are
-/// removed before normalising and all spaces after it, so `W_2` equals
-/// `W2` and `La_1-xCa_x` equals `La 1−𝑥Ca𝑥`.
+/// removed before normalising, so `W_2` becomes `w2`.
 fn title_compare_form(s: &str, tex: bool) -> String {
     let compat: String = s
         .nfkc()
         .map(|c| if c == '\u{2212}' { '-' } else { c })
         .filter(|c| !(tex && TEX_DROPPED.contains(c)))
         .collect();
-    let normalized = normalize_title(&compat);
-    if tex {
-        normalized.chars().filter(|c| *c != ' ').collect()
-    } else {
-        normalized
+    normalize_title(&compat)
+}
+
+/// Characters of the truth title in [`title_compare_form`], each with
+/// whether spaces may be added or dropped there. With `tex`, a whitespace
+/// token is marked when it contains a character of [`TEX_MARKUP`], starts
+/// inside `$…$` or an open brace group, or follows a token ending in `_` or
+/// `^`; the characters of its words, the spaces between them and the spaces
+/// next to them are marked. Without `tex` nothing is marked.
+fn truth_title_chars(s: &str, tex: bool) -> Vec<(char, bool)> {
+    let mut words: Vec<(String, bool)> = Vec::new();
+    let mut in_math = false;
+    let mut depth: u32 = 0;
+    let mut after_script = false;
+    for token in s.split_whitespace() {
+        let marked = tex && (in_math || depth > 0 || after_script || token.contains(TEX_MARKUP));
+        for c in token.chars() {
+            match c {
+                '$' => in_math = !in_math,
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        after_script = token.ends_with(['_', '^']);
+        let form = title_compare_form(token, tex);
+        for word in form.split(' ').filter(|w| !w.is_empty()) {
+            words.push((word.to_string(), marked));
+        }
+    }
+    let mut out: Vec<(char, bool)> = Vec::new();
+    let mut prev_marked = false;
+    for (k, (word, marked)) in words.iter().enumerate() {
+        if k > 0 {
+            out.push((' ', *marked || prev_marked));
+        }
+        out.extend(word.chars().map(|c| (c, *marked)));
+        prev_marked = *marked;
+    }
+    out
+}
+
+/// Whether the truth character at `i` or the one before it is marked by
+/// [`truth_title_chars`].
+fn near_marked(truth: &[(char, bool)], i: usize) -> bool {
+    let at = truth.get(i).is_some_and(|&(_, marked)| marked);
+    let before = i
+        .checked_sub(1)
+        .and_then(|p| truth.get(p))
+        .is_some_and(|&(_, marked)| marked);
+    at || before
+}
+
+/// Whether `extracted` equals the marked `truth` characters, where a marked
+/// truth space may be missing from `extracted` and `extracted` may have an
+/// extra space next to a marked truth character. Everywhere else the two
+/// must agree exactly, word boundaries included.
+fn marked_chars_equal(truth: &[(char, bool)], extracted: &[char]) -> bool {
+    let (mut i, mut j) = (0_usize, 0_usize);
+    loop {
+        match (truth.get(i).copied(), extracted.get(j).copied()) {
+            (None, None) => return true,
+            (Some((t, _)), Some(e)) if t == e => {
+                i += 1;
+                j += 1;
+            }
+            (Some((' ', true)), _) => i += 1,
+            (_, Some(' ')) if near_marked(truth, i) => j += 1,
+            _ => return false,
+        }
     }
 }
 
 /// Whether two optional titles are both present and equal after
-/// [`title_compare_form`] (TeX mode when the truth title contains `_`, `^`
-/// or `$`; markup-free truth titles keep their word spacing, so a dropped
-/// or added hyphen still counts as a miss).
+/// [`title_compare_form`]. When the truth title contains `_`, `^` or `$`,
+/// TeX mode drops the markup and lets spacing differ only inside and next to
+/// the marked sub/superscript or math tokens (see [`truth_title_chars`]), so
+/// `W_2` equals `W2` and `La_1-xCa_x` equals `La 1−𝑥Ca𝑥`, while a dropped or
+/// added hyphen elsewhere in the title still counts as a miss.
 fn title_equal(truth: Option<&String>, extracted: Option<&String>) -> bool {
     let (Some(truth), Some(extracted)) = (truth, extracted) else {
         return false;
     };
     let tex = truth.contains(TEX_MARKUP);
-    let t = title_compare_form(truth, tex);
-    !t.is_empty() && t == title_compare_form(extracted, tex)
+    let t = truth_title_chars(truth, tex);
+    let e: Vec<char> = title_compare_form(extracted, tex).chars().collect();
+    !t.is_empty() && marked_chars_equal(&t, &e)
 }
 
 /// Whether the extracted paper title matches the truth title: equal after
@@ -4733,6 +4800,18 @@ mod tests {
         assert!(!eq("Multi-agent systems", "Multiagent systems"));
         assert!(!eq("W2 distance", "W 2 distance"));
         assert!(!eq("W_2 distance", "W_3 distance"));
+        // TeX mode folds spaces only around the marked tokens.
+        assert!(!eq("W_2 multi-agent systems", "W2 multiagent systems"));
+        assert!(eq("W_2 multi-agent systems", "W2 multi-agent systems"));
+        assert!(eq("W_2 systems", "W2 systems"));
+        assert!(eq("W_2 systems", "W 2systems"));
+        assert!(!eq("W_2 deep learning", "W2 deeplearning"));
+        assert!(eq(
+            "La_1-xCa_x MnO_3",
+            "La 1\u{2212}\u{1d465}Ca\u{1d465} MnO\u{2083}"
+        ));
+        assert!(eq("Sums $a + b$ of squares", "Sums a+b of squares"));
+        assert!(!eq("Sums $a + b$ of squares", "Sums a+b ofsquares"));
         assert!(!title_equal(None, Some(&"x".to_string())));
         assert!(!eq("---", "---"));
     }
