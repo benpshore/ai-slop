@@ -1191,8 +1191,6 @@ struct ContinuationLine<'a> {
     /// Whether a blank line separates it from the text before it on its
     /// page.
     paragraph_start: bool,
-    /// Whether it starts a reference entry ([`is_entry_start`]).
-    entry: bool,
     /// Whether it starts an entry or is a label of one: [`is_entry_start`]
     /// or [`continuation_label_re`].
     label: bool,
@@ -1243,7 +1241,6 @@ fn continuation_end(
                 pos,
                 line,
                 paragraph_start,
-                entry,
                 label,
             });
             if since_entry > CONTINUATION_MAX_LINES + 1 {
@@ -6033,15 +6030,15 @@ mod tests {
         // unlabeled author-year entries of at least 8 words each (the prose
         // rule and the 12-line cap would each have ended the list here),
         // then the supplement.
-        let entries: String = (0..14)
-            .map(|i| {
-                format!(
-                    "\n\nHu, W., Pan, T., Kong, D. & Shen, W. (2021). Nonparametric matrix \
-                     response regression number {i}\nwith application to brain imaging data \
-                     analysis. Annals of Statistics, 49, 1-30."
-                )
-            })
-            .collect();
+        let mut entries = String::new();
+        for i in 0..14 {
+            let _ = write!(
+                entries,
+                "\n\nHu, W., Pan, T., Kong, D. & Shen, W. (2021). Nonparametric matrix \
+                 response regression number {i}\nwith application to brain imaging data \
+                 analysis. Annals of Statistics, 49, 1-30."
+            );
+        }
         let mut text = String::from("methods. Journal of Statistics, 12, 1-20.");
         text.push_str(&entries);
         text.push_str(
