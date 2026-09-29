@@ -93,8 +93,6 @@ const PDFIUM_BINARY_VERSION: &str = "chromium/8066";
 const PDFIUM_RENDER_VERSION: &str = "0.8.37";
 /// Environment variable naming the library directory or file.
 const ENV_LIBRARY_PATH: &str = "PDFIUM_DYNAMIC_LIB_PATH";
-/// Directory tried after the environment variable.
-const DEFAULT_LIBRARY_DIR: &str = ".pdfium/lib";
 /// Bound on nested Form `XObject` traversal.
 const MAX_FORM_DEPTH: u32 = 8;
 
@@ -111,8 +109,9 @@ const FIGURE_BYTES_CAP: usize = 256 * 1024 * 1024;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PdfiumBackend {
     /// Directory holding `libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`.
-    /// `None` tries `$PDFIUM_DYNAMIC_LIB_PATH` (a directory or the file
-    /// itself), then `.pdfium/lib`, then the system library search path.
+    /// `None` uses `$PDFIUM_DYNAMIC_LIB_PATH` (an absolute directory or file).
+    /// Relative paths and implicit loader searches are rejected so an
+    /// attacker-controlled working directory cannot supply native code.
     pub library_dir: Option<String>,
 }
 
@@ -256,21 +255,18 @@ fn extract_numbered(
 }
 
 /// Bind `libpdfium` following the search order documented on
-/// [`PdfiumBackend::library_dir`]. An explicit directory is strict: the
-/// system fallback is only tried when nothing was configured. Each call is
-/// one `dlopen` and one `FPDF_InitLibrary`, and it blocks until no other
-/// `Pdfium` exists in the process (module docs).
+/// [`PdfiumBackend::library_dir`]. Only an explicitly configured absolute
+/// location is accepted. Each call is one `dlopen` and one
+/// `FPDF_InitLibrary`, and it blocks until no other `Pdfium` exists in the
+/// process (module docs).
 fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = library_dir {
-        candidates.push(library_file(Path::new(dir)));
-    } else {
-        if let Ok(configured) = std::env::var(ENV_LIBRARY_PATH)
-            && !configured.is_empty()
-        {
-            candidates.push(library_file(Path::new(&configured)));
-        }
-        candidates.push(library_file(Path::new(DEFAULT_LIBRARY_DIR)));
+        candidates.push(configured_library_file(dir)?);
+    } else if let Ok(configured) = std::env::var(ENV_LIBRARY_PATH)
+        && !configured.is_empty()
+    {
+        candidates.push(configured_library_file(&configured)?);
     }
     let mut failures: Vec<String> = Vec::new();
     for candidate in &candidates {
@@ -279,22 +275,29 @@ fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
             Err(err) => failures.push(format!("{}: {err:?}", candidate.display())),
         }
     }
-    if library_dir.is_none() {
-        match Pdfium::bind_to_system_library() {
-            Ok(bindings) => return Ok(Pdfium::new(bindings)),
-            Err(err) => failures.push(format!("system library: {err:?}")),
-        }
-    }
     let detail = failures.join("; ");
-    let hint = format!("set {ENV_LIBRARY_PATH} or place it under {DEFAULT_LIBRARY_DIR}");
+    let hint = format!("set {ENV_LIBRARY_PATH} to an absolute trusted path");
     Err(BackendError::Unsupported(format!(
         "pdfium library not found: {hint} ({detail})"
     )))
 }
 
+/// Resolve an explicitly trusted library location without consulting the
+/// process working directory.
+fn configured_library_file(path: &str) -> Result<PathBuf, BackendError> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(BackendError::Unsupported(format!(
+            "pdfium library path must be absolute: {}",
+            path.display()
+        )));
+    }
+    Ok(library_file(path))
+}
+
 /// `path` itself when it names a file, else the platform library file name
 /// inside that directory.
-fn library_file(path: &Path) -> PathBuf {
+pub(crate) fn library_file(path: &Path) -> PathBuf {
     if path.is_file() {
         path.to_path_buf()
     } else {
@@ -878,6 +881,13 @@ mod tests {
             library_dir: Some("/opt/pdfium".to_string()),
         };
         assert_ne!(configured.identity().config_digest, identity.config_digest);
+    }
+
+    #[test]
+    fn configured_pdfium_path_must_be_absolute() {
+        let err = configured_library_file(".pdfium/lib").unwrap_err();
+        assert!(matches!(err, BackendError::Unsupported(_)));
+        assert!(err.to_string().contains("must be absolute"));
     }
 
     #[test]

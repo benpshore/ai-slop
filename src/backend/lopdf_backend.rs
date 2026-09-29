@@ -5,8 +5,10 @@
 //! Per-document work is cached inside the session: a font dictionary is
 //! resolved (encoding, widths, flags) once per `ObjectId` and shared by
 //! every page and Form `XObject` that references it, and a Form `XObject`'s
-//! content stream is decompressed and lexed once. The caches hold only
-//! owned data, so they never borrow the [`Document`] they were built from.
+//! content stream is decompressed and lexed once while the decoded programs
+//! fit [`MAX_FORM_CACHE_BYTES`]; beyond that budget a Form is decoded on
+//! every use. The caches hold only owned data, so they never borrow the
+//! [`Document`] they were built from.
 //!
 //! Content streams are not parsed with `Content::decode`, which allocates
 //! an `Operation` (and every operand) for each of the many path and colour
@@ -85,8 +87,9 @@ const LIGATURE_POLICY: &str = "expand";
 /// Revision of the content-stream extraction policy, part of the backend
 /// identity so ledger runs from different policies are never confused:
 /// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
-/// stack per Form; 3 = painted paths and Image `XObject`s become figures.
-const CONTENT_POLICY: &str = "3";
+/// stack per Form; 3 = painted paths and Image `XObject`s become figures;
+/// 4 = image placements are bounded per page.
+const CONTENT_POLICY: &str = "4";
 
 /// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
 /// long is a `rule` figure.
@@ -97,9 +100,13 @@ const RULE_LENGTH: f32 = 30.0;
 const CLUSTER_GAP: f32 = 6.0;
 /// A `vector` cluster that fits in a square this wide (points) is dropped.
 const MIN_VECTOR_SIDE: f32 = 8.0;
-/// Most painted boxes clustered on one page; beyond it the page gets one
-/// `vector` figure covering all of them.
+/// Most painted boxes or image placements retained on one page. Beyond this,
+/// painted boxes become one covering `vector` figure and images are ignored.
 const MAX_CLUSTER_BOXES: usize = 2000;
+/// Most decoded Form `XObject` program data kept per session. A document
+/// with many distinct, highly compressible Forms could otherwise grow the
+/// cache without bound; Forms beyond the budget are decoded on every use.
+const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
@@ -197,10 +204,27 @@ struct SessionCache {
     /// resolved on every use.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
     /// The text-relevant operators and painted paths of Form `XObject`
-    /// streams, keyed by stream id. Streams that fail
-    /// to lex are not cached, so their warning recurs exactly as it would
-    /// without the cache.
+    /// streams, keyed by stream id, up to [`MAX_FORM_CACHE_BYTES`] of
+    /// decoded program data. Streams that fail to lex are not cached, so
+    /// their warning recurs exactly as it would without the cache; streams
+    /// beyond the budget are decoded on every use.
     forms: HashMap<ObjectId, Rc<TextProgram>>,
+    /// Estimated bytes held by `forms`.
+    form_bytes: usize,
+}
+
+impl SessionCache {
+    /// Retain `program` for `id` when it fits the remaining budget; returns
+    /// whether it was retained.
+    fn insert_form(&mut self, id: ObjectId, program: &Rc<TextProgram>) -> bool {
+        let bytes = program.estimated_bytes();
+        if self.form_bytes.saturating_add(bytes) > MAX_FORM_CACHE_BYTES {
+            return false;
+        }
+        self.form_bytes += bytes;
+        self.forms.insert(id, Rc::clone(program));
+        true
+    }
 }
 
 struct LopdfSession {
@@ -1555,6 +1579,25 @@ struct TextProgram {
 }
 
 impl TextProgram {
+    /// Rough size of the program in memory: the vectors' elements plus the
+    /// heap bytes of string, name and array operands.
+    fn estimated_bytes(&self) -> usize {
+        fn heap_bytes(object: &Object) -> usize {
+            match object {
+                Object::String(bytes, _) | Object::Name(bytes) => bytes.len(),
+                Object::Array(items) => items
+                    .iter()
+                    .map(|item| size_of::<Object>() + heap_bytes(item))
+                    .sum(),
+                _ => 0,
+            }
+        }
+        self.ops.len() * size_of::<TextOp>()
+            + self.operands.len() * size_of::<Object>()
+            + self.paths.len() * size_of::<[f32; 4]>()
+            + self.operands.iter().map(heap_bytes).sum::<usize>()
+    }
+
     /// The operands of `op` (none for a painted path).
     fn operands(&self, op: TextOp) -> &[Object] {
         if op.kind.is_path() {
@@ -2267,6 +2310,7 @@ struct Graphics {
     extent: Option<BBox>,
     /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
     overflow: bool,
+    /// Image placements, at most [`MAX_CLUSTER_BOXES`].
     rasters: Vec<Raster>,
 }
 
@@ -2288,6 +2332,12 @@ impl Graphics {
             self.shapes.push(bbox);
         } else {
             self.overflow = true;
+        }
+    }
+
+    fn add_raster(&mut self, raster: Raster) {
+        if self.rasters.len() < MAX_CLUSTER_BOXES {
+            self.rasters.push(raster);
         }
     }
 
@@ -2507,7 +2557,7 @@ impl<'a> Interpreter<'a> {
             ctm.apply(0.0, 1.0),
             ctm.apply(1.0, 1.0),
         ]);
-        self.graphics.rasters.push(Raster {
+        self.graphics.add_raster(Raster {
             bbox,
             width_px: pixel_count(&stream.dict, b"Width"),
             height_px: pixel_count(&stream.dict, b"Height"),
@@ -2740,7 +2790,7 @@ impl<'a> Interpreter<'a> {
             };
             let program = Rc::new(program);
             if let Some(id) = stream_id {
-                self.cache.forms.insert(id, Rc::clone(&program));
+                self.cache.insert_form(id, &program);
             }
             program
         };
@@ -4760,13 +4810,15 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "3".to_string());
+        config.insert("content".to_string(), "4".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
         config.insert("content".to_string(), "2".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "3".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "4".to_string());
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
@@ -5461,6 +5513,29 @@ mod tests {
     }
 
     #[test]
+    fn form_cache_stops_growing_at_its_byte_budget() {
+        let mut cache = SessionCache::default();
+        let big = Rc::new(TextProgram {
+            ops: Vec::new(),
+            operands: vec![Object::string_literal(vec![
+                b'x';
+                MAX_FORM_CACHE_BYTES / 2 + 1
+            ])],
+            paths: Vec::new(),
+        });
+        assert!(cache.insert_form((1, 0), &big));
+        assert!(!cache.insert_form((2, 0), &big), "over budget");
+        assert_eq!(cache.forms.len(), 1);
+        let small = Rc::new(TextProgram {
+            ops: Vec::new(),
+            operands: Vec::new(),
+            paths: Vec::new(),
+        });
+        assert!(cache.insert_form((3, 0), &small));
+        assert_eq!(cache.forms.len(), 2);
+    }
+
+    #[test]
     fn shared_form_xobject_is_decoded_once_and_yields_identical_spans() {
         let ops = vec![
             Operation::new("q", vec![]),
@@ -6045,6 +6120,26 @@ mod tests {
         assert_eq!(figures.len(), 1);
         assert_eq!(figures[0].kind, "vector");
         assert_box(&figures[0], 0.0, 0.0, 40_010.0, 10.0);
+    }
+
+    #[test]
+    fn raster_placements_are_bounded() {
+        let mut graphics = Graphics::default();
+        for step in 0..=MAX_CLUSTER_BOXES {
+            graphics.add_raster(Raster {
+                bbox: BBox {
+                    x0: step as f32,
+                    y0: 0.0,
+                    x1: step as f32 + 1.0,
+                    y1: 1.0,
+                },
+                width_px: Some(1),
+                height_px: Some(1),
+            });
+        }
+        let figures = graphics.into_figures();
+        assert_eq!(figures.len(), MAX_CLUSTER_BOXES);
+        assert!(figures.iter().all(|figure| figure.kind == "raster"));
     }
 
     #[test]

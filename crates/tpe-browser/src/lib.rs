@@ -60,6 +60,14 @@ pub enum BrowserError {
     /// A stored cookie secret was not valid JSON.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Loaded page source exceeded the synchronous inspection limit.
+    #[error("page source is {actual} bytes; maximum is {maximum} bytes")]
+    PageTooLarge {
+        /// Size of the supplied page source.
+        actual: usize,
+        /// Maximum accepted page-source size.
+        maximum: usize,
+    },
     /// Chromium embedding is not compiled in or not implemented yet.
     #[error("embedding unavailable: {0}")]
     Unavailable(String),

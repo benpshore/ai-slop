@@ -288,6 +288,10 @@ const SUPERSCRIPT_REACH: f32 = 0.5;
 /// set after the final punctuation of a line, where nothing to its right
 /// competes for it.
 const SUPERSCRIPT_REACH_AFTER: f32 = 1.0;
+/// Most baseline-index entries inspected for one detached superscript. This
+/// bounds cleanup work for hostile pages with thousands of tiny or non-body
+/// lines packed into the same baseline window.
+const SUPERSCRIPT_SCAN_LIMIT: usize = 256;
 /// Unicode superscript and subscript digits, indexed by value.
 const SUPERSCRIPT_DIGITS: [char; 10] = [
     '\u{2070}', '\u{00B9}', '\u{00B2}', '\u{00B3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}',
@@ -1197,16 +1201,23 @@ impl PageGeom {
         }
     }
 
-    /// Indices of the base-line candidates with a baseline in
-    /// `low..=high`, ascending, into `out`.
-    fn window(&self, low: f32, high: f32, out: &mut Vec<usize>) {
+    /// Body-line candidates among the first [`SUPERSCRIPT_SCAN_LIMIT`] index
+    /// entries with a baseline in `low..=high`, returned in line-index order
+    /// through `out`. Counting every entry inspected (including non-body lines)
+    /// keeps the work bounded even when the window contains much furniture.
+    fn window(&self, low: f32, high: f32, index: usize, w: &PageWork, out: &mut Vec<usize>) {
         out.clear();
         let start = self.by_baseline.partition_point(|(b, _)| *b < low);
-        for &(baseline, j) in &self.by_baseline[start..] {
+        for &(baseline, j) in self.by_baseline[start..]
+            .iter()
+            .take(SUPERSCRIPT_SCAN_LIMIT)
+        {
             if baseline > high {
                 break;
             }
-            out.push(j);
+            if j != index && w.is_body(j) {
+                out.push(j);
+            }
         }
         out.sort_unstable();
     }
@@ -1249,12 +1260,15 @@ fn superscript_target(
     // <= RAISED_HIGH` and `size <= max_size`; the slack covers rounding.
     let reach = RAISED_HIGH.abs().max(LOWERED_LOW.abs()) * geom.max_size;
     let slack = 1e-3 * (bbox.y0.abs() + reach) + 1e-3;
-    geom.window(bbox.y0 - reach - slack, bbox.y0 + reach + slack, window);
+    geom.window(
+        bbox.y0 - reach - slack,
+        bbox.y0 + reach + slack,
+        index,
+        w,
+        window,
+    );
     let mut best: Option<(usize, f32, bool)> = None;
     for &j in &*window {
-        if j == index || !w.is_body(j) {
-            continue;
-        }
         let Some(other) = geom.lines.get(j) else {
             continue;
         };
@@ -4818,6 +4832,42 @@ mod tests {
         assert_eq!(target(1), Some((5, "\u{2077}".to_string())));
         assert_eq!(target(2), Some((8, "\u{2083}".to_string())));
         assert_eq!(target(10), Some((11, "\u{00B9}\u{00B2}".to_string())));
+    }
+
+    #[test]
+    fn superscript_search_bounds_a_crowded_baseline_window() {
+        let spans: Vec<Span> = (0..(SUPERSCRIPT_SCAN_LIMIT + 100))
+            .map(|i| span_at("a", i as f32, 401.0, 10.0, i as u32))
+            .collect();
+        let members: Vec<Vec<u32>> = (0..spans.len() as u32).map(|i| vec![i]).collect();
+        let lines: Vec<&[u32]> = members.iter().map(Vec::as_slice).collect();
+        let page = page_with(spans, &lines);
+        let w = prepare(&page);
+        let geom = PageGeom::new(&page);
+        let mut window = Vec::new();
+
+        assert_eq!(superscript_target(&page, &w, &geom, 0, &mut window), None);
+        assert_eq!(window.len(), SUPERSCRIPT_SCAN_LIMIT - 1);
+    }
+
+    #[test]
+    fn superscript_search_counts_furniture_toward_scan_limit() {
+        let spans: Vec<Span> = (0..(SUPERSCRIPT_SCAN_LIMIT + 100))
+            .map(|i| span_at("a", i as f32, 401.0, 10.0, i as u32))
+            .collect();
+        let members: Vec<Vec<u32>> = (0..spans.len() as u32).map(|i| vec![i]).collect();
+        let lines: Vec<&[u32]> = members.iter().map(Vec::as_slice).collect();
+        let page = page_with(spans, &lines);
+        let mut w = prepare(&page);
+        for state in &mut w.state[..SUPERSCRIPT_SCAN_LIMIT] {
+            *state = State::Furniture;
+        }
+        let geom = PageGeom::new(&page);
+        let mut window = Vec::new();
+
+        geom.window(390.0, 410.0, page.lines.len() - 1, &w, &mut window);
+
+        assert!(window.is_empty());
     }
 
     #[test]
