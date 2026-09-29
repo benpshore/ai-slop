@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use thiserror::Error;
+use tpe_credentials::Secret;
 
 use crate::keys::services;
 
@@ -156,19 +157,6 @@ pub fn request_body(provider: Provider, system: &str, user: &str, max_tokens: u3
     }
 }
 
-/// Request headers for `provider`, including the authentication header.
-pub fn headers(provider: Provider, api_key: &str) -> Vec<(&'static str, String)> {
-    let mut out = vec![("content-type", "application/json".to_owned())];
-    match provider {
-        Provider::Anthropic => {
-            out.push(("x-api-key", api_key.to_owned()));
-            out.push(("anthropic-version", ANTHROPIC_VERSION.to_owned()));
-        }
-        Provider::OpenAI => out.push(("authorization", format!("Bearer {api_key}"))),
-    }
-    out
-}
-
 /// Extracts the answer text from a 2xx response body.
 pub fn parse_response(provider: Provider, body: &str) -> Result<String, AiError> {
     let value: Value = serde_json::from_str(body)?;
@@ -261,9 +249,18 @@ pub fn error_message(body: &str) -> String {
     excerpt.trim().to_owned()
 }
 
+fn redact_credential(text: &str, api_key: &Secret) -> String {
+    text.replace(api_key.expose(), "[REDACTED]")
+}
+
 /// Sends one question and returns the answer text (blocking).
-pub fn ask(provider: Provider, api_key: &str, system: &str, user: &str) -> Result<String, AiError> {
-    if api_key.trim().is_empty() {
+pub fn ask(
+    provider: Provider,
+    api_key: &Secret,
+    system: &str,
+    user: &str,
+) -> Result<String, AiError> {
+    if api_key.expose().trim().is_empty() {
         return Err(AiError::EmptyKey);
     }
     if user.trim().is_empty() {
@@ -276,13 +273,26 @@ pub fn ask(provider: Provider, api_key: &str, system: &str, user: &str) -> Resul
         .build();
     let agent = ureq::Agent::new_with_config(config);
     let body = request_body(provider, system, user, DEFAULT_MAX_TOKENS).to_string();
-    let mut request = agent.post(provider.endpoint());
-    for (name, value) in headers(provider, api_key) {
-        request = request.header(name, value);
-    }
+    // Authentication remains scoped to construction of this private request.
+    let request = match provider {
+        Provider::Anthropic => agent
+            .post(provider.endpoint())
+            .header("x-api-key", api_key.expose())
+            .header("anthropic-version", ANTHROPIC_VERSION),
+        Provider::OpenAI => {
+            let authorization = Secret::new(format!("Bearer {}", api_key.expose()));
+            let request = agent
+                .post(provider.endpoint())
+                .header("authorization", authorization.expose());
+            drop(authorization);
+            request
+        }
+    };
     let mut response = request.send(body)?;
     let code = response.status().as_u16();
     let text = response.body_mut().read_to_string()?;
+    // Never propagate a credential echoed by a provider or intermediary.
+    let text = redact_credential(&text, api_key);
     if !(200..300).contains(&code) {
         return Err(AiError::Status {
             code,
@@ -343,19 +353,6 @@ mod tests {
         assert_eq!(messages[0]["content"], "sys");
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"], "hello");
-    }
-
-    #[test]
-    fn headers_carry_the_right_auth_scheme() {
-        let anthropic = headers(Provider::Anthropic, "sk-test");
-        assert!(anthropic.contains(&("content-type", "application/json".to_owned())));
-        assert!(anthropic.contains(&("x-api-key", "sk-test".to_owned())));
-        assert!(anthropic.contains(&("anthropic-version", "2023-06-01".to_owned())));
-        assert!(anthropic.iter().all(|(name, _)| *name != "authorization"));
-
-        let openai = headers(Provider::OpenAI, "sk-test");
-        assert!(openai.contains(&("authorization", "Bearer sk-test".to_owned())));
-        assert!(openai.iter().all(|(name, _)| *name != "x-api-key"));
     }
 
     #[test]
@@ -427,13 +424,26 @@ mod tests {
     #[test]
     fn ask_rejects_empty_key_and_question_before_any_io() {
         assert!(matches!(
-            ask(Provider::Anthropic, "  ", "sys", "q"),
+            ask(Provider::Anthropic, &Secret::new("  "), "sys", "q"),
             Err(AiError::EmptyKey)
         ));
         assert!(matches!(
-            ask(Provider::OpenAI, "key", "sys", "   "),
+            ask(Provider::OpenAI, &Secret::new("key"), "sys", "   "),
             Err(AiError::EmptyQuestion)
         ));
+    }
+
+    #[test]
+    fn echoed_credentials_are_removed_before_errors_are_built() {
+        let canary = Secret::new("canary-credential-must-not-leak");
+        let body = format!(
+            r#"{{"error":{{"type":"authentication_error","message":"bad {}"}}}}"#,
+            canary.expose()
+        );
+        let redacted = redact_credential(&body, &canary);
+        let error = parse_response(Provider::Anthropic, &redacted).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains(canary.expose()));
+        assert!(format!("{error}").contains("[REDACTED]"));
     }
 
     #[test]
