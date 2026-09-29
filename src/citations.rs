@@ -5811,6 +5811,9 @@ fn markers_in_sections_with_furniture(
     sections: &[ReferenceSection],
     repeated: &[String],
 ) -> Vec<CitationMarker> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
     let extents = list_extents(pages, sections, repeated);
     let index = RefIndex::build(refs, &extents);
     let page_windows: Vec<Vec<Range<usize>>> = pages
@@ -5892,6 +5895,11 @@ fn markers_in_sections_with_furniture(
 /// vectors.
 pub fn extract_citations(pages: &[PageText]) -> (Vec<ReferenceEntry>, Vec<CitationMarker>) {
     let sections = find_reference_sections(pages);
+    if sections.is_empty() {
+        // Nothing to segment or resolve: skip the document-wide furniture
+        // scan every list would otherwise share.
+        return (Vec::new(), Vec::new());
+    }
     let repeated = repeated_furniture(pages);
     let mut refs: Vec<ReferenceEntry> = Vec::new();
     for (k, section) in sections.iter().enumerate() {
