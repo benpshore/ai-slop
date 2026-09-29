@@ -3471,6 +3471,19 @@ fn read_lossy(path: &Path) -> Result<String, TruthError> {
     Ok(String::from_utf8_lossy(&fs::read(path)?).into_owned())
 }
 
+/// Read a source only after its on-disk size has been checked, so rejecting
+/// an oversized source does not first allocate the oversized buffer.
+fn read_lossy_bounded(path: &Path, budget: usize) -> Result<String, TruthError> {
+    if usize::try_from(fs::metadata(path)?.len()).map_or(true, |len| len > budget) {
+        return Err(TruthError::ResourceLimit);
+    }
+    let text = read_lossy(path)?;
+    if text.len() > budget {
+        return Err(TruthError::ResourceLimit);
+    }
+    Ok(text)
+}
+
 /// Keep the first entry per key (keys compare case-insensitively, as `BibTeX` does).
 fn dedupe_keys(entries: Vec<TruthReference>) -> Vec<TruthReference> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -3632,8 +3645,10 @@ fn main_documents(files: &LatexFiles) -> Result<Vec<(PathBuf, String)>, TruthErr
     let mut docs: Vec<(PathBuf, String)> = Vec::new();
     let mut source_bytes = 0usize;
     for path in readme_toplevels(files) {
-        let Ok(text) = read_lossy(&path) else {
-            continue;
+        let text = match read_lossy_bounded(&path, MAX_TOPLEVEL_SOURCE_BYTES - source_bytes) {
+            Ok(text) => text,
+            Err(TruthError::ResourceLimit) => return Err(TruthError::ResourceLimit),
+            Err(_) => continue,
         };
         source_bytes = source_bytes
             .checked_add(text.len())
@@ -3647,7 +3662,7 @@ fn main_documents(files: &LatexFiles) -> Result<Vec<(PathBuf, String)>, TruthErr
         return Ok(docs);
     }
     for path in &files.tex {
-        let text = read_lossy(path)?;
+        let text = read_lossy_bounded(path, MAX_TOPLEVEL_SOURCE_BYTES)?;
         if strip_comments(&text).contains(BEGIN_DOCUMENT) {
             return Ok(vec![(path.clone(), text)]);
         }
@@ -3670,6 +3685,10 @@ fn ground_truth_bytes(truth: &GroundTruth) -> usize {
         })
         .sum();
     reference_bytes
+        + truth.paper.title.as_ref().map_or(0, String::len)
+        + truth.paper.authors.iter().map(String::len).sum::<usize>()
+        + truth.paper.doi.as_ref().map_or(0, String::len)
+        + truth.paper.arxiv_id.as_ref().map_or(0, String::len)
         + truth.body_text.len()
         + truth
             .citations
@@ -3740,7 +3759,22 @@ fn document_truth(
     main_path: &Path,
     main_text: &str,
     several: bool,
+    budget: usize,
 ) -> Result<GroundTruth, TruthError> {
+    // Preflight every bibliography input that can contribute to this
+    // document. Parsing copies fields into multiple owned strings, so this
+    // check must happen before reading and parsing an oversized file.
+    let mut input_bytes = main_text.len();
+    for path in document_bbls(files, main_text, main_path, several)
+        .iter()
+        .chain(&files.bib)
+    {
+        let len = usize::try_from(fs::metadata(path)?.len()).unwrap_or(usize::MAX);
+        input_bytes = input_bytes
+            .checked_add(len)
+            .filter(|size| *size <= budget)
+            .ok_or(TruthError::ResourceLimit)?;
+    }
     let root: &Path = main_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -3790,13 +3824,17 @@ fn document_truth(
             "bbl+bib"
         }
     };
-    Ok(GroundTruth {
+    let truth = GroundTruth {
         references,
         citations,
         method: method.to_owned(),
         body_text: body,
         paper,
-    })
+    };
+    if ground_truth_bytes(&truth) > budget {
+        return Err(TruthError::ResourceLimit);
+    }
+    Ok(truth)
 }
 
 /// Append a later toplevel document's truth to `first`. References and
@@ -3854,12 +3892,15 @@ pub fn ground_truth(files: &LatexFiles) -> Result<GroundTruth, TruthError> {
     let several = docs.len() > 1;
     let mut combined: Option<GroundTruth> = None;
     for (path, text) in &docs {
-        let truth = match document_truth(files, path, text, several) {
+        let accumulated = combined.as_ref().map_or(0, ground_truth_bytes);
+        let remaining = MAX_GROUND_TRUTH_BYTES
+            .checked_sub(accumulated)
+            .ok_or(TruthError::ResourceLimit)?;
+        let truth = match document_truth(files, path, text, several, remaining) {
             Ok(truth) => truth,
             Err(TruthError::NoBibliography) if several => continue,
             Err(err) => return Err(err),
         };
-        let accumulated = combined.as_ref().map_or(0, ground_truth_bytes);
         if accumulated
             .checked_add(ground_truth_bytes(&truth))
             .is_none_or(|size| size > MAX_GROUND_TRUTH_BYTES)
@@ -6138,5 +6179,53 @@ Data from \cite{gamma} and \cite{beta, gamma}.
             single.paper.title.as_deref(),
             Some("Supporting Information")
         );
+    }
+
+    #[test]
+    fn ground_truth_size_includes_paper_metadata() {
+        let truth = GroundTruth {
+            references: Vec::new(),
+            citations: TruthCitations::default(),
+            method: String::new(),
+            body_text: "body".to_owned(),
+            paper: TruthPaper {
+                title: Some("title".to_owned()),
+                authors: vec!["Ada Lovelace".to_owned(), "Grace Hopper".to_owned()],
+                doi: Some("10.1/example".to_owned()),
+                arxiv_id: Some("2601.00001".to_owned()),
+            },
+        };
+        assert_eq!(
+            ground_truth_bytes(&truth),
+            "bodytitleAda LovelaceGrace Hopper10.1/example2601.00001".len()
+        );
+    }
+
+    #[test]
+    fn ground_truth_rejects_oversized_bibliography_before_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.tex"),
+            r"\begin{document}\cite{x}\bibliography{refs}\end{document}",
+        )
+        .unwrap();
+        let bbl_path = dir.path().join("main.bbl");
+        let bbl = fs::File::create(&bbl_path).unwrap();
+        bbl.set_len((MAX_GROUND_TRUTH_BYTES + 1) as u64).unwrap();
+
+        let result = ground_truth(&files(dir.path(), &["main.tex"], &["main.bbl"], &[]));
+        assert!(matches!(result, Err(TruthError::ResourceLimit)));
+    }
+
+    #[test]
+    fn ground_truth_rejects_oversized_fallback_main_before_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_path = dir.path().join("main.tex");
+        let main = fs::File::create(&main_path).unwrap();
+        main.set_len((MAX_TOPLEVEL_SOURCE_BYTES + 1) as u64)
+            .unwrap();
+
+        let result = ground_truth(&files(dir.path(), &["main.tex"], &[], &[]));
+        assert!(matches!(result, Err(TruthError::ResourceLimit)));
     }
 }
