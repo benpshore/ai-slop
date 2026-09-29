@@ -2,6 +2,8 @@
 
 For native PDF, text, DOCX, XLSX, HTML, Markdown and CSV ingestion, see
 [the mixed-document command and its fidelity limits](docs/INGESTION.md).
+For streamed manifests with bounded concurrent workers, see
+[batch ingestion and resource controls](docs/BATCH_INGESTION.md).
 
 A native Rust engine for high-throughput, faithful text mining of academic PDFs, primarily on Apple Silicon macOS and also on Linux aarch64. Native Poppler, PDFium, and **Docling Rust (`docling-project/docling.rs`)** are the foundations. MLX is the intended Apple Silicon acceleration route wherever a measured model implementation improves complete-pipeline performance without reducing accuracy.
 
