@@ -67,42 +67,86 @@ struct SectionLine {
 
 impl SectionLine {
     /// Is `other` a fragment of the same printed row (same page and column,
-    /// baselines within 0.4 × the font size)?
-    fn same_row(&self, other: &Self) -> bool {
+    /// baselines within 0.4 × the font size)? `size` is the row's font size
+    /// so far: the largest of its fragments, as the merged row used to carry.
+    fn same_row_as(&self, other: &Self, size: Option<f32>) -> bool {
         if self.page != other.page || self.column != other.column {
             return false;
         }
         let (Some(a), Some(b)) = (self.y0, other.y0) else {
             return false;
         };
-        let size = self.size.or(other.size).unwrap_or(10.0);
+        let size = size.or(other.size).unwrap_or(10.0);
         (a - b).abs() <= 0.4 * size
     }
+}
 
-    /// Join the fragment `other` into this row in x order: a fragment that
-    /// sits to the left goes in front even when it arrived later (a DOI set
-    /// in a second font sorts before the text beside it).
-    fn absorb(&mut self, other: &Self) {
-        let before = matches!((self.x0, other.x0), (Some(a), Some(b)) if b < a);
-        if self.text.is_empty() {
-            self.text.clone_from(&other.text);
-        } else if !other.text.is_empty() {
-            if before {
-                self.text = format!("{} {}", other.text, self.text);
-            } else {
-                self.text.push(' ');
-                self.text.push_str(&other.text);
-            }
+/// The larger of two optional font sizes.
+fn max_size(a: Option<f32>, b: Option<f32>) -> Option<f32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+// A genuine printed row has few fragments. These bounds prevent hostile PDF
+// geometry from turning an arbitrary number of lines into one allocation.
+const MAX_ROW_FRAGMENTS: usize = 1_024;
+const MAX_ROW_TEXT_BYTES: usize = 1024 * 1024;
+
+/// Sort the collected fragments once and concatenate them in one allocation.
+/// This avoids repeatedly copying the accumulated row when lower-x fragments
+/// arrive late in reading order.
+fn finish_row(mut fragments: Vec<SectionLine>) -> SectionLine {
+    debug_assert!(!fragments.is_empty());
+    if fragments.len() == 1 {
+        // A lone fragment (possibly one larger than the row budget) is moved
+        // out as it is, never copied.
+        return fragments.pop().expect("one fragment");
+    }
+    // The row keeps the position of the fragment that arrived first, the
+    // lowest x, the largest size and the lowest line index.
+    let (page, column, y0) = (fragments[0].page, fragments[0].column, fragments[0].y0);
+    let line = fragments
+        .iter()
+        .map(|fragment| fragment.line)
+        .min()
+        .unwrap_or(0);
+    let x0 = fragments
+        .iter()
+        .filter_map(|fragment| fragment.x0)
+        .reduce(f32::min);
+    let size = fragments
+        .iter()
+        .filter_map(|fragment| fragment.size)
+        .reduce(f32::max);
+
+    fragments.sort_by(|a, b| match (a.x0, b.x0) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let capacity = fragments
+        .iter()
+        .map(|fragment| fragment.text.len())
+        .sum::<usize>()
+        + fragments.len().saturating_sub(1);
+    let mut text = String::with_capacity(capacity);
+    for fragment in fragments {
+        if !text.is_empty() && !fragment.text.is_empty() {
+            text.push(' ');
         }
-        self.x0 = match (self.x0, other.x0) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        self.size = match (self.size, other.size) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
-        };
-        self.line = self.line.min(other.line);
+        text.push_str(&fragment.text);
+    }
+    SectionLine {
+        page,
+        line,
+        column,
+        x0,
+        y0,
+        size,
+        text,
     }
 }
 
@@ -1151,6 +1195,11 @@ fn section_lines_with_furniture(
     repeated: &[String],
 ) -> Vec<SectionLine> {
     let mut lines: Vec<SectionLine> = Vec::new();
+    let mut row = Vec::<SectionLine>::new();
+    let mut row_text_bytes = 0usize;
+    // The largest font size among the row's fragments, which decides the
+    // baseline tolerance for the next fragment (as the merged row used to).
+    let mut row_size: Option<f32> = None;
     'pages: for page in pages {
         if page.page < section.first_page {
             continue;
@@ -1179,8 +1228,17 @@ fn section_lines_with_furniture(
             }
             if page_number_re().is_match(text) {
                 let margin = line.bbox.is_some_and(|b| in_margin(b, page.height));
-                let continues =
-                    !margin && lines.last().is_some_and(|prev| identifier_open(&prev.text));
+                let continues = !margin
+                    && row
+                        .iter()
+                        .max_by(|a, b| match (a.x0, b.x0) {
+                            (Some(a), Some(b)) => a.total_cmp(&b),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        })
+                        .or_else(|| lines.last())
+                        .is_some_and(|prev| identifier_open(&prev.text));
                 if !continues {
                     continue;
                 }
@@ -1196,13 +1254,26 @@ fn section_lines_with_furniture(
             };
             // Justified columns leave gaps wider than the layout pass joins,
             // so one printed row can arrive as several lines: re-join them.
-            let same_row = lines.last().is_some_and(|last| last.same_row(&fragment));
-            if same_row && let Some(last) = lines.last_mut() {
-                last.absorb(&fragment);
-            } else {
-                lines.push(fragment);
+            let same_row = row
+                .first()
+                .is_some_and(|first| first.same_row_as(&fragment, row_size));
+            let added_bytes = fragment.text.len() + usize::from(!row.is_empty());
+            let within_budget = row.len() < MAX_ROW_FRAGMENTS
+                && row_text_bytes.saturating_add(added_bytes) <= MAX_ROW_TEXT_BYTES;
+            if !same_row || !within_budget {
+                if !row.is_empty() {
+                    lines.push(finish_row(std::mem::take(&mut row)));
+                }
+                row_text_bytes = 0;
+                row_size = None;
             }
+            row_text_bytes += fragment.text.len() + usize::from(!row.is_empty());
+            row_size = max_size(row_size, fragment.size);
+            row.push(fragment);
         }
+    }
+    if !row.is_empty() {
+        lines.push(finish_row(row));
     }
     lines
 }
@@ -8303,6 +8374,60 @@ mod tests {
         );
         assert_eq!(refs[1].doi.as_deref(), Some("10.1371/journal.pone.0151670"));
         assert_eq!(refs[1].label.as_deref(), Some("Hawkins2016"));
+    }
+
+    #[test]
+    fn row_tolerance_follows_the_largest_fragment_size() {
+        let fragment = |x0: f32, y0: f32, size: f32| SectionLine {
+            page: 1,
+            line: 0,
+            column: 0,
+            x0: Some(x0),
+            y0: Some(y0),
+            size: Some(size),
+            text: "t".to_string(),
+        };
+        let first = fragment(0.0, 100.0, 5.0);
+        let third = fragment(40.0, 106.0, 5.0);
+        // Under the first fragment's 5 pt the third is 6 pt away and split;
+        // once a 20 pt fragment joined the row it is within 0.4 × 20 pt.
+        assert!(!first.same_row_as(&third, first.size));
+        assert!(first.same_row_as(&third, max_size(first.size, Some(20.0))));
+
+        let lone = vec![fragment(0.0, 100.0, 5.0)];
+        assert_eq!(finish_row(lone).text, "t");
+        let merged = finish_row(vec![fragment(50.0, 100.0, 5.0), fragment(0.0, 100.0, 20.0)]);
+        assert_eq!(merged.text, "t t");
+        assert_eq!(merged.x0, Some(0.0));
+        assert_eq!(merged.size, Some(20.0));
+    }
+
+    #[test]
+    fn row_fragment_budget_splits_hostile_geometry() {
+        let mut input = vec![line_at("References", 0, 72.0, 754.0)];
+        for i in 0..=MAX_ROW_FRAGMENTS {
+            input.push(line_at(
+                &format!("F{i:04}"),
+                0,
+                (MAX_ROW_FRAGMENTS - i) as f32,
+                740.0,
+            ));
+        }
+        let page = page_of(1, input);
+        let section = ReferenceSection {
+            first_page: 1,
+            first_line: 0,
+            heading: "References".to_string(),
+        };
+
+        let pages = [page];
+        let repeated = repeated_furniture(&pages);
+        let rows = section_lines_with_furniture(&pages, &section, None, &repeated);
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].text.starts_with("F1023 F1022"));
+        assert!(rows[0].text.ends_with("F0000"));
+        assert_eq!(rows[1].text, "F1024");
     }
 
     /// Loop 6 segmentation fixes, each built from the text of an arXiv
