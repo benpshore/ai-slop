@@ -179,6 +179,10 @@ use crate::schema::{BBox, Line, PageText};
 
 /// Most lines a caption (start plus continuations) may take.
 pub const CAPTION_MAX_LINES: usize = 14;
+/// Most caption candidates processed on one page. Real pages contain far
+/// fewer; bounding attacker-controlled candidates prevents repeated region
+/// walks from becoming quadratic in the number of extracted lines.
+pub const CAPTION_CANDIDATE_MAX: usize = 64;
 /// Most caption lines through which untagged prose lines are skipped by
 /// the walk below a caption, and wide prose lines are taken under a
 /// sideways table label.
@@ -542,12 +546,21 @@ fn tag_page(page: &mut PageText, carry: Option<&[f32]>) -> RegionReport {
     let (caption, table) = tag_continued_table(page);
     report.caption += caption;
     report.table += table;
-    let captions: Vec<(usize, Kind)> = page
+    let mut captions: Vec<(usize, Kind)> = page
         .lines
         .iter()
         .enumerate()
         .filter_map(|(k, line)| caption_kind(line).map(|kind| (k, kind)))
+        .take(CAPTION_CANDIDATE_MAX + 1)
         .collect();
+    if captions.len() > CAPTION_CANDIDATE_MAX {
+        // Do not process a partial set: which captions happened to occur first
+        // must not determine the roles on a deliberately pathological page.
+        captions.clear();
+        page.warnings.push(format!(
+            "{WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
+        ));
+    }
     for &(k, kind) in &captions {
         let Some(b) = finite_box(&page.lines[k]) else {
             continue;
@@ -3083,6 +3096,24 @@ mod tests {
         let first = pages.clone();
         let again = tag_regions(&mut pages);
         assert_eq!(again, RegionReport::default());
+        assert_eq!(pages, first);
+    }
+
+    #[test]
+    fn excessive_caption_candidates_skip_caption_based_tagging() {
+        let lines = (0..=CAPTION_CANDIDATE_MAX)
+            .map(|k| line("Algorithm 1", 72.0, 760.0 - k as f32 * 10.0, k as u32))
+            .collect();
+        let mut pages = vec![page_of(lines)];
+
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
+        assert!(pages[0].lines.iter().all(|line| line.role == ROLE_BODY));
+        assert!(pages[0].warnings.contains(&format!(
+            "{WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
+        )));
+
+        let first = pages.clone();
+        assert_eq!(tag_regions(&mut pages), RegionReport::default());
         assert_eq!(pages, first);
     }
 
