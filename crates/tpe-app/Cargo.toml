@@ -36,5 +36,9 @@ gpui = "0.2"
 # declared at run time; `objc` is already in the tree through gpui.
 objc = "0.2"
 
+# The headless view tests (`src/gui/tests.rs`) need GPUI's test platform.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { version = "0.2", features = ["test-support"] }
+
 [lints]
 workspace = true
