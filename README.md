@@ -23,6 +23,14 @@ mise use -g github:benpshore/pdftextract
 tpe --version
 ```
 
+mise lists versions through its shared cache (`mise-versions.jdx.dev`), which
+can lag a new release by some hours. To pick up a release the moment it is
+published, bypass the cache for that command:
+
+```sh
+MISE_USE_VERSIONS_HOST=0 mise upgrade github:benpshore/pdftextract
+```
+
 Without mise, download the archive for your platform from the
 [latest release](https://github.com/benpshore/pdftextract/releases/latest),
 check it against `SHA256SUMS`, and put `tpe` on your `PATH`:
