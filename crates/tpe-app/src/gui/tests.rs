@@ -875,6 +875,15 @@ fn interaction_timings(cx: &mut TestAppContext) {
     frame(&mut visual, &shell);
     let list = shell.read_with(&visual, |shell, _| shell.list_focus.clone());
     visual.update(|window, _| window.focus(&list));
+    // Start near the tail: `stepped` finds the selected row with a scan from
+    // the front, so a press late in a big batch is the expensive case.
+    let all = ids(&shell, &visual);
+    shell.update(&mut visual, |shell, _| shell.selected = Some(all[4_849]));
+    shell.update(&mut visual, |shell, _| {
+        shell.scroll.scroll_to_item(4_849, ScrollStrategy::Top);
+    });
+    frame(&mut visual, &shell);
+    frame(&mut visual, &shell);
     let mut presses = Vec::new();
     for _ in 0..100 {
         let started = std::time::Instant::now();
@@ -885,7 +894,7 @@ fn interaction_timings(cx: &mut TestAppContext) {
         presses.push(started.elapsed());
     }
     row(
-        "Down key to selection drawn, 5,000 rows",
+        "Down key to selection drawn, rows 4,850-4,950 of 5,000",
         median(&mut presses),
     );
     let mut jumps = Vec::new();
@@ -937,23 +946,32 @@ fn interaction_timings(cx: &mut TestAppContext) {
         }),
     );
 
-    // The engine itself, on the two-page paper.
-    let job = Fixture::new();
-    let never = CancelToken::new();
-    let ledger = job.dir.path().join("timing-ledger.sqlite");
+    // The engine itself, on the two-page paper. Each sample gets its own
+    // directory and a new ledger, so none is slowed by the outputs and
+    // ledger rows of the ones before it (`publish` searches from the first
+    // free name).
     tpe::pipeline::warm_up();
-    row(
-        "Get text job on the 2-page paper (engine, ledger, file)",
-        timed(20, || {
-            jobs::run(Action::Text, &job.pdf, &ledger, &mut |_| {}, &never).unwrap();
-        }),
-    );
-    row(
-        "Get bibliography job on the 2-page paper (engine, files)",
-        timed(20, || {
-            jobs::run(Action::Bibliography, &job.pdf, &ledger, &mut |_| {}, &never).unwrap();
-        }),
-    );
+    for (what, action) in [
+        (
+            "Get text job on the 2-page paper (engine, new ledger, file)",
+            Action::Text,
+        ),
+        (
+            "Get bibliography job on the 2-page paper (engine, files)",
+            Action::Bibliography,
+        ),
+    ] {
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let job = Fixture::new();
+            let ledger = job.dir.path().join("timing-ledger.sqlite");
+            let cancel = CancelToken::new();
+            let started = std::time::Instant::now();
+            jobs::run(action, &job.pdf, &ledger, &mut |_| {}, &cancel).unwrap();
+            samples.push(started.elapsed());
+        }
+        row(what, median(&mut samples));
+    }
 }
 
 /// Rows added without starting the engine: the first `done` are failed
