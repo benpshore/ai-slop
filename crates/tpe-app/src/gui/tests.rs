@@ -618,3 +618,101 @@ fn a_bad_file_fails_its_row_and_the_queue_moves_on(cx: &mut TestAppContext) {
         "{phases:?}"
     );
 }
+
+/// Rows added without starting the engine: the first `done` are failed
+/// (finished), the rest queued.
+fn finished_then_queued(
+    shell: &Entity<Shell>,
+    cx: &mut TestAppContext,
+    paths: Vec<PathBuf>,
+    done: usize,
+) -> Vec<usize> {
+    queue_only(shell, cx, paths);
+    let all = ids(shell, cx);
+    shell.update(cx, |shell, _| {
+        for &id in &all[..done] {
+            shell.jobs.start(id);
+            shell.jobs.finish(id, Err("failed".into()));
+        }
+    });
+    all
+}
+
+#[gpui::test]
+fn clearing_lands_on_the_first_survivor_after_the_selected_row(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    // [done, done (selected), running, queued]
+    let rows = finished_then_queued(&shell, cx, copies(&fixture, 4), 2);
+    shell.update(cx, |shell, _| {
+        shell.jobs.start(rows[2]);
+        shell.selected = Some(rows[1]);
+    });
+    keys(cx, window, "cmd-k");
+    assert_eq!(ids(&shell, cx), [rows[2], rows[3]]);
+    assert_eq!(
+        selected(&shell, cx),
+        Some(rows[2]),
+        "the row that took the selected row's place, not the one after it"
+    );
+}
+
+#[gpui::test]
+fn clearing_keeps_a_surviving_selection_in_view(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    // 150 finished rows then 150 queued; the selected row is deep in the
+    // queued ones, so after clearing it is at index 100 of 150 while the old
+    // scroll offset points at the very end of the list.
+    let rows = finished_then_queued(&shell, cx, copies(&fixture, 300), 150);
+    keys(cx, window, "tab tab");
+    shell.update(cx, |shell, _| shell.selected = Some(rows[250]));
+    let _ = bounds_of(cx, window, &shell, "job-1");
+    shell.update(cx, |shell, _| {
+        shell.scroll.scroll_to_item(250, ScrollStrategy::Top);
+    });
+    let _ = bounds_of(cx, window, &shell, "job-1");
+
+    keys(cx, window, "cmd-k");
+    let _ = bounds_of(cx, window, &shell, "job-1");
+    assert_eq!(selected(&shell, cx), Some(rows[250]));
+    // Where the row is, from the scroll offset (a row's debug bounds from an
+    // earlier draw would still answer, so they cannot say it moved).
+    let at = ids(&shell, cx)
+        .iter()
+        .position(|&id| id == rows[250])
+        .unwrap();
+    let (top, height, row) = shell.read_with(cx, |shell, _| {
+        let state = shell.scroll.0.borrow();
+        (
+            -f32::from(state.base_handle.offset().y),
+            f32::from(state.last_item_size.unwrap().item.height),
+            f32::from(gpui::px(16.0)) * ROW_HEIGHT_REMS,
+        )
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let (from, to) = (at as f32 * row, (at + 1) as f32 * row);
+    assert!(
+        from >= top - 0.5 && to <= top + height + 0.5,
+        "the surviving selected row (y {from}..{to}) is inside the viewport ({top}..{})",
+        top + height
+    );
+}
+
+#[gpui::test]
+fn enter_does_not_reveal_a_queued_or_running_row(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let rows = finished_then_queued(&shell, cx, copies(&fixture, 2), 0);
+    shell.update(cx, |shell, _| {
+        shell.jobs.start(rows[0]);
+        shell.selected = Some(rows[0]);
+    });
+    keys(cx, window, "tab tab enter");
+    shell.update(cx, |shell, _| shell.selected = Some(rows[1]));
+    keys(cx, window, "space");
+    assert!(
+        fixture.log.reveals.borrow().is_empty(),
+        "no result yet: nothing to show, and never the input PDF"
+    );
+}
