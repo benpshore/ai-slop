@@ -1,0 +1,73 @@
+{
+ "stratum": "name-hungary",
+ "seed": "20260930:name-hungary",
+ "pool": {
+  "term": "(\"Hungary\"[Affiliation]) AND \"open access\"[filter] AND 2018:2026[pdat]",
+  "count": 29906,
+  "pool_used": 5000
+ },
+ "items": [
+  {
+   "id": "name-hungary-01",
+   "stratum": "name-hungary",
+   "field": "name stratum: Hungarian",
+   "layout_hint": "names: Hungarian (double-acute, family-first)",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13323255",
+   "doi": "10.3389/fpls.2026.1808527",
+   "title": "Funneliformis mosseae enhances drought tolerance in maize inbred lines through root transcriptomic reprogramming",
+   "citation": "Front Plant Sci. 2026 Jun 18;17:1808527. doi: 10.3389/fpls.2026.1808527",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13323255/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13323255.1/PMC13323255.1.pdf",
+   "pdf_bytes": 6971919,
+   "pdf_sha256": "50c9e683aec891a6b2861ab1f278118d0b88a31b343a9392630dfaa32756dec9",
+   "truth_kind": "jats",
+   "truth_n": 32,
+   "rank_in_shuffled_pool": 0,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-hungary-02",
+   "stratum": "name-hungary",
+   "field": "name stratum: Hungarian",
+   "layout_hint": "names: Hungarian (double-acute, family-first)",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13391766",
+   "doi": "10.1007/s00128-026-04305-z",
+   "title": "Combined Effects of Air Pollution and Drought Stress in Tomato Landraces",
+   "citation": "Bull Environ Contam Toxicol. 2026 Jul 22;117(2):33. doi: 10.1007/s00128-026-04305-z",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13391766/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13391766.1/PMC13391766.1.pdf",
+   "pdf_bytes": 563979,
+   "pdf_sha256": "5e6762584fb6ab5ebb39b7903a24bed78d464fcff6bc6f89074509e29da04aff",
+   "truth_kind": "jats",
+   "truth_n": 28,
+   "rank_in_shuffled_pool": 1,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-hungary-03",
+   "stratum": "name-hungary",
+   "field": "name stratum: Hungarian",
+   "layout_hint": "names: Hungarian (double-acute, family-first)",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13179056",
+   "doi": "10.1007/s00421-025-06100-w",
+   "title": "Peer-reviewed by human experts: AI failed in key steps to generate a scoping review on the neural mechanisms of cross-education",
+   "citation": "Eur J Appl Physiol. 2025 Dec 24;126(4):1907–16. doi: 10.1007/s00421-025-06100-w",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13179056/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13179056.1/PMC13179056.1.pdf",
+   "pdf_bytes": 780579,
+   "pdf_sha256": "6c4a1270fb16382ca744f577d80096902d404403b6fe68f8f95f4d7e3ed52766",
+   "truth_kind": "jats",
+   "truth_n": 25,
+   "rank_in_shuffled_pool": 2,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [],
+ "date": "2026-09-30"
+}

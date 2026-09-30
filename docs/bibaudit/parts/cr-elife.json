@@ -1,0 +1,785 @@
+{
+ "stratum": "cr-elife",
+ "seed": "20260930:cr-elife",
+ "pool_desc": {
+  "crossref_filter": "prefix:10.7554,has-references:true,from-pub-date:2019-01-01,type:journal-article",
+  "total_results": 16626,
+  "sample": 100
+ },
+ "pool": [
+  {
+   "doi": "10.7554/elife.95273",
+   "title": "Unbiased identification of cell identity in dense mixed neural cultures",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.42879",
+   "title": "The COMA complex interacts with Cse4 and positions Sli15/Ipl1 at the budding yeast inner kinetochore",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.50232",
+   "title": "Cortical excitability controls the strength of mental imagery",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.84392",
+   "title": "Divergent functions of two clades of flavodoxin in diatoms mitigate oxidative stress and iron limitation",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.50613",
+   "title": "Opioids modulate an emergent rhythmogenic process to depress breathing",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.98798.3",
+   "title": "Characterization of binding kinetics and intracellular signaling of new psychoactive substances targeting cannabinoid receptor using transition-based reweighting method",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.55676",
+   "title": "MicroRNAs of the miR-17~92 family maintain adipose tissue macrophage homeostasis by sustaining IL-10 expression",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.65351",
+   "title": "Integrated sensing of host stresses by inhibition of a cytoplasmic two-component system controls M. tuberculosis acute lung infection",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.54707",
+   "title": "A physicochemical perspective of aging from single-cell analysis of pH, macromolecular and organellar crowding in yeast",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.56605",
+   "title": "Probabilistic, spinally-gated control of bladder pressure and autonomous micturition by Barrington’s nucleus CRH neurons",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.97201",
+   "title": "Resting natural killer cells promote the progress of colon cancer liver metastasis by elevating tumor-derived stem cell factor",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.56076",
+   "title": "The Wg and Dpp morphogens regulate gene expression by modulating the frequency of transcriptional bursts",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.82249",
+   "title": "linc-mipep and linc-wrb encode micropeptides that regulate chromatin accessibility in vertebrate-specific neural cells",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.88319.4",
+   "title": "The cation channel mechanisms of subthreshold inward depolarizing currents in the mice VTA dopaminergic neurons and their roles in the chronic-stress-induced depression-like behavior",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.92938.3",
+   "title": "Neural interactions in the human frontal cortex dissociate reward and punishment learning",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.60519",
+   "title": "Early prediction of level-of-care requirements in patients with COVID-19",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.95054",
+   "title": "Disruption in CYLC1 leads to acrosome detachment, sperm head deformity, and male in/subfertility in humans and mice",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.83952",
+   "title": "Hybridization led to a rewired pluripotency network in the allotetraploid Xenopus laevis",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.60821",
+   "title": "HIV-1 Vpr antagonizes innate immune activation by targeting karyopherin-mediated NF-κB/IRF3 nuclear transport",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.102467",
+   "title": "An annotated introductory reading list for neurodiversity",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.89173",
+   "title": "Hypoxia-inducible factor induces cysteine dioxygenase and promotes cysteine homeostasis in Caenorhabditis elegans",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.55331",
+   "title": "Site-specific effects of neurosteroids on GABAA receptor activation and desensitization",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.68205",
+   "title": "A role for glial fibrillary acidic protein (GFAP)-expressing cells in the regulation of gonadotropin-releasing hormone (GnRH) but not arcuate kisspeptin neuron output in male mice",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.83345",
+   "title": "PTH regulates osteogenesis and suppresses adipogenesis through Zfp467 in a feed-forward, PTH1R-cyclic AMP-dependent manner",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.107141",
+   "title": "Biophysical basis for brain folding and misfolding patterns in ferrets and humans",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.96603",
+   "title": "Stable sequential dynamics in prefrontal cortex represents subjective estimation of time",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.95639.3",
+   "title": "Loss of ZNRF3/RNF43 unleashes EGFR in cancer",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.109624.3",
+   "title": "Insights into substrate binding and utilization by hyaluronan synthase",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.69078",
+   "title": "Maternal diet-induced obesity during pregnancy alters lipid supply to mouse E18.5 fetuses and changes the cardiac tissue lipidome in a sex-dependent manner",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.89835",
+   "title": "Gle1 is required for tRNA to stimulate Dbp5 ATPase activity in vitro and promote Dbp5-mediated tRNA export in vivo in Saccharomyces cerevisiae",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.103073",
+   "title": "Therapeutic effects of PDGF-AB/BB against cellular senescence in human intervertebral disc",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.85258",
+   "title": "Engineering of the endogenous HBD promoter increases HbA2",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.73668",
+   "title": "Parallel processing by distinct classes of principal neurons in the olfactory cortex",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.72313",
+   "title": "A functional screen of RNA binding proteins identifies genes that promote or limit the accumulation of CD138+ plasma cells",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.67764",
+   "title": "Evolution of diversity in metabolic strategies",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.84698",
+   "title": "Mir221/222 drive synovial hyperplasia and arthritis by targeting cell cycle inhibitors and chromatin remodeling components",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.78089",
+   "title": "A modelling approach to estimate the transmissibility of SARS-CoV-2 during periods of high, low, and zero case incidence",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.64145",
+   "title": "Three-dimensional biofilm colony growth supports a mutualism involving matrix and nutrient sharing",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.89951",
+   "title": "SPOP targets the immune transcription factor IRF1 for proteasomal degradation",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.79042",
+   "title": "Hierarchical architecture of dopaminergic circuits enables second-order conditioning in Drosophila",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.47322",
+   "title": "Real time dynamics of Gating-Related conformational changes in CorA",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.75769",
+   "title": "Waveform detection by deep learning reveals multi-area spindles that are selectively modulated by memory load",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.52237",
+   "title": "Hepatitis C virus exploits cyclophilin A to evade PKR",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.107565",
+   "title": "Massively parallel reporter assay for mapping gene-specific regulatory regions at single-nucleotide resolution",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.64881",
+   "title": "Polymerization of misfolded Z alpha-1 antitrypsin protein lowers CX3CR1 expression in human PBMCs",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.78100",
+   "title": "Vein fate determined by flow-based but time-delayed integration of network architecture",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.95328",
+   "title": "Targeting plasmid-encoded proteins that contain immunoglobulin-like domains to combat antimicrobial resistance",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.103016",
+   "title": "Citalopram exhibits immune-dependent anti-tumor effects by modulating C5aR1+ TAMs",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.95733",
+   "title": "A memory model of rodent spatial navigation in which place cells are memories arranged in a grid and grid cells are non-spatial",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.44452",
+   "title": "Autophagy regulates inflammatory programmed cell death via turnover of RHIM-domain proteins",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.110309.4",
+   "title": "The targeted cytosolic degradation of class I histone deacetylases is essential for efficient alphaherpesvirus replication",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.92519",
+   "title": "Single-nucleus transcriptomics reveal the differentiation trajectories of periosteal skeletal/stem progenitor cells in bone regeneration",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.100949.3",
+   "title": "Discovering root causal genes with high-throughput perturbations",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.74101",
+   "title": "Effector membrane translocation biosensors reveal G protein and βarrestin coupling profiles of 100 therapeutically relevant GPCRs",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.107936.3",
+   "title": "Host and antibiotic jointly select for greater virulence in Staphylococcus aureus",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.67681",
+   "title": "Injection with Toxoplasma gondii protein affects neuron health and survival",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.57244",
+   "title": "Integrative frontal-parietal dynamics supporting cognitive control",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.49375",
+   "title": "E. coli TraR allosterically regulates transcription initiation by altering RNA polymerase conformation",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.68773",
+   "title": "Ait1 regulates TORC1 signaling and localization in budding yeast",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.42866",
+   "title": "The human gut chemical landscape predicts microbe-mediated biotransformation of foods and drugs",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.77614",
+   "title": "Zebrafish fin regeneration involves generic and regeneration-specific osteoblast injury responses",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.103328.3",
+   "title": "An antisense oligonucleotide-based strategy to ameliorate cognitive dysfunction in the 22q11.2 Deletion Syndrome",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.71104",
+   "title": "Sequence features of retrotransposons allow for epigenetic variability",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.91685",
+   "title": "Factorized visual representations in the primate visual system and deep neural networks",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.103064.3",
+   "title": "Integrator complex subunit 12 knockout overcomes a transcriptional block to HIV latency reversal",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.91432",
+   "title": "Cryo-EM structure of the CBC-ALYREF complex",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.62273",
+   "title": "Virus infection of the CNS disrupts the immune-neural-synaptic axis via induction of pleiotropic gene regulation of host responses",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.73114",
+   "title": "ExSTED microscopy reveals contrasting functions of dopamine and somatostatin CSF-c neurons along the lamprey central canal",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.57907",
+   "title": "Nanobody-directed targeting of optogenetic tools to study signaling in the primary cilium",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.87501",
+   "title": "Plasma extracellular vesicle synaptic proteins as biomarkers of clinical progression in patients with Parkinson’s disease",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.105822.3",
+   "title": "Single-cell RNA-seq reveals trans-sialidase-like superfamily gene expression heterogeneity in Trypanosoma cruzi populations",
+   "journal": "eLife",
+   "year": 2026
+  },
+  {
+   "doi": "10.7554/elife.84327",
+   "title": "An IS-mediated, RecA-dependent, bet-hedging strategy in Burkholderia thailandensis",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.41523",
+   "title": "A matter of timing",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.97902",
+   "title": "A CDK1 phosphorylation site on Drosophila PAR-3 regulates neuroblast polarisation and sensory organ formation",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.50149",
+   "title": "The ribosomal P-stalk couples amino acid starvation to GCN2 activation in mammalian cells",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.82453",
+   "title": "How the brain regulates alcohol intake",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.97188",
+   "title": "Attentional modulation of secondary somatosensory and visual thalamus of mice",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.47106",
+   "title": "TMEM16B regulates anxiety-related behavior and GABAergic neuronal signaling in the central lateral amygdala",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.91318",
+   "title": "Class A scavenger receptor MARCO negatively regulates Ace expression and aldosterone production",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.77550",
+   "title": "How the brain processes negative emotions",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.69207",
+   "title": "Protective mitochondrial fission induced by stress-responsive protein GJA1-20k",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.52828",
+   "title": "A native prokaryotic voltage-dependent calcium channel with a novel selectivity filter sequence",
+   "journal": "eLife",
+   "year": 2020
+  },
+  {
+   "doi": "10.7554/elife.70129",
+   "title": "Subpopulations of neurons in lOFC encode previous and current rewards at time of choice",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.80483",
+   "title": "Contrasting parental roles shape sex differences in poison frog space use but not navigational performance",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.99951",
+   "title": "Emergence of power law distributions in protein-protein interaction networks through study bias",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.84570.3",
+   "title": "Inhibition of type I PRMTs reforms muscle stem cell identity enhancing their therapeutic capacity",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.83118",
+   "title": "Common genetic variations in telomere length genes and lung cancer: a Mendelian randomisation study and its novel application in lung tumour transcriptome",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.72861",
+   "title": "Alternate patterns of temperature variation bring about very different disease outcomes at different mean temperatures",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.83159",
+   "title": "HUWE1 controls tristetraprolin proteasomal degradation by regulating its phosphorylation",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.71282",
+   "title": "Adiponectin receptor agonist AdipoRon improves skeletal muscle function in aged mice",
+   "journal": "eLife",
+   "year": 2022
+  },
+  {
+   "doi": "10.7554/elife.80529",
+   "title": "Structural features stabilized by divalent cation coordination within hepatitis E virus ORF1 are critical for viral replication",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.45210",
+   "title": "A bacterial riboswitch class for the thiamin precursor HMP-PP employs a terminator-embedded aptamer",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.50292",
+   "title": "Micronuclei-based model system reveals functional consequences of chromothripsis in human cells",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.90024.3",
+   "title": "An engineered biosensor enables dynamic aspartate measurements in living cells",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.85779",
+   "title": "APOE expression and secretion are modulated by mitochondrial dysfunction",
+   "journal": "eLife",
+   "year": 2023
+  },
+  {
+   "doi": "10.7554/elife.93170",
+   "title": "Metastatic small cell lung cancer arises from TP53/RB1-deficient and MYC overproduction hESC-derived PNECs",
+   "journal": "eLife",
+   "year": 2025
+  },
+  {
+   "doi": "10.7554/elife.80216",
+   "title": "Recombinant origin and interspecies transmission of a HERV-K(HML-2)-related primate retrovirus with a novel RNA transport element",
+   "journal": "eLife",
+   "year": 2024
+  },
+  {
+   "doi": "10.7554/elife.44392",
+   "title": "A de novo evolved gene in the house mouse regulates female pregnancy cycles",
+   "journal": "eLife",
+   "year": 2019
+  },
+  {
+   "doi": "10.7554/elife.62449",
+   "title": "C. elegans orthologs MUT-7/CeWRN-1 of Werner syndrome protein regulate neuronal plasticity",
+   "journal": "eLife",
+   "year": 2021
+  },
+  {
+   "doi": "10.7554/elife.81573",
+   "title": "Regulated degradation of the inner nuclear membrane protein SUN2 maintains nuclear envelope architecture and function",
+   "journal": "eLife",
+   "year": 2022
+  }
+ ],
+ "items": [
+  {
+   "id": "cr-elife-01",
+   "stratum": "cr-elife",
+   "field": "biomedicine (eLife)",
+   "layout_hint": "author-year, one column",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.7554/elife.80216",
+   "title": "Recombinant origin and interspecies transmission of a HERV-K(HML-2)-related primate retrovirus with a novel RNA transport element",
+   "journal": "eLife",
+   "license": "cc-by",
+   "url": "https://doi.org/10.7554/elife.80216",
+   "pdf_url": "https://hal.science/hal-04826648v1/file/elife-80216-v2.pdf",
+   "pdf_host": "hal.science",
+   "pdf_bytes": 3152558,
+   "pdf_sha256": "508496dcf7036e95c8b13b1914840bb9c003a371127c86654b053726948b6ffd",
+   "pages": 29,
+   "language": "en",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 88,
+   "pool_rank": 13,
+   "version": "submittedVersion"
+  },
+  {
+   "id": "cr-elife-02",
+   "stratum": "cr-elife",
+   "field": "biomedicine (eLife)",
+   "layout_hint": "author-year, one column",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.7554/elife.83118",
+   "title": "Common genetic variations in telomere length genes and lung cancer: a Mendelian randomisation study and its novel application in lung tumour transcriptome",
+   "journal": "eLife",
+   "license": "cc-by",
+   "url": "https://doi.org/10.7554/elife.83118",
+   "pdf_url": "https://iris.unil.ch/bitstreams/5d3409b3-c5b0-4da1-bfa7-e36656ecab0a/download",
+   "pdf_host": "iris.unil.ch",
+   "pdf_bytes": 4104818,
+   "pdf_sha256": "711651a6e743f474c2eaab993bde3b5ef8e65871cb5f6ab96c258873545828c5",
+   "pages": 20,
+   "language": "en",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 54,
+   "pool_rank": 15,
+   "version": "submittedVersion"
+  },
+  {
+   "id": "cr-elife-03",
+   "stratum": "cr-elife",
+   "field": "biomedicine (eLife)",
+   "layout_hint": "author-year, one column",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.7554/elife.84698",
+   "title": "Mir221/222 drive synovial hyperplasia and arthritis by targeting cell cycle inhibitors and chromatin remodeling components",
+   "journal": "eLife",
+   "license": "cc-by",
+   "url": "https://doi.org/10.7554/elife.84698",
+   "pdf_url": "https://elifesciences.org/download/aHR0cHM6Ly9jZG4uZWxpZmVzY2llbmNlcy5vcmcvYXJ0aWNsZXMvODQ2OTgvZWxpZmUtODQ2OTgtdjEucGRmP2Nhbm9uaWNhbFVyaT1odHRwczovL2VsaWZlc2NpZW5jZXMub3JnL2FydGljbGVzLzg0Njk4/elife-84698-v1.pdf?_hash=DX9ym3fmbkxXGFpxQaP7Ddmqwdx2slIbXLf1spO0Nf0%3D",
+   "pdf_host": "elifesciences.org",
+   "pdf_bytes": 9763037,
+   "pdf_sha256": "905f9a240d1322fbe672ae0b17d897ee5c240088ed9dcc6deac2eff458c38bd9",
+   "pages": 23,
+   "language": "en",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 56,
+   "pool_rank": 16,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.7554/elife.93170",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.95054",
+   "why": "not-pdf:elifesciences.org"
+  },
+  {
+   "doi": "10.7554/elife.95054",
+   "why": "not-pdf:pmc.ncbi.nlm.nih.gov"
+  },
+  {
+   "doi": "10.7554/elife.95054",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.92938.3",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.65351",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.44392",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.110309.4",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.80483",
+   "why": "not-pdf:elifesciences.org"
+  },
+  {
+   "doi": "10.7554/elife.80483",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.77550",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.91685",
+   "why": "not-pdf:pmc.ncbi.nlm.nih.gov"
+  },
+  {
+   "doi": "10.7554/elife.91685",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.42879",
+   "why": "pdf-fetch:hdl.handle.net:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.7554/elife.42879",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.80529",
+   "why": "not-pdf:pmc.ncbi.nlm.nih.gov"
+  },
+  {
+   "doi": "10.7554/elife.80529",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.45210",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.87501",
+   "why": "pdf-fetch:github.com:<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+  },
+  {
+   "doi": "10.7554/elife.87501",
+   "why": "not-pdf:pmc.ncbi.nlm.nih.gov"
+  },
+  {
+   "doi": "10.7554/elife.87501",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.89835",
+   "why": "not-pdf:elifesciences.org"
+  },
+  {
+   "doi": "10.7554/elife.89835",
+   "why": "not-pdf:pmc.ncbi.nlm.nih.gov"
+  },
+  {
+   "doi": "10.7554/elife.89835",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7554/elife.83118",
+   "why": "not-pdf:pmc.ncbi.nlm.nih.gov"
+  }
+ ],
+ "date": "2026-09-30"
+}

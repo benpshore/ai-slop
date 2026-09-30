@@ -1,0 +1,228 @@
+{
+ "stratum": "arxiv-math",
+ "seed": "20260930:arxiv-math",
+ "cats": [
+  "math.NT",
+  "math.PR",
+  "math.AP",
+  "math.CO",
+  "math.AG",
+  "math.DG",
+  "math.OC",
+  "math.ST"
+ ],
+ "months": [
+  "202201",
+  "202608"
+ ],
+ "items": [
+  {
+   "id": "arxiv-math-01",
+   "stratum": "arxiv-math",
+   "field": "mathematics",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2312.11139",
+   "version": 1,
+   "title": "A hierarchy of Plateau problems and the approximation of Plateau's laws via the Allen--Cahn equation",
+   "license": "http://creativecommons.org/licenses/by/4.0/",
+   "url": "https://arxiv.org/abs/2312.11139v1",
+   "pdf_url": "https://arxiv.org/pdf/2312.11139v1",
+   "pdf_bytes": 552423,
+   "pdf_sha256": "b10cfbc6342853b3b2a42edea2951f52f73382397038887cb4ebc61fbe1a2639",
+   "truth_kind": "bbl",
+   "truth_n": 38,
+   "truth_detail": "bibitem:part_twov7.bbl",
+   "draw": {
+    "draw": 0,
+    "cat": "math.DG",
+    "ym": "202312",
+    "offset": 121,
+    "total": 210
+   }
+  },
+  {
+   "id": "arxiv-math-02",
+   "stratum": "arxiv-math",
+   "field": "mathematics",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2608.23996",
+   "version": 1,
+   "title": "Geometric Realization of Finite Residue Casimirs and Weil Operators via Szegő Kernels",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2608.23996v1",
+   "pdf_url": "https://arxiv.org/pdf/2608.23996v1",
+   "pdf_bytes": 521120,
+   "pdf_sha256": "f783bf6f0c065ef093cd6bd3bf6ed4e038e5309547a88aa3f4df099e7d2e166e",
+   "truth_kind": "bbl",
+   "truth_n": 18,
+   "truth_detail": "bibitem:Szego.bbl",
+   "draw": {
+    "draw": 2,
+    "cat": "math.AG",
+    "ym": "202608",
+    "offset": 360,
+    "total": 519
+   }
+  },
+  {
+   "id": "arxiv-math-03",
+   "stratum": "arxiv-math",
+   "field": "mathematics",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2212.11019",
+   "version": 3,
+   "title": "Griffiths heights and pencils of hypersurfaces",
+   "license": "http://creativecommons.org/licenses/by/4.0/",
+   "url": "https://arxiv.org/abs/2212.11019v3",
+   "pdf_url": "https://arxiv.org/pdf/2212.11019v3",
+   "pdf_bytes": 1046686,
+   "pdf_sha256": "f38488ba6a342c10f4e269fa68af9370c991629309c5f3a18bce51e0af3a05ff",
+   "truth_kind": "bbl",
+   "truth_n": 49,
+   "truth_detail": "bibitem:main.tex",
+   "draw": {
+    "draw": 3,
+    "cat": "math.AG",
+    "ym": "202212",
+    "offset": 161,
+    "total": 247
+   }
+  },
+  {
+   "id": "arxiv-math-04",
+   "stratum": "arxiv-math",
+   "field": "mathematics",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2601.11099",
+   "version": 2,
+   "title": "Robust $M$-Estimation of Scatter Matrices via Precision Structure Shrinkage",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2601.11099v2",
+   "pdf_url": "https://arxiv.org/pdf/2601.11099v2",
+   "pdf_bytes": 2964412,
+   "pdf_sha256": "d9659ff12f49f30ae181c1fe8f54833268a61b43123794b0cb80cd7d636d914a",
+   "truth_kind": "bbl",
+   "truth_n": 60,
+   "truth_detail": "bibitem:main_arXiv.tex",
+   "draw": {
+    "draw": 5,
+    "cat": "math.ST",
+    "ym": "202601",
+    "offset": 92,
+    "total": 216
+   }
+  },
+  {
+   "id": "arxiv-math-05",
+   "stratum": "arxiv-math",
+   "field": "mathematics",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2401.17960",
+   "version": 1,
+   "title": "On the new theory of 1-motives",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2401.17960v1",
+   "pdf_url": "https://arxiv.org/pdf/2401.17960v1",
+   "pdf_bytes": 374791,
+   "pdf_sha256": "c68ad032b8984849ea2583d5e8c109bd9abc2ca23bd2e3e6c873b5759ff7078b",
+   "truth_kind": "bbl",
+   "truth_n": 53,
+   "truth_detail": "bibitem:main.tex",
+   "draw": {
+    "draw": 6,
+    "cat": "math.NT",
+    "ym": "202401",
+    "offset": 300,
+    "total": 310
+   }
+  }
+ ],
+ "rejected_draws": [
+  {
+   "draw": 1,
+   "cat": "math.AG",
+   "ym": "202209",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 4,
+   "cat": "math.AG",
+   "ym": "202206",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 11,
+   "cat": "math.NT",
+   "ym": "202409",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 12,
+   "cat": "math.CO",
+   "ym": "202206",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 13,
+   "cat": "math.ST",
+   "ym": "202202",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 18,
+   "cat": "math.AP",
+   "ym": "202211",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 19,
+   "cat": "math.AP",
+   "ym": "202411",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 20,
+   "cat": "math.DG",
+   "ym": "202406",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 21,
+   "cat": "math.OC",
+   "ym": "202409",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 22,
+   "cat": "math.ST",
+   "ym": "202211",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 26,
+   "cat": "math.NT",
+   "ym": "202511",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  }
+ ],
+ "date": "2026-09-30",
+ "items_extra_discarded_by_rule": [
+  "arxiv-math-06",
+  "arxiv-math-07",
+  "arxiv-math-08",
+  "arxiv-math-09",
+  "arxiv-math-10",
+  "arxiv-math-11",
+  "arxiv-math-12",
+  "arxiv-math-13",
+  "arxiv-math-14",
+  "arxiv-math-15",
+  "arxiv-math-16",
+  "arxiv-math-17"
+ ]
+}

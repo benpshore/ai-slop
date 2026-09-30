@@ -1,0 +1,214 @@
+{
+ "stratum": "arxiv-physics",
+ "seed": "20260930:arxiv-physics",
+ "cats": [
+  "cond-mat.mes-hall",
+  "cond-mat.str-el",
+  "hep-th",
+  "hep-ph",
+  "quant-ph",
+  "astro-ph.CO",
+  "astro-ph.GA",
+  "physics.optics",
+  "cond-mat.mtrl-sci"
+ ],
+ "months": [
+  "202201",
+  "202608"
+ ],
+ "items": [
+  {
+   "id": "arxiv-physics-01",
+   "stratum": "arxiv-physics",
+   "field": "physics / astronomy",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2507.15209",
+   "version": 1,
+   "title": "An Optimal In-Situ Multipole Algorithm for the Isotropic Three-Point Correlation Functions",
+   "license": "http://creativecommons.org/licenses/by-nc-sa/4.0/",
+   "url": "https://arxiv.org/abs/2507.15209v1",
+   "pdf_url": "https://arxiv.org/pdf/2507.15209v1",
+   "pdf_bytes": 766142,
+   "pdf_sha256": "54126e6dfa75f2eee0be67fcee4b9e3aacd8723400343bc292af62456c5c119e",
+   "truth_kind": "bbl",
+   "truth_n": 100,
+   "truth_detail": "bibitem:OptAlgorithm3PCF.bbl",
+   "draw": {
+    "draw": 0,
+    "cat": "astro-ph.CO",
+    "ym": "202507",
+    "offset": 300,
+    "total": 488
+   }
+  },
+  {
+   "id": "arxiv-physics-02",
+   "stratum": "arxiv-physics",
+   "field": "physics / astronomy",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2508.16114",
+   "version": 2,
+   "title": "Neural-Network Chemical Emulator for First-Star Formation: Robust Iterative Predictions over a Wide Density Range",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2508.16114v2",
+   "pdf_url": "https://arxiv.org/pdf/2508.16114v2",
+   "pdf_bytes": 1445342,
+   "pdf_sha256": "37337f5e7c891e6fedf8d5250ebe9bde8270c08d4c9c8def40f267142a39675f",
+   "truth_kind": "bbl",
+   "truth_n": 60,
+   "truth_detail": "bibitem:main_accepted.tex",
+   "draw": {
+    "draw": 1,
+    "cat": "astro-ph.GA",
+    "ym": "202508",
+    "offset": 343,
+    "total": 487
+   }
+  },
+  {
+   "id": "arxiv-physics-03",
+   "stratum": "arxiv-physics",
+   "field": "physics / astronomy",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2303.16070",
+   "version": 1,
+   "title": "Understanding the temperatures of H3+ and H2 in diffuse interstellar sightlines",
+   "license": "http://creativecommons.org/licenses/by/4.0/",
+   "url": "https://arxiv.org/abs/2303.16070v1",
+   "pdf_url": "https://arxiv.org/pdf/2303.16070v1",
+   "pdf_bytes": 1696381,
+   "pdf_sha256": "28f5d5c3d53a9d90fd2f1b09fa01c9c9abed615e52f2ac1c1c51686b23949b19",
+   "truth_kind": "bbl",
+   "truth_n": 62,
+   "truth_detail": "bibitem:h3-h2.tex",
+   "draw": {
+    "draw": 3,
+    "cat": "astro-ph.GA",
+    "ym": "202303",
+    "offset": 405,
+    "total": 480
+   }
+  },
+  {
+   "id": "arxiv-physics-04",
+   "stratum": "arxiv-physics",
+   "field": "physics / astronomy",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2510.15411",
+   "version": 2,
+   "title": "Quantum Corrections in the Low-Temperature Fluid/Gravity Correspondence",
+   "license": "http://creativecommons.org/licenses/by/4.0/",
+   "url": "https://arxiv.org/abs/2510.15411v2",
+   "pdf_url": "https://arxiv.org/pdf/2510.15411v2",
+   "pdf_bytes": 961262,
+   "pdf_sha256": "4554b56e188041036f925f2a4f5a6efa5066e2cf243f339d4f5a9fae2f795238",
+   "truth_kind": "bbl",
+   "truth_n": 58,
+   "truth_detail": "bibitem:Draft.bbl",
+   "draw": {
+    "draw": 7,
+    "cat": "hep-th",
+    "ym": "202510",
+    "offset": 349,
+    "total": 766
+   }
+  },
+  {
+   "id": "arxiv-physics-05",
+   "stratum": "arxiv-physics",
+   "field": "physics / astronomy",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2501.14357",
+   "version": 1,
+   "title": "On z-coherence in self-focusing",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2501.14357v1",
+   "pdf_url": "https://arxiv.org/pdf/2501.14357v1",
+   "pdf_bytes": 3573416,
+   "pdf_sha256": "0d41301af05ee05b2760806c803a8e0e8fcb87c5b648c83096e2022fcfe87c1c",
+   "truth_kind": "bbl",
+   "truth_n": 46,
+   "truth_detail": "bibitem:m148_AM.tex",
+   "draw": {
+    "draw": 8,
+    "cat": "physics.optics",
+    "ym": "202501",
+    "offset": 279,
+    "total": 383
+   }
+  },
+  {
+   "id": "arxiv-physics-06",
+   "stratum": "arxiv-physics",
+   "field": "physics / astronomy",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2312.08188",
+   "version": 1,
+   "title": "Updates on the glitching pulsar monitoring campaign performed from IAR",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2312.08188v1",
+   "pdf_url": "https://arxiv.org/pdf/2312.08188v1",
+   "pdf_bytes": 1537813,
+   "pdf_sha256": "b6eaf427f41056a5a013b5f99c618ebda34548ff8d620cefb84c66363e8dcf63",
+   "truth_kind": "bbl",
+   "truth_n": 20,
+   "truth_detail": "bibitem:rm-extenso.tex",
+   "draw": {
+    "draw": 11,
+    "cat": "hep-ph",
+    "ym": "202312",
+    "offset": 298,
+    "total": 813
+   }
+  }
+ ],
+ "rejected_draws": [
+  {
+   "draw": 2,
+   "cat": "astro-ph.CO",
+   "ym": "202206",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 4,
+   "cat": "cond-mat.str-el",
+   "ym": "202506",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 5,
+   "cat": "physics.optics",
+   "ym": "202607",
+   "offset": 333,
+   "total": 505,
+   "arxiv_id": "2607.19571",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 6,
+   "cat": "physics.optics",
+   "ym": "202602",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 9,
+   "cat": "quant-ph",
+   "ym": "202604",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 10,
+   "cat": "astro-ph.CO",
+   "ym": "202606",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  }
+ ],
+ "date": "2026-09-30"
+}

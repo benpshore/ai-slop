@@ -1,0 +1,99 @@
+{
+ "stratum": "pmc-superscript",
+ "seed": "20260930:pmc-superscript",
+ "pool": {
+  "term": "(\"Nat Commun\"[Journal] OR \"Sci Rep\"[Journal]) AND \"open access\"[filter]",
+  "count": 390777,
+  "pool_used": 5000
+ },
+ "items": [
+  {
+   "id": "pmc-superscript-01",
+   "stratum": "pmc-superscript",
+   "field": "biomedicine, superscript-numeric journals (Nat Commun / Sci Rep)",
+   "layout_hint": "superscript numeric",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13534689",
+   "doi": "10.1038/s41598-026-66841-2",
+   "title": "A multi-omics systems toxicology framework reveals amino acid–mediated stress adaptation to deltamethrin exposure in a yeast model",
+   "citation": "Sci Rep. 2026 Sep 1;16:27411. doi: 10.1038/s41598-026-66841-2",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13534689/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13534689.1/PMC13534689.1.pdf",
+   "pdf_bytes": 2213348,
+   "pdf_sha256": "7378077169b5eba9622d28418ec593335cfd85b3b41c2f2a8b6aa996dae2c84d",
+   "truth_kind": "jats",
+   "truth_n": 92,
+   "rank_in_shuffled_pool": 0,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-superscript-02",
+   "stratum": "pmc-superscript",
+   "field": "biomedicine, superscript-numeric journals (Nat Commun / Sci Rep)",
+   "layout_hint": "superscript numeric",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13542236",
+   "doi": "10.1038/s41598-026-68183-5",
+   "title": "Risk factor analysis and predictive model construction and evaluation of fractional uric acid excretion in Chinese inpatients with type 2 diabetes",
+   "citation": "Sci Rep. 2026 Aug 28;16:27666. doi: 10.1038/s41598-026-68183-5",
+   "license": "CC BY-NC-ND",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13542236/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13542236.1/PMC13542236.1.pdf",
+   "pdf_bytes": 2080120,
+   "pdf_sha256": "9199ecd7b5da84e0b12f6bd861d650a2a3d6925c73c5bea5236eb3ef49b8181b",
+   "truth_kind": "jats",
+   "truth_n": 116,
+   "rank_in_shuffled_pool": 1,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-superscript-03",
+   "stratum": "pmc-superscript",
+   "field": "biomedicine, superscript-numeric journals (Nat Commun / Sci Rep)",
+   "layout_hint": "superscript numeric",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13612586",
+   "doi": "10.1038/s41467-026-77199-4",
+   "title": "Polymer-inspired mechanical metamaterials",
+   "citation": "Nat Commun. 2026 Aug 26;17:10211. doi: 10.1038/s41467-026-77199-4",
+   "license": "CC BY-NC-ND",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13612586/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13612586.1/PMC13612586.1.pdf",
+   "pdf_bytes": 5108820,
+   "pdf_sha256": "81eedb715b3e590bedde9b44ff278c18f25d362f28580119f8428fc36981092c",
+   "truth_kind": "jats",
+   "truth_n": 57,
+   "rank_in_shuffled_pool": 2,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-superscript-04",
+   "stratum": "pmc-superscript",
+   "field": "biomedicine, superscript-numeric journals (Nat Commun / Sci Rep)",
+   "layout_hint": "superscript numeric",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13572485",
+   "doi": "10.1038/s41467-026-76653-7",
+   "title": "Dual-additive enabled inorganic-rich solid electrolyte interphase for high-rate lithium negative electrodes",
+   "citation": "Nat Commun. 2026 Aug 14;17:9781. doi: 10.1038/s41467-026-76653-7",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13572485/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13572485.1/PMC13572485.1.pdf",
+   "pdf_bytes": 4027836,
+   "pdf_sha256": "f0f6df0ff7ec6b28f705de926107971b9fd25bf214ef0110c2cc31aa198864ae",
+   "truth_kind": "jats",
+   "truth_n": 69,
+   "rank_in_shuffled_pool": 4,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [
+  {
+   "pmcid": "PMC13486712",
+   "rank": 3,
+   "why": "refs<1 (0)"
+  }
+ ],
+ "date": "2026-09-30"
+}

@@ -1,0 +1,684 @@
+{
+ "stratum": "cr-frontiers",
+ "seed": "20260930:cr-frontiers",
+ "pool_desc": {
+  "crossref_filter": "prefix:10.3389,has-references:true,from-pub-date:2019-01-01,type:journal-article",
+  "total_results": 617867,
+  "sample": 100
+ },
+ "pool": [
+  {
+   "doi": "10.3389/fendo.2023.1307325",
+   "title": "Higher adjuvant radioactive iodine therapy dosage helps intermediate-risk papillary thyroid carcinoma patients achieve better therapeutic effect",
+   "journal": "Frontiers in Endocrinology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fnut.2023.1310020",
+   "title": "Critical assessment of wheat biofortification for iron and zinc: a comprehensive review of conceptualization, trends, approaches, bioavailability, health impact, and policy framework",
+   "journal": "Frontiers in Nutrition",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fimmu.2024.1381091",
+   "title": "The longitudinal characterization of immune responses in COVID-19 patients reveals novel prognostic signatures for disease severity, patients’ survival and long COVID",
+   "journal": "Frontiers in Immunology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fphy.2022.932050",
+   "title": "Laser-Induced Forward Transfer of Silver Nanoparticles for a Black Metal Absorber",
+   "journal": "Frontiers in Physics",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpsyg.2021.751406",
+   "title": "Analysis of Piano Performance Characteristics by Deep Learning and Artificial Intelligence and Its Application in Piano Teaching",
+   "journal": "Frontiers in Psychology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fsoc.2020.584390",
+   "title": "Commentary: COVID-19 and mental health equity in the United States",
+   "journal": "Frontiers in Sociology",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/feart.2021.636554",
+   "title": "Geometric and Dynamic Patterns of the Golmud Segment in the Southern Marginal Fault of the Qaidam Basin",
+   "journal": "Frontiers in Earth Science",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fonc.2021.633024",
+   "title": "Integrated Analysis of Nine Prognostic RNA-Binding Proteins in Soft Tissue Sarcoma",
+   "journal": "Frontiers in Oncology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fspas.2022.1020748",
+   "title": "Sub-surface plasma flows and the flare productivity of solar active regions",
+   "journal": "Frontiers in Astronomy and Space Sciences",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fimmu.2023.1339669",
+   "title": "Translational studies of exosomes in sports medicine – a mini-review",
+   "journal": "Frontiers in Immunology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/frwa.2025.1707872",
+   "title": "Toxicity identification evaluation of riverine water using seed germination: lead toxicity in the Fen River’s Taiyuan section of China",
+   "journal": "Frontiers in Water",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fnut.2021.675935",
+   "title": "Assessing the Contribution of Relative Macrophage Frequencies to Subcutaneous Adipose Tissue",
+   "journal": "Frontiers in Nutrition",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/feart.2023.1321422",
+   "title": "Machine learning analysis and nowcasting of marine fog visibility using FATIMA Grand Banks campaign measurements",
+   "journal": "Frontiers in Earth Science",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fmed.2021.736320",
+   "title": "Effect of Hyperinsulinemia and Insulin Resistance on Endocrine, Metabolic, and Reproductive Outcomes in Non-PCOS Women Undergoing Assisted Reproduction: A Retrospective Cohort Study",
+   "journal": "Frontiers in Medicine",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fendo.2022.837816",
+   "title": "Investigation and Application of Risk Factors of Macrosomia Based on 10,396 Chinese Pregnant Women",
+   "journal": "Frontiers in Endocrinology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpsyg.2023.1281083",
+   "title": "Editorial: Implementation of social and emotional learning interventions in applied settings: approaches to definition, measurement, and analysis",
+   "journal": "Frontiers in Psychology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fsurg.2026.1853630",
+   "title": "Brucella prosthetic joint infection following total knee arthroplasty: a rare case report",
+   "journal": "Frontiers in Surgery",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fphar.2025.1703727",
+   "title": "Anti-inflammatory effects of Banisteriopsis caapi and beta-carbolines in neuronal cells: potential implications for neuro-COVID",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fchem.2020.589106",
+   "title": "Metal-Ligand Coordination Induced Ionochromism for π-Conjugated Materials",
+   "journal": "Frontiers in Chemistry",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/fanim.2025.1562392",
+   "title": "Alteration of hair growth in mice by circulating exosomes from Xinji fine-wool and small-tailed Han sheep",
+   "journal": "Frontiers in Animal Science",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fphar.2026.1770524",
+   "title": "Rhaponticum genus: a systematic review on traditional uses, phytochemical profiles and pharmacological activities",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fphar.2024.1434652",
+   "title": "Icariin promotes functional recovery in rats after spinal cord injury by inhibiting YAP and regulating PPM1B ubiquitination to inhibiting the activation of reactive astrocytes",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fcvm.2026.1868434",
+   "title": "Clinical characteristics of subclinical carotid atherosclerosis in middle-aged and elderly populations with different glucose metabolism statuses: a cross-sectional study",
+   "journal": "Frontiers in Cardiovascular Medicine",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fendo.2021.687834",
+   "title": "Long-Term Antithyroid Drug Treatment of Graves’ Disease in Children and Adolescents: A 20-Year Single-Center Experience",
+   "journal": "Frontiers in Endocrinology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fpsyt.2022.984860",
+   "title": "Association between psychological symptoms and illegal driving behaviors in a sample of Chinese private car drivers",
+   "journal": "Frontiers in Psychiatry",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fcell.2022.1080626",
+   "title": "ADAR RNA editing on antisense RNAs results in apparent U-to-C base changes on overlapping sense transcripts",
+   "journal": "Frontiers in Cell and Developmental Biology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fmicb.2022.1003709",
+   "title": "Functional analysis of the bZIP-type transcription factors AtfA and AtfB in Aspergillus nidulans",
+   "journal": "Frontiers in Microbiology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpls.2025.1676933",
+   "title": "Nanoplastic alters soybean microbiome across rhizocompartments level and symbiosis via flavonoid-mediated pathways",
+   "journal": "Frontiers in Plant Science",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fmed.2025.1561387",
+   "title": "Pulmonary and functional hallmarks after SARS-CoV-2 infection across three WHO severity level-groups: an observational study",
+   "journal": "Frontiers in Medicine",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fpsyg.2020.602520",
+   "title": "Multimedia Gloss Presentation: Learners' Preference and the Effects on EFL Vocabulary Learning and Reading Comprehension",
+   "journal": "Frontiers in Psychology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fgene.2022.801382",
+   "title": "Whole-Genome Sequencing of Vero E6 (VERO C1008) and Comparative Analysis of Four Vero Cell Sublines",
+   "journal": "Frontiers in Genetics",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpls.2022.964604",
+   "title": "Genome-wide identification of growth-regulating factor transcription factor family related to leaf and stem development in alfalfa",
+   "journal": "Frontiers in Plant Science",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fnhum.2024.1380583",
+   "title": "Effects of continuous versus intermittent theta-burst TMS on fMRI connectivity",
+   "journal": "Frontiers in Human Neuroscience",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fpubh.2022.1045714",
+   "title": "Harassment disparities and risk profile within lesbian, gay, bisexual and transgender Spanish adult population: Comparisons by age, gender identity, sexual orientation, and perpetration context",
+   "journal": "Frontiers in Public Health",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fenvs.2024.1543951",
+   "title": "Editorial: Application of artificial intelligence-supported process-based climate models to understand the atmosphere/weather patterns and their prediction",
+   "journal": "Frontiers in Environmental Science",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fonc.2022.858620",
+   "title": "A new technique for performing interstitial implants for gynecologic malignancies using transvaginal ultrasound guidance",
+   "journal": "Frontiers in Oncology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/feart.2026.1774414",
+   "title": "Sensitivity of melt energy of the Greenland ice sheet to changes in spatially variable ice-surface roughness derived from ICESat GLAS data",
+   "journal": "Frontiers in Earth Science",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fphar.2025.1666168",
+   "title": "Study on cerebrospinal fluid meropenem, vancomycin and tigecycline monitoring in patients with central nervous system infection following neurosurgery under different drug regimens",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fnut.2026.1729151",
+   "title": "Construction and validation of a nutritional status (CONUT)-based nomogram for predicting prolonged hematological toxicity in relapsed/refractory multiple myeloma after CAR-T cell therapy",
+   "journal": "Frontiers in Nutrition",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fmars.2026.1847546",
+   "title": "Dietary lipid utilisation under different thermal conditions in flathead grey mullet (Mugil cephalus)",
+   "journal": "Frontiers in Marine Science",
+   "year": 2026
+  },
+  {
+   "doi": "10.1111/tri.13697",
+   "title": "Suspension and resumption of kidney transplant programmes during the COVID‐19 pandemic: perspectives from patients, caregivers and potential living donors – a qualitative study",
+   "journal": "Transplant International",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/fimmu.2026.1918662",
+   "title": "m6A modification in immune-cell inflammatory fate: from RNA fate regulation to therapeutic translation in inflammatory diseases",
+   "journal": "Frontiers in Immunology",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fpls.2025.1660144",
+   "title": "Alterations in microhabitat can impact litter decomposition by modifying the litter C/N ratio and regulating soil microbial activity",
+   "journal": "Frontiers in Plant Science",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fphar.2025.1552251",
+   "title": "Gui-zhi-fu-ling-wan alleviates bleomycin-induced pulmonary fibrosis through inhibiting epithelial-mesenchymal transition and ferroptosis",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fimmu.2022.1104625",
+   "title": "Inhibition of galectins in cancer: Biological challenges for their clinical application",
+   "journal": "Frontiers in Immunology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fmed.2025.1682909",
+   "title": "Ultrastructure of human platelet concentrates after treatment with pathogen reduction technologies for prolonged storage",
+   "journal": "Frontiers in Medicine",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fpubh.2022.1003203",
+   "title": "Developing a guideline for measuring workplace non-Gaussian noise exposure based on kurtosis adjustment of noise level in China",
+   "journal": "Frontiers in Public Health",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpls.2026.1851523",
+   "title": "An in situ image-based phenotyping system for hydroponic maize seedling roots based on DB-UNet and customized skeleton-based analysis",
+   "journal": "Frontiers in Plant Science",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fbioe.2021.803052",
+   "title": "The GDF11 Promotes Nerve Regeneration After Sciatic Nerve Injury in Adult Rats by Promoting Axon Growth and Inhibiting Neuronal Apoptosis",
+   "journal": "Frontiers in Bioengineering and Biotechnology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fmicb.2023.1284648",
+   "title": "Nutrient-dependent cross-kingdom interactions in the hyphosphere of an arbuscular mycorrhizal fungus",
+   "journal": "Frontiers in Microbiology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/frsen.2021.767073",
+   "title": "Drone Surveying of Volumetric Ice Growth in a Steep River",
+   "journal": "Frontiers in Remote Sensing",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fcimb.2021.634793",
+   "title": "All Roads Lead to Cytosol: Trypanosoma cruzi Multi-Strategic Approach to Invasion",
+   "journal": "Frontiers in Cellular and Infection Microbiology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fonc.2024.1379861",
+   "title": "Reconstructive flap surgery in head and neck cancer patients: an interdisciplinary view of the challenges encountered by radiation oncologists in postoperative radiotherapy",
+   "journal": "Frontiers in Oncology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fonc.2022.925938",
+   "title": "Emerging PD-1/PD-L1 targeting immunotherapy in non-small cell lung cancer: Current status and future perspective in Japan, US, EU, and China",
+   "journal": "Frontiers in Oncology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fvets.2019.00422",
+   "title": "Heritability of Unilateral Elbow Dysplasia in the Dog: A Retrospective Study of Sire and Dam Influence",
+   "journal": "Frontiers in Veterinary Science",
+   "year": 2019
+  },
+  {
+   "doi": "10.3389/fcell.2022.731831",
+   "title": "Naringin Mediates Adult Hippocampal Neurogenesis for Antidepression via Activating CREB Signaling",
+   "journal": "Frontiers in Cell and Developmental Biology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fphys.2021.723931",
+   "title": "Preliminary Investigations Into the Effect of Exercise-Induced Muscle Damage on Systemic Extracellular Vesicle Release in Trained Younger and Older Men",
+   "journal": "Frontiers in Physiology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fnut.2025.1615783",
+   "title": "Synergistic effects of 1-MCP and H₂S co-treatment on sugar and energy metabolisms in postharvest strawberry fruit",
+   "journal": "Frontiers in Nutrition",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fpsyg.2023.1119950",
+   "title": "Families with young children during the COVID-19 pandemic—The importance of family type, perceived partnership roles, parental stress, and social support for changes in the home learning environment during lockdown",
+   "journal": "Frontiers in Psychology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fpls.2020.602701",
+   "title": "Downregulating VAC14 in Guard Cells Causes Drought Hypersensitivity by Inhibiting Stomatal Closure",
+   "journal": "Frontiers in Plant Science",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/fnins.2022.879435",
+   "title": "Diagnostic Value of Multimodal Intraoperative Neuromonitoring by Combining Somatosensory-With Motor-Evoked Potential in Posterior Decompression Surgery for Thoracic Spinal Stenosis",
+   "journal": "Frontiers in Neuroscience",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fphys.2022.1076445",
+   "title": "Wavelet analysis of laser Doppler microcirculatory signals: Current applications and limitations",
+   "journal": "Frontiers in Physiology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fphar.2024.1376637",
+   "title": "Commercial Chinese polyherbal preparation Zao Ren An Shen prescription for primary insomnia: a systematic review with meta-analysis and trial sequential analysis",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fphar.2023.1097600",
+   "title": "Does China’s competitive generic substitution policy deliver equivalent clinical outcomes? A pilot study with two generic formulations of olanzepine",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fphys.2021.752940",
+   "title": "KairoSight: Open-Source Software for the Analysis of Cardiac Optical Data Collected From Multiple Species",
+   "journal": "Frontiers in Physiology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fped.2022.914139",
+   "title": "Diagnostic value of ultrasound in children with transverse testicular ectopia",
+   "journal": "Frontiers in Pediatrics",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpsyg.2025.1635208",
+   "title": "Does it mean more positive or more negative? A study on central attitudes toward homosexuality",
+   "journal": "Frontiers in Psychology",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fenrg.2022.979539",
+   "title": "A dual input single output non-isolated DC-DC converter for multiple sources electric vehicle applications",
+   "journal": "Frontiers in Energy Research",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpsyg.2022.823229",
+   "title": "Singing and Social Identity in Young Children",
+   "journal": "Frontiers in Psychology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fimmu.2025.1537483",
+   "title": "The ammonia-Slc4a11 axis in T cells alleviates LPS-induced mastitis",
+   "journal": "Frontiers in Immunology",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fphar.2020.00575",
+   "title": "Bioluminescence Imaging-Based Assessment of the Anti-Triple-Negative Breast Cancer and NF-Kappa B Pathway Inhibition Activity of Britanin",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/fdmed.2026.1715080",
+   "title": "Influence of crystallization and adhesive cementation on the fracture resistance of CAD/CAM advanced lithium disilicate and zirconia-reinforced lithium silicate ceramics after thermocycling",
+   "journal": "Frontiers in Dental Medicine",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fmed.2025.1650387",
+   "title": "Successful treatment of recurrent traumatic cardiac arrest due to splenic rupture in trauma resuscitation unit: a case report",
+   "journal": "Frontiers in Medicine",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fpls.2024.1414128",
+   "title": "Effect of gamma irradiation on proliferation and growth of friable embryogenic callus and in vitro nodal cuttings of ugandan cassava genotypes",
+   "journal": "Frontiers in Plant Science",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fmicb.2020.603818",
+   "title": "Change of Endoglucanase Activity and Rumen Microbial Community During Biodegradation of Cellulose Using Rumen Microbiota",
+   "journal": "Frontiers in Microbiology",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/fphys.2020.575060",
+   "title": "Rest-Phase Hypothermia Reveals a Link Between Aging and Oxidative Stress: A Novel Hypothesis",
+   "journal": "Frontiers in Physiology",
+   "year": 2020
+  },
+  {
+   "doi": "10.3389/fendo.2026.1809473",
+   "title": "Clinical validation of an artificial intelligence model for thyroid fine-needle aspiration biopsy indication: comparison with TI-RADS systems and human specialists in a Chilean public hospital",
+   "journal": "Frontiers in Endocrinology",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fmicb.2022.908329",
+   "title": "Comparative analysis of aroma components and quality of Geotrichum candidum after space mutation breeding",
+   "journal": "Frontiers in Microbiology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fnut.2022.848857",
+   "title": "Nano-Sized Antioxidative Trimetallic Complex Based on Maillard Reaction Improves the Mineral Nutrients of Apple (Malus domestica Borkh.)",
+   "journal": "Frontiers in Nutrition",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fpubh.2022.963673",
+   "title": "The psychological impact of COVID-19 pandemic on healthcare workers",
+   "journal": "Frontiers in Public Health",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fphar.2022.1047649",
+   "title": "Editorial: Advance in translational research of preterm birth and related pregnancy",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fcimb.2023.1167827",
+   "title": "Regulation of SARS-CoV-2 infection by diet-modulated gut microbiota",
+   "journal": "Frontiers in Cellular and Infection Microbiology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fmicb.2022.1046201",
+   "title": "Plant growth promotion of the forage plant Lupinus albus Var. Orden Dorado using Pseudomonas agronomica sp. nov. and Bacillus pretiosus sp. nov. added over a valorized agricultural biowaste",
+   "journal": "Frontiers in Microbiology",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fphar.2020.617018",
+   "title": "Editorial: Mechanisms of Traditional Medicinal Plants Used to Control Type 2 Diabetes or Metabolic Syndrome",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/feduc.2024.1402599",
+   "title": "Development of a metacognition co-curriculum for a university course in introductory organic chemistry",
+   "journal": "Frontiers in Education",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fmed.2025.1549324",
+   "title": "A pilot study of disulfiram for individuals with persistent symptoms despite prior antibiotic treatment for Lyme disease",
+   "journal": "Frontiers in Medicine",
+   "year": 2025
+  },
+  {
+   "doi": "10.3389/fchem.2020.611032",
+   "title": "Nanostructure Nickel-Based Selenides as Cathode Materials for Hybrid Battery-Supercapacitors",
+   "journal": "Frontiers in Chemistry",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fpubh.2024.1403414",
+   "title": "Spatial and temporal characteristic of PM2.5 and influence factors in the Yellow River Basin",
+   "journal": "Frontiers in Public Health",
+   "year": 2024
+  },
+  {
+   "doi": "10.3389/fnins.2022.846001",
+   "title": "Effects of Acute Hypoxia on Early Visual and Auditory Evoked Potentials",
+   "journal": "Frontiers in Neuroscience",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fams.2023.1129105",
+   "title": "Challenges and perspectives in recurrence analyses of event time series",
+   "journal": "Frontiers in Applied Mathematics and Statistics",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fnut.2023.1238748",
+   "title": "Editorial: Novel technologies for enrichment, extraction, and determination of phenolic compounds in foods, volume I",
+   "journal": "Frontiers in Nutrition",
+   "year": 2023
+  },
+  {
+   "doi": "10.3389/fpls.2026.1766206",
+   "title": "Pan-NLRome of Spinacia facilitates the rapid discovery of downy mildew resistance genes",
+   "journal": "Frontiers in Plant Science",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fphys.2022.897174",
+   "title": "Flexible Thermal Sensitivity of Mitochondrial Oxygen Consumption and Substrate Oxidation in Flying Insect Species",
+   "journal": "Frontiers in Physiology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/feart.2026.1923006",
+   "title": "Generative artificial intelligence and deep ensemble learning for short-term rockburst prediction in underground engineering using microseismic data",
+   "journal": "Frontiers in Earth Science",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fphar.2021.769190",
+   "title": "Detecting Critical Functional Ingredients Group and Mechanism of Xuebijing Injection in Treating Sepsis",
+   "journal": "Frontiers in Pharmacology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fmed.2021.740374",
+   "title": "A Systematic Review of Intravenous β-Hydroxybutyrate Use in Humans – A Promising Future Therapy?",
+   "journal": "Frontiers in Medicine",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fendo.2021.741548",
+   "title": "Craniofacial and Craniocervical Features in Cartilage-Hair Hypoplasia: A Radiological Study of 17 Patients and 34 Controls",
+   "journal": "Frontiers in Endocrinology",
+   "year": 2021
+  },
+  {
+   "doi": "10.3389/fcell.2022.996273",
+   "title": "Bibliometric analysis of research trends in stem cell therapy for knee osteoarthritis over the period 2001–2021",
+   "journal": "Frontiers in Cell and Developmental Biology",
+   "year": 2022
+  },
+  {
+   "doi": "10.3389/fnins.2026.1868009",
+   "title": "Elevated cerebral blood flow in distal and intermediate arterial territories in pediatric sickle cell anemia",
+   "journal": "Frontiers in Neuroscience",
+   "year": 2026
+  },
+  {
+   "doi": "10.3389/fonc.2021.601512",
+   "title": "c-MYC and Epithelial Ovarian Cancer",
+   "journal": "Frontiers in Oncology",
+   "year": 2021
+  }
+ ],
+ "items": [
+  {
+   "id": "cr-frontiers-01",
+   "stratum": "cr-frontiers",
+   "field": "neuroscience/medicine (Frontiers)",
+   "layout_hint": "author-year, one column",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.3389/fmicb.2022.1003709",
+   "title": "Functional analysis of the bZIP-type transcription factors AtfA and AtfB in Aspergillus nidulans",
+   "journal": "Frontiers in Microbiology",
+   "license": "cc-by",
+   "url": "https://doi.org/10.3389/fmicb.2022.1003709",
+   "pdf_url": "https://www.frontiersin.org/articles/10.3389/fmicb.2022.1003709/pdf",
+   "pdf_host": "www.frontiersin.org",
+   "pdf_bytes": 1328325,
+   "pdf_sha256": "387230406644563c046f3bfd49a99f87a22c4e3c025e06810721aa562b063178",
+   "pages": 9,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 39,
+   "pool_rank": 0,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "cr-frontiers-02",
+   "stratum": "cr-frontiers",
+   "field": "neuroscience/medicine (Frontiers)",
+   "layout_hint": "author-year, one column",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.3389/fvets.2019.00422",
+   "title": "Heritability of Unilateral Elbow Dysplasia in the Dog: A Retrospective Study of Sire and Dam Influence",
+   "journal": "Frontiers in Veterinary Science",
+   "license": "cc-by",
+   "url": "https://doi.org/10.3389/fvets.2019.00422",
+   "pdf_url": "https://www.frontiersin.org/articles/10.3389/fvets.2019.00422/pdf",
+   "pdf_host": "www.frontiersin.org",
+   "pdf_bytes": 2746825,
+   "pdf_sha256": "5409aee518f8f481926a9a2db4f87244237681d87d43aaaeedf4281fab4a4bff",
+   "pages": 10,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 28,
+   "pool_rank": 1,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "cr-frontiers-03",
+   "stratum": "cr-frontiers",
+   "field": "neuroscience/medicine (Frontiers)",
+   "layout_hint": "author-year, one column",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.3389/fams.2023.1129105",
+   "title": "Challenges and perspectives in recurrence analyses of event time series",
+   "journal": "Frontiers in Applied Mathematics and Statistics",
+   "license": "cc-by",
+   "url": "https://doi.org/10.3389/fams.2023.1129105",
+   "pdf_url": "https://www.frontiersin.org/articles/10.3389/fams.2023.1129105/pdf",
+   "pdf_host": "www.frontiersin.org",
+   "pdf_bytes": 289085,
+   "pdf_sha256": "adb999de050878316194ad563998340c0276c9d35eb47a62a56c51d89ecc1d5f",
+   "pages": 7,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 70,
+   "pool_rank": 2,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [],
+ "date": "2026-09-30"
+}

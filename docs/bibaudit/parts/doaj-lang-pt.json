@@ -1,0 +1,623 @@
+{
+ "stratum": "doaj-lang-pt",
+ "seed": "20260930:doaj-lang-pt",
+ "pool_desc": {
+  "doaj_query": "bibjson.journal.language:PT AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2023": 52769,
+   "2017": 57693,
+   "2024": 51525,
+   "2022": 54097,
+   "2019": 55835,
+   "2016": 54321,
+   "2020": 65274,
+   "2021": 63873,
+   "2018": 58248,
+   "2025": 44077,
+   "2015": 56474
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.20344/amp.19381",
+   "title": "Anemia da Doença Renal Crónica: Que Terapêuticas Estão Disponíveis?",
+   "journal": "Acta Médica Portuguesa",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "PT",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 611,
+   "subjects": [
+    "Medicine",
+    "Medicine (General)"
+   ]
+  },
+  {
+   "doi": "10.18471/rbe.v37.46421",
+   "title": "PERCEPÇÃO DE PUÉRPERAS NEGRAS SOBRE OS CUIDADOS RECEBIDOS NO PARTO",
+   "journal": "Revista Baiana de Enfermagem",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 480,
+   "subjects": [
+    "Nursing"
+   ]
+  },
+  {
+   "doi": "10.35699/2447-6218.2022.44488",
+   "title": "De Torcida Organizada a Movimento Independente",
+   "journal": "Licere",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 616,
+   "subjects": [
+    "Recreation. Leisure"
+   ]
+  },
+  {
+   "doi": "10.47990/rrq96958",
+   "title": "Dictamen Técnico-Científico sobre la fluoración del agua de abastecimiento público",
+   "journal": "Revista de Odontopediatria Latinoamericana",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "CO",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 211,
+   "subjects": [
+    "Dentistry"
+   ]
+  },
+  {
+   "doi": "10.1590/2177-6709.27.4.e2220519.oar",
+   "title": "What do black patients expect from orthodontic treatment? The aesthetic perception of facial profile between orthodontists and black laypersons",
+   "journal": "Dental Press Journal of Orthodontics",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 34,
+   "subjects": [
+    "Dentistry"
+   ]
+  },
+  {
+   "doi": "10.23925/1983-4373.2017i19p146-162",
+   "title": "Os cinco sentidos, tradução de Nelson Pimenta: reflexões sobre poesia surda no Youtube",
+   "journal": "FronteiraZ",
+   "lang": [
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 173,
+   "subjects": [
+    "Literature (General)",
+    "French literature - Italian literature - Spanish literature - Portuguese literature"
+   ]
+  },
+  {
+   "doi": "10.5965/19847246242023e0505",
+   "title": "A pandemia de Covid-19 e suas implicações na saúde Mental da população negra: um ensaio desde a tríplice-fronteiram",
+   "journal": "Revista PerCursos",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 591,
+   "subjects": [
+    "History (General)",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.51359/2175-294x.2019.240768",
+   "title": "Espero um ano inteiro até chegar fevereiro: representações do carnaval por três poetas pernambucanos",
+   "journal": "Revista Investigações",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 460,
+   "subjects": [
+    "Language. Linguistic theory. Comparative grammar",
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.18012/arf.2016.30950",
+   "title": "La ciudadanía como lo propriamente humano: digresiones entre la naturaleza indentitaria ilustrada y una política de la diferença animal",
+   "journal": "Aufklärung",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 981,
+   "subjects": [
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.23925/2237-9657.2023.v12i2p067-088",
+   "title": "Entre o digital e o físico: integrando recursos com o GeoGebra para práticas criativas em espaços de aprendizagem",
+   "journal": "Revista do Instituto GeoGebra Internacional de São Paulo",
+   "lang": [
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 400,
+   "subjects": [
+    "Special aspects of education",
+    "Mathematics"
+   ]
+  },
+  {
+   "doi": "10.14211/regepe.v9i1.1805",
+   "title": "A Legitimidade de Professores na Educação em Empreendedorismo: o que podemos aprender de uma revisão de literatura",
+   "journal": "Regepe Entrepreneurship and Small Business Journal",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 659,
+   "subjects": [
+    "Business"
+   ]
+  },
+  {
+   "doi": "10.15359/ree.25-3.18",
+   "title": "Diseño de un sistema de indicadores para la evaluación y selección de aplicaciones para personas con Trastorno del Espectro Autista",
+   "journal": "Revista Electrónica Educare",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "CR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 115,
+   "subjects": [
+    "Education",
+    "Special aspects of education"
+   ]
+  },
+  {
+   "doi": "10.18265/1517-03062015v1n35p111-124",
+   "title": "Impacto da degradação ambiental sobre a caracterização da ictiofauna do estuário do Rio Paraíba (Nordeste do Brasil)",
+   "journal": "Revista Principia",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 589,
+   "subjects": [
+    "Technology (General)",
+    "Science",
+    "Science (General)"
+   ]
+  },
+  {
+   "doi": "10.34632/lusitaniasacra.2018.5336",
+   "title": "Destino, liberdade e aporia",
+   "journal": "Lusitania Sacra",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "PT",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 376,
+   "subjects": [
+    "Religion (General)"
+   ]
+  },
+  {
+   "doi": "10.1590/0034-7167-2023-0329",
+   "title": "Scale of perception of family self-efficacy in home care for children on peritoneal dialysis",
+   "journal": "Revista Brasileira de Enfermagem",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 323,
+   "subjects": [
+    "Nursing"
+   ]
+  },
+  {
+   "doi": "10.34096/rtt.i14.2434",
+   "title": "El transporte intracondominal en la movilidad cotidiana de la periurbanización: el enlace comunitario del Área Metropolitana de Guadalajara",
+   "journal": "Revista Transporte y Territorio",
+   "lang": [
+    "ES",
+    "PT"
+   ],
+   "country": "AR",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 190,
+   "subjects": [
+    "Transportation and communications"
+   ]
+  },
+  {
+   "doi": "10.1590/2175-7860202273051",
+   "title": "Vascular epiphytes in the cloud forests of the Serra da Mantiqueira, Southeastern Region of Brazil",
+   "journal": "Rodriguésia",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 326,
+   "subjects": [
+    "Biology (General)",
+    "Botany"
+   ]
+  },
+  {
+   "doi": "10.5585/2025.25114",
+   "title": "O padrão estético tido como o “ideal” e as violências de gênero e raça a partir da expectativa da beleza feminina",
+   "journal": "Prisma Jurídico",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 87,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.21527/2176-6622.2017.47.133-176",
+   "title": "CORRUPÇÃO E SUAS CONSEQUÊNCIAS NEFASTAS: O CONTROLE EXTERNO PREVENTIVO E MEIOS ALTERNATIVOS COMO MECANISMO DE COMBATE",
+   "journal": "Direito em Debate",
+   "lang": [
+    "EN",
+    "ES",
+    "IT",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 491,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.21527/2176-7114.2025.50.15595",
+   "title": "Percepção do clima ético entre enfermeiros no ambiente hospitalar",
+   "journal": "Revista Contexto & Saúde",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 191,
+   "subjects": [
+    "Medicine (General)"
+   ]
+  },
+  {
+   "doi": "10.32635/2176-9745.rbc.2021v67n4.1513",
+   "title": "Relação Positiva entre o Ângulo de Fase Padronizado e o Estadiamento Clínico em Indivíduos com Câncer",
+   "journal": "Revista Brasileira de Cancerologia",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 229,
+   "subjects": [
+    "Neoplasms. Tumors. Oncology. Including cancer and carcinogens"
+   ]
+  },
+  {
+   "doi": "10.5007/2176-8552.2023.e94751",
+   "title": "Mário de Andrade cita Oscar Wilde: homoerotismo e homofobia no debate com Francisco Pati (1922-1923)",
+   "journal": "Outra Travessia",
+   "lang": [
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 749,
+   "subjects": [
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.16921/chasqui.v0i52.604",
+   "title": "Aguas de un mismo caudal",
+   "journal": "Chasqui",
+   "lang": [
+    "ES",
+    "PT"
+   ],
+   "country": "EC",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 552,
+   "subjects": [
+    "Communication. Mass media"
+   ]
+  },
+  {
+   "doi": "10.5565/rev/qpsicologia.2082",
+   "title": "Ressenya de Moix (2022) La Cueva del Mono. Las siete piedras de la sabiduría",
+   "journal": "Quaderns de Psicología",
+   "lang": [
+    "CA",
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 181,
+   "subjects": [
+    "Psychology"
+   ]
+  },
+  {
+   "doi": "10.22235/d.v0i14.324",
+   "title": "Fotografía de Marcelo Casacuberta",
+   "journal": "Dixit",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "UY",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 516,
+   "subjects": [
+    "Communication. Mass media"
+   ]
+  },
+  {
+   "doi": "10.20396/riesup.v7i0.8659104",
+   "title": "Gênero e sexualidades no contexto da universidade pública",
+   "journal": "Revista Internacional de Educação Superior",
+   "lang": [
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 571,
+   "subjects": [
+    "Education",
+    "Theory and practice of education"
+   ]
+  },
+  {
+   "doi": "10.7770/cuhso-v35n1-art860",
+   "title": "Incorporación del enfoque de derechos en la gestión local migratoria en Chile",
+   "journal": "CUHSO",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "CL",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 317,
+   "subjects": [
+    "Social sciences (General)",
+    "Anthropology"
+   ]
+  },
+  {
+   "doi": "10.47179/abcustos.v20i1.780",
+   "title": "CONTROLE GERENCIAL, APRENDIZAGEM E DESEMPENHO ORGANIZACIONAL: O PAPEL DA LIDERANÇA",
+   "journal": "ABCustos",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 336,
+   "subjects": [
+    "Accounting. Bookkeeping"
+   ]
+  },
+  {
+   "doi": "10.15536/revistathema.24.2025.3618",
+   "title": "Variabilidade espacial da qualidade da água do Canal São Gonçalo em períodos de alta e baixa pluviosidade: avaliação de dados pretéritos utilizando estatística multivariada.",
+   "journal": "Revista Thema",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 811,
+   "subjects": [
+    "Special aspects of education",
+    "Technology"
+   ]
+  },
+  {
+   "doi": "10.4000/confins.13215",
+   "title": "La mercatique transatlantique d’un végétal psychoactif : le guaraná entre remède et aliment (1840-1921)",
+   "journal": "Confins",
+   "lang": [
+    "EN",
+    "FR",
+    "PT"
+   ],
+   "country": "FR",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 302,
+   "subjects": [
+    "Geography. Anthropology. Recreation"
+   ]
+  },
+  {
+   "doi": "10.34624/id.v8i1.12631",
+   "title": "La educación para la sustentabilidad política pública Vs. realidad",
+   "journal": "Indagatio Didactica",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "PT",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 978,
+   "subjects": [
+    "Education (General)",
+    "Theory and practice of education",
+    "Special aspects of education",
+    "History of education"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-lang-pt-01",
+   "stratum": "doaj-lang-pt",
+   "field": "non-English: Portuguese",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.20344/amp.19381",
+   "title": "Anemia da Doença Renal Crónica: Que Terapêuticas Estão Disponíveis?",
+   "journal": "Acta Médica Portuguesa",
+   "license": "cc-by-nc",
+   "url": "https://doi.org/10.20344/amp.19381",
+   "pdf_url": "https://actamedicaportuguesa.com/revista/index.php/amp/article/download/19381/15095",
+   "pdf_host": "actamedicaportuguesa.com",
+   "pdf_bytes": 215540,
+   "pdf_sha256": "f38bd10e155eaf8e364ca6351ada5c3157b1b63e03b5cfcd51dffd78ddec0d77",
+   "pages": 1,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 5,
+   "pool_rank": 3,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-lang-pt-02",
+   "stratum": "doaj-lang-pt",
+   "field": "non-English: Portuguese",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.5965/19847246242023e0505",
+   "title": "A pandemia de Covid-19 e suas implicações na saúde Mental da população negra: um ensaio desde a tríplice-fronteiram",
+   "journal": "PerCursos",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.5965/19847246242023e0505",
+   "pdf_url": "https://periodicos.udesc.br/index.php/percursos/article/download/22849/16065",
+   "pdf_host": "periodicos.udesc.br",
+   "pdf_bytes": 900291,
+   "pdf_sha256": "bf86c45357f893e8e0f9151843f2afb585bed3311cfd0b93061f177e48cd7c64",
+   "pages": 33,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 39,
+   "pool_rank": 4,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.22235/d.v0i14.324",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.15359/ree.25-3.18",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.35699/2447-6218.2022.44488",
+   "why": "crossref-refs=0"
+  }
+ ],
+ "date": "2026-09-30"
+}

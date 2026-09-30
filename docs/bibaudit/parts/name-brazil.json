@@ -1,0 +1,73 @@
+{
+ "stratum": "name-brazil",
+ "seed": "20260930:name-brazil",
+ "pool": {
+  "term": "(\"Brazil\"[Affiliation] OR \"Portugal\"[Affiliation]) AND \"open access\"[filter] AND 2018:2026[pdat]",
+  "count": 186590,
+  "pool_used": 5000
+ },
+ "items": [
+  {
+   "id": "name-brazil-01",
+   "stratum": "name-brazil",
+   "field": "name stratum: Portuguese",
+   "layout_hint": "names: Portuguese/Brazilian double surnames",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13471646",
+   "doi": "10.1111/jcmm.71218",
+   "title": "Aerobic Endurance Training Modulates Cardiac Renin‐Angiotensin System Peptides and Matrix Metalloproteinase Activity During Chronic Stress",
+   "citation": "J Cell Mol Med. 2026 Aug 13;30(15):e71218. doi: 10.1111/jcmm.71218",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13471646/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13471646.1/PMC13471646.1.pdf",
+   "pdf_bytes": 3610196,
+   "pdf_sha256": "06fd4334a826cb91f856aaa91efcb40e1c2eb746e46017b330477c545dde84dc",
+   "truth_kind": "jats",
+   "truth_n": 135,
+   "rank_in_shuffled_pool": 0,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-brazil-02",
+   "stratum": "name-brazil",
+   "field": "name stratum: Portuguese",
+   "layout_hint": "names: Portuguese/Brazilian double surnames",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13472044",
+   "doi": "10.1021/acs.jchemed.6c00286",
+   "title": "Effects of Temperature and Salinity on the Germination of Triticum aestivum",
+   "citation": "J Chem Educ. 2026 Jul 20;103(8):4590–7. doi: 10.1021/acs.jchemed.6c00286",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13472044/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13472044.1/PMC13472044.1.pdf",
+   "pdf_bytes": 2205508,
+   "pdf_sha256": "6c18f4f56a514f2856e20a1b773b48e50aae873cab87c87f102f5e2eb8f28958",
+   "truth_kind": "jats",
+   "truth_n": 18,
+   "rank_in_shuffled_pool": 1,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-brazil-03",
+   "stratum": "name-brazil",
+   "field": "name stratum: Portuguese",
+   "layout_hint": "names: Portuguese/Brazilian double surnames",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13517939",
+   "doi": "10.3390/sports14080335",
+   "title": "Levels of Susceptibility to Exercise Dependence and Mood States in Street Runners",
+   "citation": "Sports (Basel). 2026 Aug 4;14(8):335. doi: 10.3390/sports14080335",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13517939/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13517939.1/PMC13517939.1.pdf",
+   "pdf_bytes": 463317,
+   "pdf_sha256": "8519290007f5ddedd6a260be2670d33aee52deb7d7c3641ec437f2640179bf90",
+   "truth_kind": "jats",
+   "truth_n": 42,
+   "rank_in_shuffled_pool": 2,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [],
+ "date": "2026-09-30"
+}

@@ -1,0 +1,79 @@
+{
+ "stratum": "pmc-scanned-historical",
+ "seed": "20260930:pmc-scanned-historical",
+ "pool": {
+  "term": "1900:1960[pdat] AND \"open access\"[filter] AND review[Title]",
+  "count": 466,
+  "pool_used": 466
+ },
+ "items": [
+  {
+   "id": "pmc-scanned-historical-01",
+   "stratum": "pmc-scanned-historical",
+   "field": "scanned/OCR'd 1900-1960 articles (historical OCR, expect no reference list)",
+   "layout_hint": "scanned, footnotes at most",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC5068982",
+   "doi": null,
+   "title": "Book Review",
+   "citation": "Bristol Med Chir J (1883). 1949 Jan;66(237):20–2.",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5068982/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC5068982.1/PMC5068982.1.pdf",
+   "pdf_bytes": 2267120,
+   "pdf_sha256": "3877a1831637416ad9b6f42684eb08d3f2b21a82d0d9d82ead4e094d7670adcf",
+   "truth_kind": "jats",
+   "truth_n": 0,
+   "rank_in_shuffled_pool": 0,
+   "historical_ocr": true
+  },
+  {
+   "id": "pmc-scanned-historical-02",
+   "stratum": "pmc-scanned-historical",
+   "field": "scanned/OCR'd 1900-1960 articles (historical OCR, expect no reference list)",
+   "layout_hint": "scanned, footnotes at most",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC5064540",
+   "doi": null,
+   "title": "Book Review",
+   "citation": "Bristol Med Chir J (1883). 1946 Autumn;63(227):119–20.",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5064540/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC5064540.1/PMC5064540.1.pdf",
+   "pdf_bytes": 1518257,
+   "pdf_sha256": "11b2747ba253937a9338c5e43a3082ad9d7b0a6a229ebc78184567c72e3748eb",
+   "truth_kind": "jats",
+   "truth_n": 0,
+   "rank_in_shuffled_pool": 1,
+   "historical_ocr": true
+  },
+  {
+   "id": "pmc-scanned-historical-03",
+   "stratum": "pmc-scanned-historical",
+   "field": "scanned/OCR'd 1900-1960 articles (historical OCR, expect no reference list)",
+   "layout_hint": "scanned, footnotes at most",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC5061011",
+   "doi": null,
+   "title": "Book Review",
+   "citation": "Bristol Med Chir J (1883). 1933 Winter;50(190):271–85.",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5061011/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC5061011.1/PMC5061011.1.pdf",
+   "pdf_bytes": 8394052,
+   "pdf_sha256": "9a1aa8326e669ee0124d437cd096a3f50e22ef239642651161f9b57edd308143",
+   "truth_kind": "jats",
+   "truth_n": 0,
+   "rank_in_shuffled_pool": 3,
+   "historical_ocr": true
+  }
+ ],
+ "rejected_draws": [
+  {
+   "pmcid": "PMC2598854",
+   "rank": 2,
+   "why": "no-open-license"
+  }
+ ],
+ "date": "2026-09-30"
+}

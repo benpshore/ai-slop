@@ -1,0 +1,673 @@
+{
+ "stratum": "doaj-lang-de",
+ "seed": "20260930:doaj-lang-de",
+ "pool_desc": {
+  "doaj_query": "bibjson.journal.language:DE AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2021": 15766,
+   "2023": 17590,
+   "2025": 17497,
+   "2015": 12253,
+   "2017": 12854,
+   "2022": 16070,
+   "2020": 16232,
+   "2024": 17165,
+   "2019": 13986,
+   "2018": 13381,
+   "2016": 13788
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.22363/2313-2302-2021-25-3-371-377",
+   "title": "Is Hermann Cohen a Classical Philosopher?",
+   "journal": "RUDN Journal of Philosophy",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 774,
+   "subjects": [
+    "Philosophy. Psychology. Religion"
+   ]
+  },
+  {
+   "doi": "10.22363/2313-2302-2023-27-3-541-555",
+   "title": "Kant and Marburg School",
+   "journal": "RUDN Journal of Philosophy",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 951,
+   "subjects": [
+    "Philosophy. Psychology. Religion"
+   ]
+  },
+  {
+   "doi": "10.17885/heiup.hdjbo.2025.1.25284",
+   "title": "Abbildungsverzeichnis",
+   "journal": "Heidelberger Jahrbücher Online",
+   "lang": [
+    "DE",
+    "EN"
+   ],
+   "country": "DE",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 638,
+   "subjects": [
+    "General Works"
+   ]
+  },
+  {
+   "doi": "10.52097/wpt.3539",
+   "title": "Irrational Rationality of Individualism, Tortuous Logic of Collectivism, and Cardinal Stefan Wyszyński’s Integral-Humanist Concept of Socio-Political Life",
+   "journal": "Wrocławski Przegląd Teologiczny",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "IT",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 798,
+   "subjects": [
+    "The Bible",
+    "Doctrinal Theology",
+    "Practical Theology"
+   ]
+  },
+  {
+   "doi": "10.14746/eip.2015.1.11",
+   "title": "W stronę chirurgii zarodka: Socjoprawne aspekty innowacyjnych technik wspomaganego rozrodu",
+   "journal": "Ethics in Progress",
+   "lang": [
+    "DE",
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 709,
+   "subjects": [
+    "Ethics"
+   ]
+  },
+  {
+   "doi": "10.22240/sent36.01.017",
+   "title": "Peter Lombard on God’s Knowledge: Sententiae, Book I, Distinctions 35-38, as the Basis for Later Theological Discussions",
+   "journal": "Sententiae",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 873,
+   "subjects": [
+    "Philosophy (General)",
+    "History (General)"
+   ]
+  },
+  {
+   "doi": "10.18716/ride.a.13.3",
+   "title": "Songs of the Victorians",
+   "journal": "RIDE",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "DE",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 824,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Information resources (General)"
+   ]
+  },
+  {
+   "doi": "10.5585/eccos.n68.24374",
+   "title": "O protagonismo do anonimato e o “silenciamento” dos atores principais",
+   "journal": "EccoS – Revista Científica",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 477,
+   "subjects": [
+    "History of scholarship and learning. The humanities"
+   ]
+  },
+  {
+   "doi": "10.4000/jtei.2573",
+   "title": "A TEI Customization for Writing TEI Customizations",
+   "journal": "Journal of the Text Encoding Initiative",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "US",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 762,
+   "subjects": [
+    "Computer software"
+   ]
+  },
+  {
+   "doi": "10.17892/app.2018.0006.103",
+   "title": "Michael Gott and Todd Herzog (ed.):<br/>East, West and Centre: Reframing Post-1989 European Cinema",
+   "journal": "Apparatus. Film, Media and Digital Cultures of Central and Eastern Europe",
+   "lang": [
+    "CS",
+    "DE",
+    "EN",
+    "LV",
+    "PL",
+    "RU",
+    "UK"
+   ],
+   "country": "DE",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 354,
+   "subjects": [
+    "Fine Arts",
+    "Communication. Mass media"
+   ]
+  },
+  {
+   "doi": "10.4312/vestnik.16.21-37",
+   "title": "La personne dans des systèmes langagiers",
+   "journal": "Vestnik za Tuje Jezike",
+   "lang": [
+    "DE",
+    "ES",
+    "FR",
+    "IT",
+    "SL"
+   ],
+   "country": "SI",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 322,
+   "subjects": [
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.5282/o-bib/2018h2s208-213",
+   "title": "Neue Konzepte für die Informations-und Literaturversorgung? - Eine Zusammenfassung der Fortbildung „Fachinformationsdienste: Angebote und Perspektiven der überregionalen Informationsversorgung“",
+   "journal": "o-bib. Das offene Bibliotheksjournal",
+   "lang": [
+    "DE",
+    "EN"
+   ],
+   "country": "DE",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 654,
+   "subjects": [
+    "Bibliography. Library science. Information resources"
+   ]
+  },
+  {
+   "doi": "10.17175/sb003_007",
+   "title": "Feldnotizen 2.0. Über Digitalität in der ethnografischen\n                        Beobachtungspraxis",
+   "journal": "Zeitschrift für digitale Geisteswissenschaften",
+   "lang": [
+    "DE",
+    "EN"
+   ],
+   "country": "DE",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 590,
+   "subjects": [
+    "Language and Literature",
+    "History of scholarship and learning. The humanities"
+   ]
+  },
+  {
+   "doi": "10.21630/maa.2025.76.06",
+   "title": "A complete hyoid bone of a woolly rhinoceros (Coelodonta antiquitatis) from the Late Pleistocene at Artazu VIII (Gipuzkoa, northern Iberian Peninsula)",
+   "journal": "Munibe Antropologia-Arkeologia",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "EU",
+    "FR"
+   ],
+   "country": "ES",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 951,
+   "subjects": [
+    "Auxiliary sciences of history",
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.15421/312511",
+   "title": "Генріх Карлович Брун (Бруyн) в історії математичної науки і освіти",
+   "journal": "Сучасні дослідження з німецької історії",
+   "lang": [
+    "DE",
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 580,
+   "subjects": [
+    "History of Germany"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.26468/trakyasobed.885478",
+   "title": "ÖZEL YETENEKLİ ÇOCUKLARIN EBEVEYNİ OLMAK VE ERKEN ÇOCUKLUKTA ÖZEL YETENEKLİ OLMAK: EBEVEYN GÖRÜŞLERİ",
+   "journal": "Trakya University Journal of Social Sciences",
+   "lang": [
+    "DE",
+    "EN",
+    "TR"
+   ],
+   "country": "TR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 972,
+   "subjects": [
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.59384/uirtus.2024.2659",
+   "title": "Analysis of the Failure of Credit Contracts in Microfinance Institutions in Kara, Togo",
+   "journal": "Uirtus",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "TG",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 829,
+   "subjects": [
+    "Language and Literature"
+   ]
+  },
+  {
+   "doi": "10.13128/ra-20525",
+   "title": "Strumenti e metodi per la documentazione digitale degli scavi archeologici: La Blanca (Petén - Guatemala)",
+   "journal": "Restauro Archeologico",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 337,
+   "subjects": [
+    "Architecture",
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.15745/da.323974",
+   "title": "MÜSLÜMAN OLMAYANLARIN CEHENNEM’DE GÖRECEKLERİ AZÂBIN EBEDÎLİĞİ SORUNU",
+   "journal": "Dini Araştırmalar",
+   "lang": [
+    "AR",
+    "DE",
+    "EN",
+    "RU",
+    "TR"
+   ],
+   "country": "TR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 577,
+   "subjects": [
+    "Philosophy. Psychology. Religion",
+    "Moral theology"
+   ]
+  },
+  {
+   "doi": "10.24193/subbphil.2017.1.01",
+   "title": "LA JUDICIARISATION, UNE SOLUTION ET UN PROBLÈME",
+   "journal": "Studia Universitatis Babeș-Bolyai. Philosophia",
+   "lang": [
+    "DE",
+    "EN",
+    "FR"
+   ],
+   "country": "RO",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 512,
+   "subjects": [
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.18778/0208-6107.38.04",
+   "title": "Communicative action and practical discourse to empower patients in healthcare-related decision making",
+   "journal": "Acta Universitatis Lodziensis: Folia Philosophica",
+   "lang": [
+    "DE",
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 909,
+   "subjects": [
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.24917/20811853.21.18",
+   "title": "O wierszach jak abanicos. Hiszpańskie tropy w poezji Alfreda Marka Wierzbickiego",
+   "journal": "Annales Universitatis Paedagogicae Cracoviensis. Studia Historicolitteraria",
+   "lang": [
+    "DE",
+    "EN",
+    "IT",
+    "PL",
+    "RU"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 323,
+   "subjects": [
+    "Language and Literature"
+   ]
+  },
+  {
+   "doi": "10.4312/vestnik.11.291-302",
+   "title": "« The two old bachelors » de Edward Lear: étude sémantique et traductologique",
+   "journal": "Vestnik za Tuje Jezike",
+   "lang": [
+    "DE",
+    "ES",
+    "FR",
+    "IT",
+    "SL"
+   ],
+   "country": "SI",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 522,
+   "subjects": [
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.17951/k.2019.26.2.55-72",
+   "title": "A “Diagnose” of Muslims’ Social Integration in Madrid",
+   "journal": "Annales Universitatis Mariae Curie-Skłodowska. Sectio K, Politologia",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "PL",
+    "RU"
+   ],
+   "country": "PL",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 296,
+   "subjects": [
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.58286/31385",
+   "title": "X-Ray Computed Tomography of Polymers exposed to High-pressure Hydrogen Gas",
+   "journal": "e-Journal of Nondestructive Testing",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "DE",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 608,
+   "subjects": [
+    "Technology"
+   ]
+  },
+  {
+   "doi": "10.15460/auue.2024.97.1.307",
+   "title": "Language maps and sociolinguistic data",
+   "journal": "Afrika und Übersee",
+   "lang": [
+    "DE",
+    "EN",
+    "FR"
+   ],
+   "country": "DE",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 798,
+   "subjects": [
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.3176/lu.2002.1.06",
+   "title": "Reviev on: Vilja Oja, Linguistic Studies of Estonian Colour Terminology, Tartu 2001 (Dissertationes Philologiae Estonicae Universitatis Tartuensis 9)",
+   "journal": "Linguistica Uralica",
+   "lang": [
+    "DE",
+    "EN",
+    "RU"
+   ],
+   "country": "EE",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 224,
+   "subjects": [
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.4000/ries.14260",
+   "title": "Une analyse des résultats en mathématiques des pays francophones d’Afrique subsaharienne dans l’évaluation Pasec 2019",
+   "journal": "Revue Internationale d’Éducation de Sèvres",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 904,
+   "subjects": [
+    "Education"
+   ]
+  },
+  {
+   "doi": "10.4000/ries.9357",
+   "title": "Vers une gouvernance apprenante",
+   "journal": "Revue Internationale d’Éducation de Sèvres",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 775,
+   "subjects": [
+    "Education"
+   ]
+  },
+  {
+   "doi": "10.12775/etudtrav.33.007",
+   "title": "Ramesside Inscriptions and Preparatory Sketches in the Western Wall of Portico of Obelisks of Hatshepsut’s Temple at Deir el-Bahari",
+   "journal": "Études et Travaux (Institute des Cultures Méditerranéennes et Orientales de l'Académie Polonaise des Sciences)",
+   "lang": [
+    "DE",
+    "EN",
+    "FR"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 943,
+   "subjects": [
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.7203/rek.4.1.12644",
+   "title": "From the unity of sensible intuition to the sensible unity of intuition: revisiting the proof-structure of Kant’s B-Deduction argument",
+   "journal": "Revista de Estudios Kantianos",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "ES",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 298,
+   "subjects": [
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.14712/24647055.2016.15",
+   "title": "Stroje, texty, sítě a jiné obrazy: metaforický rozměr sociologie",
+   "journal": "Acta Universitatis Carolinae Philosophica et Historica",
+   "lang": [
+    "CS",
+    "DE",
+    "EN"
+   ],
+   "country": "CZ",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 859,
+   "subjects": [
+    "Philosophy. Psychology. Religion"
+   ]
+  },
+  {
+   "doi": "10.34767/siip.2019.18.03",
+   "title": "UE – Ukraina: wokół europejskich aspiracji Kijowa. Wybrane aspekty z uwzględnieniem perspektywy niemieckiej",
+   "journal": "Świat Idei i Polityki",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "PL",
+    "RU"
+   ],
+   "country": "PL",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 934,
+   "subjects": [
+    "Political science",
+    "Social Sciences"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-lang-de-01",
+   "stratum": "doaj-lang-de",
+   "field": "non-English: German",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.22363/2313-2302-2023-27-3-541-555",
+   "title": "Kant and Marburg School",
+   "journal": "RUDN Journal of Philosophy",
+   "license": "cc-by-nc",
+   "url": "https://doi.org/10.22363/2313-2302-2023-27-3-541-555",
+   "pdf_url": "https://journals.rudn.ru/philosophy/article/download/36046/22500",
+   "pdf_host": "journals.rudn.ru",
+   "pdf_bytes": 413357,
+   "pdf_sha256": "fbc1ec438b60ba88540ae276f91640911d3c0f60cdf718c7282eba20d8b552c9",
+   "pages": 15,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 26,
+   "pool_rank": 3,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.4312/vestnik.16.21-37",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "https://doi.org/10.26468/trakyasobed.885478",
+   "why": "not-pdf:dergipark.org.tr"
+  },
+  {
+   "doi": "https://doi.org/10.26468/trakyasobed.885478",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.17175/sb003_007",
+   "why": "crossref:HTTPError"
+  }
+ ],
+ "date": "2026-09-30"
+}

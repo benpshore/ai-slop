@@ -1,0 +1,192 @@
+{
+ "stratum": "arxiv-social",
+ "seed": "20260930:arxiv-social",
+ "cats": [
+  "physics.soc-ph",
+  "cs.CY",
+  "cs.SI",
+  "stat.AP"
+ ],
+ "months": [
+  "202201",
+  "202608"
+ ],
+ "items": [
+  {
+   "id": "arxiv-social-01",
+   "stratum": "arxiv-social",
+   "field": "social science / society",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2310.01593",
+   "version": 1,
+   "title": "Prescribed Fire Modeling using Knowledge-Guided Machine Learning for Land Management",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2310.01593v1",
+   "pdf_url": "https://arxiv.org/pdf/2310.01593v1",
+   "pdf_bytes": 1512108,
+   "pdf_sha256": "a390788a3c34913d54c694e166e50b907c78360ff84696bce377b22a81e0b734",
+   "truth_kind": "bbl",
+   "truth_n": 53,
+   "truth_detail": "bibitem:main.bbl",
+   "draw": {
+    "draw": 0,
+    "cat": "stat.AP",
+    "ym": "202310",
+    "offset": 8,
+    "total": 195
+   }
+  },
+  {
+   "id": "arxiv-social-02",
+   "stratum": "arxiv-social",
+   "field": "social science / society",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2207.12594",
+   "version": 3,
+   "title": "Confirmation Bias in Social Networks",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2207.12594v3",
+   "pdf_url": "https://arxiv.org/pdf/2207.12594v3",
+   "pdf_bytes": 1202246,
+   "pdf_sha256": "611b435ab19183597668d8530099103176cfa3f195ada132137782a9c224e239",
+   "truth_kind": "bbl",
+   "truth_n": 62,
+   "truth_detail": "bibitem:CBSN_draft_3rdRR_MSS_v01.bbl",
+   "draw": {
+    "draw": 3,
+    "cat": "physics.soc-ph",
+    "ym": "202207",
+    "offset": 95,
+    "total": 115
+   }
+  },
+  {
+   "id": "arxiv-social-03",
+   "stratum": "arxiv-social",
+   "field": "social science / society",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2208.07961",
+   "version": 1,
+   "title": "Online Learning for Mixture of Multivariate Hawkes Processes",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2208.07961v1",
+   "pdf_url": "https://arxiv.org/pdf/2208.07961v1",
+   "pdf_bytes": 517078,
+   "pdf_sha256": "7b95948aac541044dde97d796c66dc6443c4a5e59a3a3f844d0301fff48fbd95",
+   "truth_kind": "bbl",
+   "truth_n": 31,
+   "truth_detail": "bibitem:OMMHP Arxiv/main.tex",
+   "draw": {
+    "draw": 15,
+    "cat": "cs.SI",
+    "ym": "202208",
+    "offset": 65,
+    "total": 122
+   }
+  }
+ ],
+ "rejected_draws": [
+  {
+   "draw": 1,
+   "cat": "physics.soc-ph",
+   "ym": "202402",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 2,
+   "cat": "stat.AP",
+   "ym": "202212",
+   "offset": 38,
+   "total": 130,
+   "arxiv_id": "2212.03421",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 4,
+   "cat": "cs.SI",
+   "ym": "202511",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 5,
+   "cat": "cs.CY",
+   "ym": "202601",
+   "offset": 256,
+   "total": 465,
+   "arxiv_id": "2602.00038",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 6,
+   "cat": "stat.AP",
+   "ym": "202602",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 7,
+   "cat": "cs.CY",
+   "ym": "202411",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 8,
+   "cat": "stat.AP",
+   "ym": "202201",
+   "offset": 6,
+   "total": 150,
+   "arxiv_id": "2201.01024",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 9,
+   "cat": "cs.SI",
+   "ym": "202411",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 10,
+   "cat": "physics.soc-ph",
+   "ym": "202502",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 11,
+   "cat": "physics.soc-ph",
+   "ym": "202512",
+   "offset": 134,
+   "total": 142,
+   "arxiv_id": "2512.24332",
+   "version": 2,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 12,
+   "cat": "stat.AP",
+   "ym": "202506",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 13,
+   "cat": "physics.soc-ph",
+   "ym": "202512",
+   "offset": 133,
+   "total": 142,
+   "arxiv_id": "2601.00871",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 14,
+   "cat": "physics.soc-ph",
+   "ym": "202511",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  }
+ ],
+ "date": "2026-09-30"
+}

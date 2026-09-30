@@ -1,0 +1,568 @@
+{
+ "stratum": "doaj-lang-es",
+ "seed": "20260930:doaj-lang-es",
+ "pool_desc": {
+  "doaj_query": "bibjson.journal.language:ES AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2025": 78520,
+   "2015": 81996,
+   "2021": 94148,
+   "2017": 84794,
+   "2020": 97291,
+   "2018": 90408,
+   "2016": 81810,
+   "2024": 83652,
+   "2019": 87206,
+   "2022": 87482,
+   "2023": 86528
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.15178/va.2025.158.e1598",
+   "title": "La evolución de la comunicación dentro del mundo del fútbol en Twitch. Análisis de los estudios de caso más influyentes en España",
+   "journal": "Vivat Academia",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 147,
+   "subjects": [
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.35295/osls.iisl/0000-0000-0000-1198",
+   "title": "Marriage and divorce practices in Islamic centers in Italy",
+   "journal": "Oñati Socio-Legal Series",
+   "lang": [
+    "EN",
+    "ES",
+    "EU",
+    "FR",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 905,
+   "subjects": [
+    "Social legislation"
+   ]
+  },
+  {
+   "doi": "10.55602/rlic.v5i1.142",
+   "title": "Diversidade de gênero",
+   "journal": "Revista Acadêmica Licencia&acturas",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 188,
+   "subjects": [
+    "Theory and practice of education"
+   ]
+  },
+  {
+   "doi": "10.22015/v.rslr/72.2.12",
+   "title": "Danzare con le parole",
+   "journal": "Versants",
+   "lang": [
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "CH",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 945,
+   "subjects": [
+    "Romanic languages"
+   ]
+  },
+  {
+   "doi": "10.21527/2237-6453.2020.51.186-209",
+   "title": "Observando a Dinâmica Territorial do Emprego e do Deslocamento para Trabalho na Região do Vale do Rio Pardo-RS",
+   "journal": "Desenvolvimento em Questão",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 66,
+   "subjects": [
+    "Economic growth, development, planning",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.32719/29536782.2025.1.6",
+   "title": "El derecho a migrar: De las rutas migrantes a la jurisprudencia constitucional. Análisis de la jurisprudencia de la Corte Constitucional del Ecuador en el período 2019-2024",
+   "journal": "Andares: Revista de Derechos Humanos y de la Naturaleza",
+   "lang": [
+    "ES"
+   ],
+   "country": "EC",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 694,
+   "subjects": [
+    "Comparative law. International uniform law"
+   ]
+  },
+  {
+   "doi": "10.24215/25456377e229",
+   "title": "Las cabezas indígenas de Franco Furfaro. Retratos típicos del Norte Argentino",
+   "journal": "Revista del Museo de La Plata",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "AR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 582,
+   "subjects": [
+    "Anthropology",
+    "Natural history (General)"
+   ]
+  },
+  {
+   "doi": "10.5935/1415-2762.20150005",
+   "title": "Participação de avós no cuidado aos filhos de mães adolescentes",
+   "journal": "REME: Revista Mineira de Enfermagem",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 447,
+   "subjects": [
+    "Nursing"
+   ]
+  },
+  {
+   "doi": "10.46688/ahmoi.n19.330",
+   "title": "Sobrevivir, resistir y luchar. Las comunistas durante la década de los 80 en Chile",
+   "journal": "Archivos de Historia del Movimiento Obrero y la Izquierda",
+   "lang": [
+    "ES"
+   ],
+   "country": "AR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 410,
+   "subjects": [
+    "1789-",
+    "Labor in politics. Political activity of the working class",
+    "Socialism. Communism. Anarchism"
+   ]
+  },
+  {
+   "doi": "10.3989/anacervantinos.2023.008",
+   "title": "Cervantes y la teoría de la agnición: un análisis de los reconocimientos en el Persiles",
+   "journal": "Anales Cervantinos",
+   "lang": [
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 132,
+   "subjects": [
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.15359/ree.25-3.18",
+   "title": "Diseño de un sistema de indicadores para la evaluación y selección de aplicaciones para personas con Trastorno del Espectro Autista",
+   "journal": "Revista Electrónica Educare",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "CR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 166,
+   "subjects": [
+    "Education",
+    "Special aspects of education"
+   ]
+  },
+  {
+   "doi": "10.51303/jtbau.vi3.594",
+   "title": "Two New Traditional Neighborhoods for the Town of Rozzano, Milan",
+   "journal": "Journal of Traditional Building, Architecture and Urbanism",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 799,
+   "subjects": [
+    "Architecture",
+    "Building construction"
+   ]
+  },
+  {
+   "doi": "10.5380/rinc.v6i2.70080",
+   "title": "Anti-racism legislation in Brazil: the role of the Courts in the reproduction of the myth of  racial democracy",
+   "journal": "Revista de Investigações Constitucionais",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 328,
+   "subjects": [
+    "Law",
+    "Law of nations",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.24936/2177-4986.v13n2.2020.763",
+   "title": "FATORES QUE INFLUENCIAM O STRESS DOS PROFESSORES DA EDUCAÇÃO INFANTIL DA CIDADE DE BURITICUPU/MA",
+   "journal": "Competência",
+   "lang": [
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 215,
+   "subjects": [
+    "Education (General)",
+    "Special aspects of education"
+   ]
+  },
+  {
+   "doi": "10.4995/riai.2024.20175",
+   "title": "El Gemelo Digital y su aplicación en la Automática",
+   "journal": "Revista Iberoamericana de Automática e Informática Industrial RIAI",
+   "lang": [
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 968,
+   "subjects": [
+    "Control engineering systems. Automatic machinery (General)"
+   ]
+  },
+  {
+   "doi": "10.19053/22160159.3582",
+   "title": "Uso de la robótica educativa como estrategia didáctica en el aula",
+   "journal": "Praxis & Saber",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "CO",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 363,
+   "subjects": [
+    "Special aspects of education"
+   ]
+  },
+  {
+   "doi": "10.3989/mc.2023.325822",
+   "title": "Analysis of two experimental setups to study mode II fracture on fibre-reinforced gypsum notched specimens",
+   "journal": "Materiales de Construccion",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 714,
+   "subjects": [
+    "Materials of engineering and construction. Mechanics of materials"
+   ]
+  },
+  {
+   "doi": "10.53897/revaia.25.29.92",
+   "title": "Arbóreas de la familia Fabaceae de la selva baja caducifolia y diversidad de usos",
+   "journal": "AIA Avances en Investigación Agropecuaria",
+   "lang": [
+    "ES"
+   ],
+   "country": "MX",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 892,
+   "subjects": [
+    "Agriculture (General)",
+    "Animal culture"
+   ]
+  },
+  {
+   "doi": "10.1590/1806-9126-rbef-2021-0384",
+   "title": "Teoria da medida, decoerência e a interpretação de Montevidéu da mecânica quântica",
+   "journal": "Revista Brasileira de Ensino de Física",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 230,
+   "subjects": [
+    "Physics"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.26423/rcpi.v10i2.626",
+   "title": "Competencia digital docente: Experiencia formativa para la educación superior",
+   "journal": "Revista Ciencias Pedagógicas e Innovación",
+   "lang": [
+    "ES"
+   ],
+   "country": "EC",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 781,
+   "subjects": [
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.18270/chps..v22i1.4070",
+   "title": "Validación y estandarización de pruebas neuropsicológicas para la evaluación de funciones ejecutivas en población universitaria",
+   "journal": "Cuadernos Hispanoamericanos de Psicología",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "CO",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 841,
+   "subjects": [
+    "Philosophy. Psychology. Religion",
+    "Psychology"
+   ]
+  },
+  {
+   "doi": "10.12804/revistas.urosario.edu.co/revsalud/a.6118",
+   "title": "Fatores de Risco Associados a Asfixia Perinatal no Hospital Universitário Méderi, 2010-2011",
+   "journal": "Revista Ciencias de la Salud",
+   "lang": [
+    "ES"
+   ],
+   "country": "CO",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 37,
+   "subjects": [
+    "Medicine",
+    "Medicine (General)"
+   ]
+  },
+  {
+   "doi": "10.48038/revlatt.n2.29",
+   "title": "Responsabilidad empresarial en la última dictadura argentina: aportes a partir de casos de empresas agroindustriales en las regiones Noroeste y Noreste (1974-1983)",
+   "journal": "Revista Latinoamericana de Trabajo y Trabajadores",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "NL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 476,
+   "subjects": [
+    "History of Civilization",
+    "History (General) and history of Europe",
+    "Latin America. Spanish America",
+    "Industry",
+    "Labor. Work. Working class",
+    "Social history and conditions. Social problems. Social reform"
+   ]
+  },
+  {
+   "doi": "10.1590/0102.3772e39nspe08.en",
+   "title": "The Data Generation Mechanism: Relationship Between Constructs and Their Indicators",
+   "journal": "Psicologia: Teoria e Pesquisa",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 726,
+   "subjects": [
+    "Psychology"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-lang-es-01",
+   "stratum": "doaj-lang-es",
+   "field": "non-English: Spanish",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.35295/osls.iisl/0000-0000-0000-1198",
+   "title": "Marriage and divorce practices in Islamic centers in Italy",
+   "journal": "Oñati Socio-Legal Series",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.35295/osls.iisl/0000-0000-0000-1198",
+   "pdf_url": "https://opo.iisj.net/index.php/osls/article/download/1201/1378",
+   "pdf_host": "opo.iisj.net",
+   "pdf_bytes": 610110,
+   "pdf_sha256": "d5294f72a37aef50da1fa2e6edabeae396856bc80aa8cb4303eff623cdf5a024",
+   "pages": 31,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 61,
+   "pool_rank": 13,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-lang-es-02",
+   "stratum": "doaj-lang-es",
+   "field": "non-English: Spanish",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.4995/riai.2024.20175",
+   "title": "El Gemelo Digital y su aplicación en la Automática",
+   "journal": "Revista Iberoamericana de Automática e Informática industrial",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.4995/riai.2024.20175",
+   "pdf_url": "https://riunet.upv.es/bitstream/10251/203590/1/RIAI_2024_20175.pdf",
+   "pdf_host": "riunet.upv.es",
+   "pdf_bytes": 2427169,
+   "pdf_sha256": "4c1d5f2819cc50f33dcfb3ade4639e07dd9b8863fc6f725ae976f45bb9fbb15f",
+   "pages": 25,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 127,
+   "pool_rank": 14,
+   "version": "submittedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.21527/2237-6453.2020.51.186-209",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.1590/1806-9126-rbef-2021-0384",
+   "why": "pdf-fetch:www.scielo.br:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1590/1806-9126-rbef-2021-0384",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.3989/anacervantinos.2023.008",
+   "why": "pdf-fetch:analescervantinos.revistas.csic.es:<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+  },
+  {
+   "doi": "10.3989/anacervantinos.2023.008",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.19053/22160159.3582",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.46688/ahmoi.n19.330",
+   "why": "not-pdf:www.archivosrevista.com.ar"
+  },
+  {
+   "doi": "10.46688/ahmoi.n19.330",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.55602/rlic.v5i1.142",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "https://doi.org/10.26423/rcpi.v10i2.626",
+   "why": "pdf-fetch:incyt.upse.edu.ec:HTTP Error 404: Not Found"
+  },
+  {
+   "doi": "https://doi.org/10.26423/rcpi.v10i2.626",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.1590/0102.3772e39nspe08.en",
+   "why": "pdf-fetch:www.scielo.br:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1590/0102.3772e39nspe08.en",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.3989/mc.2023.325822",
+   "why": "pdf-fetch:materconstrucc.revistas.csic.es:<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+  },
+  {
+   "doi": "10.3989/mc.2023.325822",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.51303/jtbau.vi3.594",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5380/rinc.v6i2.70080",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.32719/29536782.2025.1.6",
+   "why": "pdf-fetch:revistas.uasb.edu.ec:HTTP Error 404: Not Found"
+  },
+  {
+   "doi": "10.32719/29536782.2025.1.6",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "https://doi.org/10.24936/2177-4986.v13n2.2020.763",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.4995/riai.2024.20175",
+   "why": "pdf-fetch:polipapers.upv.es:<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+  }
+ ],
+ "date": "2026-09-30"
+}

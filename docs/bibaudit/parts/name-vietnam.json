@@ -1,0 +1,73 @@
+{
+ "stratum": "name-vietnam",
+ "seed": "20260930:name-vietnam",
+ "pool": {
+  "term": "(\"Vietnam\"[Affiliation] OR \"Viet Nam\"[Affiliation]) AND \"open access\"[filter] AND 2018:2026[pdat]",
+  "count": 20011,
+  "pool_used": 5000
+ },
+ "items": [
+  {
+   "id": "name-vietnam-01",
+   "stratum": "name-vietnam",
+   "field": "name stratum: Vietnamese",
+   "layout_hint": "names: Vietnamese (diacritics)",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13559854",
+   "doi": "10.1002/cbdv.71687",
+   "title": "Osteogenic Activity of New Dammarane‐Type Saponins From Gynostemma pentaphyllum",
+   "citation": "Chem Biodivers. 2026 Sep 10;23(9):e71687. doi: 10.1002/cbdv.71687",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13559854/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13559854.1/PMC13559854.1.pdf",
+   "pdf_bytes": 1531972,
+   "pdf_sha256": "2cb4308664616a055f1065fbb142774e0153b6947a3fd93daf8fc649b36214c7",
+   "truth_kind": "jats",
+   "truth_n": 25,
+   "rank_in_shuffled_pool": 0,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-vietnam-02",
+   "stratum": "name-vietnam",
+   "field": "name stratum: Vietnamese",
+   "layout_hint": "names: Vietnamese (diacritics)",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13206666",
+   "doi": "10.3390/cimb48050461",
+   "title": "Characterization of Arthrospira platensis NH Draft Genome",
+   "citation": "Curr Issues Mol Biol. 2026 Apr 29;48(5):461. doi: 10.3390/cimb48050461",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13206666/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13206666.1/PMC13206666.1.pdf",
+   "pdf_bytes": 2917755,
+   "pdf_sha256": "b11ece2d9befd4e06f544c694b1dd6102a453662633782e32b0fdafb422fd692",
+   "truth_kind": "jats",
+   "truth_n": 52,
+   "rank_in_shuffled_pool": 1,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-vietnam-03",
+   "stratum": "name-vietnam",
+   "field": "name stratum: Vietnamese",
+   "layout_hint": "names: Vietnamese (diacritics)",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC12101030",
+   "doi": "10.1186/s13256-025-05312-0",
+   "title": "Uterine arteriovenous malformation or uterine artery pseudoaneurysm secondary to uterine aspiration in cesarean scar ectopic pregnancy: a case report and review of the literature",
+   "citation": "J Med Case Rep. 2025 May 23;19:248. doi: 10.1186/s13256-025-05312-0",
+   "license": "CC BY-NC-ND",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12101030/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC12101030.1/PMC12101030.1.pdf",
+   "pdf_bytes": 2389480,
+   "pdf_sha256": "2f5de8d5503caf820cc0cc97f629ff4088a2fe35b72c2868ae0cb06b2e74b4a2",
+   "truth_kind": "jats",
+   "truth_n": 46,
+   "rank_in_shuffled_pool": 2,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [],
+ "date": "2026-09-30"
+}

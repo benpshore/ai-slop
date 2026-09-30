@@ -1,0 +1,722 @@
+{
+ "stratum": "doaj-lang-fr",
+ "seed": "20260930:doaj-lang-fr",
+ "pool_desc": {
+  "doaj_query": "bibjson.journal.language:FR AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2017": 41506,
+   "2025": 48692,
+   "2019": 45965,
+   "2022": 44896,
+   "2024": 59287,
+   "2015": 32375,
+   "2020": 54625,
+   "2018": 51449,
+   "2016": 39195,
+   "2023": 57480
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.1051/matecconf/201713400044",
+   "title": "Practical Use of the Braking Attributes Measurements Results",
+   "journal": "MATEC Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 511,
+   "subjects": [
+    "Engineering (General). Civil engineering (General)"
+   ]
+  },
+  {
+   "doi": "10.17398/1886-9440.20.139",
+   "title": "La dimensi´ón dialógica en la Refutación de la Donación de Constantino de Lorenzo Valla",
+   "journal": "Talia dixit",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 179,
+   "subjects": [
+    "Medieval history",
+    "Style. Composition. Rhetoric",
+    "Philosophy. Psychology. Religion"
+   ]
+  },
+  {
+   "doi": "http://dx.doi.org/10.1387/pceic.20991",
+   "title": "Martel, Lucrecia (2017). Zama. Película, y Cuarón, Alfonso (2018). Roma. Película",
+   "journal": "Papeles del CEIC: International Journal on Collective Identity Research",
+   "lang": [
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "ES",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 547,
+   "subjects": [
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.1051/e3sconf/202454002008",
+   "title": "Fuzzy Controllers based DTC of 6/4 SRM drive with Novel Converter",
+   "journal": "E3S Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 337,
+   "subjects": [
+    "Environmental sciences"
+   ]
+  },
+  {
+   "doi": "10.25965/interfaces-numeriques.3812",
+   "title": "Le design comme objet idéal pour la recherche en communication ?",
+   "journal": "Interfaces Numériques",
+   "lang": [
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 142,
+   "subjects": [
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.4000/15i28",
+   "title": "Timelines: Imagining the Past in Theodor De Bry’s America",
+   "journal": "Transatlantica",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 610,
+   "subjects": [
+    "History America",
+    "America"
+   ]
+  },
+  {
+   "doi": "10.13130/2035-7680/6598",
+   "title": "Segnalazioni",
+   "journal": "Altre Modernità",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 270,
+   "subjects": [
+    "Language and Literature",
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.4000/e-spania.28491",
+   "title": "Frontière et marche, société et noblesse de frontière en péninsule Ibérique",
+   "journal": "E-Spania",
+   "lang": [
+    "ES",
+    "FR",
+    "LA",
+    "PT"
+   ],
+   "country": "FR",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 715,
+   "subjects": [
+    "History (General) and history of Europe",
+    "History of Spain"
+   ]
+  },
+  {
+   "doi": "10.1051/e3sconf/20199603002",
+   "title": "Rapid oil spill simulation within Ghana’s coastal waters",
+   "journal": "E3S Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 944,
+   "subjects": [
+    "Environmental sciences"
+   ]
+  },
+  {
+   "doi": "10.1051/matecconf/20153307003",
+   "title": "The morphology of lath martensite: a new perspective",
+   "journal": "MATEC Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 139,
+   "subjects": [
+    "Engineering (General). Civil engineering (General)"
+   ]
+  },
+  {
+   "doi": "10.1051/matecconf/201711502013",
+   "title": "Experimental investigation of main rotor wake",
+   "journal": "MATEC Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 922,
+   "subjects": [
+    "Engineering (General). Civil engineering (General)"
+   ]
+  },
+  {
+   "doi": "10.5209/thel.81522",
+   "title": "El testimonio de Élie Buzyn: resistencia y humanidad",
+   "journal": "Thélème",
+   "lang": [
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "ES",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 366,
+   "subjects": [
+    "French literature - Italian literature - Spanish literature - Portuguese literature"
+   ]
+  },
+  {
+   "doi": "10.4000/eces.3011",
+   "title": "40 anos de renovação, e uma saudação",
+   "journal": "e-cadernos ces",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "PT",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 320,
+   "subjects": [
+    "General Works",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.13135/2532-5353/1316",
+   "title": "Presentazione della Cronologia Ciceroniana",
+   "journal": "Ciceroniana On Line",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 730,
+   "subjects": [
+    "Philology. Linguistics",
+    "Greek language and literature. Latin language and literature"
+   ]
+  },
+  {
+   "doi": "10.4000/baefe.1023",
+   "title": "Philadelphie (2019)",
+   "journal": "Bulletin Archéologique des Écoles Françaises à l’Étranger",
+   "lang": [
+    "FR"
+   ],
+   "country": "GR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 413,
+   "subjects": [
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.4000/flaubert.2639",
+   "title": "Du R. P. Cruchard. Et, accessoirement, des femmes folles à la messe",
+   "journal": "Flaubert: Revue Critique et Génétique",
+   "lang": [
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 982,
+   "subjects": [
+    "French literature - Italian literature - Spanish literature - Portuguese literature"
+   ]
+  },
+  {
+   "doi": "10.15168/t3.v0i14.340",
+   "title": "L’uomo dalla roncola. Il Fanon degli scrittori",
+   "journal": "Ticontre: Teoria Testo Traduzione",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 239,
+   "subjects": [
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.22363/2313-2302-2017-21-2-229-239",
+   "title": "Phenomenal and computational in the structures of consciousness",
+   "journal": "RUDN Journal of Philosophy",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 683,
+   "subjects": [
+    "Philosophy. Psychology. Religion"
+   ]
+  },
+  {
+   "doi": "10.1590/1982-3703003192258",
+   "title": "Perfil de Docentes Humanistas, Fenomenológicos e Existenciais: Análise de Editais de Concursos",
+   "journal": "Psicologia: Ciência e Profissão",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 206,
+   "subjects": [
+    "Psychology"
+   ]
+  },
+  {
+   "doi": "10.51359/2357-9986.2024.264312",
+   "title": "Resenha de \"O contrato racial\", de Charles W. Mills",
+   "journal": "Perspectiva Filosófica",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 553,
+   "subjects": [
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.1051/e3sconf/20199102031",
+   "title": "Eigenfrequency spectrum of the reinforced concrete cantilever beam",
+   "journal": "E3S Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 925,
+   "subjects": [
+    "Environmental sciences"
+   ]
+  },
+  {
+   "doi": "10.56583/sz.696",
+   "title": "„Pożegnanie z Polską”. Wspomnienia Artura Schneidera z lat 1967-1972",
+   "journal": "Studia Żydowskie",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 481,
+   "subjects": [
+    "Ethnology. Social and cultural anthropology",
+    "Judaism"
+   ]
+  },
+  {
+   "doi": "10.1051/bioconf/20191202014",
+   "title": "Influence of yeasts of the genus Saccharomyces and not Saccharomyces in elaboration of white wines",
+   "journal": "BIO Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 719,
+   "subjects": [
+    "Microbiology",
+    "Physiology",
+    "Zoology"
+   ]
+  },
+  {
+   "doi": "10.4000/nda.3421",
+   "title": "Le camp de prisonniers allemands de Stenay (Meuse) durant la seconde guerre mondiale",
+   "journal": "Les Nouvelles de l’Archéologie",
+   "lang": [
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 981,
+   "subjects": [
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.48734/akofena.s010.14.2023",
+   "title": "The Use of Literary Texts as Didactic Tools in the Teaching/Learning of French as a Foreign Language",
+   "journal": "Akofena",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "CI",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 58,
+   "subjects": [
+    "Language and Literature"
+   ]
+  },
+  {
+   "doi": "10.11588/amold.2010.0.29999",
+   "title": "Un pas spre normalitate: prof. dr. Gh. Postică membru de onoare al Institutului de Arheologie al Academiei Române - filiala Iaşi",
+   "journal": "Arheologia Moldovei",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "IT",
+    "RO"
+   ],
+   "country": "RO",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 533,
+   "subjects": [
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.4000/nuevomundo.80532",
+   "title": "Miradas desde la Italia fascista sobre la Argentina de los años treinta",
+   "journal": "Nuevo mundo - Mundos Nuevos",
+   "lang": [
+    "EN",
+    "FR",
+    "PT"
+   ],
+   "country": "FR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 925,
+   "subjects": [
+    "Anthropology",
+    "Latin America. Spanish America"
+   ]
+  },
+  {
+   "doi": "10.21608/altc.2022.281647",
+   "title": "\"تصور مقترح لتطوير مراكز تعليم الكبار في مصر\" \"دراسة ميدانية\"",
+   "journal": "المجلة التربوية لتعليم الکبار",
+   "lang": [
+    "AR",
+    "EN",
+    "FR"
+   ],
+   "country": "EG",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 115,
+   "subjects": [
+    "Special aspects of education"
+   ]
+  },
+  {
+   "doi": "10.1051/shsconf/20197008025",
+   "title": "The Use of “the Big Five” in Assessing Levels of Adaptation in Dental Students at Various Stages of Their Education",
+   "journal": "SHS Web of Conferences",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 343,
+   "subjects": [
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.21618/fil1920198v",
+   "title": "Семантичка анализа енглеских посуђеница у комуникацији на друштвеној мрежи фејсбук",
+   "journal": "Filolog",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "IT",
+    "RU",
+    "SR"
+   ],
+   "country": "BA",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 640,
+   "subjects": [
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.21608/joa.2022.268405",
+   "title": "مواقع التواصل الاجتماعي ودورها في التمكين الرقمي للشباب ذوي الاحتياجات الخاصة وتقييمهم لها",
+   "journal": "المجلة المصرية لبحوث الرأى العام",
+   "lang": [
+    "AR",
+    "EN",
+    "FR"
+   ],
+   "country": "EG",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 464,
+   "subjects": [
+    "Communication. Mass media"
+   ]
+  },
+  {
+   "doi": "10.6092/issn.2533-2325/8722",
+   "title": "Editoriale",
+   "journal": "I Quaderni del MAES",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 708,
+   "subjects": [
+    "History (General) and history of Europe",
+    "History (General)"
+   ]
+  },
+  {
+   "doi": "10.4000/ebc.2776",
+   "title": "Michel Morel, Éléments d’axiocritique, Prolégomènes à l’étude du texte et de l’image",
+   "journal": "Études Britanniques Contemporaines",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 325,
+   "subjects": [
+    "Arts in general",
+    "English language",
+    "English literature"
+   ]
+  },
+  {
+   "doi": "10.14201/17572",
+   "title": "Revisores que han evaluado artículos llegados a Aula. Revista de Pedagogía de la Universidad de Salamanca en 2017",
+   "journal": "Aula",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 822,
+   "subjects": [
+    "Education"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-lang-fr-01",
+   "stratum": "doaj-lang-fr",
+   "field": "non-English: French",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.4000/15i28",
+   "title": "Timelines: Imagining the Past in Theodor De Bry’s America",
+   "journal": "Transatlantica",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.4000/15i28",
+   "pdf_url": "http://journals.openedition.org/transatlantica/pdf/27184",
+   "pdf_host": "journals.openedition.org",
+   "pdf_bytes": 2746044,
+   "pdf_sha256": "ff6ad78144a80e8c11f8662d3b9aebd32a1886de97e4f8063cd7c261662b9904",
+   "pages": 32,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 74,
+   "pool_rank": 7,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-lang-fr-02",
+   "stratum": "doaj-lang-fr",
+   "field": "non-English: French",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.1051/matecconf/20153307003",
+   "title": "The morphology of lath martensite: a new perspective",
+   "journal": "MATEC Web of Conferences",
+   "license": "cc-by",
+   "url": "https://doi.org/10.1051/matecconf/20153307003",
+   "pdf_url": "https://arxiv.org/pdf/1507.02127",
+   "pdf_host": "arxiv.org",
+   "pdf_bytes": 3311044,
+   "pdf_sha256": "78b00190d7fbfd8092cc3e823c61811c252177c5c61a772c9f3178eb91114cdd",
+   "pages": 13,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 23,
+   "pool_rank": 9,
+   "version": "submittedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.21608/altc.2022.281647",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.1051/shsconf/20197008025",
+   "why": "pdf-fetch:www.shs-conferences.org:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1051/shsconf/20197008025",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.1051/e3sconf/20199603002",
+   "why": "pdf-fetch:www.e3s-conferences.org:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1051/e3sconf/20199603002",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.13135/2532-5353/1316",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "http://dx.doi.org/10.1387/pceic.20991",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.1051/e3sconf/202454002008",
+   "why": "pdf-fetch:www.e3s-conferences.org:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1051/e3sconf/202454002008",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.48734/akofena.s010.14.2023",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.1051/e3sconf/20199102031",
+   "why": "pdf-fetch:www.e3s-conferences.org:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1051/e3sconf/20199102031",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.1051/matecconf/20153307003",
+   "why": "pdf-fetch:www.matec-conferences.org:HTTP Error 403: Forbidden"
+  }
+ ],
+ "date": "2026-09-30"
+}

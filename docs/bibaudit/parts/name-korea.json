@@ -1,0 +1,99 @@
+{
+ "stratum": "name-korea",
+ "seed": "20260930:name-korea",
+ "pool": {
+  "term": "(\"Republic of Korea\"[Affiliation] OR \"South Korea\"[Affiliation]) AND \"open access\"[filter] AND 2018:2026[pdat]",
+  "count": 128120,
+  "pool_used": 5000
+ },
+ "items": [
+  {
+   "id": "name-korea-01",
+   "stratum": "name-korea",
+   "field": "name stratum: Korean",
+   "layout_hint": "names: Korean",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13509356",
+   "doi": "10.3390/biomedicines14081776",
+   "title": "Beyond Acute Infection: A Conceptual Framework Linking Zoonotic Bacterial Pathogens to Pulmonary Fibrosis and Lung Carcinogenesis",
+   "citation": "Biomedicines. 2026 Aug 6;14(8):1776. doi: 10.3390/biomedicines14081776",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13509356/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13509356.1/PMC13509356.1.pdf",
+   "pdf_bytes": 1548357,
+   "pdf_sha256": "29fe2782ec7ab6cf0462fc1f806576a6d152e350dbb110a078d75608012436c3",
+   "truth_kind": "jats",
+   "truth_n": 146,
+   "rank_in_shuffled_pool": 0,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-korea-02",
+   "stratum": "name-korea",
+   "field": "name stratum: Korean",
+   "layout_hint": "names: Korean",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13587424",
+   "doi": "10.1186/s12940-026-01334-3",
+   "title": "Residential indoor air monitoring to assess long-term exposure to air pollution in susceptible populations for epidemiology: overview and early findings",
+   "citation": "Environ Health. 2026 Sep 17;25:77. doi: 10.1186/s12940-026-01334-3",
+   "license": "CC BY-NC-ND",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13587424/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13587424.1/PMC13587424.1.pdf",
+   "pdf_bytes": 1560732,
+   "pdf_sha256": "376c19f00aaef820a9b3f71d5b642396ea1f78017c6dd06d340ad61e1d9697ee",
+   "truth_kind": "jats",
+   "truth_n": 51,
+   "rank_in_shuffled_pool": 1,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-korea-03",
+   "stratum": "name-korea",
+   "field": "name stratum: Korean",
+   "layout_hint": "names: Korean",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13339990",
+   "doi": "10.1039/d6ra04051a",
+   "title": "H2O2-scavenging intermetallic Pt5Ce/C as a highly active and durable oxygen reduction electrocatalyst",
+   "citation": "RSC Adv. 2026 Jul 7. Online ahead of print. doi: 10.1039/d6ra04051a",
+   "license": "CC BY-NC",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13339990/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13339990.1/PMC13339990.1.pdf",
+   "pdf_bytes": 1471377,
+   "pdf_sha256": "f70fba54068a099af12b74f695d60de3abdf2096f7a3aa4f17e84e52f66db7d5",
+   "truth_kind": "jats",
+   "truth_n": 49,
+   "rank_in_shuffled_pool": 3,
+   "historical_ocr": false
+  },
+  {
+   "id": "name-korea-04",
+   "stratum": "name-korea",
+   "field": "name stratum: Korean",
+   "layout_hint": "names: Korean",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC13525707",
+   "doi": "10.1002/advs.77494",
+   "title": "Interfacial Interaction‐Engineered Dual Lithiophilic Ultrathin Interlayers for Dendrite‐Suppressed Lithium Metal Textile Anodes",
+   "citation": "Adv Sci (Weinh). 2026 Aug 29:e77494. Online ahead of print. doi: 10.1002/advs.77494",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC13525707/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC13525707.1/PMC13525707.1.pdf",
+   "pdf_bytes": 4719878,
+   "pdf_sha256": "9b5aa2f284bb805cbf40dc2663ec7772df30c656b86dead3cdad64e33f1a0a0a",
+   "truth_kind": "jats",
+   "truth_n": 67,
+   "rank_in_shuffled_pool": 4,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [
+  {
+   "pmcid": "PMC13487794",
+   "rank": 2,
+   "why": "no-pdf"
+  }
+ ],
+ "date": "2026-09-30"
+}

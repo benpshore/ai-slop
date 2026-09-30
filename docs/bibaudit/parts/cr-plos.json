@@ -1,0 +1,689 @@
+{
+ "stratum": "cr-plos",
+ "seed": "20260930:cr-plos",
+ "pool_desc": {
+  "crossref_filter": "prefix:10.1371,has-references:true,from-pub-date:2019-01-01,type:journal-article",
+  "total_results": 166910,
+  "sample": 100
+ },
+ "pool": [
+  {
+   "doi": "10.1371/journal.pntd.0011364",
+   "title": "IgG4 antibodies to the recombinant filarial antigen Wb-Bhp-1 decrease dramatically following treatment of lymphatic filariasis",
+   "journal": "PLOS Neglected Tropical Diseases",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.ppat.1007978",
+   "title": "Structural Insights into Curli CsgA Cross-β Fibril Architecture Inspire Repurposing of Anti-amyloid Compounds as Anti-biofilm Agents",
+   "journal": "PLOS Pathogens",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0292112",
+   "title": "Race and sex differences in ROS production and SOD activity in HUVECs",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0343138",
+   "title": "Impact of timing from last dose of dexamethasone administration to delivery, different steroid courses, and fetal number on preterm neonatal outcomes",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pone.0333536",
+   "title": "Comparing machine learning, deep learning, and reinforcement learning performance in Culex pipiens predictive modeling",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0227897",
+   "title": "A network approach to analyze neuronal lineage and layer innervation in the Drosophila optic lobes",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0271059",
+   "title": "The effect of COVID-19 pandemic on sleep-related problems in adults and elderly citizens: An infodemiology study using relative search volume data",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0318771",
+   "title": "Comparison of stable isotope mixing models for examining plant root water uptake",
+   "journal": "PLOS ONE",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pcbi.1013126",
+   "title": "Interleaved single and bursting spiking resonance in neurons",
+   "journal": "PLOS Computational Biology",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pcbi.1008570",
+   "title": "On the evolution and development of morphological complexity: A view from gene regulatory networks",
+   "journal": "PLOS Computational Biology",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pone.0329687",
+   "title": "Assessing the burden of severe nausea and vomiting of pregnancy or hyperemesis gravidarum and the associated use and experiences of medication treatments: An Australian consumer survey",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0246153",
+   "title": "Dementia and the risk of short-term readmission and mortality after a pneumonia admission",
+   "journal": "PLOS ONE",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pone.0353408",
+   "title": "Health system costs and systemic treatment patterns by disease stage for 8577 people diagnosed with melanoma in New South Wales, Australia 2006–2019",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pone.0223756",
+   "title": "Estimation of maize evapotraspiration under drought stress - A case study of Huaibei Plain, China",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pgph.0002015",
+   "title": "Determinants of Kangaroo Mother Care among low-birth-weight infants in low resource settings",
+   "journal": "PLOS Global Public Health",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0266853",
+   "title": "Fear of an unprecedented, invisible enemy: Difficulties experienced in establishing criteria for the release of COVID-19 patients from isolation in a Japanese University Hospital",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0344592",
+   "title": "Correction: Evaluating the pentapharmacological potency of otamixaban against lung cancer CDK2, transferase, oxidoreductase and signalling proteins",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pone.0284222",
+   "title": "The introduction and spread of rye (Secale cereale) in the Iberian Peninsula",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0276688",
+   "title": "Statistical modeling for COVID 19 infected patient’s data in Kingdom of Saudi Arabia",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0278460",
+   "title": "Cost-effectiveness of talazoparib for patients with locally advanced or metastasized breast cancer in Germany",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0262995",
+   "title": "Optimising long-term athletic development: An investigation of practitioners’ knowledge, adherence, practices and challenges",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0230006",
+   "title": "Both clinical and environmental Caulobacter species are virulent in the Galleria mellonella infection model",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0232972",
+   "title": "Polysaccharides isolated from Cordyceps Sinensis contribute to the progression of NASH by modifying the gut microbiota in mice fed a high-fat diet",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0214878",
+   "title": "Statistical models discriminating between complex samples measured with microfluidic receptor-cell arrays",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0342480",
+   "title": "Association between intrinsic capacity trajectories and risk of stroke incidence in middle-aged and older chinese adults: Evidence from a nationwide prospective cohort study based on CHARLS",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pone.0262299",
+   "title": "In silico analysis of potential off-target sites to gene editing for Mucopolysaccharidosis type I using the CRISPR/Cas9 system: Implications for population-specific treatments",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0316950",
+   "title": "Prevalence, outcome and conduct of in-hospital cardiopulmonary resuscitation in government hospitals of Nepal",
+   "journal": "PLOS ONE",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0289534",
+   "title": "Elucidation of composition of chlorine compounds in acidic sodium chlorite solution using ion chromatography",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0278571",
+   "title": "Crowdsource authoring as a tool for enhancing the quality of competency assessments in healthcare professions",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0282590",
+   "title": "Case management interventions in chronic disease reduce anxiety and depressive symptoms: A systematic review and meta-analysis",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0260891",
+   "title": "The implications of parent mental health and wellbeing for parent-child attachment: A systematic review",
+   "journal": "PLOS ONE",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pgen.1008916",
+   "title": "Trappc9 deficiency causes parent-of-origin dependent microcephaly and obesity",
+   "journal": "PLOS Genetics",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0348032",
+   "title": "Expression of Concern: How to detect a polytrauma patient at risk of complications: A validation and database analysis of four published scales",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pgen.1010801",
+   "title": "The evolutionary maintenance of ancient recombining sex chromosomes in the ostrich",
+   "journal": "PLOS Genetics",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0276101",
+   "title": "Theoretical research on reasonable shield support capacity in close-multiple coal seams with the coordinated mining: A case study of Qianjiaying coal mine",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pgph.0002961",
+   "title": "Parental vaccine hesitancy and acceptance of a COVID-19 vaccine: An internet-based survey in the US and five Asian countries",
+   "journal": "PLOS Global Public Health",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pgph.0001854",
+   "title": "The influence of COVID-19 barrier measures on the positivity rate of typhoidal salmonellosis and amoebiasis in the Buea Health District, South West Region of Cameroon",
+   "journal": "PLOS Global Public Health",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0277156",
+   "title": "Genetic variation in promoter region of the bovine LAP3 gene associated with estimated breeding values of milk production traits and clinical mastitis in dairy cattle",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0302235",
+   "title": "Feasibility and preliminary effects of a mindfulness-based physical exercise (MBPE) program for community-dwelling older people with sarcopenia: A protocol for a parallel, two-armed pilot randomised controlled trial",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0281898",
+   "title": "Preparation of noninfectious scRNAseq samples from SARS-CoV-2-infected epithelial cells",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0289185",
+   "title": "Urinary titin is not an early biomarker of skeletal muscle atrophy induced by muscle denervation in mice",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0213642",
+   "title": "7T MRI in epilepsy patients with previously normal clinical MRI exams compared against healthy controls",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0220001",
+   "title": "Factors related to medication errors in the preparation and administration of intravenous medication in the hospital environment",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0219451",
+   "title": "Functional decline in facial expression generation in older women: A cross-sectional study using three-dimensional morphometry",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0236457",
+   "title": "Selective enhancement of cardiomyocyte efficiency results in a pernicious heart condition",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0255337",
+   "title": "Multi-omics subtyping pipeline for chronic obstructive pulmonary disease",
+   "journal": "PLOS ONE",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pone.0214794",
+   "title": "Rhodnius prolixus: Identification of missing components of the IMD immune signaling pathway and functional characterization of its role in eliminating bacteria",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0300094",
+   "title": "Correction: Exploring reasons why South African dental therapists are leaving their profession: A theory-informed qualitative study",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0293613",
+   "title": "A new adaptive MPPT technique using an improved INC algorithm supported by fuzzy self-tuning controller for a grid-linked photovoltaic system",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0261875",
+   "title": "Correlation coefficient local capping REMD adaptive filtering method for laser interference signal",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0227330",
+   "title": "Analyzing and learning the language for different types of harassment",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0241866",
+   "title": "Childhood health and the changing distribution of foreign aid: Evidence from Nigeria's transition to lower-middle-income status",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0350164",
+   "title": "Retraction: A novel primary stability test method for artificial acetabular shells considering vertical load during level walking and shell position",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pgen.1010770",
+   "title": "The circadian clock is disrupted in pancreatic cancer",
+   "journal": "PLOS Genetics",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0347766",
+   "title": "Prevalence of fungal infections in a patient cohort in The Gambia: Identification and characterization of three priority fungal species in patients with symptoms suggestive of TB",
+   "journal": "PLOS One",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pone.0330367",
+   "title": "Ethical implications of neurotechnology in industry-academia partnerships: Insights from patient and research participant interviews",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0238165",
+   "title": "Automatic classification of fine-scale mountain vegetation based on mountain altitudinal belt",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0224030",
+   "title": "Hippocampal subfield volumes and pre-clinical Alzheimer’s disease in 408 cognitively normal adults born in 1946",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0282944",
+   "title": "Relationship between fall history and toe grip strength in older adults with knee osteoarthritis in Japan: A cross-sectional study",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pcbi.1010363",
+   "title": "A framework for macroscopic phase-resetting curves for generalised spiking neural networks",
+   "journal": "PLOS Computational Biology",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.ppat.1009996",
+   "title": "Heparan sulfate proteoglycans serve as alternative receptors for low affinity LCMV variants",
+   "journal": "PLOS Pathogens",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pone.0314541",
+   "title": "ILR-Net: Low-light image enhancement network based on the combination of iterative learning mechanism and Retinex theory",
+   "journal": "PLOS ONE",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0328911",
+   "title": "Gene expression profiling and pathway analysis in acute myeloid leukaemia-normal karyotype patients",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0278899",
+   "title": "Knowledge and practices of modern contraceptives among religious minority (Muslim) women: A cross-sectional study from Southern Nepal",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pntd.0013207",
+   "title": "Unveiling fatal risk factors: Predicting hemophagocytic lymphohistiocytosis in SFTS patients",
+   "journal": "PLOS Neglected Tropical Diseases",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0309711",
+   "title": "Occurrence, genetic diversity, and antimicrobial resistance of methicillin-resistant Staphylococcus spp. in hospitalized and non-hospitalized cats in Brazil",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0286183",
+   "title": "Impact of the cost-of-living crisis on the nature of attempts to stop smoking and to reduce alcohol consumption in Great Britain: A representative population survey, 2021–2022",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0234288",
+   "title": "Assessment of the relationships between agroecosystem condition and the ecosystem service soil erosion regulation in Northern Germany",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0290256",
+   "title": "A capacitive laser-induced graphene based aptasensor for SARS-CoV-2 detection in human saliva",
+   "journal": "PLOS ONE",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0339233",
+   "title": "Correction: LPS responsiveness and neutrophil chemotaxis in vivo require PMN MMP-8 activity",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0215468",
+   "title": "Real world usage characteristics of a novel mobile health self-monitoring device: Results from the Scanadu Consumer Health Outcomes (SCOUT) Study",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0228217",
+   "title": "Prevalence and association of pks+ Escherichia coli with colorectal cancer in patients at the University Malaya Medical Centre, Malaysia",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0302903",
+   "title": "Trends in cancer mortality among the elderly in China, 2005–2035",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0278027",
+   "title": "Repositioning of acefylline as anti-cancer drug: Synthesis, anticancer and computational studies of azomethines derived from acefylline tethered 4-amino-3-mercapto-1,2,4-triazole",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0308153",
+   "title": "Identifying the determinants of tourism receipts of Thailand and relevant determinant-determinant interactions",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0284629",
+   "title": "Effect of face-covering use on adherence to other COVID-19 protective behaviours: A systematic review",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0253949",
+   "title": "Revisiting the relationship between constructive alignment and learning approaches: A perceived alignment perspective",
+   "journal": "PLOS ONE",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pcbi.1012929",
+   "title": "Zero-shot segmentation using embeddings from a protein language model identifies functional regions in the human proteome",
+   "journal": "PLOS Computational Biology",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0223138",
+   "title": "Expression of Concern: Resveratrol Enhances Antitumor Activity of TRAIL in Prostate Cancer Xenografts through Activation of FOXO Transcription Factor",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0239465",
+   "title": "Co-variability of the summer NDVIs on the eastern Tibetan Plateau and in the Lake Baikal region: Associated climate factors and atmospheric circulation",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0242521",
+   "title": "In silico analysis identifies a putative cell-of-origin for BRAF fusion-positive cerebellar pilocytic astrocytoma",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0265589",
+   "title": "Successful implementation of parenting support at preschool: An evaluation of Triple P in Sweden",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pntd.0008319",
+   "title": "Prognostic factors for mortality among patients with visceral leishmaniasis in East Africa: Systematic review and meta-analysis",
+   "journal": "PLOS Neglected Tropical Diseases",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.pone.0245059",
+   "title": "Mixed methods exploration of Ghanaian women’s domestic work, childcare and effects on their mental health",
+   "journal": "PLOS ONE",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pone.0308417",
+   "title": "Application of sliding mode variable structure control algorithm in PMSM vector control system in complex environment",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0320832",
+   "title": "Zero inflated high dimensional compositional data with DeepInsight",
+   "journal": "PLOS ONE",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0213755",
+   "title": "Correction: Further investigation of phenotypes and confounding factors of progressive ratio performance and feeding behavior in the BACHD rat model of Huntington disease",
+   "journal": "PLOS ONE",
+   "year": 2019
+  },
+  {
+   "doi": "10.1371/journal.pone.0297900",
+   "title": "Exploration adhesion properties of Liquorilactobacillus and Lentilactobacillus isolated from two different sources of tepache kefir grains",
+   "journal": "PLOS ONE",
+   "year": 2024
+  },
+  {
+   "doi": "10.1371/journal.pone.0324812",
+   "title": "Advancing energy integration: renewable sources, ancillary services, and stability",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pcbi.1014391",
+   "title": "Multi-stable oscillations in cortical networks with two classes of inhibition",
+   "journal": "PLOS Computational Biology",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pmed.1004827",
+   "title": "Heterogeneous impacts of HIV pre-exposure prophylaxis (PrEP) on drug resistance and phylogenetic cluster transmission dynamics in British Columbia, Canada: A retrospective cohort and simulation study",
+   "journal": "PLOS Medicine",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pbio.3002083",
+   "title": "iPHoP: An integrated machine learning framework to maximize host prediction for metagenome-derived viruses of archaea and bacteria",
+   "journal": "PLOS Biology",
+   "year": 2023
+  },
+  {
+   "doi": "10.1371/journal.pone.0265929",
+   "title": "Multiple correspondence analysis as a tool for examining Nobel Prize data from 1901 to 2018",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0275257",
+   "title": "Image quality of abdominal ultrasonography after esophagogastroduodenoscopy is preserved by using carbon dioxide insufflation: A non-inferiority test in the same subject",
+   "journal": "PLOS ONE",
+   "year": 2022
+  },
+  {
+   "doi": "10.1371/journal.pone.0246648",
+   "title": "Formulation, in vitro characterization and optimization of taste-masked orally disintegrating co-trimoxazole tablet by direct compression",
+   "journal": "PLOS ONE",
+   "year": 2021
+  },
+  {
+   "doi": "10.1371/journal.pdig.0001459",
+   "title": "Evaluating the use of drones within medical logistics: A patient-focused qualitative evaluation",
+   "journal": "PLOS Digital Health",
+   "year": 2026
+  },
+  {
+   "doi": "10.1371/journal.pone.0328492",
+   "title": "Experimental study on mechanical properties and microstructure of cement-based expansion grouting materials for broken coal mass",
+   "journal": "PLOS One",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pone.0224761",
+   "title": "Effects of trust-based decision making in disrupted supply chains",
+   "journal": "PLOS ONE",
+   "year": 2020
+  },
+  {
+   "doi": "10.1371/journal.ppat.1012837",
+   "title": "MmuPV1 infection of Tmc6/Ever1 or Tmc8/Ever2 deficient FVB mice as a model of βHPV in typical epidermodysplasia verruciformis",
+   "journal": "PLOS Pathogens",
+   "year": 2025
+  },
+  {
+   "doi": "10.1371/journal.pgph.0006299",
+   "title": "Changes in the prevalence, causes of visual impairment, and cataract service coverage in Karamoja, Uganda, between 2015 and 2023: Findings from two cross-sectional surveys",
+   "journal": "PLOS Global Public Health",
+   "year": 2026
+  }
+ ],
+ "items": [
+  {
+   "id": "cr-plos-01",
+   "stratum": "cr-plos",
+   "field": "biomedicine/social (PLOS)",
+   "layout_hint": "numeric [1]",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.1371/journal.pone.0278027",
+   "title": "Repositioning of acefylline as anti-cancer drug: Synthesis, anticancer and computational studies of azomethines derived from acefylline tethered 4-amino-3-mercapto-1,2,4-triazole",
+   "journal": "PLOS ONE",
+   "license": "cc-by",
+   "url": "https://doi.org/10.1371/journal.pone.0278027",
+   "pdf_url": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0278027&type=printable",
+   "pdf_host": "journals.plos.org",
+   "pdf_bytes": 1932002,
+   "pdf_sha256": "7ddcb926e17f5945807604312a7d2443b5f82a3934aa294a1332b0ca237b5c48",
+   "pages": 19,
+   "language": "en",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 60,
+   "pool_rank": 0,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "cr-plos-02",
+   "stratum": "cr-plos",
+   "field": "biomedicine/social (PLOS)",
+   "layout_hint": "numeric [1]",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.1371/journal.pcbi.1013126",
+   "title": "Interleaved single and bursting spiking resonance in neurons",
+   "journal": "PLOS Computational Biology",
+   "license": "public-domain",
+   "url": "https://doi.org/10.1371/journal.pcbi.1013126",
+   "pdf_url": "https://journals.plos.org/ploscompbiol/article/file?id=10.1371/journal.pcbi.1013126&type=printable",
+   "pdf_host": "journals.plos.org",
+   "pdf_bytes": 3836286,
+   "pdf_sha256": "9084c95823d3611bdf03367c448459bbf303a22e398e3e33e791641fb214d1fe",
+   "pages": 22,
+   "language": "en",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 82,
+   "pool_rank": 1,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "cr-plos-03",
+   "stratum": "cr-plos",
+   "field": "biomedicine/social (PLOS)",
+   "layout_hint": "numeric [1]",
+   "source": "Crossref sample + Unpaywall",
+   "doi": "10.1371/journal.pone.0276101",
+   "title": "Theoretical research on reasonable shield support capacity in close-multiple coal seams with the coordinated mining: A case study of Qianjiaying coal mine",
+   "journal": "PLOS ONE",
+   "license": "cc-by",
+   "url": "https://doi.org/10.1371/journal.pone.0276101",
+   "pdf_url": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0276101&type=printable",
+   "pdf_host": "journals.plos.org",
+   "pdf_bytes": 5516062,
+   "pdf_sha256": "dcb88e851477b8fb21f168c4e036abfd00830357f4f7457f09f0f28af408138e",
+   "pages": 28,
+   "language": "en",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 46,
+   "pool_rank": 3,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.1371/journal.pone.0219451",
+   "why": "no-usable-pdf-location"
+  }
+ ],
+ "date": "2026-09-30"
+}

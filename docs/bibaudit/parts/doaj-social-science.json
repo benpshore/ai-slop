@@ -1,0 +1,615 @@
+{
+ "stratum": "doaj-social-science",
+ "seed": "20260930:doaj-social-science",
+ "pool_desc": {
+  "doaj_query": "(bibjson.subject.term:Sociology OR bibjson.subject.term:\"Political science\") AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2019": 13491,
+   "2017": 11833,
+   "2025": 14997,
+   "2016": 11249,
+   "2021": 14307,
+   "2015": 10646,
+   "2024": 14272,
+   "2020": 13590,
+   "2022": 15058,
+   "2018": 12496,
+   "2023": 14516
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.5281/zenodo.3621215",
+   "title": "Konflikt w przestrzeni i przestrzeń dla konfliktu: wpływ partycypacji społecznej na spory w przestrzeni publicznej",
+   "journal": "Dyskurs & Dialog",
+   "lang": [
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 528,
+   "subjects": [
+    "Social Sciences",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.17163/uni.n43.2025.05",
+   "title": "La participación ciudadana y el gobierno abierto en la era digital: una mirada desde la IA",
+   "journal": "Universitas",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "EC",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 190,
+   "subjects": [
+    "Social sciences (General)",
+    "Political science",
+    "Communication. Mass media",
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.21697/stv.2015.53.2.08",
+   "title": "FRANCISZKA SAWICKIEGO KRYTYKA IDEOLOGII RASISTOWSKIEJ",
+   "journal": "Studia Theologica Varsaviensia",
+   "lang": [
+    "EN",
+    "FR",
+    "IT",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 651,
+   "subjects": [
+    "Philosophy. Psychology. Religion",
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.24014/jdr.v32i1.12866",
+   "title": "Dakwah Bil-Hal Kiai sebagai Upaya Pemberdayaan Santri (Action Da'wah by the Kiai as an Effort to Empower Students)",
+   "journal": "Jurnal Dakwah Risalah",
+   "lang": [
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 217,
+   "subjects": [
+    "Islam",
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.1177/23780231241259680",
+   "title": "Political Influencers and Their Social Media Audiences during the 2021 Arizona Audit",
+   "journal": "Socius",
+   "lang": [
+    "EN"
+   ],
+   "country": "US",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 33,
+   "subjects": [
+    "Social Sciences",
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.22201/fcpys.2448492xe.1993.152.50755",
+   "title": "Los sistemas políticos y su crisis. Parte I: La desilusión de los sistemas",
+   "journal": "Revista Mexicana de Ciencias Políticas y Sociales",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "MX",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 611,
+   "subjects": [
+    "Political science (General)",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.36787/jsi.v3i2.374",
+   "title": "PEMBELAJARAN MODEL GAMBAR DAN SUGESTI IMAJINER  TERHADAP KEMAMPUAN MENULIS PUISI DAN SASTRA",
+   "journal": "Jurnal Soshum Insentif",
+   "lang": [
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 478,
+   "subjects": [
+    "Political science",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.22034/sm.2022.108113.1382",
+   "title": "The Role of National Media in the Political Efficiency\nof the Islamic Republic of Iran based\non the Objectives of the Supreme Leader\nfrom the Perspective of Academics",
+   "journal": "‫سیاست متعالیه‏",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 639,
+   "subjects": [
+    "Political science (General)",
+    "Islam"
+   ]
+  },
+  {
+   "doi": "10.13133/2037-3643_70.283_2",
+   "title": "Opportunities and limits of rebalancing the Eurozone via wage policies: Theoretical considerations and empirical illustrations for the case of Germany",
+   "journal": "PSL Quarterly Review",
+   "lang": [
+    "EN"
+   ],
+   "country": "IT",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 571,
+   "subjects": [
+    "Political science",
+    "Economic theory. Demography"
+   ]
+  },
+  {
+   "doi": "10.26650/sj.2022.42.1.0103",
+   "title": "Examining the Relationship between Perpetual Peace and Military Sociology",
+   "journal": "İstanbul Üniversitesi Sosyoloji Dergisi",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "TR"
+   ],
+   "country": "TR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 486,
+   "subjects": [
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.13131/2611-657x.whatever.v5i1.167",
+   "title": "William Seabrook and Man Ray",
+   "journal": "Whatever",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 106,
+   "subjects": [
+    "Philosophy (General)",
+    "Sociology (General)",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.3389/fpos.2022.823071",
+   "title": "Of Revenue Without Rulers: Public Goods in the Egalitarian Cities of the Indus Civilization",
+   "journal": "Frontiers in Political Science",
+   "lang": [
+    "EN"
+   ],
+   "country": "CH",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 885,
+   "subjects": [
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.2218/himalaya.2019.7875",
+   "title": "The Soteriological Context of a Tibetan Oracle",
+   "journal": "HIMALAYA",
+   "lang": [
+    "EN"
+   ],
+   "country": "GB",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 431,
+   "subjects": [
+    "Asian. Oriental",
+    "History of Asia",
+    "Anthropology",
+    "Languages and literature of Eastern Asia, Africa, Oceania",
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.7440/colombiaint118.2024.05",
+   "title": "Cambiar algo para que nada cambie. La reforma decorativa de las elecciones primarias obligatorias en Perú",
+   "journal": "Colombia Internacional",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "CO",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 123,
+   "subjects": [
+    "International relations",
+    "Political science (General)"
+   ]
+  },
+  {
+   "doi": "10.53897/revescc.2025.3.07",
+   "title": "Más allá de la felicidad desbordada.",
+   "journal": "Estudios sobre las Culturas Contemporáneas",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "MX",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 952,
+   "subjects": [
+    "Sociology (General)",
+    "Ethnology. Social and cultural anthropology"
+   ]
+  },
+  {
+   "doi": "10.15446/cp.v15n30.92553",
+   "title": "Bakunin y la gestión pública",
+   "journal": "Ciencia Política",
+   "lang": [
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "CO",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 570,
+   "subjects": [
+    "Political science",
+    "Political institutions and public administration (General)",
+    "Political science (General)"
+   ]
+  },
+  {
+   "doi": "10.12946/rg23/284-286",
+   "title": "Dreitausend Jahre Rechtsgeschichte",
+   "journal": "Rechtsgeschichte - Legal History",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "DE",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 265,
+   "subjects": [
+    "Law",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.5195/jwsr.2022.1117",
+   "title": "Interrogating Structural Conditions for Agricultural Production",
+   "journal": "Journal of World-Systems Research",
+   "lang": [
+    "EN"
+   ],
+   "country": "US",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 110,
+   "subjects": [
+    "Political science",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.24193/subbeuropaea.2023.2.12",
+   "title": "REPRESENTATIONS OF THE COMMUNIST RESISTANCE IN ROMANIAN CINEMA. THE THAWING PERIOD",
+   "journal": "Studia Universitatis Babeş-Bolyai. Studia Europaea",
+   "lang": [
+    "DE",
+    "EN",
+    "FR"
+   ],
+   "country": "RO",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 382,
+   "subjects": [
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.12775/dn.2015.1.14",
+   "title": "Nieznana relacja Kazimierza Świtalskiego na temat zamachu majowego",
+   "journal": "Dzieje Najnowsze",
+   "lang": [
+    "EN",
+    "FR",
+    "PL",
+    "RU"
+   ],
+   "country": "PL",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 186,
+   "subjects": [
+    "Political science",
+    "History of Poland"
+   ]
+  },
+  {
+   "doi": "10.5771/2566-7742-2019-1-29",
+   "title": "The fictitious commodification of money and the Euro experiment",
+   "journal": "Culture, Practice & Europeanization",
+   "lang": [
+    "DE",
+    "EN"
+   ],
+   "country": "DE",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 606,
+   "subjects": [
+    "Social sciences (General)",
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.60842/rass-pgpa.05.vol.4.n2.2024",
+   "title": "Le recyclage des coquillages fossiles dans l’espace sénégambien : histoire et archéologie ",
+   "journal": "Pensées Genre, Penser Autrement",
+   "lang": [
+    "FR"
+   ],
+   "country": "CI",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 0,
+   "subjects": [
+    "Anthropology",
+    "Sociology (General)",
+    "Education",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.1515/joso-2023-frontmatter1",
+   "title": "Frontmatter",
+   "journal": "Journal of Organizational Sociology",
+   "lang": [
+    "EN"
+   ],
+   "country": "DE",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 991,
+   "subjects": [
+    "Sociology (General)"
+   ]
+  },
+  {
+   "doi": "10.22059/jwdp.2023.350732.1008274",
+   "title": "Phenomenology of Female Suicide in Dishmuk Region",
+   "journal": "زن در توسعه و سیاست",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 419,
+   "subjects": [
+    "Social Sciences",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.22201/fcpys.2448492xe.1999.175.49115",
+   "title": "Federalismo y democracia en México",
+   "journal": "Revista Mexicana de Ciencias Políticas y Sociales",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "MX",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 827,
+   "subjects": [
+    "Political science (General)",
+    "Social sciences (General)"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-social-science-01",
+   "stratum": "doaj-social-science",
+   "field": "social science (sociology / political science)",
+   "layout_hint": "author-year expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.7440/colombiaint118.2024.05",
+   "title": "Cambiar algo para que nada cambie. La reforma decorativa de las elecciones primarias obligatorias en Perú",
+   "journal": "Colombia Internacional",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.7440/colombiaint118.2024.05",
+   "pdf_url": "https://revistas.uniandes.edu.co/index.php/colombia-int/article/download/8856/9316",
+   "pdf_host": "revistas.uniandes.edu.co",
+   "pdf_bytes": 259360,
+   "pdf_sha256": "9f8e86ab16e701519064555ef0aa8b27fa9f9f35c3611dc4c0c3de25dff8a4d9",
+   "pages": 26,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 47,
+   "pool_rank": 0,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-social-science-02",
+   "stratum": "doaj-social-science",
+   "field": "social science (sociology / political science)",
+   "layout_hint": "author-year expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.5195/jwsr.2022.1117",
+   "title": "Interrogating Structural Conditions for Agricultural Production",
+   "journal": "Journal of World-Systems Research",
+   "license": "cc-by",
+   "url": "https://doi.org/10.5195/jwsr.2022.1117",
+   "pdf_url": "https://jwsr.pitt.edu/ojs/jwsr/article/download/1117/1570",
+   "pdf_host": "jwsr.pitt.edu",
+   "pdf_bytes": 507974,
+   "pdf_sha256": "db555712eeb68f2633f75e1d39a8dcf3fca69e71bca14f4699d31638a15ed03b",
+   "pages": 32,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 133,
+   "pool_rank": 10,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-social-science-03",
+   "stratum": "doaj-social-science",
+   "field": "social science (sociology / political science)",
+   "layout_hint": "author-year expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.24193/subbeuropaea.2023.2.12",
+   "title": "REPRESENTATIONS OF THE COMMUNIST RESISTANCE IN ROMANIAN CINEMA. THE THAWING PERIOD",
+   "journal": "Studia Universitatis Babeș-Bolyai Studia Europaea",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.24193/subbeuropaea.2023.2.12",
+   "pdf_url": "https://studia.reviste.ubbcluj.ro/index.php/subbeuropaea/article/download/6821/6561",
+   "pdf_host": "studia.reviste.ubbcluj.ro",
+   "pdf_bytes": 459405,
+   "pdf_sha256": "7a838c19309778bc5e289d58658dcd218fc86f2cfee1875f0fb41f11400239e4",
+   "pages": 18,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 42,
+   "pool_rank": 13,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-social-science-04",
+   "stratum": "doaj-social-science",
+   "field": "social science (sociology / political science)",
+   "layout_hint": "author-year expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.3389/fpos.2022.823071",
+   "title": "Of Revenue Without Rulers: Public Goods in the Egalitarian Cities of the Indus Civilization",
+   "journal": "Frontiers in Political Science",
+   "license": "cc-by",
+   "url": "https://doi.org/10.3389/fpos.2022.823071",
+   "pdf_url": "https://www.frontiersin.org/articles/10.3389/fpos.2022.823071/pdf",
+   "pdf_host": "www.frontiersin.org",
+   "pdf_bytes": 6640822,
+   "pdf_sha256": "7dcda660ba801fb1a826fafe625272c527ac99cba5111f4f7d635d775017992c",
+   "pages": 19,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 215,
+   "pool_rank": 16,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.22034/sm.2022.108113.1382",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.22201/fcpys.2448492xe.1993.152.50755",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.2218/himalaya.2019.7875",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.13133/2037-3643_70.283_2",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.21697/stv.2015.53.2.08",
+   "why": "title-mismatch:czasopisma.uksw.edu.pl:0.00"
+  },
+  {
+   "doi": "10.21697/stv.2015.53.2.08",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.13131/2611-657x.whatever.v5i1.167",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.24014/jdr.v32i1.12866",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22201/fcpys.2448492xe.1999.175.49115",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.53897/revescc.2025.3.07",
+   "why": "pdf-fetch:revistasacademicas.ucol.mx:HTTP Error 468: "
+  },
+  {
+   "doi": "10.53897/revescc.2025.3.07",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.5771/2566-7742-2019-1-29",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.15446/cp.v15n30.92553",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.12775/dn.2015.1.14",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5281/zenodo.3621215",
+   "why": "crossref:HTTPError"
+  }
+ ],
+ "date": "2026-09-30"
+}

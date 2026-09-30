@@ -1,0 +1,624 @@
+{
+ "stratum": "doaj-lang-ru",
+ "seed": "20260930:doaj-lang-ru",
+ "pool_desc": {
+  "doaj_query": "bibjson.journal.language:RU AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2020": 34965,
+   "2023": 34945,
+   "2021": 35131,
+   "2025": 37273,
+   "2016": 34442,
+   "2019": 38333,
+   "2017": 30759,
+   "2015": 28163,
+   "2022": 38077,
+   "2024": 36083
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.18524/2410-2601.2009.14.203066",
+   "title": "Щодо трансценденталізму раннього Гайдеґера",
+   "journal": "Докса",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 102,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.18019/1028-4427-2020-26-4-585-592",
+   "title": "Conservative treatment of aseptic necrosis of the femoral head in adults (literature review)",
+   "journal": "Гений oртопедии",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 584,
+   "subjects": [
+    "Orthopedic surgery"
+   ]
+  },
+  {
+   "doi": "10.18500/2782-4594-2023-2-1-42-51",
+   "title": "Analysis of the participation of Russian student teams at the World Summer and Winter University Games in 2013–2021",
+   "journal": "Физическое воспитание и студенческий спорт",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 751,
+   "subjects": [
+    "Education (General)",
+    "Special aspects of education",
+    "Theory and practice of education"
+   ]
+  },
+  {
+   "doi": "10.32718/nvlvet-a10335",
+   "title": "Ecologically oriented yield monitoring as a tool for climate change adaptation",
+   "journal": "Науковий вісник Львівського національного університету ветеринарної медицини та біотехнологій імені С.З. Гжицького. Серія: Сільськогосподарські науки",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 543,
+   "subjects": [
+    "Veterinary medicine"
+   ]
+  },
+  {
+   "doi": "10.14412/1995-4484-2016-1s-43-48",
+   "title": "INVESTIGATION OF A ROLE OF THE IMMUNOGENICITY OF INFLIXIMAB IN THE THERAPY OF ANKYLOSING SPONDYLITIS",
+   "journal": "Научно-практическая ревматология",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 162,
+   "subjects": [
+    "Diseases of the musculoskeletal system"
+   ]
+  },
+  {
+   "doi": "10.14341/omet9758",
+   "title": "Vitamin D binding protein polymorphysm in patients with acute coronary syndrome in kaliningrad region",
+   "journal": "Ожирение и метаболизм",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 584,
+   "subjects": [
+    "Physiology",
+    "Biochemistry"
+   ]
+  },
+  {
+   "doi": "10.17709/2410-1893-2025-12-2-8",
+   "title": "CIGB-552: Anticancer peptide with multimodal mechanisms and clinical promise for colorectal cancer",
+   "journal": "Исследования и практика в медицине",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 818,
+   "subjects": [
+    "Medicine"
+   ]
+  },
+  {
+   "doi": "10.31431/1816-5524-2022-3-51-101-110",
+   "title": "Expeditional exploration of the Kuril Islands in 2021",
+   "journal": "Вестник Камчатской региональной ассоциации \"Учебно-научный центр\". Серия: Науки о Земле",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 636,
+   "subjects": [
+    "Geology"
+   ]
+  },
+  {
+   "doi": "10.18522/1995-0640-2020-1-208-217",
+   "title": "Basic Approaches to the Creation and Analysis of the Legal Status of News Publics",
+   "journal": "Известия Южного федерального университета: Филологические науки",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 29,
+   "subjects": [
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.5922/0207-6918-2020-2-2",
+   "title": "The Universe of Science. The Architectonic Ideas of Science, Sciences and their Parts in Kant",
+   "journal": "Кантовский сборник",
+   "lang": [
+    "DE",
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 390,
+   "subjects": [
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.35567/1999-4508-2020-2-3",
+   "title": "MEAN ANNUAL RUNOFF OF THE RIVERS OF THE CRIMEAN PENINSULA SOUTHWEST",
+   "journal": "Водное хозяйство России: проблемы, технологии, управление",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 421,
+   "subjects": [
+    "River, lake, and water-supply engineering (General)"
+   ]
+  },
+  {
+   "doi": "10.26428/1606-9919-2019-197-35-61",
+   "title": "RECENT CHANGES IN THE OKHOTSK SEA ECOSYSTEM (2008–2018)",
+   "journal": "Известия ТИНРО",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 967,
+   "subjects": [
+    "Aquaculture. Fisheries. Angling"
+   ]
+  },
+  {
+   "doi": "10.15276/opu.2.52.2017.08",
+   "title": "Optimal operational regimes of sea water desalination plants with mechanical vapor compres-sion",
+   "journal": "Trudy Odesskogo Politehničeskogo Universiteta",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 711,
+   "subjects": [
+    "General Works"
+   ]
+  },
+  {
+   "doi": "10.20310/1810-0201-2016-21-10(162)-96-103",
+   "title": "PUBLIC TRANSPORT IN THE PROVINCIAL (REGIONAL) CENTERS OF RUSSIA IN XIX-XX CENTURIES: THE FORMATION AND DEVELOPMENT (ON MATERIALS OF PENZA, RYAZAN, TAMBOV)",
+   "journal": "Вестник Тамбовского университета. Серия: Гуманитарные науки",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 147,
+   "subjects": [
+    "Education (General)",
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.21686/2500-3925-2015-2-95-99",
+   "title": "PRODUCT PROMOTION STRATEGY IN SPORTS INDUSTRY",
+   "journal": "Статистика и экономика",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 539,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.12775/dn.2019.3.12",
+   "title": "Dębica i powiat dębicki pod władzą Armii Czerwonej w latach 1944–1945 w aspektach społeczno-politycznym i ekonomicznym",
+   "journal": "Dzieje Najnowsze",
+   "lang": [
+    "EN",
+    "FR",
+    "PL",
+    "RU"
+   ],
+   "country": "PL",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 21,
+   "subjects": [
+    "Political science",
+    "History of Poland"
+   ]
+  },
+  {
+   "doi": "10.24884/0042-4625-2021-180-4-41-45",
+   "title": "Solid-pseudopapillary neoplasia of the pancreas (analysis of three cases)",
+   "journal": "Вестник хирургии имени И.И. Грекова",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 106,
+   "subjects": [
+    "Surgery"
+   ]
+  },
+  {
+   "doi": "10.18551/rjoas.2023-01.01",
+   "title": "POST-PROFIT STRATEGY: REDESIGNING ROLES OF MARKETING AS A PILLAR IN SUPPORTING SUSTAINABLE TOURISM DEVELOPMENT IN BALI",
+   "journal": "Russian Journal of Agricultural and Socio-Economic Sciences",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 136,
+   "subjects": [
+    "Agriculture (General)"
+   ]
+  },
+  {
+   "doi": "10.14412/1995-4484-2020-268-275",
+   "title": "EFFICACY AND SAFETY OF TOFACITINIB IN PATIENTS WITH PSORIATIC ARTHRITIS IN REAL CLINICAL PRACTICE",
+   "journal": "Научно-практическая ревматология",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 643,
+   "subjects": [
+    "Diseases of the musculoskeletal system"
+   ]
+  },
+  {
+   "doi": "10.20996/1819-6446-2010-6-5-747-748",
+   "title": "THE INFECTIVE ENDOCARDITIS (PREVENTION, DIAGNOSIS CRITERIA AND TREATMENT): KEY POINTS 2010",
+   "journal": "Рациональная фармакотерапия в кардиологии",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 639,
+   "subjects": [
+    "Therapeutics. Pharmacology",
+    "Diseases of the circulatory (Cardiovascular) system"
+   ]
+  },
+  {
+   "doi": "10.26425/2658-3445-2019-1-7-18",
+   "title": "Methodology of a marketing research of Internet users",
+   "journal": "E-Management",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 699,
+   "subjects": [
+    "Electronics",
+    "Management information systems"
+   ]
+  },
+  {
+   "doi": "10.5281/zenodo.61622",
+   "title": "Ścieżki dywersyfikacji uprawiania gier sportowych jako wyznaczniki różnicowania kompetencji trenerów i team managerów – paradygmat a realia = Diversification of paths in sport games as a determinant of differentiating  competences of trainers and team managers - the paradigm vs. reality",
+   "journal": "Journal of Education, Health and Sport",
+   "lang": [
+    "EN",
+    "ES",
+    "PL",
+    "RU",
+    "UK"
+   ],
+   "country": "PL",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 294,
+   "subjects": [
+    "Education",
+    "Sports",
+    "Medicine"
+   ]
+  },
+  {
+   "doi": "10.18500/1818-9601-2025-25-3-303-313",
+   "title": "Two years of Special Military Operation: Dynamics of changes in the attitude of youth (within the context of media infl uence)",
+   "journal": "Известия Саратовского университета. Новая серия: Cоциология. Политология",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 346,
+   "subjects": [
+    "Social Sciences",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.18255/1818-1015-2023-3-202-213",
+   "title": "Text classification by CEFR levels using machine learning methods and BERT language model",
+   "journal": "Моделирование и анализ информационных систем",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 816,
+   "subjects": [
+    "Information technology"
+   ]
+  },
+  {
+   "doi": "10.21518/2079-701x-2022-16-6-130-136",
+   "title": "Pregnancy outcomes and thyroid dysfunction: preterm birth risk assessment",
+   "journal": "Медицинский совет",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 943,
+   "subjects": [
+    "Medicine"
+   ]
+  },
+  {
+   "doi": "10.13130/2037-2426/9425",
+   "title": "Rëubeni Fürst der Juden (Reubeni, principe degli ebrei) di Max Brod: un «messia» sionista dal ghetto di Praga",
+   "journal": "Enthymema",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "RU"
+   ],
+   "country": "IT",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 296,
+   "subjects": [
+    "Language. Linguistic theory. Comparative grammar",
+    "Style. Composition. Rhetoric",
+    "Literature (General)",
+    "Oratory. Elocution, etc."
+   ]
+  },
+  {
+   "doi": "10.33581/2520-6338-2021-3-86–96",
+   "title": "Formation of monument protection activities in Soviet Belarus in the years of «thaw» (1953–1968)",
+   "journal": "Журнал Белорусского государственного университета: История",
+   "lang": [
+    "BE",
+    "EN",
+    "RU"
+   ],
+   "country": "BY",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 469,
+   "subjects": [
+    "History (General)"
+   ]
+  },
+  {
+   "doi": "10.19090/i.2017.28.29-41",
+   "title": "DIE SICHERUNG EINES ANTIKEN STADTTORS BEI AENEAS TACTICUS. QUELLE UND MODELLE",
+   "journal": "Истраживања",
+   "lang": [
+    "DE",
+    "EN",
+    "RU",
+    "SR"
+   ],
+   "country": "RS",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 42,
+   "subjects": [
+    "History of Balkan Peninsula"
+   ]
+  },
+  {
+   "doi": "10.23947/2541-9129-2017-4-9-24",
+   "title": "THE ANALYSIS OF ОССUPATIONAL INJURY SITUATION AT THE MACHINE-BUILDING ENTERPRISE \"ROSTOV PRESSING-CUTTING PLANT\" OVER THE PERIOD FROM 2006 TO 2016",
+   "journal": "Безопасность техногенных и природных систем",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 894,
+   "subjects": [
+    "Industrial safety. Industrial accident prevention"
+   ]
+  },
+  {
+   "doi": "10.17749/2070-4909/farmakoekonomika.2021.115",
+   "title": "Machine learning based on laboratory data for disease prediction",
+   "journal": "Фармакоэкономика",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 344,
+   "subjects": [
+    "Therapeutics. Pharmacology",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.3176/lu.2004.1.14",
+   "title": "Review on: N.  M.  Krasnova,  Stilističeskij potentsial glagol'no-imennych slovosočetanij v gornomarijskom literaturnom jazyke. Dissertatsija na soiskanie učenoj stepeni kandidata filologičeskich nauk, Iževsk 2002; pp. 71–72",
+   "journal": "Linguistica Uralica",
+   "lang": [
+    "DE",
+    "EN",
+    "RU"
+   ],
+   "country": "EE",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 240,
+   "subjects": [
+    "Philology. Linguistics"
+   ]
+  },
+  {
+   "doi": "10.15829/1728-8800-2024-3960",
+   "title": "Effectiveness of a virtual reality relaxation to correct symptoms of depression, anxiety, emotional and cognitive disorders in patients with heart failure",
+   "journal": "Кардиоваскулярная терапия и профилактика",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 622,
+   "subjects": [
+    "Diseases of the circulatory (Cardiovascular) system"
+   ]
+  },
+  {
+   "doi": "10.37493/2308-4758.2025.3.2",
+   "title": "Assessment of shock resistance of the light industry of Russia in modern conditions",
+   "journal": "Наука. Инновации. Технологии",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 90,
+   "subjects": [
+    "Geography (General)"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-lang-ru-01",
+   "stratum": "doaj-lang-ru",
+   "field": "non-English: Russian (Cyrillic)",
+   "layout_hint": "mixed",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.26425/2658-3445-2019-1-7-18",
+   "title": "Methodology of a marketing research of Internet users",
+   "journal": "E-Management",
+   "license": "cc-by",
+   "url": "https://doi.org/10.26425/2658-3445-2019-1-7-18",
+   "pdf_url": "https://e-management.guu.ru/jour/article/download/23/24",
+   "pdf_host": "e-management.guu.ru",
+   "pdf_bytes": 433540,
+   "pdf_sha256": "ac4b8f2316563c6810f6023c9adbfc1388a9dc1b96c63a4046ee8c19c9956ef0",
+   "pages": 12,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 9,
+   "pool_rank": 6,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.20310/1810-0201-2016-21-10(162)-96-103",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.14341/omet9758",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.35567/1999-4508-2020-2-3",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.3176/lu.2004.1.14",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21686/2500-3925-2015-2-95-99",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.18500/1818-9601-2025-25-3-303-313",
+   "why": "not-pdf:soziopolit.sgu.ru"
+  },
+  {
+   "doi": "10.18500/1818-9601-2025-25-3-303-313",
+   "why": "no-usable-pdf-location"
+  }
+ ],
+ "date": "2026-09-30"
+}

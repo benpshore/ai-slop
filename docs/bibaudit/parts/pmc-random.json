@@ -1,0 +1,240 @@
+{
+ "stratum": "pmc-random",
+ "seed": "20260930:pmc-random",
+ "pool": {
+  "uniform_random_ids": [
+   1000,
+   13000000
+  ]
+ },
+ "items": [
+  {
+   "id": "pmc-random-01",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC4999203",
+   "doi": "10.1371/journal.pone.0161901",
+   "title": "Genome-Wide Identification, Evolutionary Analysis and Expression Profiles of LATERAL ORGAN BOUNDARIES DOMAIN Gene Family in Lotus japonicus and Medicago truncatula",
+   "citation": "PLoS One. 2016 Aug 25;11(8):e0161901. doi: 10.1371/journal.pone.0161901",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4999203/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC4999203.1/PMC4999203.1.pdf",
+   "pdf_bytes": 5783954,
+   "pdf_sha256": "1b0f6ae0eb8c889e8d4f1a904381ecd6823078e70463eb4e3eeb18331989d190",
+   "truth_kind": "jats",
+   "truth_n": 25,
+   "rank_in_shuffled_pool": 3,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-02",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC11984734",
+   "doi": "10.1371/journal.pmed.1004454",
+   "title": "Maternal dietary patterns, breastfeeding duration, and their association with child cognitive function and head circumference growth: A prospective mother–child cohort study",
+   "citation": "PLoS Med. 2025 Apr 10;22(4):e1004454. doi: 10.1371/journal.pmed.1004454",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11984734/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC11984734.1/PMC11984734.1.pdf",
+   "pdf_bytes": 1330412,
+   "pdf_sha256": "9885990afa2f649696add9d8000d1af536bb4c8d270f56c97df13734273d8e93",
+   "truth_kind": "jats",
+   "truth_n": 64,
+   "rank_in_shuffled_pool": 6,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-03",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC7478811",
+   "doi": "10.1097/CM9.0000000000000984",
+   "title": "Progress and prospect of non-invasive detection techniques in the therapeutic evaluation of melasma",
+   "citation": "Chin Med J (Engl). 2020 Aug 17;133(17):2104–6. doi: 10.1097/CM9.0000000000000984",
+   "license": "CC BY-NC-ND",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7478811/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC7478811.1/PMC7478811.1.pdf",
+   "pdf_bytes": 231824,
+   "pdf_sha256": "c0dcc829236bd4ac9e736fd74429e0ba4f672072b2fd9db99c43291a19643b3c",
+   "truth_kind": "jats",
+   "truth_n": 26,
+   "rank_in_shuffled_pool": 7,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-04",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC5673727",
+   "doi": "10.12669/pjms.335.12908",
+   "title": "Transpedical Interbody Bone Grafting in the Treatment of Senile Osteoporotic Vertebral Fracture",
+   "citation": "Pak J Med Sci. 2017 Sep-Oct;33(5):1166–70. doi: 10.12669/pjms.335.12908",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5673727/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC5673727.1/PMC5673727.1.pdf",
+   "pdf_bytes": 573556,
+   "pdf_sha256": "4f55dfcae28c33dbd403ae7c2551540ef8d3a247e1736b54704393d0c26ac177",
+   "truth_kind": "jats",
+   "truth_n": 16,
+   "rank_in_shuffled_pool": 9,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-05",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC11946461",
+   "doi": "10.3390/plants14060959",
+   "title": "Candidate Gene for Kernel-Related Traits in Maize Revealed by a Combination of GWAS and Meta-QTL Analyses",
+   "citation": "Plants (Basel). 2025 Mar 19;14(6):959. doi: 10.3390/plants14060959",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11946461/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC11946461.1/PMC11946461.1.pdf",
+   "pdf_bytes": 2624262,
+   "pdf_sha256": "441ff7ecd7482135417fb2353119f77fc3ad9d11c39c961ee5d35a8327840dd3",
+   "truth_kind": "jats",
+   "truth_n": 148,
+   "rank_in_shuffled_pool": 11,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-06",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC12873038",
+   "doi": "10.1186/s40981-026-00847-7",
+   "title": "Delayed emergence with remimazolam after laparoscopic subsegmental hepatectomy including the intermittent pringle maneuver in a patient with preserved liver function",
+   "citation": "JA Clin Rep. 2026 Feb 5;12:12. doi: 10.1186/s40981-026-00847-7",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12873038/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC12873038.1/PMC12873038.1.pdf",
+   "pdf_bytes": 1058466,
+   "pdf_sha256": "38e5a99ff5219aba4e8987311ff20b40a8f7a807557f3d33ea94e40b2482cc57",
+   "truth_kind": "jats",
+   "truth_n": 5,
+   "rank_in_shuffled_pool": 12,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-07",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC11027079",
+   "doi": "10.1017/ice.2023.172",
+   "title": "A severe acute respiratory coronavirus virus 2 (SARS-CoV-2) nosocomial cluster with inter-facility spread: Lessons learned",
+   "citation": "Infect Control Hosp Epidemiol. 2024 Jan 4;45(5):635–43. doi: 10.1017/ice.2023.172",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11027079/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC11027079.1/PMC11027079.1.pdf",
+   "pdf_bytes": 659671,
+   "pdf_sha256": "f9b0d2cd6e589b3e97048afbdfe1e01d5aded602951d6db1a2a32250531c470c",
+   "truth_kind": "jats",
+   "truth_n": 24,
+   "rank_in_shuffled_pool": 16,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-random-08",
+   "stratum": "pmc-random",
+   "field": "biomedicine (uniform random PMC ids)",
+   "layout_hint": "mixed",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC9570808",
+   "doi": "10.3390/polym14193990",
+   "title": "Electrospun Porous Nanofibers: Pore−Forming Mechanisms and Applications for Photocatalytic Degradation of Organic Pollutants in Wastewater",
+   "citation": "Polymers (Basel). 2022 Sep 23;14(19):3990. doi: 10.3390/polym14193990",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9570808/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC9570808.1/PMC9570808.1.pdf",
+   "pdf_bytes": 10921387,
+   "pdf_sha256": "e2fd6f9302e67bba0c1a243ceac5926c45abb498cb5fb44908358fba12cb5fbf",
+   "truth_kind": "jats",
+   "truth_n": 173,
+   "rank_in_shuffled_pool": 20,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [
+  {
+   "pmcid": "PMC3159181",
+   "rank": 0,
+   "why": "not-oa"
+  },
+  {
+   "pmcid": "PMC1200502",
+   "rank": 1,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC3644805",
+   "rank": 2,
+   "why": "not-oa"
+  },
+  {
+   "pmcid": "PMC674569",
+   "rank": 4,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC1496525",
+   "rank": 5,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC423942",
+   "rank": 8,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC2268888",
+   "rank": 10,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC3652356",
+   "rank": 13,
+   "why": "no-open-license"
+  },
+  {
+   "pmcid": "PMC7971382",
+   "rank": 14,
+   "why": "no-open-license"
+  },
+  {
+   "pmcid": "PMC666998",
+   "rank": 15,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC11375740",
+   "rank": 17,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC9192685",
+   "rank": 18,
+   "why": "not-in-bucket"
+  },
+  {
+   "pmcid": "PMC1741732",
+   "rank": 19,
+   "why": "not-in-bucket"
+  }
+ ],
+ "date": "2026-09-30"
+}

@@ -1,0 +1,580 @@
+{
+ "stratum": "doaj-economics",
+ "seed": "20260930:doaj-economics",
+ "pool_desc": {
+  "doaj_query": "bibjson.subject.term:Economics AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2018": 7194,
+   "2022": 10613,
+   "2023": 8817,
+   "2021": 8776,
+   "2024": 10238,
+   "2025": 11023,
+   "2019": 9819,
+   "2020": 7252,
+   "2015": 7025,
+   "2016": 9141,
+   "2017": 7116
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.21686/2500-3925-2023-4-12-21",
+   "title": "Assessing the Level of Consumption by Children in Households",
+   "journal": "Статистика и экономика",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 831,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.25206/2542-0488-2024-9-3-35-40",
+   "title": "Problems of eliminating youth unemployment in Omsk in the 1920s",
+   "journal": "Омский научный вестник: Серия \"Общество. История. Современность\"",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 297,
+   "subjects": [
+    "History (General) and history of Europe",
+    "Economics as a science",
+    "Newspapers"
+   ]
+  },
+  {
+   "doi": "10.14276/1971-8357.1258",
+   "title": "Prospettive per uno studio storico sulla corruzione tra politica ed economia nella cultura mediterranea. Il caso italiano e il caso spagnolo nel seennio 2014-2020",
+   "journal": "Argomenti: Rivista di Economia, Cultura e Ricerca Sociale",
+   "lang": [
+    "EN",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 274,
+   "subjects": [
+    "Business",
+    "Economics as a science",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.1590/0101-31571993-0753",
+   "title": "Inflação e credibilidade: uma introdução com bibliografia",
+   "journal": "Brazilian Journal of Political Economy",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 81,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.14530/se.2018.4.067-091",
+   "title": "Natural Resources: How to Measure Them in ‘Resource Curse’ Studies",
+   "journal": "Пространственная экономика",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 120,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.1590/198055272417",
+   "title": "REVISITING BALANCE-OF-PAYMENTS CONSTRAINED GROWTH 70 YEARS AFTER ECALC’S MANIFESTO: THE CASE OF SOUTH AMERICA",
+   "journal": "Revista de Economia Contemporânea",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 678,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.2478/ers-2023-0032",
+   "title": "Changes in the core-Periphery Structure of the Framework Programme’s Regional Network",
+   "journal": "Studia Ekonomiczne i Regionalne",
+   "lang": [
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 130,
+   "subjects": [
+    "Regional economics. Space in economics",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.1590/0101-31571988-2126",
+   "title": "Os grandes problemas da moeda internacional",
+   "journal": "Brazilian Journal of Political Economy",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 683,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.21608/molag.2023.226414.1230",
+   "title": "فاعلية الدورات التدريبية في تطوير منظومة تدريس الأداء العزفي لآلة البيانو لدى أعضاء هيئة تدريس الكليات النوعية",
+   "journal": "المجلة العلمية لكلية التربية النوعية - جامعة المنوفية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 389,
+   "subjects": [
+    "Education (General)",
+    "Music",
+    "Fine Arts",
+    "Home economics"
+   ]
+  },
+  {
+   "doi": "10.37493/2307-907x.2021.3.10",
+   "title": "THE IMPULSIVE CROWD AS A NEW WAY OF MANIPULATING THE STOCK MARKET",
+   "journal": "Вестник Северо-Кавказского федерального университета",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 90,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.29313/amwaluna.v2i1.3039",
+   "title": "EFEKTIFITAS PROGRAM CSR SALAM BRIS PADA PENINGKATAN KOMPETENSI MAHASISWA DI LABORATORIUM BANK MINI SYARIAH",
+   "journal": "Amwaluna: Jurnal Ekonomi dan Keuangan Syariah",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 312,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.32342/2074-5354-2023-1-58-8",
+   "title": "IMPROVING THE SYSTEM OF ADAPTIVE MANAGEMENT OF AGRICULTURAL ENTERPRISES ON THE BASIS OF CONTROLLING",
+   "journal": "Akademičnij Oglâd",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 11,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.31648/aspal.6819",
+   "title": "Sustainability of urbanization processes in the digital environment: food security factors",
+   "journal": "Acta Scientiarum Polonorum. Administratio Locorum",
+   "lang": [
+    "EN"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 295,
+   "subjects": [
+    "Land tenure",
+    "Regional economics. Space in economics"
+   ]
+  },
+  {
+   "doi": "10.55643/fcaptp.1.60.2025.4564",
+   "title": "AN ANALYSIS OF INVESTMENT DEMAND AND THE DEVELOPMENT TREND OF NON-STATE ENTERPRISES IN VIETNAM",
+   "journal": "Фінансово-кредитна діяльність: проблеми теорії та практики",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 634,
+   "subjects": [
+    "Economics as a science",
+    "Business"
+   ]
+  },
+  {
+   "doi": "10.4102/sajems.v23i1.2905",
+   "title": "Modelling asymmetric relationship between exports and growth in a developing economy: Evidence from Namibia",
+   "journal": "South African Journal of Economic and Management Sciences",
+   "lang": [
+    "EN"
+   ],
+   "country": "ZA",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 947,
+   "subjects": [
+    "Management. Industrial management",
+    "Business",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.25206/2542-0488-2025-10-2-104-110",
+   "title": "Towards a reconstruction of Nietzschean Ontology",
+   "journal": "Омский научный вестник: Серия \"Общество. История. Современность\"",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 805,
+   "subjects": [
+    "History (General) and history of Europe",
+    "Economics as a science",
+    "Newspapers"
+   ]
+  },
+  {
+   "doi": "10.18778/1508-2008.25.24",
+   "title": "Determinants of International Reserves Among Organisation of Petroleum Exporting Countries (OPEC)",
+   "journal": "Comparative Economic Research",
+   "lang": [
+    "EN"
+   ],
+   "country": "PL",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 798,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.21608/mjle.2024.392754",
+   "title": "فعل الإفشاء في جريمة افشاء السر المهني .",
+   "journal": "مجلة البحوث القانونية و الاقتصادية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 878,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Islamic law",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.5922/2079-8555-2017-3-1",
+   "title": "The Baltics on Their Way towards a Circular Economy",
+   "journal": "Baltic Region",
+   "lang": [
+    "EN"
+   ],
+   "country": "RU",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 0,
+   "subjects": [
+    "Regional economics. Space in economics"
+   ]
+  },
+  {
+   "doi": "10.3390/economies11100255",
+   "title": "The Economic Efficiency of Coffee Growers in the Department of Caldas, Colombia",
+   "journal": "Economies",
+   "lang": [
+    "EN"
+   ],
+   "country": "CH",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 147,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.55643/fcaptp.1.48.2023.3973",
+   "title": "INVESTING OF THE SPHERE OF CULTURE IN UKRAINE: SOURCES AND PECULIARITIES",
+   "journal": "Фінансово-кредитна діяльність: проблеми теорії та практики",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 140,
+   "subjects": [
+    "Economics as a science",
+    "Business"
+   ]
+  },
+  {
+   "doi": "10.15678/krem.816",
+   "title": "Performance management jako holistyczna koncepcja zarządzania organizacją",
+   "journal": "Zeszyty Naukowe Uniwersytetu Ekonomicznego w Krakowie",
+   "lang": [
+    "EN"
+   ],
+   "country": "PL",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 339,
+   "subjects": [
+    "Economics as a science",
+    "Business"
+   ]
+  },
+  {
+   "doi": "10.24818/ea/2020/s14/1085",
+   "title": "The Impact of Heavy Work Investment on the Economy and the Individual",
+   "journal": "Amfiteatru Economic",
+   "lang": [
+    "EN",
+    "RO"
+   ],
+   "country": "RO",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 319,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.5937/megrev1502201k",
+   "title": "Juvenile delinquency in Russia: Ccriminal justice, trends, key issues",
+   "journal": "Megatrend Revija",
+   "lang": [
+    "EN",
+    "SR"
+   ],
+   "country": "RS",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 442,
+   "subjects": [
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.5281/zenodo.4553646",
+   "title": "The (Non)-Existing EU Standards in National Minority Protection as Prerequisites for Successful European Integration: The Case of Macedonia and Serbia",
+   "journal": "AICEI Proceedings",
+   "lang": [
+    "EN"
+   ],
+   "country": "MK",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 248,
+   "subjects": [
+    "Europe (General)",
+    "History of Balkan Peninsula",
+    "Political science",
+    "Economics as a science"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-economics-01",
+   "stratum": "doaj-economics",
+   "field": "economics",
+   "layout_hint": "author-year (Harvard/APA) expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.32342/2074-5354-2023-1-58-8",
+   "title": "IMPROVING THE SYSTEM OF ADAPTIVE MANAGEMENT OF AGRICULTURAL ENTERPRISES ON THE BASIS OF CONTROLLING",
+   "journal": "Academic Review",
+   "license": "cc-by",
+   "url": "https://doi.org/10.32342/2074-5354-2023-1-58-8",
+   "pdf_url": "https://doi.org/10.32342/2074-5354-2023-1-58-8",
+   "pdf_host": "doi.org",
+   "pdf_bytes": 835410,
+   "pdf_sha256": "a0a016ae633ac3971ef4726996c8306e4be25901d86a28f9f607c8cea22f67cf",
+   "pages": 13,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 58,
+   "pool_rank": 0,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-economics-02",
+   "stratum": "doaj-economics",
+   "field": "economics",
+   "layout_hint": "author-year (Harvard/APA) expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.24818/ea/2020/s14/1085",
+   "title": "The Impact of Heavy Work Investment on the Economy and the Individual",
+   "journal": "www.amfiteatrueconomic.ro",
+   "license": "cc-by",
+   "url": "https://doi.org/10.24818/ea/2020/s14/1085",
+   "pdf_url": "https://doi.org/10.24818/ea/2020/s14/1085",
+   "pdf_host": "doi.org",
+   "pdf_bytes": 803672,
+   "pdf_sha256": "23e35160668146a65859457e93ed8118634c5ee02d6e7ead76147e52037af94a",
+   "pages": 18,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 13,
+   "pool_rank": 2,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-economics-03",
+   "stratum": "doaj-economics",
+   "field": "economics",
+   "layout_hint": "author-year (Harvard/APA) expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.4102/sajems.v23i1.2905",
+   "title": "Modelling asymmetric relationship between exports and growth in a developing economy: Evidence from Namibia",
+   "journal": "South African Journal of Economic and Management Sciences",
+   "license": "cc-by",
+   "url": "https://doi.org/10.4102/sajems.v23i1.2905",
+   "pdf_url": "https://sajems.org/index.php/sajems/article/download/2905/2039",
+   "pdf_host": "sajems.org",
+   "pdf_bytes": 818421,
+   "pdf_sha256": "3fd4e36d51505e915b03eec74add2249433ed4590be8685c816e99e9b373d8c1",
+   "pages": 10,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 30,
+   "pool_rank": 6,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-economics-04",
+   "stratum": "doaj-economics",
+   "field": "economics",
+   "layout_hint": "author-year (Harvard/APA) expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.55643/fcaptp.1.48.2023.3973",
+   "title": "INVESTING OF THE SPHERE OF CULTURE IN UKRAINE: SOURCES AND PECULIARITIES",
+   "journal": "Financial and credit activity problems of theory and practice",
+   "license": "cc-by",
+   "url": "https://doi.org/10.55643/fcaptp.1.48.2023.3973",
+   "pdf_url": "https://fkd.net.ua/index.php/fkd/article/download/3973/3749",
+   "pdf_host": "fkd.net.ua",
+   "pdf_bytes": 215473,
+   "pdf_sha256": "8db46040e37bf288620786453dddd4c6ad48f21e3fa39e4af54e60f1c0d171af",
+   "pages": 12,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 34,
+   "pool_rank": 7,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-economics-05",
+   "stratum": "doaj-economics",
+   "field": "economics",
+   "layout_hint": "author-year (Harvard/APA) expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.21686/2500-3925-2023-4-12-21",
+   "title": "Assessing the Level of Consumption by Children in Households",
+   "journal": "Statistics and Economics",
+   "license": "cc-by",
+   "url": "https://doi.org/10.21686/2500-3925-2023-4-12-21",
+   "pdf_url": "https://statecon.rea.ru/jour/article/download/1767/1358",
+   "pdf_host": "statecon.rea.ru",
+   "pdf_bytes": 795059,
+   "pdf_sha256": "4074d1c70430983ecb3cfb7dd80f17b3db4080c8db88fcacd69204231d654561",
+   "pages": 9,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 25,
+   "pool_rank": 9,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.37493/2307-907x.2021.3.10",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5922/2079-8555-2017-3-1",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.25206/2542-0488-2025-10-2-104-110",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.1590/198055272417",
+   "why": "pdf-fetch:www.scielo.br:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.1590/198055272417",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.5937/megrev1502201k",
+   "why": "crossref-refs=0"
+  }
+ ],
+ "date": "2026-09-30"
+}

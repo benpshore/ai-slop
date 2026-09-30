@@ -1,0 +1,236 @@
+{
+ "stratum": "arxiv-cs",
+ "seed": "20260930:arxiv-cs",
+ "cats": [
+  "cs.LG",
+  "cs.CL",
+  "cs.CV",
+  "cs.CR",
+  "cs.DS",
+  "cs.SE"
+ ],
+ "months": [
+  "202201",
+  "202608"
+ ],
+ "items": [
+  {
+   "id": "arxiv-cs-01",
+   "stratum": "arxiv-cs",
+   "field": "computer science / ML",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2501.04798",
+   "version": 1,
+   "title": "Teaching Simulation as a Research Method in Empirical Software Engineering",
+   "license": "http://creativecommons.org/licenses/by-nc-nd/4.0/",
+   "url": "https://arxiv.org/abs/2501.04798v1",
+   "pdf_url": "https://arxiv.org/pdf/2501.04798v1",
+   "pdf_bytes": 629428,
+   "pdf_sha256": "d7c226be07f0896cac2afbeb949efb483e1e9755953386b89667a66c5475901f",
+   "truth_kind": "bbl",
+   "truth_n": 35,
+   "truth_detail": "bibitem:main.bbl",
+   "draw": {
+    "draw": 4,
+    "cat": "cs.SE",
+    "ym": "202501",
+    "offset": 59,
+    "total": 352
+   }
+  },
+  {
+   "id": "arxiv-cs-02",
+   "stratum": "arxiv-cs",
+   "field": "computer science / ML",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2503.10706",
+   "version": 2,
+   "title": "SciFi-Benchmark: Leveraging Science Fiction To Improve Robot Behavior",
+   "license": "http://creativecommons.org/licenses/by/4.0/",
+   "url": "https://arxiv.org/abs/2503.10706v2",
+   "pdf_url": "https://arxiv.org/pdf/2503.10706v2",
+   "pdf_bytes": 4184665,
+   "pdf_sha256": "57b04c31aa9c78e366b253516932ea523eff3736ec53530f53c0b621c33ec377",
+   "truth_kind": "bbl",
+   "truth_n": 48,
+   "truth_detail": "bibitem:main.bbl",
+   "draw": {
+    "draw": 8,
+    "cat": "cs.CL",
+    "ym": "202503",
+    "offset": 810,
+    "total": 1880
+   }
+  },
+  {
+   "id": "arxiv-cs-03",
+   "stratum": "arxiv-cs",
+   "field": "computer science / ML",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2412.05366",
+   "version": 2,
+   "title": "ExploraCoder: Advancing code generation for multiple unseen APIs via planning and chained exploration",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2412.05366v2",
+   "pdf_url": "https://arxiv.org/pdf/2412.05366v2",
+   "pdf_bytes": 901107,
+   "pdf_sha256": "acc9f63760850cb4fe973ec03d290efc5e9e5f34c10bd27b19b9c43f983d5225",
+   "truth_kind": "bbl",
+   "truth_n": 38,
+   "truth_detail": "bibitem:exploracoder.bbl",
+   "draw": {
+    "draw": 12,
+    "cat": "cs.SE",
+    "ym": "202412",
+    "offset": 61,
+    "total": 314
+   }
+  },
+  {
+   "id": "arxiv-cs-04",
+   "stratum": "arxiv-cs",
+   "field": "computer science / ML",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2207.12661",
+   "version": 1,
+   "title": "Learning Visual Representation from Modality-Shared Contrastive Language-Image Pre-training",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2207.12661v1",
+   "pdf_url": "https://arxiv.org/pdf/2207.12661v1",
+   "pdf_bytes": 1477194,
+   "pdf_sha256": "2ef7de1761db49968d12b0fb44dfbf88fa13152befc56e8077d7fc4363ed1aa5",
+   "truth_kind": "bbl",
+   "truth_n": 69,
+   "truth_detail": "bibitem:eccv2022submission.bbl",
+   "draw": {
+    "draw": 16,
+    "cat": "cs.CL",
+    "ym": "202207",
+    "offset": 366,
+    "total": 442
+   }
+  },
+  {
+   "id": "arxiv-cs-05",
+   "stratum": "arxiv-cs",
+   "field": "computer science / ML",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2210.12353",
+   "version": 3,
+   "title": "Leveraging Large Language Models for Multiple Choice Question Answering",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2210.12353v3",
+   "pdf_url": "https://arxiv.org/pdf/2210.12353v3",
+   "pdf_bytes": 581740,
+   "pdf_sha256": "b9b5d3cf0c33334e2eb99fc2d7818a93d51886699b3b8c64f19da6b9fbc63595",
+   "truth_kind": "bbl",
+   "truth_n": 71,
+   "truth_detail": "bibitem:iclr2023_conference.bbl",
+   "draw": {
+    "draw": 17,
+    "cat": "cs.LG",
+    "ym": "202210",
+    "offset": 2253,
+    "total": 3267
+   }
+  }
+ ],
+ "rejected_draws": [
+  {
+   "draw": 0,
+   "cat": "cs.CR",
+   "ym": "202402",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 1,
+   "cat": "cs.CL",
+   "ym": "202303",
+   "offset": 379,
+   "total": 747,
+   "arxiv_id": "2303.09892",
+   "version": 3,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 2,
+   "cat": "cs.LG",
+   "ym": "202206",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 3,
+   "cat": "cs.LG",
+   "ym": "202206",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 5,
+   "cat": "cs.CR",
+   "ym": "202502",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 6,
+   "cat": "cs.SE",
+   "ym": "202211",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 7,
+   "cat": "cs.CL",
+   "ym": "202306",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 9,
+   "cat": "cs.SE",
+   "ym": "202306",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 10,
+   "cat": "cs.CL",
+   "ym": "202512",
+   "offset": 1283,
+   "total": 1330,
+   "arxiv_id": "2601.14267",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 11,
+   "cat": "cs.SE",
+   "ym": "202206",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 13,
+   "cat": "cs.CR",
+   "ym": "202311",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 14,
+   "cat": "cs.DS",
+   "ym": "202509",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 15,
+   "cat": "cs.SE",
+   "ym": "202510",
+   "offset": 18,
+   "total": 576,
+   "arxiv_id": "2510.01003",
+   "version": 2,
+   "why": "no-bbl-or-bibitem"
+  }
+ ],
+ "date": "2026-09-30"
+}

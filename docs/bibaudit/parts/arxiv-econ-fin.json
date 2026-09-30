@@ -1,0 +1,197 @@
+{
+ "stratum": "arxiv-econ-fin",
+ "seed": "20260930:arxiv-econ-fin",
+ "cats": [
+  "econ.GN",
+  "econ.EM",
+  "q-fin.GN",
+  "q-fin.PM",
+  "q-fin.ST",
+  "econ.TH"
+ ],
+ "months": [
+  "202201",
+  "202608"
+ ],
+ "items": [
+  {
+   "id": "arxiv-econ-fin-01",
+   "stratum": "arxiv-econ-fin",
+   "field": "economics / finance",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2207.01793",
+   "version": 3,
+   "title": "The Short-term Impact of Congestion Taxes on Ridesourcing Demand and Traffic Congestion: Evidence from Chicago",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2207.01793v3",
+   "pdf_url": "https://arxiv.org/pdf/2207.01793v3",
+   "pdf_bytes": 12454737,
+   "pdf_sha256": "29f2458e27d5e69053a0dfce90e0b73cf254aec5fb9cf35e243864ee3d4318d8",
+   "truth_kind": "bbl",
+   "truth_n": 35,
+   "truth_detail": "bibitem:Main_text.bbl",
+   "draw": {
+    "draw": 0,
+    "cat": "econ.GN",
+    "ym": "202207",
+    "offset": 5,
+    "total": 44
+   }
+  },
+  {
+   "id": "arxiv-econ-fin-02",
+   "stratum": "arxiv-econ-fin",
+   "field": "economics / finance",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2308.05486",
+   "version": 3,
+   "title": "Money Growth and Inflation: A Quantile Sensitivity Approach",
+   "license": "http://creativecommons.org/licenses/by-nc-nd/4.0/",
+   "url": "https://arxiv.org/abs/2308.05486v3",
+   "pdf_url": "https://arxiv.org/pdf/2308.05486v3",
+   "pdf_bytes": 305621,
+   "pdf_sha256": "bbf6398d09ff86b596d7ea6ea9e2264d939a7580beb1d7c0f48c0273b21dca75",
+   "truth_kind": "bbl",
+   "truth_n": 17,
+   "truth_detail": "bibitem:draft.bbl",
+   "draw": {
+    "draw": 1,
+    "cat": "econ.EM",
+    "ym": "202308",
+    "offset": 16,
+    "total": 53
+   }
+  },
+  {
+   "id": "arxiv-econ-fin-03",
+   "stratum": "arxiv-econ-fin",
+   "field": "economics / finance",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2207.04595",
+   "version": 4,
+   "title": "A semi-parametric dynamic conditional correlation framework for risk forecasting",
+   "license": "http://creativecommons.org/licenses/by/4.0/",
+   "url": "https://arxiv.org/abs/2207.04595v4",
+   "pdf_url": "https://arxiv.org/pdf/2207.04595v4",
+   "pdf_bytes": 847984,
+   "pdf_sha256": "c1cb69dcc571471e5c9a18c6c293d069f189c8bf2984dbd6470ff9094de3f621",
+   "truth_kind": "bbl",
+   "truth_n": 38,
+   "truth_detail": "bibitem:main.bbl",
+   "draw": {
+    "draw": 8,
+    "cat": "q-fin.PM",
+    "ym": "202207",
+    "offset": 4,
+    "total": 8
+   }
+  },
+  {
+   "id": "arxiv-econ-fin-04",
+   "stratum": "arxiv-econ-fin",
+   "field": "economics / finance",
+   "layout_hint": "LaTeX (arXiv)",
+   "source": "arXiv",
+   "arxiv_id": "2603.13823",
+   "version": 1,
+   "title": "Enhancing the Accuracy of Regional Input-Output Table Estimation: A Deep Learning Approach",
+   "license": "http://arxiv.org/licenses/nonexclusive-distrib/1.0/",
+   "url": "https://arxiv.org/abs/2603.13823v1",
+   "pdf_url": "https://arxiv.org/pdf/2603.13823v1",
+   "pdf_bytes": 1016563,
+   "pdf_sha256": "91acb76397b0a3bd4e4392d8e403b0fbde324f938b454b92107566e4cdef42fe",
+   "truth_kind": "bbl",
+   "truth_n": 39,
+   "truth_detail": "bibitem:Main.tex",
+   "draw": {
+    "draw": 11,
+    "cat": "econ.EM",
+    "ym": "202603",
+    "offset": 44,
+    "total": 85
+   }
+  }
+ ],
+ "rejected_draws": [
+  {
+   "draw": 2,
+   "cat": "q-fin.GN",
+   "ym": "202603",
+   "offset": 2,
+   "total": 14,
+   "arxiv_id": "2603.11838",
+   "version": 2,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 3,
+   "cat": "q-fin.GN",
+   "ym": "202307",
+   "offset": 1,
+   "total": 15,
+   "arxiv_id": "2307.03935",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 4,
+   "cat": "q-fin.GN",
+   "ym": "202210",
+   "offset": 2,
+   "total": 6,
+   "arxiv_id": "2210.07955",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 5,
+   "cat": "econ.GN",
+   "ym": "202507",
+   "offset": 50,
+   "total": 109,
+   "arxiv_id": "2507.12267",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 6,
+   "cat": "econ.GN",
+   "ym": "202310",
+   "offset": 14,
+   "total": 78,
+   "arxiv_id": "2310.05114",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 7,
+   "cat": "econ.EM",
+   "ym": "202606",
+   "why": "error:HTTPError:HTTP Error 500: Internal Server Error"
+  },
+  {
+   "draw": 9,
+   "cat": "q-fin.GN",
+   "ym": "202301",
+   "offset": 2,
+   "total": 12,
+   "arxiv_id": "2301.07520",
+   "version": 1,
+   "why": "no-bbl-or-bibitem"
+  },
+  {
+   "draw": 10,
+   "cat": "q-fin.ST",
+   "ym": "202601",
+   "offset": 34,
+   "total": 38,
+   "arxiv_id": "2601.23172",
+   "version": 2,
+   "why": "no-bbl-or-bibitem"
+  }
+ ],
+ "date": "2026-09-30"
+}

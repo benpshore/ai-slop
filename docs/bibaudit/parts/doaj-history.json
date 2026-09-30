@@ -1,0 +1,700 @@
+{
+ "stratum": "doaj-history",
+ "seed": "20260930:doaj-history",
+ "pool_desc": {
+  "doaj_query": "bibjson.subject.term:History AND bibjson.year:[2015 TO 2025]",
+  "total_hits": {
+   "2021": 28824,
+   "2024": 28839,
+   "2017": 20003,
+   "2022": 27664,
+   "2016": 19775,
+   "2020": 27162,
+   "2019": 22418,
+   "2018": 23240,
+   "2025": 31904
+  },
+  "window": 9900
+ },
+ "pool": [
+  {
+   "doi": "10.36317/kaj/2019/v1.i42.1407",
+   "title": "تصميم منهج دراسي متأزر للمرحله الدراسيه الابتدائية",
+   "journal": "آداب الكوفة",
+   "lang": [
+    "AR",
+    "EN",
+    "FR"
+   ],
+   "country": "IQ",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 190,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Arts in general",
+    "Language and Literature"
+   ]
+  },
+  {
+   "doi": "10.34624/id.v16i3.38472",
+   "title": "CALCULECO: um jogo para Educação Ambiental e sustentabilidade com o uso da Matemática",
+   "journal": "Indagatio Didactica",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "PT",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 316,
+   "subjects": [
+    "Education (General)",
+    "Theory and practice of education",
+    "Special aspects of education",
+    "History of education"
+   ]
+  },
+  {
+   "doi": "10.18352/incontri.10173",
+   "title": "Il tempo e l'aspetto nel discorso. Italiano e olandese a confronto",
+   "journal": "Incontri: Rivista Europea di Studi Italiani",
+   "lang": [
+    "EN",
+    "IT",
+    "NL"
+   ],
+   "country": "NL",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 441,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "History of Italy"
+   ]
+  },
+  {
+   "doi": "10.4000/e-spania.26578",
+   "title": "L’amour comme lien politique dans la Estoria de España d’Alphonse X le Sage",
+   "journal": "E-Spania",
+   "lang": [
+    "ES",
+    "FR",
+    "LA",
+    "PT"
+   ],
+   "country": "FR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 956,
+   "subjects": [
+    "History (General) and history of Europe",
+    "History of Spain"
+   ]
+  },
+  {
+   "doi": "10.26436/2017.5.3.433",
+   "title": "التأشير والتباعد بين القدماء والمحدثين مقاربة تداولية",
+   "journal": "گۆڤارا زانستێن مرۆڤایەتی یا زانكۆیا زاخۆ",
+   "lang": [
+    "AR",
+    "EN",
+    "KU"
+   ],
+   "country": "IQ",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 165,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Language and Literature"
+   ]
+  },
+  {
+   "doi": "10.18441/ibam.19.2019.71.35-50",
+   "title": "Tlaxcalan Histories of the Conquest and the Construction of a Cultural Memory",
+   "journal": "Iberoamericana. América Latina - España - Portugal",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "DE",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 430,
+   "subjects": [
+    "History of Portugal",
+    "History of Spain",
+    "Latin America. Spanish America",
+    "French literature - Italian literature - Spanish literature - Portuguese literature",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.30827/dreh.v0i13.7246",
+   "title": "Design, Educação e Formação. Uma visão situada e transversal",
+   "journal": "DEDiCA",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 18,
+   "subjects": [
+    "Education (General)",
+    "History of scholarship and learning. The humanities"
+   ]
+  },
+  {
+   "doi": "10.18524/2410-2601.2019.1(31).186351",
+   "title": "«ТРАНСГРЕСИВНИЙ СМІХ» ЖОРЖА БАТАЯ В КОНТЕКСТІ КРИТИКИ ФІЛОСОФІЇ МОДЕРНУ",
+   "journal": "Докса",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 174,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Philosophy (General)"
+   ]
+  },
+  {
+   "doi": "10.17497/tuhed.491909",
+   "title": "TOPLUMSAL HAFIZANIN SİYASAL ALAN TARAFINDAN İNŞA SÜRECİNİN SOSYAL BİLGİLER/TARİH DERS KİTAPLARINA YANSIMALARI",
+   "journal": "Turkish History Education Journal",
+   "lang": [
+    "EN",
+    "TR"
+   ],
+   "country": "TR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 234,
+   "subjects": [
+    "Special aspects of education",
+    "History (General)"
+   ]
+  },
+  {
+   "doi": "10.1016/j.jik.2021.01.002",
+   "title": "Factors influencing blockchain adoption in supply chain management practices: A study based on the oil industry",
+   "journal": "Journal of Innovation & Knowledge",
+   "lang": [
+    "EN"
+   ],
+   "country": "ES",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 167,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.52056/9791254691984/13",
+   "title": "Simona Troilo, “Pietre d’Oltremare”",
+   "journal": "Storicamente",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "IT",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 581,
+   "subjects": [
+    "History (General)"
+   ]
+  },
+  {
+   "doi": "10.26436/hjuoz.2019.7.2.492",
+   "title": "ره‌نگڤه‌دانا ده‌لاله‌تا ناڤونیشانى د رۆمانا (سوتنگه‌ه) یا نڤیسه‌ر (بلند محمد) یدا",
+   "journal": "گۆڤارا زانستێن مرۆڤایەتی یا زانكۆیا زاخۆ",
+   "lang": [
+    "AR",
+    "EN",
+    "KU"
+   ],
+   "country": "IQ",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 215,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Language and Literature"
+   ]
+  },
+  {
+   "doi": "10.3989/ceg.2024.137.17",
+   "title": "Carlos Ortiz de Landázuri, La vida futura del camino jacobeo, Logroño, [Federación Española Asociaciones Amigos Camino de Santiago], 2022, 325 págs. ISBN: 978-84-73799-70-2.",
+   "journal": "Cuadernos de Estudios Gallegos",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "GL"
+   ],
+   "country": "ES",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 8,
+   "subjects": [
+    "History of Spain"
+   ]
+  },
+  {
+   "doi": "10.30958/ajha.4.2.4",
+   "title": "Mediterranean Mountains in the Mythological Paintings of European Art",
+   "journal": "Athens Journal of Humanities & Arts",
+   "lang": [
+    "EN"
+   ],
+   "country": "GR",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 638,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Fine Arts"
+   ]
+  },
+  {
+   "doi": "10.1057/s41599-025-06170-3",
+   "title": "The power of regional centrality: specialization, diversity, and their effects on regional economic growth",
+   "journal": "Humanities & Social Sciences Communications",
+   "lang": [
+    "EN"
+   ],
+   "country": "GB",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 125,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.25160/bjbs.v6i1.26352",
+   "title": "Reflecting on hard and soft coups: a comparison of Aquarius  by Kleber Mendonça Filho and Land in Anguish by Glauber Rocha",
+   "journal": "Brasiliana: Journal for Brazilian Studies",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "DK",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 554,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.5944/etfii.34.2021.29016",
+   "title": "Libertad religiosa y libertad del acto de fe: el arbitraje de Constantino en los primeros conflictos cristianos de su tiempo (311-324)",
+   "journal": "Espacio, Tiempo y Forma. Serie II, Historia Antigua",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 440,
+   "subjects": [
+    "History (General) and history of Europe",
+    "History (General)",
+    "Ancient history"
+   ]
+  },
+  {
+   "doi": "10.37522/aaav.98.2020.29",
+   "title": "Architectural Heritage Investigation in Interwar Vilnius: Problems and Methods",
+   "journal": "Acta Academiae Artium Vilnensis",
+   "lang": [
+    "EN",
+    "LT"
+   ],
+   "country": "LT",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 335,
+   "subjects": [
+    "Visual arts",
+    "History of the arts"
+   ]
+  },
+  {
+   "doi": "10.48276/issn.2280-8833.5232",
+   "title": "Significato e attualità di \"Antoher brick in the wall\"",
+   "journal": "Bibliomanie",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT"
+   ],
+   "country": "IT",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 534,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Literature (General)"
+   ]
+  },
+  {
+   "doi": "10.52476/trb.10075",
+   "title": "Recent Acquisitions: Prints",
+   "journal": "The Rijksmuseum Bulletin",
+   "lang": [
+    "EN",
+    "NL"
+   ],
+   "country": "NL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 272,
+   "subjects": [
+    "History of the arts"
+   ]
+  },
+  {
+   "doi": "10.14258/izvasu(2020)3-09",
+   "title": "Особенности однодневных статистических кампаний в конце XIX — начале XX в. (по материалам Западной Сибири и Степного края)",
+   "journal": "Известия Алтайского государственного университета",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 227,
+   "subjects": [
+    "Physics",
+    "History (General)"
+   ]
+  },
+  {
+   "doi": "10.31861/mhpi2024.50.87-106",
+   "title": "Інструменталізація міжнародно-політичної парадигми З. Бжезінського у формуванні регіональних пріоритетів зовнішньої політики України",
+   "journal": "Історико-політичні проблеми сучасного світу",
+   "lang": [
+    "DE",
+    "EN",
+    "PL",
+    "RO",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 715,
+   "subjects": [
+    "History (General) and history of Europe",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.4000/framespa.9587",
+   "title": "Caroline Goldblum, Françoise d’Eaubonne et l’écoféminisme, Paris, Le passager clandestin, 2019.",
+   "journal": "Les Cahiers de Framespa",
+   "lang": [
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 705,
+   "subjects": [
+    "Social history and conditions. Social problems. Social reform"
+   ]
+  },
+  {
+   "doi": "10.24197/em.21.2020.487-491",
+   "title": "CALLEJA PUERTA, Miguel; DOMÍNGUEZ GUERRERO, María Luisa (eds.), Escritura, notariado y espacio urbano en la Corona de Castilla y Portugal (siglos XII-XVII)",
+   "journal": "Edad Media",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 196,
+   "subjects": [
+    "Medieval history"
+   ]
+  },
+  {
+   "doi": "10.4000/12lry",
+   "title": "Tiny traces: miniatures and miniaturisation in LC Cyprus",
+   "journal": "Cahiers du Centre d’Études Chypriotes",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 204,
+   "subjects": [
+    "History of Civilization",
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.4000/transatlantica.20223",
+   "title": "Unmasking Currents: Thinking Power and War with Foucault and the Black Panthers",
+   "journal": "Transatlantica",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 505,
+   "subjects": [
+    "History America",
+    "America"
+   ]
+  },
+  {
+   "doi": "10.4000/terrabrasilis.9424",
+   "title": "A balnearização como fenômeno de fronteira (notas a partir do caso francês, 1830’s–1980’s)",
+   "journal": "Terra Brasilis",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 29,
+   "subjects": [
+    "History of Civilization",
+    "Archaeology"
+   ]
+  },
+  {
+   "doi": "10.22378/2313-6197.2021-9-4.912-922",
+   "title": "“The Development of the Ideas of Scholars of Previous Generations Will Be the Best Monument for Them”: In Memory of Leonid Teodorovich Yablonsky (1950–2016)",
+   "journal": "Золотоордынское обозрение",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 705,
+   "subjects": [
+    "Auxiliary sciences of history",
+    "History of Civilization"
+   ]
+  },
+  {
+   "doi": "10.34624/id.v8i1.12111",
+   "title": "Espaços educativos não formais na educação formal: educação ambiental como eixo integrador do ensino de ciências",
+   "journal": "Indagatio Didactica",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "PT",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 962,
+   "subjects": [
+    "Education (General)",
+    "Theory and practice of education",
+    "Special aspects of education",
+    "History of education"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-history-01",
+   "stratum": "doaj-history",
+   "field": "history / humanities",
+   "layout_hint": "footnotes or author-year",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.4000/transatlantica.20223",
+   "title": "Unmasking Currents: Thinking Power and War with Foucault and the Black Panthers",
+   "journal": "Transatlantica",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.4000/transatlantica.20223",
+   "pdf_url": "https://journals.openedition.org/transatlantica/pdf/20223",
+   "pdf_host": "journals.openedition.org",
+   "pdf_bytes": 287782,
+   "pdf_sha256": "25da39877a0f7af78450767f36841c7e39acb1909b533fe7c5e904a961afd10c",
+   "pages": 26,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 78,
+   "pool_rank": 2,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-history-02",
+   "stratum": "doaj-history",
+   "field": "history / humanities",
+   "layout_hint": "footnotes or author-year",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.4000/terrabrasilis.9424",
+   "title": "A balnearização como fenômeno de fronteira (notas a partir do caso francês, 1830’s–1980’s)",
+   "journal": "Terra Brasilis",
+   "license": "cc-by-nc-sa",
+   "url": "https://doi.org/10.4000/terrabrasilis.9424",
+   "pdf_url": "https://journals.openedition.org/terrabrasilis/pdf/9424",
+   "pdf_host": "journals.openedition.org",
+   "pdf_bytes": 1460340,
+   "pdf_sha256": "e293f963cf206084d98711bc9aae3682160863da84cbcd9873d47ad3afd76b00",
+   "pages": 28,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 50,
+   "pool_rank": 9,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-history-03",
+   "stratum": "doaj-history",
+   "field": "history / humanities",
+   "layout_hint": "footnotes or author-year",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.4000/12lry",
+   "title": "Tiny traces: miniatures and miniaturisation in LC Cyprus",
+   "journal": "Cahiers du Centre d'Etudes Chypriotes",
+   "license": "cc-by-nc-sa",
+   "url": "https://doi.org/10.4000/12lry",
+   "pdf_url": "http://journals.openedition.org/cchyp/pdf/1450",
+   "pdf_host": "journals.openedition.org",
+   "pdf_bytes": 916951,
+   "pdf_sha256": "1e4b1a2e50a303be1be2b6fd3ab3d3fa1e03c11d27074deb3ec7e1d0576673bc",
+   "pages": 27,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 100,
+   "pool_rank": 10,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-history-04",
+   "stratum": "doaj-history",
+   "field": "history / humanities",
+   "layout_hint": "footnotes or author-year",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.31861/mhpi2024.50.87-106",
+   "title": "Інструменталізація міжнародно-політичної парадигми З. Бжезінського у формуванні регіональних пріоритетів зовнішньої політики України",
+   "journal": "Історико-політичні проблеми сучасного світу",
+   "license": "cc-by",
+   "url": "https://doi.org/10.31861/mhpi2024.50.87-106",
+   "pdf_url": "https://mhpi.chnu.edu.ua/mhpi/article/download/162/155",
+   "pdf_host": "mhpi.chnu.edu.ua",
+   "pdf_bytes": 771664,
+   "pdf_sha256": "e7234b75fa8a691e67084a71811765b5bc2ffd455d3fd758daf1d8c0ce870489",
+   "pages": 20,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 40,
+   "pool_rank": 17,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.14258/izvasu(2020)3-09",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.4000/e-spania.26578",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.18524/2410-2601.2019.1(31).186351",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.36317/kaj/2019/v1.i42.1407",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.30958/ajha.4.2.4",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.26436/hjuoz.2019.7.2.492",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.18441/ibam.19.2019.71.35-50",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.17497/tuhed.491909",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.30827/dreh.v0i13.7246",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.25160/bjbs.v6i1.26352",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.52476/trb.10075",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5944/etfii.34.2021.29016",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.48276/issn.2280-8833.5232",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.37522/aaav.98.2020.29",
+   "why": "crossref-refs=0"
+  }
+ ],
+ "date": "2026-09-30"
+}

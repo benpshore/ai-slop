@@ -1,0 +1,134 @@
+{
+ "stratum": "pmc-scanned-with-refs",
+ "seed": "20260930:pmc-scanned-with-refs",
+ "pool": {
+  "term": "1968:1985[pdat] AND \"open access\"[filter]",
+  "count": 27241,
+  "pool_used": 5000
+ },
+ "items": [
+  {
+   "id": "pmc-scanned-with-refs-01",
+   "stratum": "pmc-scanned-with-refs",
+   "field": "scanned/OCR'd 1968-1985 articles (Elsevier back-file in PMC; no CC licence, PMC OA-subset membership only)",
+   "layout_hint": "scanned page images + OCR text layer",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC3012298",
+   "doi": null,
+   "title": "A STUDY OF ATTITUDES OF KEY RELATIVES OF SCHIZOPHERENIC PATIENTS",
+   "citation": "Indian J Psychiatry. 1983 Oct-Dec;25(4):264–8.",
+   "license": "CC BY-NC-SA",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3012298/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC3012298.1/PMC3012298.1.pdf",
+   "pdf_bytes": 186312,
+   "pdf_sha256": "8444b1976d9bce68174d24ffa7a2469201773e5adb4b212b89a0d5eb06c236f7",
+   "truth_kind": "jats",
+   "truth_n": 12,
+   "rank_in_shuffled_pool": 3,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-scanned-with-refs-02",
+   "stratum": "pmc-scanned-with-refs",
+   "field": "scanned/OCR'd 1968-1985 articles (Elsevier back-file in PMC; no CC licence, PMC OA-subset membership only)",
+   "layout_hint": "scanned page images + OCR text layer",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC2010294",
+   "doi": "10.1038/bjc.1980.102",
+   "title": "Colchicine ultrasensitivity of peripheral-blood lymphocytes from patients with non-Hodgkin's lymphoma",
+   "citation": "Br J Cancer. 1980 Apr;41(4):593–601. doi: 10.1038/bjc.1980.102",
+   "license": "CC BY",
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC2010294/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC2010294.1/PMC2010294.1.pdf",
+   "pdf_bytes": 1302925,
+   "pdf_sha256": "23b0c3ca1a5915fa2e6b1acc72f858cf476313843f0905fb9d3add171a23898d",
+   "truth_kind": "jats",
+   "truth_n": 11,
+   "rank_in_shuffled_pool": 4,
+   "historical_ocr": true
+  },
+  {
+   "id": "pmc-scanned-with-refs-03",
+   "stratum": "pmc-scanned-with-refs",
+   "field": "scanned/OCR'd 1968-1985 articles (Elsevier back-file in PMC; no CC licence, PMC OA-subset membership only)",
+   "layout_hint": "scanned page images + OCR text layer",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC7131175",
+   "doi": "10.1016/0042-6822(79)90468-9",
+   "title": "Pathogenic murine coronaviruses II. Characterization of virus-specific proteins of murine coronaviruses JHMV and A59V",
+   "citation": "Virology. 2004 Jun 9;94(2):371–84. doi: 10.1016/0042-6822(79)90468-9",
+   "license": null,
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7131175/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC7131175.1/PMC7131175.1.pdf",
+   "pdf_bytes": 8022866,
+   "pdf_sha256": "25dc38bf0ca506787524d217aad1047853caa3b399078a48528cdfc81710a472",
+   "truth_kind": "jats",
+   "truth_n": 24,
+   "rank_in_shuffled_pool": 6,
+   "historical_ocr": false
+  },
+  {
+   "id": "pmc-scanned-with-refs-04",
+   "stratum": "pmc-scanned-with-refs",
+   "field": "scanned/OCR'd 1968-1985 articles (Elsevier back-file in PMC; no CC licence, PMC OA-subset membership only)",
+   "layout_hint": "scanned page images + OCR text layer",
+   "source": "PMC OA (AWS pmc-oa-opendata)",
+   "pmcid": "PMC7091011",
+   "doi": "10.1007/BF02991060",
+   "title": "Prevention of atopy—current concepts and personal experience",
+   "citation": "Clin Rev Allergy. 1984;2(2):107–23. doi: 10.1007/BF02991060",
+   "license": null,
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7091011/",
+   "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC7091011.1/PMC7091011.1.pdf",
+   "pdf_bytes": 1332974,
+   "pdf_sha256": "f0cc518accc9d8b1e0333c91341cf0ab3c358981afcfa2761f4cd903d3b99869",
+   "truth_kind": "jats",
+   "truth_n": 107,
+   "rank_in_shuffled_pool": 11,
+   "historical_ocr": false
+  }
+ ],
+ "rejected_draws": [
+  {
+   "pmcid": "PMC5367057",
+   "rank": 0,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC5077056",
+   "rank": 1,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC4997189",
+   "rank": 2,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC5366436",
+   "rank": 5,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC5366500",
+   "rank": 7,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC4997159",
+   "rank": 8,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC3012865",
+   "rank": 9,
+   "why": "refs<5 (0)"
+  },
+  {
+   "pmcid": "PMC5092379",
+   "rank": 10,
+   "why": "refs<5 (0)"
+  }
+ ],
+ "date": "2026-09-30"
+}
