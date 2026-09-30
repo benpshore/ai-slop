@@ -212,8 +212,17 @@ drop.
 Nothing below has been run by a person on a Mac yet. Verified by CI: the
 crate builds with GPUI and passes clippy and its tests, including the
 headless keyboard tests above; the bundle declares its document type and
-Services and signs; the Services provider answers both messages. Reasoned
-from the code:
+Services and signs; the Services provider answers both messages; and the
+built bundle, opened with a PDF through Launch Services (the Open With and
+Dock-drop path), starts, shows one window (640×508 points with its title
+bar), processes the file and writes `paper.txt`, then quits when asked. The
+App workflow keeps that window list and a screenshot as an artifact; the
+first one:
+
+![PDFTextract on macOS 15 (CI screenshot, after opening paper.pdf)](images/pdftextract-launch-macos.png)
+
+Not covered by that run: the Finder Services menu, a real drop or click, and
+anything by voice or switch. Reasoned from the code:
 
 - **Screen readers and switch access: not supported by the framework.**
   GPUI 0.2.2 exposes no accessibility tree (see the accessibility note in
