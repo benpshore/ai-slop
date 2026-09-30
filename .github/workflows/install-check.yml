@@ -38,6 +38,10 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       VERSION: ${{ inputs.version }}
+      # mise normally lists versions through its own cache host, which lags
+      # GitHub by up to a day and resolved "latest" to a stale release; ask
+      # the GitHub API directly so a just-published release is installable.
+      MISE_USE_VERSIONS_HOST: "0"
     steps:
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
@@ -49,8 +53,10 @@ jobs:
           spec="github:benpshore/pdftextract"
           if [ -n "$VERSION" ]; then spec="$spec@${VERSION#v}"; fi
           mkdir -p "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj"
+          mise ls-remote "github:benpshore/pdftextract" | tail -3
           mise use "$spec"
           mise ls
+          mise which tpe
           mise exec -- tpe --version
           mise exec -- tpe backends
           mise exec -- sh -c 'command -v tpe'
