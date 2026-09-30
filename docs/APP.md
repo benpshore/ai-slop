@@ -33,6 +33,12 @@ Ways in:
   Bibliography with PDFTextract** (`NSServices` in `bundle/Info.plist`,
   answered by the Objective-C provider `src/services.rs` declares at run
   time; test `provider_answers_both_service_messages`, macOS only);
+- the job list from the keyboard: Tab reaches it (one stop, after the two
+  big buttons); Up and Down move a selection, Home/End or ⌘↑/⌘↓ jump to the
+  first or last row, Enter or Space shows the selected row's result in
+  Finder, ⌘C copies its text, Delete removes it if it is still queued (a
+  finished row is never removed by a stray key; Clear finished, ⌘K, does
+  that). The buttons on each row do the same for the pointer;
 - Finder: Open With PDFTextract, or drop PDFs on the Dock icon
   (`CFBundleDocumentTypes`, delivered through `Application::on_open_urls`;
   these run *Get text*, since Open With cannot say which action);
@@ -67,7 +73,8 @@ and queued once it does (`jobs::Mailbox`, test
 ### Measured: cost of drawing the job list
 
 GPUI's test platform, `--release`, x86-64 Linux, one full draw (layout,
-prepaint, paint) of the window with N queued rows and nothing running:
+prepaint, paint) of the window with N queued rows and nothing running, when
+every row was built on every redraw:
 
 | rows | draw time |
 | ---: | ---: |
@@ -76,11 +83,14 @@ prepaint, paint) of the window with N queued rows and nothing running:
 | 1,000 | 94 ms |
 | 5,000 | 553 ms |
 
-About 85 µs per row, linear. Every row is rebuilt on every redraw, and a
-running job redraws once per frame, so a drop of a few hundred PDFs will
-stutter: the list is not virtualized yet, and that is the next change. These
-are not M1 numbers and not click-to-pixel latency; launch time, click-to-row
-latency and per-page progress cost on an M1 have not been recorded.
+About 85 µs per row, linear, and a running job redraws once per frame, so a
+drop of a few hundred PDFs would have stuttered. The list is now a GPUI
+`uniform_list`: rows are all `ROW_HEIGHT_REMS` tall (so the height follows
+the text size), and only the rows on screen are built. The same 5,000-row
+draw is guarded by a test (`drawing_cost_does_not_grow_with_the_number_of_rows`,
+debug build, 400 ms bound against roughly 3 s before). These are not M1
+numbers and not click-to-pixel latency; launch time, click-to-row latency and
+per-page progress cost on an M1 have not been recorded.
 
 ## Layout
 
@@ -133,9 +143,12 @@ Finder and `quit` replaced. They check, with keystrokes: focus starts on
 Get text; Enter, Space, Tab and Shift-Tab reach both actions; ⌘O, ⌘B and ⌘K
 work from anywhere; a cancelled chooser adds nothing; chosen files become a
 row at once and finish; files sent before the window exists (a cold launch
-from Finder) and while it is open are queued in order; Tab reaches each row's
-Copy, Show in Finder and Clear finished, and Enter runs them (Copy puts the
-text on the clipboard); closing the window keeps a running job and the app
+from Finder) and while it is open are queued in order; Tab reaches the list
+and Clear finished; arrow keys, Home and End move a selection that keeps
+itself in view; Enter shows the selected row in Finder, ⌘C copies its text
+(to the clipboard), Delete removes only queued rows; keys reach rows that are
+not on screen; clicking a row selects it and focuses the list; rows are all
+the same height and their text fits; closing the window keeps a running job and the app
 quits itself once idle; the Dock icon reopens the window on the same rows;
 a bad file fails its row and the queue moves on.
 
@@ -161,15 +174,16 @@ from the code:
   cannot see these controls. This is the app's largest known gap and needs
   an upstream accessibility layer.
 - Keyboard (verified headlessly, see above): every action is on a key (⌘O,
-  ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab through the two big buttons, each row's Remove /
-  Copy / Show in Finder and Clear finished; Enter or Space on the focused
-  one). The accent border on the focused control is drawn, not tested.
-  Nothing is timed, nothing expires.
+  ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab through the two big buttons, the job list and
+  Clear finished; Enter or Space on the focused one; arrows, Home, End, ⌘C,
+  Enter and Delete inside the list). Rows are reachable whether or not they
+  are on screen. The accent border on the focused control and the selection
+  highlight are drawn, not tested. Nothing is timed, nothing expires.
 - Targets: the two buttons are full-width and at least 132 pt tall; row
   buttons are padded. Drop is an alternative to the button, never the only
   path.
 - Text: fixed sizes for now; the previous window's ⌘= / ⌘- scaling was not
-  carried over yet.
+  carried over yet (row heights are already in rems for it).
 
 ## Known limits
 

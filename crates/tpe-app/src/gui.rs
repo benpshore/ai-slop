@@ -30,8 +30,8 @@
 //! or Space on the focused one), the File menu, large targets, nothing timed,
 //! and visible text on every control.
 
-use std::collections::HashMap;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -40,12 +40,12 @@ use futures::{FutureExt, StreamExt};
 use gpui::{
     App, Application, Bounds, ClickEvent, ClipboardItem, Context, DefiniteLength, Div, Entity,
     ExternalPaths, FocusHandle, FontWeight, Global, KeyBinding, Menu, MenuItem, PathPromptOptions,
-    Stateful, SystemMenuType, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, rgb, size,
+    ScrollStrategy, Stateful, SystemMenuType, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, rems, rgb, size, uniform_list,
 };
 
 use tpe::pipeline::Progress;
-use tpe_app::jobs::{self, Action, JobList, JobRow, Mailbox, Phase};
+use tpe_app::jobs::{self, Action, JobList, JobRow, Mailbox, Phase, Step};
 
 actions!(
     pdftextract,
@@ -56,7 +56,14 @@ actions!(
         ClearDone,
         Activate,
         FocusNext,
-        FocusPrev
+        FocusPrev,
+        SelectPrev,
+        SelectNext,
+        SelectFirst,
+        SelectLast,
+        CopyText,
+        RevealSelected,
+        RemoveSelected
     ]
 );
 
@@ -89,17 +96,18 @@ struct ShellHandle(Entity<Shell>);
 
 impl Global for ShellHandle {}
 
-/// Focus handles of one row's buttons, so each is a tab stop.
-struct RowFocus {
-    remove: FocusHandle,
-    copy: FocusHandle,
-    reveal: FocusHandle,
-}
+/// Tab order: Get text, Get bibliography, the job list (one stop; the arrow
+/// keys move a selection through its rows), then Clear finished.
+const LIST_TAB_INDEX: isize = 3;
+const CLEAR_TAB_INDEX: isize = 4;
 
-/// Tab indices: the two big buttons, then `ROW_TAB_BASE + 4 * id + k` for
-/// row `id`'s buttons, then Clear finished last.
-const ROW_TAB_BASE: isize = 10;
-const CLEAR_TAB_INDEX: isize = isize::MAX / 2;
+/// Height of one job row, in rems so it follows the text size. Rows are all
+/// this tall, which is what lets the list draw only the ones on screen.
+const ROW_HEIGHT_REMS: f32 = 6.0;
+
+/// The smallest window (points): the action header, one whole row and the
+/// Clear finished button still fit at the default text size.
+const MIN_WINDOW: (f32, f32) = (480.0, 400.0);
 
 /// Shows a path in Finder.
 type Reveal = Rc<dyn Fn(&mut App, &Path)>;
@@ -137,8 +145,11 @@ pub struct Shell {
     root_focus: FocusHandle,
     text_focus: FocusHandle,
     biblio_focus: FocusHandle,
+    list_focus: FocusHandle,
     clear_focus: FocusHandle,
-    row_focus: HashMap<usize, RowFocus>,
+    scroll: UniformListScrollHandle,
+    /// The selected row's id.
+    selected: Option<usize>,
 }
 
 impl Shell {
@@ -148,6 +159,7 @@ impl Shell {
     fn new(intake: &Mailbox<Intake>, ledger: PathBuf, host: Host, cx: &mut Context<Self>) -> Self {
         let text_focus = cx.focus_handle().tab_index(1).tab_stop(true);
         let biblio_focus = cx.focus_handle().tab_index(2).tab_stop(true);
+        let list_focus = cx.focus_handle().tab_index(LIST_TAB_INDEX).tab_stop(true);
         let clear_focus = cx.focus_handle().tab_index(CLEAR_TAB_INDEX).tab_stop(true);
 
         // Paths from Finder or the command line arrive on this channel,
@@ -173,27 +185,11 @@ impl Shell {
             root_focus: cx.focus_handle(),
             text_focus,
             biblio_focus,
+            list_focus,
             clear_focus,
-            row_focus: HashMap::new(),
+            scroll: UniformListScrollHandle::new(),
+            selected: None,
         }
-    }
-
-    /// The focus handles of row `id`'s buttons, created on first use.
-    fn row_focus(&mut self, id: usize, cx: &mut Context<Self>) -> &RowFocus {
-        self.row_focus.entry(id).or_insert_with(|| {
-            let base = ROW_TAB_BASE + 4 * isize::try_from(id).unwrap_or(isize::MAX / 8);
-            RowFocus {
-                remove: cx.focus_handle().tab_index(base).tab_stop(true),
-                copy: cx.focus_handle().tab_index(base + 1).tab_stop(true),
-                reveal: cx.focus_handle().tab_index(base + 2).tab_stop(true),
-            }
-        })
-    }
-
-    /// Drop focus handles of rows that no longer exist.
-    fn prune_row_focus(&mut self) {
-        let live: Vec<usize> = self.jobs.rows().iter().map(|row| row.id).collect();
-        self.row_focus.retain(|id, _| live.contains(id));
     }
 
     /// Quit once nothing is queued or running and no window is open.
@@ -297,16 +293,76 @@ impl Shell {
     }
 
     fn remove(&mut self, id: usize, cx: &mut Context<Self>) {
+        let index = self.jobs.index_of(id);
         if self.jobs.remove(id) {
-            self.prune_row_focus();
+            if self.selected == Some(id) {
+                self.selected = index.and_then(|index| self.jobs.nearest_to(index));
+            }
             cx.notify();
         }
     }
 
     fn clear_done(&mut self, cx: &mut Context<Self>) {
+        // Rows that will survive, ahead of the selected one: the first
+        // survivor after a removed selection lands at exactly that index.
+        let survivors_before = self
+            .selected
+            .and_then(|id| self.jobs.index_of(id))
+            .map(|at| {
+                self.jobs.rows()[..at]
+                    .iter()
+                    .filter(|row| row.is_active())
+                    .count()
+            });
         self.jobs.clear_done();
-        self.prune_row_focus();
+        if self.selected.is_some_and(|id| self.jobs.row(id).is_none()) {
+            self.selected = self.jobs.nearest_to(survivors_before.unwrap_or(0));
+        }
+        // The list is shorter and its rows have new indices: the old scroll
+        // offset would point past them or away from the selection.
+        let at = self
+            .selected
+            .and_then(|id| self.jobs.index_of(id))
+            .unwrap_or(0);
+        self.scroll.scroll_to_item(at, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    /// Select row `id`.
+    fn select(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.notify();
+    }
+
+    /// Move the selection and scroll just enough to keep it fully visible.
+    fn step_selection(&mut self, step: Step, window: &Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.jobs.stepped(self.selected, step) {
+            self.select(id, cx);
+            if let Some(index) = self.jobs.index_of(id) {
+                self.keep_visible(index, window);
+            }
+        }
+    }
+
+    /// Scroll the list only when row `index` is not fully on screen: up to
+    /// put it at the top, down to put it at the bottom.
+    fn keep_visible(&self, index: usize, window: &Window) {
+        let state = self.scroll.0.borrow();
+        let Some(size) = state.last_item_size else {
+            return; // not laid out yet: the list is at the top
+        };
+        let row = f32::from(window.rem_size()) * ROW_HEIGHT_REMS;
+        let top = -f32::from(state.base_handle.offset().y);
+        let first_visible = (top / row).ceil();
+        let last_visible = ((top + f32::from(size.item.height)) / row).floor() - 1.0;
+        drop(state);
+        #[allow(clippy::cast_precision_loss)]
+        let at = index as f32;
+        if at < first_visible {
+            self.scroll.scroll_to_item(index, ScrollStrategy::Top);
+        } else if at > last_visible {
+            self.scroll.scroll_to_item(index, ScrollStrategy::Bottom);
+        }
     }
 
     fn on_get_text(&mut self, _: &GetText, _: &mut Window, cx: &mut Context<Self>) {
@@ -321,7 +377,9 @@ impl Shell {
         self.clear_done(cx);
     }
 
-    /// Enter or Space on whichever button has focus.
+    /// Enter or Space on whichever button or list has focus: the two big
+    /// buttons choose files, Clear finished clears, the list shows the
+    /// selected row's result in Finder.
     fn on_activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
         if self.text_focus.is_focused(window) {
             self.choose(Action::Text, cx);
@@ -329,38 +387,82 @@ impl Shell {
             self.choose(Action::Bibliography, cx);
         } else if self.clear_focus.is_focused(window) {
             self.clear_done(cx);
-        } else if let Some((id, which)) = self.focused_row_button(window) {
-            match which {
-                RowButton::Remove => self.remove(id, cx),
-                RowButton::Copy => self.copy(id, cx),
-                RowButton::Reveal => self.reveal(id, cx),
-            }
+        } else if self.list_focus.is_focused(window) {
+            self.reveal_selected(cx);
         }
     }
 
-    fn focused_row_button(&self, window: &Window) -> Option<(usize, RowButton)> {
-        self.row_focus.iter().find_map(|(id, focus)| {
-            if focus.remove.is_focused(window) {
-                Some((*id, RowButton::Remove))
-            } else if focus.copy.is_focused(window) {
-                Some((*id, RowButton::Copy))
-            } else if focus.reveal.is_focused(window) {
-                Some((*id, RowButton::Reveal))
-            } else {
-                None
-            }
-        })
+    /// Show the selected row's result in Finder. Queued and running rows have
+    /// no result yet (and no button), so the key does nothing on them rather
+    /// than opening their input PDF.
+    fn reveal_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected
+            && self.jobs.row(id).is_some_and(|row| !row.is_active())
+        {
+            self.reveal(id, cx);
+        }
     }
 
-    // GPUI listeners take `&mut Self` even when only the window moves.
-    #[allow(clippy::unused_self)]
-    fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, _: &mut Context<Self>) {
+    fn on_reveal_selected(&mut self, _: &RevealSelected, _: &mut Window, cx: &mut Context<Self>) {
+        self.reveal_selected(cx);
+    }
+
+    fn on_copy_text(&mut self, _: &CopyText, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected {
+            self.copy(id, cx);
+        }
+    }
+
+    /// Delete on the selected row: a queued row leaves the list; a finished
+    /// one stays (Clear finished removes those), so a stray key cannot lose
+    /// a result.
+    fn on_remove_selected(&mut self, _: &RemoveSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected {
+            self.remove(id, cx);
+        }
+    }
+
+    fn on_select_prev(&mut self, _: &SelectPrev, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(Step::Up, window, cx);
+    }
+
+    fn on_select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(Step::Down, window, cx);
+    }
+
+    fn on_select_first(&mut self, _: &SelectFirst, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(Step::First, window, cx);
+    }
+
+    fn on_select_last(&mut self, _: &SelectLast, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(Step::Last, window, cx);
+    }
+
+    fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
         window.focus_next();
+        self.select_first_if_landed_on_list(window, cx);
     }
 
-    #[allow(clippy::unused_self)]
-    fn on_focus_prev(&mut self, _: &FocusPrev, window: &mut Window, _: &mut Context<Self>) {
+    fn on_focus_prev(&mut self, _: &FocusPrev, window: &mut Window, cx: &mut Context<Self>) {
         window.focus_prev();
+        self.select_first_if_landed_on_list(window, cx);
+    }
+
+    /// Tabbing into the list selects the first row when nothing is selected,
+    /// and brings an existing selection into view (it may have been scrolled
+    /// away with the trackpad), so the focus is never on an invisible
+    /// selection.
+    fn select_first_if_landed_on_list(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.list_focus.is_focused(window) {
+            return;
+        }
+        match self.selected.and_then(|id| self.jobs.index_of(id)) {
+            Some(index) => {
+                self.keep_visible(index, window);
+                cx.notify();
+            }
+            None => self.step_selection(Step::First, window, cx),
+        }
     }
 
     /// A large button that is also a drop target for PDF files.
@@ -415,25 +517,26 @@ impl Shell {
             )
     }
 
-    fn render_row(&mut self, row: &JobRow, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// One row: name, a bar slot (drawn only while running, but always
+    /// reserved), and a two-line status; the buttons are for the pointer,
+    /// the same actions are on keys for the selected row.
+    fn render_row(
+        row: &JobRow,
+        selected: bool,
+        list_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let id = row.id;
         let status_color = match row.phase {
             Phase::Failed(_) => FAILED,
             _ => MUTED,
         };
-        let focus = self.row_focus(id, cx);
-        let (remove_focus, copy_focus, reveal_focus) = (
-            focus.remove.clone(),
-            focus.copy.clone(),
-            focus.reveal.clone(),
-        );
         let mut buttons = div().flex().gap_2().flex_shrink_0();
         match row.phase {
             Phase::Queued => {
                 buttons = buttons.child(small_button(
                     ("remove", id),
                     "Remove",
-                    &remove_focus,
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.remove(id, cx)),
                 ));
             }
@@ -443,65 +546,112 @@ impl Shell {
                     buttons = buttons.child(small_button(
                         ("copy", id),
                         "Copy",
-                        &copy_focus,
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.copy(id, cx)),
                     ));
                 }
                 buttons = buttons.child(small_button(
                     ("reveal", id),
                     "Show in Finder",
-                    &reveal_focus,
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.reveal(id, cx)),
                 ));
             }
         }
-        let mut column = div()
+        let mut bar = div().w_full().h(px(6.0)).rounded_md();
+        if row.phase == Phase::Running {
+            bar = bar.bg(rgb(TRACK)).child(
+                div()
+                    .h_full()
+                    .rounded_md()
+                    .bg(rgb(ACCENT))
+                    .w(DefiniteLength::Fraction(row.fraction().unwrap_or(0.0))),
+            );
+        }
+        let border = match (selected, list_focused) {
+            (true, true) => ACCENT,
+            (true, false) => MUTED,
+            (false, _) => PANEL,
+        };
+        let column = div()
             .flex()
             .flex_col()
             .flex_1()
+            .min_w_0()
             .gap_1()
             .overflow_hidden()
-            .child(div().text_lg().truncate().child(row.name()));
-        if row.phase == Phase::Running {
-            let fraction = row.fraction().unwrap_or(0.0);
-            column = column.child(
-                div().w_full().h(px(6.0)).rounded_md().bg(rgb(TRACK)).child(
-                    div()
-                        .h_full()
-                        .rounded_md()
-                        .bg(rgb(ACCENT))
-                        .w(DefiniteLength::Fraction(fraction)),
-                ),
+            .child(
+                div()
+                    .debug_selector(|| format!("job-{id}-title"))
+                    .text_lg()
+                    .truncate()
+                    .child(row.name()),
+            )
+            .child(bar)
+            .child(
+                div()
+                    .debug_selector(|| format!("job-{id}-status"))
+                    .text_sm()
+                    .line_clamp(2)
+                    .text_color(rgb(status_color))
+                    .child(row.status_line()),
             );
-        }
-        column = column.child(
+        // The outer element is the list item (fixed height, with the gap
+        // between rows as padding); the inner one is the visible panel.
+        div().id(("job", id)).h(rems(ROW_HEIGHT_REMS)).py_1().child(
             div()
-                .text_sm()
-                .text_color(rgb(status_color))
-                .child(row.status_line()),
-        );
+                .debug_selector(|| format!("job-{id}"))
+                .flex()
+                .items_center()
+                .gap_4()
+                .size_full()
+                .px_3()
+                .rounded_md()
+                .border_2()
+                .border_color(rgb(border))
+                .bg(rgb(PANEL))
+                .overflow_hidden()
+                .on_mouse_down(gpui::MouseButton::Left, {
+                    let listener = cx.listener(move |this, _, window: &mut Window, cx| {
+                        this.select(id, cx);
+                        window.focus(&this.list_focus);
+                    });
+                    move |event, window, cx| listener(event, window, cx)
+                })
+                .child(column)
+                .child(buttons),
+        )
+    }
+
+    /// The job list: one tab stop, only the rows on screen are built.
+    fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id(("job", id))
-            .flex()
-            .items_center()
-            .gap_4()
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .bg(rgb(PANEL))
-            .child(column)
-            .child(buttons)
+            .id("jobs")
+            .track_focus(&self.list_focus)
+            .key_context("Jobs")
+            .flex_1()
+            .min_h_0()
+            .child(
+                uniform_list(
+                    "job-rows",
+                    self.jobs.rows().len(),
+                    cx.processor(|this, range: Range<usize>, window, cx| {
+                        let focused = this.list_focus.is_focused(window);
+                        let selected = this.selected;
+                        let rows: Vec<JobRow> =
+                            this.jobs.rows().get(range).unwrap_or_default().to_vec();
+                        rows.iter()
+                            .map(|row| Self::render_row(row, selected == Some(row.id), focused, cx))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(self.scroll.clone())
+                .size_full(),
+            )
     }
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let snapshot: Vec<JobRow> = self.jobs.rows().to_vec();
-        let rows: Vec<Stateful<Div>> = snapshot
-            .iter()
-            .map(|row| self.render_row(row, cx))
-            .collect();
-        let empty = rows.is_empty();
+        let empty = self.jobs.rows().is_empty();
         let has_done = self.jobs.has_done();
         div()
             .id("shell")
@@ -513,6 +663,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_activate))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_prev))
+            .on_action(cx.listener(Self::on_select_prev))
+            .on_action(cx.listener(Self::on_select_next))
+            .on_action(cx.listener(Self::on_select_first))
+            .on_action(cx.listener(Self::on_select_last))
+            .on_action(cx.listener(Self::on_copy_text))
+            .on_action(cx.listener(Self::on_reveal_selected))
+            .on_action(cx.listener(Self::on_remove_selected))
             .flex()
             .flex_col()
             .size_full()
@@ -524,7 +681,12 @@ impl Render for Shell {
                 div()
                     .flex()
                     .gap_4()
-                    .child(Self::action_button(Action::Text, &self.text_focus.clone(), window, cx))
+                    .child(Self::action_button(
+                        Action::Text,
+                        &self.text_focus.clone(),
+                        window,
+                        cx,
+                    ))
                     .child(Self::action_button(
                         Action::Bibliography,
                         &self.biblio_focus.clone(),
@@ -537,50 +699,33 @@ impl Render for Shell {
                     "Drop PDFs on a button, or press it to choose files. Output lands next to each PDF.",
                 ))
             })
-            .when(!empty, |this| {
-                this.child(
-                    div()
-                        .id("jobs")
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children(rows),
-                )
-            })
+            .when(!empty, |this| this.child(self.render_list(cx)))
             .when(has_done, |this| {
                 this.child(
-                    div().flex().child(small_button(
-                        ("clear", 0),
-                        "Clear finished (⌘K)",
-                        &self.clear_focus,
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.clear_done(cx)),
-                    )),
+                    div().flex().child(
+                        small_button(
+                            ("clear", 0),
+                            "Clear finished (⌘K)",
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.clear_done(cx)),
+                        )
+                        .debug_selector(|| "clear-done".to_string())
+                        .track_focus(&self.clear_focus)
+                        .focus(|style| style.border_color(rgb(ACCENT))),
+                    ),
                 )
             })
     }
 }
 
-/// Which of a row's buttons has focus.
-#[derive(Clone, Copy)]
-enum RowButton {
-    Remove,
-    Copy,
-    Reveal,
-}
-
-/// A labelled button that is a tab stop (`focus`) and shows an accent
-/// border while focused; Enter and Space reach it through `Activate`.
+/// A labelled button for the pointer. Keyboard focus is added by the caller
+/// where the button is a tab stop (Clear finished).
 fn small_button(
     id: (&'static str, usize),
     label: &'static str,
-    focus: &FocusHandle,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .track_focus(focus)
         .px_3()
         .py_2()
         .rounded_md()
@@ -589,7 +734,6 @@ fn small_button(
         .bg(rgb(BUTTON))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(BUTTON_HOVER)))
-        .focus(|style| style.border_color(rgb(ACCENT)))
         .child(label)
         .on_click(on_click)
 }
@@ -605,7 +749,7 @@ fn open_main_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(640.0), px(480.0)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(480.0), px(320.0))),
+        window_min_size: Some(size(px(MIN_WINDOW.0), px(MIN_WINDOW.1))),
         titlebar: Some(TitlebarOptions {
             title: Some("PDFTextract".into()),
             ..TitlebarOptions::default()
@@ -639,6 +783,15 @@ fn setup(cx: &mut App) {
         KeyBinding::new("space", Activate, Some("Shell")),
         KeyBinding::new("tab", FocusNext, Some("Shell")),
         KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
+        KeyBinding::new("up", SelectPrev, Some("Jobs")),
+        KeyBinding::new("down", SelectNext, Some("Jobs")),
+        KeyBinding::new("home", SelectFirst, Some("Jobs")),
+        KeyBinding::new("end", SelectLast, Some("Jobs")),
+        KeyBinding::new("cmd-up", SelectFirst, Some("Jobs")),
+        KeyBinding::new("cmd-down", SelectLast, Some("Jobs")),
+        KeyBinding::new("cmd-c", CopyText, Some("Jobs")),
+        KeyBinding::new("backspace", RemoveSelected, Some("Jobs")),
+        KeyBinding::new("delete", RemoveSelected, Some("Jobs")),
     ]);
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     cx.on_window_closed(|cx| {
@@ -679,6 +832,8 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("Get Text…", GetText),
                 MenuItem::action("Get Bibliography…", GetBibliography),
                 MenuItem::separator(),
+                MenuItem::action("Copy Text", CopyText),
+                MenuItem::action("Show in Finder", RevealSelected),
                 MenuItem::action("Clear Finished", ClearDone),
             ],
         },
