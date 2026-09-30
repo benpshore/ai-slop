@@ -19,6 +19,7 @@ use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use tpe_biblio::filename::{CreatorStyle, FilenameOptions, Part};
 
 use tpe::backend;
 use tpe::bibliography;
@@ -27,6 +28,7 @@ use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, PipelineError, Progress};
+use tpe::rename;
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
 
 /// Service-time target per 20-page chunk, in milliseconds.
@@ -66,6 +68,8 @@ enum Cmd {
     },
     /// Evaluate extraction against `arXiv` `LaTeX` ground truth and write a report.
     Eval(EvalArgs),
+    /// Rename PDFs from their metadata (`Smith and Jones - 2020 - Title.pdf`); a dry run unless `--apply`.
+    Rename(RenameArgs),
     /// List every known backend, whether it is compiled in, and whether it
     /// opens a one-page probe PDF (native libraries found).
     Backends,
@@ -134,6 +138,48 @@ struct ExtractArgs {
     /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page.
     #[arg(long)]
     progress: bool,
+}
+
+/// A component of the new file name.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum NamePart {
+    Creator,
+    Year,
+    Title,
+}
+
+#[derive(Args)]
+struct RenameArgs {
+    /// PDF files to rename (regular files only; symlinks are refused).
+    #[arg(
+        required_unless_present = "undo",
+        conflicts_with = "undo",
+        value_name = "PATH"
+    )]
+    paths: Vec<PathBuf>,
+    /// Actually rename (or, with `--undo`, restore). Without it only the plan is printed.
+    #[arg(long)]
+    apply: bool,
+    /// Look up a DOI found in the PDF at Crossref (network). Default: offline, PDF metadata only.
+    #[arg(long, conflicts_with = "undo")]
+    online: bool,
+    /// Undo journal to write (default `tpe-rename-<unix time>.json` here); never overwritten.
+    #[arg(long, value_name = "FILE", conflicts_with = "undo")]
+    journal: Option<PathBuf>,
+    /// Reverse the renames recorded in this journal.
+    #[arg(long, value_name = "JOURNAL")]
+    undo: Option<PathBuf>,
+    /// Name only the first author's surname (default: `A`, `A and B`, `A et al.`).
+    #[arg(long, conflicts_with = "undo")]
+    first_author: bool,
+    /// Name components in order, comma separated.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "creator,year,title",
+        conflicts_with = "undo"
+    )]
+    pattern: Vec<NamePart>,
 }
 
 #[derive(Args)]
@@ -262,6 +308,7 @@ fn main() -> anyhow::Result<ExitCode> {
             run_eval(&args)?;
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Rename(args) => run_rename(&args),
         Cmd::Backends => {
             run_backends()?;
             Ok(ExitCode::SUCCESS)
@@ -609,6 +656,118 @@ fn run_stats(db: &Path) -> anyhow::Result<()> {
     println!("citations: {}", stats.citations);
     println!("figures: {}", stats.figures);
     Ok(())
+}
+
+fn run_rename(args: &RenameArgs) -> anyhow::Result<ExitCode> {
+    if let Some(journal) = &args.undo {
+        return run_undo(journal, args.apply);
+    }
+    let options = FilenameOptions {
+        parts: args
+            .pattern
+            .iter()
+            .map(|p| match p {
+                NamePart::Creator => Part::Creator,
+                NamePart::Year => Part::Year,
+                NamePart::Title => Part::Title,
+            })
+            .collect(),
+        creators: if args.first_author {
+            CreatorStyle::First
+        } else {
+            CreatorStyle::Zotero
+        },
+        ..FilenameOptions::default()
+    };
+    // Crossref's public pool answered 429 at the client's default 10 requests/s.
+    let client = args.online.then(|| {
+        tpe_biblio::Client::new(USER_AGENT)
+            .with_host_interval("api.crossref.org", std::time::Duration::from_millis(300))
+    });
+    let plan = rename::plan(rename::collect(&args.paths, client.as_ref()), &options);
+    for item in &plan {
+        println!("{}", rename::render(item));
+    }
+    let count = |f: fn(&rename::Action) -> bool| plan.iter().filter(|p| f(&p.action)).count();
+    let renames = count(|a| matches!(a, rename::Action::Rename { .. }));
+    let same = count(|a| matches!(a, rename::Action::Unchanged));
+    let skipped = plan.len() - renames - same;
+    let summary = format!("{renames} to rename, {same} already named, {skipped} skipped");
+    let Some(journal) = rename::journal_for(&plan).context("preparing the undo journal")? else {
+        println!("{summary}");
+        return Ok(ExitCode::SUCCESS);
+    };
+    if !args.apply {
+        println!("{summary} (dry run; pass --apply to rename)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let journal_path = args.journal.clone().unwrap_or_else(|| {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        PathBuf::from(format!("tpe-rename-{secs}.json"))
+    });
+    rename::write_journal(&journal_path, &journal)
+        .with_context(|| format!("writing journal {}", journal_path.display()))?;
+    let mut failed = 0_usize;
+    for (entry, result) in journal.entries.iter().zip(rename::apply(&journal)) {
+        if let Err(e) = result {
+            failed += 1;
+            eprintln!("error   {} -> {}: {e}", entry.from, entry.to);
+        }
+    }
+    println!(
+        "{summary}; {} renamed, {failed} failed; undo with: tpe rename --undo {} --apply",
+        journal.entries.len() - failed,
+        journal_path.display()
+    );
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn run_undo(path: &Path, apply: bool) -> anyhow::Result<ExitCode> {
+    let journal = rename::read_journal(path).map_err(|e| anyhow::anyhow!(e))?;
+    let mut restored = 0_usize;
+    let mut problems = 0_usize;
+    for entry in journal.entries.iter().rev() {
+        let action = if apply {
+            rename::undo_entry(entry)
+        } else {
+            Ok(rename::plan_undo(entry))
+        };
+        match action {
+            Ok(rename::UndoAction::Restore) => {
+                restored += 1;
+                let verb = if apply { "restored" } else { "restore " };
+                println!("{verb} {} -> {}", entry.to, entry.from);
+            }
+            Ok(rename::UndoAction::Nothing) => {
+                println!("nothing {} (not renamed or already restored)", entry.from);
+            }
+            Ok(rename::UndoAction::Skip(reason)) => {
+                problems += 1;
+                println!("skip    {} ({reason})", entry.to);
+            }
+            Err(e) => {
+                problems += 1;
+                eprintln!("error   {} -> {}: {e}", entry.to, entry.from);
+            }
+        }
+    }
+    let dry = if apply {
+        ""
+    } else {
+        " (dry run; pass --apply to restore)"
+    };
+    println!("{restored} to restore, {problems} skipped or failed{dry}");
+    Ok(if problems == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// Print one line per known backend: `<name>\tavailable\t<probe outcome>`
