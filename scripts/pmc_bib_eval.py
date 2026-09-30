@@ -1039,7 +1039,8 @@ def render_failures(papers: list[dict], mismatches: dict[str, list[Mismatch]]) -
         per_paper[m.pmcid] += 1
         if per_paper[m.pmcid] > 2:
             continue
-        rows.append([m.pmcid, str(m.entry), cell(m.truth), cell(m.extracted), f"{m.similarity:.2f}"])
+        row = [m.pmcid, str(m.entry), cell(m.truth), cell(m.extracted), f"{m.similarity:.2f}"]
+        rows.append(row)
         if len(rows) >= CLOSEST_TITLES:
             break
     lines.append("## Closest title mismatches (backward path, at most two per paper)")
