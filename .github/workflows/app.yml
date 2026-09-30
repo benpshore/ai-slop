@@ -55,6 +55,17 @@ jobs:
       - run: cargo fmt --check -p tpe-app
       - run: cargo clippy -p tpe-app --all-targets -- -D warnings
       - run: cargo test -p tpe-app
+      - name: Interaction timings (release, GPUI test platform)
+        run: |
+          set -o pipefail
+          cargo test -p tpe-app --release --bin tpe-app -- --ignored --nocapture interaction_timings 2>&1 | tee timings.log
+          {
+            echo "### Interaction timings"
+            echo
+            echo "$(uname -m), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown CPU), macOS $(sw_vers -productVersion). GPUI test platform: view state, layout and scene building on the CPU; no GPU, no display."
+            echo
+            grep '^|' timings.log
+          } >> "$GITHUB_STEP_SUMMARY"
       - run: sh crates/tpe-app/bundle.sh
       - name: Bundle smoke test
         run: |

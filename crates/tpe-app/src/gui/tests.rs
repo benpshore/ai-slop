@@ -56,6 +56,11 @@ struct Fixture {
     mailbox: Rc<Mailbox<Intake>>,
 }
 
+/// Marks an app whose `setup` has run.
+struct SetupDone;
+
+impl gpui::Global for SetupDone {}
+
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -69,11 +74,21 @@ impl Fixture {
         }
     }
 
-    /// Bind the keys, build the view and open its window.
+    /// Bind the keys, build the view and open its window. `setup` runs once
+    /// per app (it appends key bindings, so a second run would double them)
+    /// and an earlier fixture's window is closed, so a test that opens
+    /// several fixtures in one app measures one configuration, like the real
+    /// app.
     fn open(&self, cx: &mut TestAppContext) -> (Entity<Shell>, AnyWindowHandle) {
         let ledger = self.dir.path().join("state").join("ledger.sqlite");
         let shell = cx.update(|cx| {
-            setup(cx);
+            if cx.try_global::<SetupDone>().is_none() {
+                setup(cx);
+                cx.set_global(SetupDone);
+            }
+            for stale in cx.windows() {
+                let _ = stale.update(cx, |_, window, _| window.remove_window());
+            }
             let shell = cx.new(|cx| Shell::new(&self.mailbox, ledger, fake_host(&self.log), cx));
             cx.set_global(ShellHandle(shell.clone()));
             open_main_window(cx);
@@ -760,6 +775,313 @@ fn a_cancelled_row_can_be_shown_in_finder_and_cleared(cx: &mut TestAppContext) {
         row_phase(&shell, cx).is_empty(),
         "Clear finished removed the cancelled row too"
     );
+}
+
+/// Median of `samples` (sorts them).
+fn median(samples: &mut [std::time::Duration]) -> std::time::Duration {
+    samples.sort();
+    let mid = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        // Even count: the average of the two middle observations.
+        (samples[mid - 1] + samples[mid]) / 2
+    } else {
+        samples[mid]
+    }
+}
+
+/// What a set of timings looks like: the middle *and* the tail. A median
+/// alone hides jitter and the occasional slow interaction, which is exactly
+/// what a user notices, so the table always shows the range and the 95th
+/// percentile beside it.
+#[derive(Debug, PartialEq, Eq)]
+struct Stats {
+    n: usize,
+    min: std::time::Duration,
+    median: std::time::Duration,
+    /// Nearest-rank 95th percentile (the slowest one in twenty).
+    p95: std::time::Duration,
+    max: std::time::Duration,
+}
+
+impl Stats {
+    fn of(samples: &mut [std::time::Duration]) -> Self {
+        let median = median(samples); // sorts
+        let n = samples.len();
+        // Nearest rank: the smallest sample at or above 95% of them.
+        let rank = (n * 95).div_ceil(100).max(1);
+        Self {
+            n,
+            min: samples[0],
+            median,
+            p95: samples[rank - 1],
+            max: samples[n - 1],
+        }
+    }
+}
+
+#[test]
+fn the_median_of_an_even_count_averages_the_middle_pair() {
+    let ms = std::time::Duration::from_millis;
+    assert_eq!(median(&mut [ms(4), ms(1), ms(3), ms(2)]), ms(2) + ms(1) / 2);
+    assert_eq!(median(&mut [ms(9), ms(1)]), ms(5));
+    assert_eq!(median(&mut [ms(3), ms(1), ms(2)]), ms(2));
+    assert_eq!(median(&mut [ms(7)]), ms(7));
+}
+
+#[test]
+fn the_stats_keep_the_outliers_a_median_would_hide() {
+    let ms = std::time::Duration::from_millis;
+    // Four fast samples and one 100 ms stall: the median says 1 ms, the
+    // range and the tail say the stall happened.
+    let stats = Stats::of(&mut [ms(1), ms(100), ms(1), ms(1), ms(1)]);
+    assert_eq!(
+        stats,
+        Stats {
+            n: 5,
+            min: ms(1),
+            median: ms(1),
+            p95: ms(100),
+            max: ms(100)
+        }
+    );
+    // 1..=100 ms: nearest-rank p95 is the 95th value.
+    let mut hundred: Vec<_> = (1..=100).map(ms).collect();
+    let stats = Stats::of(&mut hundred);
+    assert_eq!((stats.p95, stats.max, stats.min), (ms(95), ms(100), ms(1)));
+    assert_eq!(stats.median, ms(50) + ms(1) / 2);
+    // A single sample is its own everything.
+    let stats = Stats::of(&mut [ms(7)]);
+    assert_eq!(
+        (stats.min, stats.median, stats.p95, stats.max),
+        (ms(7), ms(7), ms(7), ms(7))
+    );
+}
+
+/// `f` timed `runs` times.
+fn timed(runs: usize, mut f: impl FnMut()) -> Stats {
+    let mut samples: Vec<_> = (0..runs)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            f();
+            started.elapsed()
+        })
+        .collect();
+    Stats::of(&mut samples)
+}
+
+/// One row of the published timings table.
+fn row(what: &str, stats: &Stats) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    // How far the slowest sample is from the median: 1.0 is perfectly steady.
+    let spread = ms(stats.max) / ms(stats.median).max(f64::EPSILON);
+    eprintln!(
+        "| {what} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {spread:.1}x |",
+        stats.n,
+        ms(stats.min),
+        ms(stats.median),
+        ms(stats.p95),
+        ms(stats.max),
+    );
+}
+
+/// One frame: layout, prepaint and paint of the window with the view.
+fn frame(visual: &mut VisualTestContext, shell: &Entity<Shell>) {
+    visual.draw(
+        gpui::point(px(0.0), px(0.0)),
+        size(px(640.0), px(480.0)),
+        |_, _| shell.clone(),
+    );
+}
+
+/// How long the interactions the app must answer at once take, on GPUI's
+/// test platform: view state, layout and scene building on the CPU, with no
+/// GPU and no display, so the frame is measured up to the point a renderer
+/// would take over. The App workflow runs this on a macOS runner in release
+/// mode and prints the table (`--release -- --ignored --nocapture`). It
+/// measures; it asserts nothing.
+#[gpui::test]
+#[ignore = "a measurement: run with --release -- --ignored --nocapture"]
+// One long table-printing script reads better than helpers per row.
+#[allow(clippy::too_many_lines)]
+fn interaction_timings(cx: &mut TestAppContext) {
+    eprintln!("| interaction (ms) | n | min | median | p95 | max | max/median |");
+    eprintln!("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
+
+    // A window with no rows: the first frame, then a steady one.
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    let started = std::time::Instant::now();
+    frame(&mut visual, &shell);
+    row(
+        "first frame, empty window (one cold draw)",
+        &Stats::of(&mut [started.elapsed()]),
+    );
+    row(
+        "frame, empty window",
+        &timed(50, || frame(&mut visual, &shell)),
+    );
+
+    // A file arrives (a drop, a chooser, Finder) through `Shell::enqueue`,
+    // which also starts the job: the row is there, running, drawn.
+    let paths = copies(&fixture, 1);
+    let mut arrivals = Vec::new();
+    for _ in 0..30 {
+        let started = std::time::Instant::now();
+        shell.update(&mut visual, |shell, cx| {
+            shell.enqueue(paths.clone(), Action::Text, cx);
+        });
+        frame(&mut visual, &shell);
+        arrivals.push(started.elapsed());
+        // Let the job finish, empty the list and draw the empty window, all
+        // outside the timer, so the next arrival is into an already-drawn
+        // empty view. The model is cleared directly: `Shell::clear_done` also
+        // schedules a list scroll that an empty window (which draws no list)
+        // would leave pending for the timed frame.
+        visual.run_until_parked();
+        shell.update(&mut visual, |shell, cx| {
+            shell.jobs.clear_done();
+            cx.notify();
+        });
+        frame(&mut visual, &shell);
+        frame(&mut visual, &shell);
+    }
+    row("file arrives to its row drawn", &Stats::of(&mut arrivals));
+
+    // The list at scale.
+    for rows in [1usize, 100, 5000] {
+        let scale = Fixture::new();
+        let (shell, window) = scale.open(cx);
+        queue_only(&shell, cx, copies(&scale, rows));
+        let mut visual = VisualTestContext::from_window(window, cx);
+        frame(&mut visual, &shell);
+        let time = timed(20, || {
+            shell.update(&mut visual, |_, cx| cx.notify());
+            frame(&mut visual, &shell);
+        });
+        row(&format!("frame, {rows} rows"), &time);
+    }
+
+    // With 5,000 rows: a key press to the new selection drawn, a jump to the
+    // end, and a progress event to its frame.
+    let big = Fixture::new();
+    let (shell, window) = big.open(cx);
+    queue_only(&shell, cx, copies(&big, 5000));
+    let mut visual = VisualTestContext::from_window(window, cx);
+    frame(&mut visual, &shell);
+    let list = shell.read_with(&visual, |shell, _| shell.list_focus.clone());
+    visual.update(|window, _| window.focus(&list));
+    // Start near the tail: `stepped` finds the selected row with a scan from
+    // the front, so a press late in a big batch is the expensive case.
+    let all = ids(&shell, &visual);
+    shell.update(&mut visual, |shell, _| shell.selected = Some(all[4_849]));
+    shell.update(&mut visual, |shell, _| {
+        shell.scroll.scroll_to_item(4_849, ScrollStrategy::Top);
+    });
+    frame(&mut visual, &shell);
+    frame(&mut visual, &shell);
+    let mut presses = Vec::new();
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        visual
+            .cx
+            .dispatch_keystroke(window, Keystroke::parse("down").unwrap());
+        frame(&mut visual, &shell);
+        presses.push(started.elapsed());
+    }
+    row(
+        "Down key to selection drawn, rows 4,850-4,950 of 5,000",
+        &Stats::of(&mut presses),
+    );
+    let mut jumps = Vec::new();
+    for key in ["end", "home"].repeat(10) {
+        let started = std::time::Instant::now();
+        visual
+            .cx
+            .dispatch_keystroke(window, Keystroke::parse(key).unwrap());
+        frame(&mut visual, &shell);
+        frame(&mut visual, &shell);
+        jumps.push(started.elapsed());
+    }
+    row(
+        "End / Home to the new rows drawn (two frames), 5,000 rows",
+        &Stats::of(&mut jumps),
+    );
+    // The job being timed is the last row: every earlier one has finished
+    // (a real batch reaches its late rows only after the early ones), so a
+    // progress event pays for finding a row at the end of the list.
+    let running = shell.update(&mut visual, |shell, _| {
+        let ids: Vec<usize> = shell.jobs.rows().iter().map(|row| row.id).collect();
+        let (tail, earlier) = ids.split_last().unwrap();
+        for &id in earlier {
+            shell.jobs.start(id);
+            // As a successful text batch leaves them: a summary and a .txt
+            // result, so the visible rows carry Copy and Show in Finder.
+            shell.jobs.finish(
+                id,
+                Ok(jobs::Outcome {
+                    outputs: vec![PathBuf::from(format!("/tmp/tpe-timing-{id}.txt"))],
+                    summary: "text \u{b7} 2 pages, 3 references".into(),
+                    warnings: Vec::new(),
+                }),
+            );
+        }
+        shell.jobs.start(*tail);
+        *tail
+    });
+    // Show the running row: only the rows on screen are built, so with the
+    // list left at the top the frames would draw unchanged rows.
+    shell.update(&mut visual, |shell, _| {
+        shell.scroll.scroll_to_item(4_999, ScrollStrategy::Bottom);
+    });
+    frame(&mut visual, &shell);
+    frame(&mut visual, &shell);
+    let mut page = 0u32;
+    row(
+        "progress event (model update, not the channel hop) to its frame, last of 5,000 rows",
+        &timed(100, || {
+            page += 1;
+            shell.update(&mut visual, |shell, cx| {
+                shell.jobs.progress(
+                    running,
+                    tpe::pipeline::Progress::Page {
+                        page,
+                        done: page,
+                        total: 20_000,
+                    },
+                );
+                cx.notify();
+            });
+            frame(&mut visual, &shell);
+        }),
+    );
+
+    // The engine itself, on the two-page paper. Each sample gets its own
+    // directory and a new ledger, so none is slowed by the outputs and
+    // ledger rows of the ones before it (`publish` searches from the first
+    // free name).
+    tpe::pipeline::warm_up();
+    for (what, action) in [
+        (
+            "Get text job on the 2-page paper (engine, new ledger, file)",
+            Action::Text,
+        ),
+        (
+            "Get bibliography job on the 2-page paper (engine, files)",
+            Action::Bibliography,
+        ),
+    ] {
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let job = Fixture::new();
+            let ledger = job.dir.path().join("timing-ledger.sqlite");
+            let cancel = CancelToken::new();
+            let started = std::time::Instant::now();
+            jobs::run(action, &job.pdf, &ledger, &mut |_| {}, &cancel).unwrap();
+            samples.push(started.elapsed());
+        }
+        row(what, &Stats::of(&mut samples));
+    }
 }
 
 /// Rows added without starting the engine: the first `done` are failed
