@@ -127,6 +127,10 @@ struct PendingFigure {
 struct FigureStaging<'a> {
     base: Option<&'a Path>,
     root: Option<PathBuf>,
+    /// Directories this run created above the staging directory (the figures
+    /// directory itself, if it did not exist), deepest first, so a run that
+    /// files nothing leaves no empty directory behind.
+    made: Vec<PathBuf>,
     pending: Vec<PendingFigure>,
 }
 
@@ -135,6 +139,7 @@ impl<'a> FigureStaging<'a> {
         Self {
             base,
             root: None,
+            made: Vec::new(),
             pending: Vec::new(),
         }
     }
@@ -145,6 +150,11 @@ impl<'a> FigureStaging<'a> {
         if let Some(root) = &self.root {
             return Ok(root.clone());
         }
+        self.made = base
+            .ancestors()
+            .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
+            .map(Path::to_path_buf)
+            .collect();
         fs::create_dir_all(base)?;
         loop {
             let unique = FIGURE_STAGING.fetch_add(1, Ordering::Relaxed);
@@ -217,6 +227,10 @@ impl Drop for FigureStaging<'_> {
     fn drop(&mut self) {
         if let Some(root) = &self.root {
             let _ = fs::remove_dir_all(root);
+        }
+        // Each fails, harmlessly, once figures have been filed inside it.
+        for dir in &self.made {
+            let _ = fs::remove_dir(dir);
         }
     }
 }
@@ -1098,10 +1112,10 @@ mod tests {
             matches!(result, Err(PipelineError::Cancelled)),
             "{result:?}"
         );
-        let left: Vec<_> = std::fs::read_dir(&figures)
-            .map(|entries| entries.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        assert!(left.is_empty(), "nothing left behind: {left:?}");
+        assert!(
+            !figures.exists(),
+            "not even the figures directory the run had to create"
+        );
 
         // A file an earlier complete run filed is never touched by a
         // cancelled one (it only ever writes to its own staging directory).
@@ -1171,10 +1185,7 @@ mod tests {
             run_job_with(&backend, &fake_job(&input, Some(&figures)))
         }));
         assert!(outcome.is_err(), "the stage panicked");
-        let left: Vec<_> = std::fs::read_dir(&figures)
-            .map(|entries| entries.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        assert!(left.is_empty(), "nothing filed, staging removed: {left:?}");
+        assert!(!figures.exists(), "nothing filed, nothing left");
     }
 
     #[test]
