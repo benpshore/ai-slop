@@ -18,16 +18,21 @@ permissions:
   contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
+      checks: read
+      contents: read
+    outputs:
+      skip: ${{ steps.guard.outputs.skip }}
+      version: ${{ steps.build.outputs.version }}
     env:
-      GH_TOKEN: ${{ github.token }}
       SHA: ${{ github.sha }}
     steps:
       - name: Wait for this commit's ci check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           for _ in $(seq 1 75); do
@@ -45,7 +50,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
       - name: Already released?
         id: guard
         run: |
@@ -54,7 +59,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
       - name: Tag, test, build
         if: steps.guard.outputs.skip != 'true'
-        id: tag
+        id: build
         run: |
           set -euo pipefail
           latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
@@ -68,10 +73,40 @@ jobs:
           uv audit --locked --preview-features audit-command
           uv build
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Push tag and publish
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: steps.guard.outputs.skip != 'true'
+        with:
+          name: release-dist
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: release-dist
+          path: dist
+      - name: Push tag and publish
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          git push origin "refs/tags/v$VERSION"
+          set -euo pipefail
+          tag_sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="v$VERSION" \
+            -f message="v$VERSION" \
+            -f object="$SHA" \
+            -f type=commit \
+            --jq .sha)
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/v$VERSION" \
+            -f sha="$tag_sha"
           gh release create "v$VERSION" dist/* --verify-tag --generate-notes
