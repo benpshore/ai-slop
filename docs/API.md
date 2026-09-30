@@ -113,8 +113,18 @@ nothing and names each bad path by index and reason (`not_absolute`,
 ```
 
 `state` is `queued`, `running`, `cancelling`, `finished`, `failed` or
-`cancelled` (the app's rows). `progress` is the engine's last progress event
-in the shape `tpe extract --progress` prints. `path` is the path as sent;
+`cancelled` (the app's rows). `progress` is the engine's last progress event,
+or `null` before the first:
+
+| `event` | Fields | When |
+|---|---|---|
+| `reading` | `done`, `total` (bytes) | while the PDF is read, before it opens (one per 4 MiB read) |
+| `opened` | `pages`, `total` (pages) | the PDF opened; `total` pages will be processed |
+| `page` | `page`, `done`, `total` (pages) | a page finished |
+
+`opened` and `page` are the lines `tpe extract --progress` prints, without
+`path`; `reading` is not in that stream. The job's own `done` and `total`
+count pages only, so they stay `0` and `null` while it reads. `path` is the path as sent;
 `outputs[].path` is where the job wrote (next to the resolved PDF). `seq`
 increases with every change and is the event id. Ids are
 `<instance>-<n>`: `instance` is random per server run, so an id kept from an
@@ -292,8 +302,8 @@ submitted path; the job then reads whatever is there.
 no sandbox. An engine panic fails that job only (`jobs::run` catches it) and
 writes nothing. The engine bounds known pathological inputs (the repository's
 "Bound …" changes), but a PDF that makes one page run for a very long time
-holds the queue (cancel takes effect only between pages; restart the server
-to stop it), and one that exhausts memory can take the server down. PDF text
+holds the queue (cancel takes effect while the file is read and between
+pages, not inside one; restart the server to stop it), and one that exhausts memory can take the server down. PDF text
 is written only to the output files, never logged; it is served with its
 file type (`text/plain` or `application/json`), `X-Content-Type-Options:
 nosniff` and `Content-Security-Policy: default-src 'none'`, so a browser

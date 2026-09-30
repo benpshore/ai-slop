@@ -214,9 +214,15 @@
           "done": { "type": "integer", "minimum": 0, "description": "Pages processed so far." },
           "total": { "type": ["integer", "null"], "description": "Pages this run covers, once the PDF is open." },
           "progress": {
-            "description": "The engine's last progress event, as tpe extract --progress prints it (without the path).",
+            "description": "The engine's last progress event: reading (bytes of the PDF read so far, before it opens), then opened and page, the last two as tpe extract --progress prints them (without the path).",
             "oneOf": [
               { "type": "null" },
+              {
+                "type": "object",
+                "required": ["event", "done", "total"],
+                "additionalProperties": false,
+                "properties": { "event": { "const": "reading" }, "done": { "type": "integer", "description": "Bytes read so far." }, "total": { "type": "integer", "description": "Bytes in the file." } }
+              },
               {
                 "type": "object",
                 "required": ["event", "pages", "total"],

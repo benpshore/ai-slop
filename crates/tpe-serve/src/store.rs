@@ -608,8 +608,9 @@ fn state(row: &JobRow) -> &'static str {
     }
 }
 
-/// A progress event in the shape `tpe extract --progress` prints, without
-/// the path.
+/// A progress event: `opened` and `page` in the shape `tpe extract
+/// --progress` prints, without the path, plus `reading` (bytes), which that
+/// stream leaves out.
 struct ProgressView(Progress);
 
 impl Serialize for ProgressView {
@@ -716,8 +717,30 @@ impl Serialize for JobView<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::{Progress, ProgressView, redact};
+    use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn progress_events_have_the_documented_shapes() {
+        let view = |event| serde_json::to_value(ProgressView(event)).unwrap();
+        assert_eq!(
+            view(Progress::Reading { done: 4, total: 9 }),
+            json!({"event": "reading", "done": 4, "total": 9})
+        );
+        assert_eq!(
+            view(Progress::Opened { pages: 5, total: 2 }),
+            json!({"event": "opened", "pages": 5, "total": 2})
+        );
+        assert_eq!(
+            view(Progress::Page {
+                page: 3,
+                done: 1,
+                total: 2
+            }),
+            json!({"event": "page", "page": 3, "done": 1, "total": 2})
+        );
+    }
 
     #[test]
     fn failures_name_only_what_the_client_sent() {
