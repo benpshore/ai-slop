@@ -53,18 +53,19 @@ jobs:
         with:
           persist-credentials: false
       - run: rustc --version --verbose && uname -m && python3 --version
-      - name: Draw a fresh sample (sample=true)
-        if: env.SAMPLE == 'true'
+      - name: Choose the manifest (sample=true or a missing pinned manifest draws a fresh sample)
         run: |
-          mkdir -p out/report
-          python3 scripts/pmc_sample.py --seed "$SEED" --target "$TARGET" --out out/report/pmc-manifest.json
-          echo "MANIFEST=out/report/pmc-manifest.json" >> "$GITHUB_ENV"
-          echo "===== BEGIN PMC MANIFEST ====="
-          cat out/report/pmc-manifest.json
-          echo "===== END PMC MANIFEST ====="
-      - name: Use the pinned manifest
-        if: env.SAMPLE != 'true'
-        run: echo "MANIFEST=corpus/pmc-manifest.json" >> "$GITHUB_ENV"
+          if [ "$SAMPLE" = true ] || [ ! -f corpus/pmc-manifest.json ]; then
+            mkdir -p out/report
+            python3 scripts/pmc_sample.py --seed "$SEED" --target "$TARGET" --out out/report/pmc-manifest.json
+            echo "SAMPLE=true" >> "$GITHUB_ENV"
+            echo "MANIFEST=out/report/pmc-manifest.json" >> "$GITHUB_ENV"
+            echo "===== BEGIN PMC MANIFEST ====="
+            cat out/report/pmc-manifest.json
+            echo "===== END PMC MANIFEST ====="
+          else
+            echo "MANIFEST=corpus/pmc-manifest.json" >> "$GITHUB_ENV"
+          fi
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cargo
         with:
