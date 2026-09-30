@@ -79,7 +79,7 @@ jobs:
       - name: Launch the bundle and open a PDF with it (the Open With path)
         run: |
           set -eu
-          APP=target/release/PDFTextract.app
+          APP="$PWD/target/release/PDFTextract.app"
           dir=$(mktemp -d)
           cp crates/tpe-app/tests/fixtures/synthetic-paper.pdf "$dir/paper.pdf"
           # Launch Services hands the file to a cold app, as Finder's Open With does.
