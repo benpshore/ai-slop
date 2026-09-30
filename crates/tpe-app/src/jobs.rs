@@ -315,6 +315,16 @@ impl JobList {
         self.rows.len() != before
     }
 
+    /// Drop row `id` if it is finished, failed or cancelled; `false` for a
+    /// queued or running row (see [`JobList::remove`]) or an unknown id. The
+    /// window clears finished rows all at once ([`JobList::clear_done`]); the
+    /// local API (`crates/tpe-serve`) removes them one at a time.
+    pub fn remove_done(&mut self, id: usize) -> bool {
+        let before = self.rows.len();
+        self.rows.retain(|row| row.id != id || row.is_active());
+        self.rows.len() != before
+    }
+
     pub fn has_done(&self) -> bool {
         self.rows.iter().any(|row| !row.is_active())
     }
@@ -1129,6 +1139,32 @@ mod tests {
         assert_eq!(list.rows()[0].status_line(), "bibliography · Failed: boom");
         assert_eq!(list.rows()[0].phase, Phase::Failed("boom".into()));
         assert_eq!(list.rows()[0].copyable(), None);
+    }
+
+    #[test]
+    fn remove_done_drops_only_the_named_finished_row() {
+        let (dir, pdf, _ledger) = scratch();
+        let other = dir.path().join("other.pdf");
+        std::fs::copy(&pdf, &other).unwrap();
+        let mut list = JobList::default();
+        list.enqueue([pdf.clone(), other, pdf], Action::Text);
+        let ids: Vec<usize> = list.rows().iter().map(|row| row.id).collect();
+
+        assert!(!list.remove_done(ids[0]), "a queued row is not done");
+        list.start(ids[0]);
+        assert!(!list.remove_done(ids[0]), "a running row is never dropped");
+        list.finish(ids[0], Err(RunError::Cancelled));
+        list.start(ids[1]);
+        list.finish(ids[1], Err(RunError::Failed("boom".into())));
+
+        assert!(list.remove_done(ids[0]), "a cancelled row goes");
+        assert!(!list.remove_done(ids[0]), "only once");
+        assert!(!list.remove_done(999), "an unknown id removes nothing");
+        let left: Vec<usize> = list.rows().iter().map(|row| row.id).collect();
+        assert_eq!(left, [ids[1], ids[2]], "the other rows stay, in order");
+        assert!(list.remove_done(ids[1]), "a failed row goes");
+        assert_eq!(list.rows().len(), 1);
+        assert_eq!(list.rows()[0].phase, Phase::Queued);
     }
 
     #[test]
