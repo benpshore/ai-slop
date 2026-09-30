@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
 
@@ -131,11 +131,14 @@ fn figure_run_dir(hash: &str, identity: &BackendIdentity) -> String {
 /// `<figures_dir>/<run_dir>/p<page>-f<index>.<ext>` and set `file` to that
 /// path relative to `figures_dir` (always `/`-separated). A failed write
 /// leaves `file` unset and returns a warning (never prefixed `failed:`, which
-/// is reserved for pages whose text could not be extracted).
+/// is reserved for pages whose text could not be extracted). Files this call
+/// newly created (not ones that already existed) are added to `created`, so
+/// a cancelled run can take them back.
 fn collect_figures(
     session: &mut dyn DocumentSession,
     page: &mut PageText,
     export: Option<(&Path, &str)>,
+    created: &mut Vec<PathBuf>,
 ) -> Vec<String> {
     let page_no = page.page;
     let mut warnings: Vec<String> = Vec::new();
@@ -151,8 +154,14 @@ fn collect_figures(
         let ext = figure_extension(figure.mime.as_deref());
         let relative = format!("{run_dir}/p{page_no}-f{index}.{ext}");
         let target = dir.join(&relative);
+        let fresh = !target.exists();
         match write_figure(&target, &bytes) {
-            Ok(()) => figure.file = Some(relative),
+            Ok(()) => {
+                figure.file = Some(relative);
+                if fresh {
+                    created.push(target);
+                }
+            }
             Err(err) => warnings.push(format!(
                 "figure export: page {page_no} figure {index}: {}: {err}",
                 target.display()
@@ -161,6 +170,24 @@ fn collect_figures(
     }
     page.warnings.extend(warnings.iter().cloned());
     warnings
+}
+
+/// Remove the figure files a cancelled run created, and the run's directories
+/// when that leaves them empty. Files that existed before the run stay.
+fn discard_exports(export: Option<(&Path, &str)>, created: &[PathBuf]) {
+    if created.is_empty() {
+        return;
+    }
+    for path in created {
+        let _ = fs::remove_file(path);
+    }
+    if let Some((dir, run_dir)) = export {
+        let run = dir.join(run_dir);
+        let _ = fs::remove_dir(&run); // fails, harmlessly, if anything is left
+        if let Some(hash_dir) = run.parent() {
+            let _ = fs::remove_dir(hash_dir);
+        }
+    }
 }
 
 /// Compile every lazily built regex of the text stages (and of the `LaTeX`
@@ -270,10 +297,12 @@ fn parse_while_hashing(
             hash_state = HashState::Done(hashed);
         }
         let export: Option<(&Path, &str)> = figures_dir.map(|dir| (dir, run_dir.as_str()));
+        let mut exported: Vec<PathBuf> = Vec::new();
         for page in first..=last {
             match session.page_text(page) {
                 Ok(mut text) => {
-                    let figure_warnings = collect_figures(session.as_mut(), &mut text, export);
+                    let figure_warnings =
+                        collect_figures(session.as_mut(), &mut text, export, &mut exported);
                     warnings.extend(figure_warnings);
                     pages.push(text);
                 }
@@ -294,6 +323,7 @@ fn parse_while_hashing(
             })
             .is_break()
             {
+                discard_exports(export, &exported);
                 return Err(PipelineError::Cancelled);
             }
         }
@@ -493,7 +523,7 @@ mod tests {
 
     use super::{
         PipelineError, Progress, chunk_results, figure_extension, resolve_page_range, run_job,
-        run_job_observed, run_job_with, sub_range_digest,
+        run_job_observed, run_job_with, run_job_with_observed, sub_range_digest,
     };
     use crate::backend::{BackendError, DocumentSession, Extractor, lopdf_backend::LopdfBackend};
     use crate::schema::{
@@ -946,6 +976,61 @@ mod tests {
             result.pages[0].text
         );
         assert!(result.pages[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_run_takes_back_the_figures_it_exported() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let figures = dir.path().join("figures");
+        let backend = FakeExtractor {
+            reading_order: false,
+        };
+        let result =
+            run_job_with_observed(&backend, &fake_job(&input, Some(&figures)), &mut |event| {
+                match event {
+                    Progress::Page { .. } => ControlFlow::Break(()),
+                    Progress::Opened { .. } => ControlFlow::Continue(()),
+                }
+            });
+        assert!(
+            matches!(result, Err(PipelineError::Cancelled)),
+            "{result:?}"
+        );
+        let left: Vec<_> = walk(&figures);
+        assert!(left.is_empty(), "nothing left behind: {left:?}");
+
+        // Files that were already there (an earlier complete run) stay.
+        run_job_with(&backend, &fake_job(&input, Some(&figures))).unwrap();
+        let before = walk(&figures);
+        assert_eq!(before.len(), 1, "{before:?}");
+        let again =
+            run_job_with_observed(&backend, &fake_job(&input, Some(&figures)), &mut |event| {
+                match event {
+                    Progress::Page { .. } => ControlFlow::Break(()),
+                    Progress::Opened { .. } => ControlFlow::Continue(()),
+                }
+            });
+        assert!(matches!(again, Err(PipelineError::Cancelled)));
+        assert_eq!(walk(&figures), before, "the earlier run's export is kept");
+    }
+
+    /// Every file under `root`, recursively (empty when `root` is absent).
+    fn walk(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found.sort();
+        found
     }
 
     #[test]
