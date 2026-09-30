@@ -115,6 +115,9 @@ jobs:
             echo "::warning::the app did not quit on request; killing it"
             pkill -x PDFTextract
           fi
+          # Enforced last, after the app is stopped and the screenshot is kept:
+          # a missing window list, or none on screen, fails the step.
+          grep -q 'on-screen PDFTextract windows: [1-9]' "$RUNNER_TEMP/windows.txt"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
