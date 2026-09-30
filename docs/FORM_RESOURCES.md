@@ -13,8 +13,8 @@ The replacement policy applies to Form XObjects in the lopdf interpreter:
 | Cached programs | 64 MiB allocation charge, including vector capacities and nested operands; minimum 256 bytes per entry |
 | Cache cardinality | 4,096 entries and bounded FIFO eviction queue |
 | Decode work | 64 MiB per page; chains/predictors retain their worst-case reservation |
-| Form execution work | 128 MiB of program charge per page, charged on cached hits too |
-| Form invocations | 16,384 per page, including empty cached Forms |
+| Form execution work | 256 MiB of program charge per page, charged on cached hits too |
+| Form invocations | 131,072 per page, including empty cached Forms |
 
 The cache evicts oldest entries instead of permanently refusing new reusable
 Forms. Active interpreter frames can still hold evicted programs through Rc;
@@ -29,13 +29,20 @@ it does not return a successful page containing silently truncated spans.
 The pipeline's existing failed-page handling records this error. Content
 policy identity changes from 4 to 5 so prior ledger results are not confused
 with this extraction policy. Limits are conservative initial policy choices,
-not corpus-derived accuracy guarantees or a wall-clock timeout.
+not general accuracy guarantees or a wall-clock timeout. The 70-paper pinned
+corpus was used to reject and correct an overly restrictive initial invocation
+limit: a real figure-heavy page invokes Forms 64,554 times, so 16,384 was
+unacceptable. The adopted 131,072-call and 256 MiB execution limits provide
+roughly twice the observed maximum, not a claim to cover every legitimate PDF.
 
 Validation: tests cover empty/tiny entry floods, duplicate accounting,
 spare-capacity and dictionary accounting, byte-budget eviction, a compressed
 Form expanding past 8 MiB, repeated uncached direct Forms, repeated cached
 empty Forms, per-page budget reset and hostile filter/predictor dimensions.
-Existing warm/cold reuse and span/figure tests remain intact. Workspace Rust
+Existing warm/cold reuse and span/figure tests remain intact. A corpus
+diagnostic reads every page of all 70 pinned PDFs successfully and measures
+peaks of 64,554 calls, 6,628,971 decode bytes and 116,183,200 bytes of
+execution charge per page. Workspace Rust
 tests and Clippy pass; Python checks pass (64 tests and dependency audit).
 
 A release-mode synthetic diagnostic on this x86-64 Linux executor extracted

@@ -113,8 +113,8 @@ const MIN_FORM_CHARGE: usize = 256;
 const MAX_FORM_DECODE_BYTES: usize = 8 * 1024 * 1024;
 /// Per-page limits also cover cache misses after eviction and direct Forms.
 const MAX_PAGE_FORM_DECODE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_PAGE_FORM_WORK_BYTES: usize = 128 * 1024 * 1024;
-const MAX_PAGE_FORM_CALLS: usize = 16_384;
+const MAX_PAGE_FORM_WORK_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PAGE_FORM_CALLS: usize = 131_072;
 const MAX_FORM_FILTERS: usize = 8;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
@@ -216,6 +216,8 @@ struct SessionCache {
     forms: HashMap<ObjectId, (Rc<TextProgram>, usize)>,
     form_order: VecDeque<ObjectId>,
     form_bytes: usize,
+    #[cfg(test)]
+    last_form_work: Option<FormWork>,
 }
 
 impl SessionCache {
@@ -248,6 +250,7 @@ impl SessionCache {
 
 /// Budgets reset for each page, so page order cannot exhaust a session-wide
 /// work allowance. These bound Form work, not document parsing or fonts.
+#[derive(Clone, Copy)]
 struct FormWork {
     decode: usize,
     execute: usize,
@@ -3027,6 +3030,10 @@ fn extract_page(
     };
     let mut contexts = vec![page_context];
     interpreter.run(&program, &mut contexts, 0);
+    #[cfg(test)]
+    {
+        interpreter.cache.last_form_work = Some(interpreter.form_work);
+    }
     if let Some(reason) = interpreter.resource_error {
         return Err(page_error(page, format!("resource_limit: {reason}")));
     }
@@ -5878,6 +5885,46 @@ mod tests {
     }
 
     type OpList = Result<Vec<(String, Vec<Object>)>, String>;
+
+    #[test]
+    #[ignore = "requires TPE_CORPUS_CACHE containing the pinned public PDFs"]
+    fn measure_corpus_form_work() {
+        let root = std::env::var("TPE_CORPUS_CACHE").expect("set TPE_CORPUS_CACHE");
+        let mut peaks = [0usize; 3];
+        let mut peak_files = [String::new(), String::new(), String::new()];
+        let mut documents = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path().join("paper.pdf");
+            if !path.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let mut session = open_session(&bytes);
+            documents += 1;
+            for page in 1..=session.pages.len() as u32 {
+                session.page_text(page).unwrap();
+                let used = session.cache.last_form_work.unwrap();
+                for (index, value) in [
+                    MAX_PAGE_FORM_CALLS - used.calls,
+                    MAX_PAGE_FORM_DECODE_BYTES - used.decode,
+                    MAX_PAGE_FORM_WORK_BYTES - used.execute,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if value > peaks[index] {
+                        peaks[index] = value;
+                        peak_files[index] = format!("{} page {page}", path.display());
+                    }
+                }
+            }
+        }
+        assert_eq!(documents, 70);
+        eprintln!(
+            "corpus Form peaks: calls={}, decode_bytes={}, execution_charge={}; locations={peak_files:?}",
+            peaks[0], peaks[1], peaks[2]
+        );
+    }
 
     /// Manual diagnostic; no flaky wall-clock threshold in the test suite.
     #[test]
