@@ -33,7 +33,33 @@ HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 CONTEXT_LINES = 6
+HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-"})
 CLOSEST_TITLES = 20
+# Letters with no canonical decomposition, so NFD cannot strip their mark.
+FOLD_LETTERS = str.maketrans(
+    {
+        "\u0142": "l",
+        "\u0141": "L",
+        "\u00f8": "o",
+        "\u00d8": "O",
+        "\u0111": "d",
+        "\u0110": "D",
+        "\u00f0": "d",
+        "\u00d0": "D",
+        "\u00fe": "th",
+        "\u00de": "Th",
+        "\u00df": "ss",
+        "\u00e6": "ae",
+        "\u00c6": "AE",
+        "\u0153": "oe",
+        "\u0152": "OE",
+        "\u0131": "i",
+        "\u0127": "h",
+        "\u0126": "H",
+        "\u0167": "t",
+        "\u0166": "T",
+    }
+)
 LEAK_PATTERNS = [
     r"\bpage \d+ of \d+\b",
     r"\bauthor manuscript\b",
@@ -114,7 +140,7 @@ def nfc(value: str | None) -> str:
 
 def loose(value: str | None) -> str:
     """NFKC, diacritics stripped, casefolded, letters and digits only."""
-    text = unicodedata.normalize("NFKC", value or "")
+    text = unicodedata.normalize("NFKC", value or "").translate(FOLD_LETTERS)
     text = unicodedata.normalize("NFD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
     text = re.sub(r"[^\w\s]|_", " ", text.casefold())
@@ -136,7 +162,8 @@ def norm_doi(value: str | None) -> str | None:
 
 
 def strip_title(value: str | None) -> str:
-    return nfc(value).rstrip(".").strip()
+    """Strict title form: NFC, typographic hyphens (U+2010, U+2011) as `-`, no final period."""
+    return nfc(value).translate(HYPHENS).rstrip(".").strip()
 
 
 def is_initial(token: str) -> bool:
@@ -1006,11 +1033,16 @@ def render_failures(papers: list[dict], mismatches: dict[str, list[Mismatch]]) -
     lines.append("")
     closest = [m for m in mismatches["backward"] if m.name == "title"]
     closest.sort(key=lambda m: (-m.similarity, m.pmcid, m.entry))
-    rows = [
-        [m.pmcid, str(m.entry), cell(m.truth), cell(m.extracted), f"{m.similarity:.2f}"]
-        for m in closest[:CLOSEST_TITLES]
-    ]
-    lines.append("## Closest title mismatches (backward path; the typical strict-title failure)")
+    per_paper: Counter[str] = Counter()
+    rows = []
+    for m in closest:
+        per_paper[m.pmcid] += 1
+        if per_paper[m.pmcid] > 2:
+            continue
+        rows.append([m.pmcid, str(m.entry), cell(m.truth), cell(m.extracted), f"{m.similarity:.2f}"])
+        if len(rows) >= CLOSEST_TITLES:
+            break
+    lines.append("## Closest title mismatches (backward path, at most two per paper)")
     lines.append("")
     lines.extend(table(["pmcid", "entry", "truth", "extracted", "similarity"], rows))
     lines.append("")

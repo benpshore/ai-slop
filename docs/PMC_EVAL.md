@@ -95,7 +95,7 @@ papers (rates are sums of counts, not means of per-paper rates).
 | year | integer equality | |
 | DOI (truth has one) | lowercase, prefix-stripped equality where the truth has a DOI; a missing extracted DOI counts as wrong | publishers add DOIs to the XML that the PDF never prints, so this is mostly a measure of what the PDF shows |
 | DOI, when one was extracted | the same equality over pairs where a DOI was extracted (a precision); `truth DOI but none extracted` and `extracted DOI where truth has none` are counted separately | a DOI printed in the PDF but absent from the XML is not an error, but is not verified either |
-| title, strict | NFC, whitespace-collapsed, one trailing period ignored, otherwise exact | |
+| title, strict | NFC, whitespace-collapsed, U+2010/U+2011 hyphens read as `-` (publisher XML uses them where the print has `-`), one trailing period ignored, otherwise exact | |
 | title, loose | similarity of the loose forms at least 0.9 | |
 | entries with U+FFFD | share of extracted entries with a replacement character | |
 | leakage | share of extracted entries containing the article's own DOI, elocation id or page range, or `Page n of m` / `Author manuscript` / `Downloaded from` / `available in PMC` | a rough running-head detector; journal names are not used because entries legitimately cite the same journal |

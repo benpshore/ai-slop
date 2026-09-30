@@ -98,6 +98,8 @@ def test_surname_shapes_and_strictness():
     assert pmc.nfc("Obtulowicz") != pmc.nfc("Obtu\u0142owicz")
     assert pmc.surname_loose_equal("Obtu\u0142owicz", "Obtulowicz")
     assert pmc.surname_loose_equal("van der Berg", "Berg")
+    assert pmc.loose("\u00d8stergaard \u00df") == "ostergaard ss"
+    assert pmc.strip_title("Dose\u2011response.") == "Dose-response"
     assert not pmc.surname_loose_equal("Smith", "Smyth")
 
 
