@@ -775,7 +775,9 @@ fn finished_then_queued(
     shell.update(cx, |shell, _| {
         for &id in &all[..done] {
             shell.jobs.start(id);
-            shell.jobs.finish(id, Err(jobs::RunError::Failed("failed".into())));
+            shell
+                .jobs
+                .finish(id, Err(jobs::RunError::Failed("failed".into())));
         }
     });
     all

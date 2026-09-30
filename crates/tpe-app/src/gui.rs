@@ -35,7 +35,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, StreamExt};
@@ -47,7 +46,7 @@ use gpui::{
 };
 
 use tpe::pipeline::Progress;
-use tpe_app::jobs::{self, Action, JobList, JobRow, Mailbox, Phase, Step};
+use tpe_app::jobs::{self, Action, CancelToken, JobList, JobRow, Mailbox, Phase, Step};
 
 actions!(
     pdftextract,
@@ -150,7 +149,7 @@ pub struct Shell {
     /// The selected row's id.
     selected: Option<usize>,
     /// The running job and the flag that stops it.
-    running: Option<(usize, Arc<AtomicBool>)>,
+    running: Option<(usize, Arc<CancelToken>)>,
 }
 
 impl Shell {
@@ -243,7 +242,7 @@ impl Shell {
         self.jobs.start(id);
         cx.notify();
 
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(CancelToken::new());
         self.running = Some((id, cancel.clone()));
         let (sender, mut receiver) = mpsc::unbounded::<Progress>();
         let task = cx.background_executor().spawn(async move {
@@ -313,13 +312,14 @@ impl Shell {
         }
     }
 
-    /// Stop running job `id` at its next page. Nothing is written for it.
+    /// Stop running job `id` at its next page. Nothing is written for it. A
+    /// job that has already begun writing its results is not stopped: the
+    /// request is refused and the row stays as it is until it finishes.
     fn cancel(&mut self, id: usize, cx: &mut Context<Self>) {
-        let Some((running, flag)) = &self.running else {
+        let Some((running, token)) = &self.running else {
             return;
         };
-        if *running == id && self.jobs.mark_cancelling(id) {
-            flag.store(true, Ordering::Relaxed);
+        if *running == id && token.request() && self.jobs.mark_cancelling(id) {
             cx.notify();
         }
     }

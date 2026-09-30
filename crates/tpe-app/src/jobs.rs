@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
@@ -384,11 +384,18 @@ fn generation_paths(source: &Path, suffixes: &[&str], generation: u64) -> Vec<Pa
 /// Temporary files removed when dropped, so a failure or a clash leaves none.
 struct Staged(Vec<PathBuf>);
 
-impl Drop for Staged {
-    fn drop(&mut self) {
-        for path in &self.0 {
+impl Staged {
+    /// Remove the files now; nothing is left to remove on drop.
+    fn discard(&mut self) {
+        for path in self.0.drain(..) {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        self.discard();
     }
 }
 
@@ -399,35 +406,33 @@ static STAGING: AtomicU64 = AtomicU64::new(0);
 ///
 /// Never overwrites: the files of one call share a generation number, and
 /// any existing name in the set moves the whole set on (`paper 2.*`), so a
-/// pair never mixes two runs. Each file is written completely to a hidden
-/// temporary name in the same directory and then given its final name with a
-/// hard link, which fails instead of replacing an existing file, so a reader
-/// or a force-quit sees either no file or a whole one, and two concurrent
-/// publishers cannot take the same name. Where the file system has no hard
-/// links, the final name is created exclusively and written in place (a
-/// force-quit mid-write can then leave a short file).
+/// pair never mixes two runs. Each file is written completely (once) to a
+/// hidden temporary name in the same directory and then given its final name
+/// with a hard link, which fails instead of replacing an existing file, so a
+/// reader or a force-quit sees either no file or a whole one, and two
+/// concurrent publishers cannot take the same name. A clash costs another
+/// link, not another write. Where the file system has no hard links (the
+/// link fails as unsupported or not permitted), the final name is created
+/// exclusively and written in place instead (a force-quit mid-write can then
+/// leave a short file). Any other error, a full disk included, is returned
+/// as it is, not retried.
 ///
 /// # Errors
 /// The file system's error, with nothing left behind that this call made.
 pub fn publish(source: &Path, files: &[(&str, Vec<u8>)]) -> std::io::Result<Vec<PathBuf>> {
     let suffixes: Vec<&str> = files.iter().map(|(suffix, _)| *suffix).collect();
-    let mut use_links = true;
+    let mut staged = stage(source, files)?;
     for generation in 1u64.. {
         let finals = generation_paths(source, &suffixes, generation);
-        let placed = if use_links {
-            match place_by_link(source, &finals, files) {
-                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
-                    // No hard links here (FAT, some network shares): create
-                    // exclusively and write in place from now on.
-                    use_links = false;
-                    place_exclusively(&finals, files)
-                }
-                other => other,
+        if !staged.0.is_empty() {
+            match link_all(&staged.0, &finals) {
+                Ok(()) => return Ok(finals),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) if links_unsupported(&error) => staged.discard(),
+                Err(error) => return Err(error),
             }
-        } else {
-            place_exclusively(&finals, files)
-        };
-        match placed {
+        }
+        match place_exclusively(&finals, files) {
             Ok(()) => return Ok(finals),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -436,12 +441,8 @@ pub fn publish(source: &Path, files: &[(&str, Vec<u8>)]) -> std::io::Result<Vec<
     unreachable!("the generation counter does not run out")
 }
 
-/// Stage every file, then link each into place; on a clash undo the links.
-fn place_by_link(
-    source: &Path,
-    finals: &[PathBuf],
-    files: &[(&str, Vec<u8>)],
-) -> std::io::Result<()> {
+/// Write each file completely to its own hidden temporary name.
+fn stage(source: &Path, files: &[(&str, Vec<u8>)]) -> std::io::Result<Staged> {
     let directory = source.parent().unwrap_or_else(|| Path::new(""));
     let mut staged = Staged(Vec::new());
     for (suffix, bytes) in files {
@@ -458,8 +459,14 @@ fn place_by_link(
         file.write_all(bytes)?;
         file.sync_all()?;
     }
+    Ok(staged)
+}
+
+/// Link each staged file to its final name; on any failure remove the links
+/// this call made.
+fn link_all(staged: &[PathBuf], finals: &[PathBuf]) -> std::io::Result<()> {
     let mut linked: Vec<&PathBuf> = Vec::new();
-    for (temporary, target) in staged.0.iter().zip(finals) {
+    for (temporary, target) in staged.iter().zip(finals) {
         if let Err(error) = fs::hard_link(temporary, target) {
             for done in linked {
                 let _ = fs::remove_file(done);
@@ -469,6 +476,17 @@ fn place_by_link(
         linked.push(target);
     }
     Ok(())
+}
+
+/// Whether a failed `hard_link` says this file system has no hard links,
+/// as opposed to a clash or a real I/O error: FAT, exFAT and some network
+/// shares answer "not supported" or "not permitted" (`EPERM`; on macOS
+/// `ENOTSUP`). The directory is known to be writable by then, since the
+/// staged files were just created in it.
+fn links_unsupported(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{PermissionDenied, Unsupported};
+    matches!(error.kind(), Unsupported | PermissionDenied)
+        || (cfg!(target_os = "macos") && error.raw_os_error() == Some(45))
 }
 
 /// Create each final name exclusively and write it; on any failure remove
@@ -591,6 +609,59 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
+/// A job's stop switch. The person asks with [`CancelToken::request`]; the
+/// job stops at its next page, or at the last moment before it writes
+/// anything. Once the job has started writing its results (the ledger, then
+/// the files) a stop is refused, so "Cancelling" is only ever shown for a job
+/// that will really write nothing, and a job that was told to stop never
+/// half-writes.
+#[derive(Debug, Default)]
+pub struct CancelToken(AtomicU8);
+
+impl CancelToken {
+    const RUNNING: u8 = 0;
+    const STOP: u8 = 1;
+    const COMMITTED: u8 = 2;
+
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(Self::RUNNING))
+    }
+
+    /// Ask the job to stop. `true`: it will stop (or was already asked to).
+    /// `false`: it is already writing its results and will finish.
+    pub fn request(&self) -> bool {
+        match self.0.compare_exchange(
+            Self::RUNNING,
+            Self::STOP,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(now) => now == Self::STOP,
+        }
+    }
+
+    /// Whether a stop has been asked for.
+    pub fn is_requested(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::STOP
+    }
+
+    /// The job's point of no return, called before its first write: `true`
+    /// to go on (later stop requests are refused), `false` when a stop was
+    /// asked for first and nothing may be written.
+    fn commit(&self) -> bool {
+        match self.0.compare_exchange(
+            Self::RUNNING,
+            Self::COMMITTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(now) => now == Self::COMMITTED,
+        }
+    }
+}
+
 /// Run one job in this process. `observe` is called on this thread for the
 /// open and for each page. Setting `cancel` stops the job at the next page
 /// (the post-processing of a finished parse cannot be interrupted, so a
@@ -606,11 +677,11 @@ pub fn run(
     source: &Path,
     ledger: &Path,
     observe: &mut dyn FnMut(Progress),
-    cancel: &AtomicBool,
+    cancel: &CancelToken,
 ) -> Result<Outcome, RunError> {
     let mut watch = |event: Progress| {
         observe(event);
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_requested() {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -628,7 +699,7 @@ fn run_text(
     source: &Path,
     ledger: &Path,
     watch: &mut dyn FnMut(Progress) -> ControlFlow<()>,
-    cancel: &AtomicBool,
+    cancel: &CancelToken,
 ) -> Result<Outcome, RunError> {
     let job = EngineJob {
         path: source.to_string_lossy().into_owned(),
@@ -641,9 +712,6 @@ fn run_text(
     let mut result =
         panic::catch_unwind(AssertUnwindSafe(|| pipeline::run_job_observed(&job, watch)))
             .unwrap_or_else(|payload| Err(panic_error(&*payload)))?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err(RunError::Cancelled);
-    }
     if result.status == Status::Failed {
         return Err(RunError::Failed(
             result
@@ -652,6 +720,11 @@ fn run_text(
                 .cloned()
                 .unwrap_or_else(|| "extraction failed".to_string()),
         ));
+    }
+    // From here the job writes (ledger, then file): the last moment a stop
+    // is accepted, and after it a stop request is refused.
+    if !cancel.commit() {
+        return Err(RunError::Cancelled);
     }
     if let Some(parent) = ledger.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
@@ -697,7 +770,7 @@ fn run_text(
 fn run_bibliography(
     source: &Path,
     watch: &mut dyn FnMut(Progress) -> ControlFlow<()>,
-    cancel: &AtomicBool,
+    cancel: &CancelToken,
 ) -> Result<Outcome, RunError> {
     let started = Instant::now();
     let extractor = backend::by_name(BACKEND).ok_or("backend unavailable".to_string())?;
@@ -709,7 +782,9 @@ fn run_bibliography(
         Ok::<_, RunError>((snapshot.hash.0, scan))
     }))
     .unwrap_or_else(|payload| Err(panic_error(&*payload).into()))?;
-    if cancel.load(Ordering::Relaxed) {
+    // The rest builds the record and writes it: the last moment a stop is
+    // accepted, and after it a stop request is refused.
+    if !cancel.commit() {
         return Err(RunError::Cancelled);
     }
     let record = Record::from_scan(
@@ -763,17 +838,12 @@ fn panic_error(payload: &(dyn std::any::Any + Send)) -> pipeline::PipelineError 
 mod tests {
     use std::path::Path;
 
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::{
-        Action, JobList, Mailbox, Outcome, Phase, RunError, Step, file_url_to_path,
+        Action, CancelToken, JobList, Mailbox, Outcome, Phase, RunError, Step, file_url_to_path,
         generation_paths, publish, run,
     };
     use futures::{FutureExt, StreamExt};
     use tpe::pipeline::Progress;
-
-    /// A flag that is never set.
-    static NEVER: AtomicBool = AtomicBool::new(false);
 
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -802,7 +872,14 @@ mod tests {
     fn text_job_writes_sibling_text_with_progress() {
         let (dir, pdf, ledger) = scratch();
         let mut events = Vec::new();
-        let outcome = run(Action::Text, &pdf, &ledger, &mut |e| events.push(e), &NEVER).unwrap();
+        let outcome = run(
+            Action::Text,
+            &pdf,
+            &ledger,
+            &mut |e| events.push(e),
+            &CancelToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(outcome.outputs, [dir.path().join("paper.txt")]);
         assert_eq!(outcome.summary, "2 pages, 3 references");
@@ -836,7 +913,14 @@ mod tests {
         assert!(stored.timings.write_ms > 0.0, "the ledger write was timed");
 
         // A second run never overwrites: it numbers the new file.
-        let again = run(Action::Text, &pdf, &ledger, &mut |_| {}, &NEVER).unwrap();
+        let again = run(
+            Action::Text,
+            &pdf,
+            &ledger,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
         assert_eq!(again.outputs, [dir.path().join("paper 2.txt")]);
     }
 
@@ -849,7 +933,7 @@ mod tests {
             &pdf,
             &ledger,
             &mut |e| events.push(e),
-            &NEVER,
+            &CancelToken::new(),
         )
         .unwrap();
 
@@ -887,7 +971,14 @@ mod tests {
 
         // With one file of the pair gone, the next run numbers both.
         std::fs::remove_file(&outcome.outputs[0]).unwrap();
-        let again = run(Action::Bibliography, &pdf, &ledger, &mut |_| {}, &NEVER).unwrap();
+        let again = run(
+            Action::Bibliography,
+            &pdf,
+            &ledger,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
         assert_eq!(
             again.outputs,
             [
@@ -921,11 +1012,23 @@ mod tests {
         let junk = dir.path().join("junk.pdf");
         std::fs::write(&junk, b"not a pdf").unwrap();
         assert!(matches!(
-            run(Action::Text, &junk, &ledger, &mut |_| {}, &NEVER),
+            run(
+                Action::Text,
+                &junk,
+                &ledger,
+                &mut |_| {},
+                &CancelToken::new()
+            ),
             Err(RunError::Failed(_))
         ));
         assert!(matches!(
-            run(Action::Bibliography, &junk, &ledger, &mut |_| {}, &NEVER),
+            run(
+                Action::Bibliography,
+                &junk,
+                &ledger,
+                &mut |_| {},
+                &CancelToken::new()
+            ),
             Err(RunError::Failed(_))
         ));
         assert_eq!(names(dir.path()), ["junk.pdf", "paper.pdf"]);
@@ -1170,7 +1273,7 @@ mod tests {
     #[test]
     fn a_stop_requested_at_the_first_page_ends_a_text_job_with_nothing_written() {
         let (dir, pdf, ledger) = scratch();
-        let cancel = AtomicBool::new(false);
+        let cancel = CancelToken::new();
         let mut seen = Vec::new();
         let result = run(
             Action::Text,
@@ -1179,7 +1282,7 @@ mod tests {
             &mut |event| {
                 seen.push(event);
                 if matches!(event, Progress::Page { .. }) {
-                    cancel.store(true, Ordering::Relaxed);
+                    cancel.request();
                 }
             },
             &cancel,
@@ -1201,7 +1304,8 @@ mod tests {
     #[test]
     fn a_stop_before_the_start_ends_either_job_kind_at_once() {
         let (dir, pdf, ledger) = scratch();
-        let cancel = AtomicBool::new(true);
+        let cancel = CancelToken::new();
+        assert!(cancel.request());
         for action in [Action::Text, Action::Bibliography] {
             let mut pages = 0;
             let result = run(
@@ -1220,20 +1324,106 @@ mod tests {
     #[test]
     fn a_stopped_bibliography_scan_writes_nothing() {
         let (dir, pdf, ledger) = scratch();
-        let cancel = AtomicBool::new(false);
+        let cancel = CancelToken::new();
         let result = run(
             Action::Bibliography,
             &pdf,
             &ledger,
             &mut |event| {
                 if matches!(event, Progress::Page { .. }) {
-                    cancel.store(true, Ordering::Relaxed);
+                    cancel.request();
                 }
             },
             &cancel,
         );
         assert_eq!(result, Err(RunError::Cancelled));
         assert_eq!(listing(dir.path()), ["paper.pdf"]);
+    }
+
+    #[test]
+    fn a_stop_is_accepted_only_until_the_job_starts_writing() {
+        let stop_first = CancelToken::new();
+        assert!(stop_first.request());
+        assert!(stop_first.request(), "asking again is still a stop");
+        assert!(stop_first.is_requested());
+        assert!(
+            !stop_first.commit(),
+            "a stop asked for first wins: no writes"
+        );
+
+        let write_first = CancelToken::new();
+        assert!(write_first.commit());
+        assert!(!write_first.request(), "too late: it is writing");
+        assert!(!write_first.is_requested());
+        assert!(write_first.commit(), "committing twice is harmless");
+    }
+
+    #[test]
+    fn a_finished_job_refuses_a_late_stop_and_wrote_its_files() {
+        let (dir, pdf, ledger) = scratch();
+        for action in [Action::Text, Action::Bibliography] {
+            let cancel = CancelToken::new();
+            let outcome = run(action, &pdf, &ledger, &mut |_| {}, &cancel).unwrap();
+            assert!(!cancel.request(), "{action:?}: the job had committed");
+            assert!(
+                outcome.outputs.iter().all(|path| path.is_file()),
+                "{action:?}"
+            );
+        }
+        assert!(dir.path().join("paper.txt").is_file());
+    }
+
+    #[test]
+    fn a_clash_retries_the_links_not_the_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("paper.pdf");
+        std::fs::write(&source, b"pdf").unwrap();
+        for name in ["paper.txt", "paper 2.txt", "paper 3.txt"] {
+            std::fs::write(dir.path().join(name), b"old").unwrap();
+        }
+        let staged = super::stage(&source, &[(".txt", b"new".to_vec())]).unwrap();
+        let partials = |dir: &Path| {
+            listing(dir)
+                .into_iter()
+                .filter(|name| name.ends_with(".partial"))
+                .count()
+        };
+        assert_eq!(partials(dir.path()), 1, "written once");
+        for generation in 1..=3 {
+            let finals = generation_paths(&source, &[".txt"], generation);
+            let error = super::link_all(&staged.0, &finals).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(partials(dir.path()), 1, "no second copy staged");
+        }
+        let free = generation_paths(&source, &[".txt"], 4);
+        super::link_all(&staged.0, &free).unwrap();
+        assert_eq!(std::fs::read(&free[0]).unwrap(), b"new");
+        drop(staged);
+        assert_eq!(partials(dir.path()), 0, "the temporary name is gone");
+        assert_eq!(std::fs::read(&free[0]).unwrap(), b"new", "the link remains");
+    }
+
+    #[test]
+    fn only_a_missing_hard_link_facility_falls_back_to_writing_in_place() {
+        use std::io::{Error, ErrorKind};
+        // Kinds, not errno numbers, which differ between Linux and macOS.
+        for kind in [ErrorKind::Unsupported, ErrorKind::PermissionDenied] {
+            assert!(super::links_unsupported(&Error::from(kind)), "{kind:?}");
+        }
+        // Real failures are returned as they are, never retried by writing.
+        for kind in [
+            ErrorKind::AlreadyExists,
+            ErrorKind::StorageFull,
+            ErrorKind::QuotaExceeded,
+            ErrorKind::Other,
+        ] {
+            assert!(!super::links_unsupported(&Error::from(kind)), "{kind:?}");
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            super::links_unsupported(&Error::from_raw_os_error(45)),
+            "ENOTSUP"
+        );
     }
 
     #[test]
