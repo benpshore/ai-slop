@@ -780,7 +780,22 @@ fn a_cancelled_row_can_be_shown_in_finder_and_cleared(cx: &mut TestAppContext) {
 /// Median of `samples` (sorts them).
 fn median(samples: &mut [std::time::Duration]) -> std::time::Duration {
     samples.sort();
-    samples[samples.len() / 2]
+    let mid = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        // Even count: the average of the two middle observations.
+        (samples[mid - 1] + samples[mid]) / 2
+    } else {
+        samples[mid]
+    }
+}
+
+#[test]
+fn the_median_of_an_even_count_averages_the_middle_pair() {
+    let ms = std::time::Duration::from_millis;
+    assert_eq!(median(&mut [ms(4), ms(1), ms(3), ms(2)]), ms(2) + ms(1) / 2);
+    assert_eq!(median(&mut [ms(9), ms(1)]), ms(5));
+    assert_eq!(median(&mut [ms(3), ms(1), ms(2)]), ms(2));
+    assert_eq!(median(&mut [ms(7)]), ms(7));
 }
 
 /// `f` timed `runs` times; the median.
@@ -925,9 +940,16 @@ fn interaction_timings(cx: &mut TestAppContext) {
         let (tail, earlier) = ids.split_last().unwrap();
         for &id in earlier {
             shell.jobs.start(id);
-            shell
-                .jobs
-                .finish(id, Err(jobs::RunError::Failed("done".into())));
+            // As a successful text batch leaves them: a summary and a .txt
+            // result, so the visible rows carry Copy and Show in Finder.
+            shell.jobs.finish(
+                id,
+                Ok(jobs::Outcome {
+                    outputs: vec![PathBuf::from(format!("/tmp/tpe-timing-{id}.txt"))],
+                    summary: "text \u{b7} 2 pages, 3 references".into(),
+                    warnings: Vec::new(),
+                }),
+            );
         }
         shell.jobs.start(*tail);
         *tail
