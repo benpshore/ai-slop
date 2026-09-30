@@ -520,11 +520,26 @@ fn strip_link_wrapper(text: &str) -> &str {
 fn clean_text(raw: &str) -> Option<String> {
     let unescaped = unescape_markdown(raw).replace(IMAGE_PLACEHOLDER, "");
     let unlinked = strip_link_wrapper(unescaped.trim_end());
-    let normalised: String = unlinked.nfc().collect();
-    if normalised.trim().is_empty() {
+    // docling joins words with the spacing it measured, so a justified line
+    // comes back with runs of spaces; one space is what was printed.
+    let normalised: String = unlinked.nfc().collect::<String>();
+    let mut collapsed = String::with_capacity(normalised.len());
+    let mut pending_space = false;
+    for c in normalised.chars() {
+        if c == ' ' {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        pending_space = false;
+        collapsed.push(c);
+    }
+    if collapsed.trim().is_empty() {
         None
     } else {
-        Some(normalised)
+        Some(collapsed)
     }
 }
 

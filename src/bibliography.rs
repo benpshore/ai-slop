@@ -58,6 +58,10 @@ pub struct Record {
     pub assessment: Assessment,
     /// Whether the list accounts for the labels and years on its pages.
     pub plausible: bool,
+    /// The paper's own record, when `--resolve` ran and it verified.
+    pub paper: Option<crate::schema::Resolved>,
+    /// How the entries resolved, when `--resolve` ran.
+    pub resolution: Option<crate::resolve::Outcome>,
     pub elapsed_ms: f64,
     pub error: Option<String>,
 }
@@ -84,6 +88,8 @@ impl Record {
             warnings: scan.warnings,
             assessment: scan.assessment,
             plausible: scan.plausible,
+            paper: None,
+            resolution: None,
             elapsed_ms,
             error: None,
         }
@@ -110,6 +116,8 @@ impl Record {
             warnings: vec![error.clone()],
             assessment: Assessment::default(),
             plausible: true,
+            paper: None,
+            resolution: None,
             elapsed_ms,
             error: Some(error),
         }
@@ -218,6 +226,7 @@ fn scan_window(
                 entry.index = u32::try_from(i + 1).unwrap_or(u32::MAX);
                 citations::parse_entry(entry);
             }
+            crate::resolve::attach_links(&mut references, &checked);
             let mut warnings: Vec<String> = checked
                 .iter()
                 .flat_map(|page| page.warnings.iter().cloned())

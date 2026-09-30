@@ -1731,14 +1731,9 @@ fn segment_by_label_rows(
             used[k] = true;
             matched += 1;
             let number = rows[k].number;
-            push_entry(
-                &mut entries,
-                Some(format!("[{number}]")),
-                &line.text,
-                line.page,
-            );
+            push_entry(&mut entries, Some(format!("[{number}]")), line);
         } else if entries.is_empty() {
-            push_entry(&mut entries, None, &line.text, line.page);
+            push_entry(&mut entries, None, line);
         } else {
             append_continuation(&mut entries, &line.text, context);
         }
@@ -1840,13 +1835,29 @@ pub fn segment_entries(pages: &[PageText], section: &ReferenceSection) -> Vec<Re
     segment_list(pages, section, stop)
 }
 
-fn push_entry(entries: &mut Vec<ReferenceEntry>, label: Option<String>, text: &str, page: u32) {
+/// The first line's left edge, baseline and size as an anchor box, for
+/// attaching link annotations to the entry.
+fn anchor_of(line: &SectionLine) -> Option<BBox> {
+    let (Some(x0), Some(y0)) = (line.x0, line.y0) else {
+        return None;
+    };
+    let size = line.size.unwrap_or(10.0);
+    Some(BBox {
+        x0,
+        y0,
+        x1: x0,
+        y1: y0 + size,
+    })
+}
+
+fn push_entry(entries: &mut Vec<ReferenceEntry>, label: Option<String>, line: &SectionLine) {
     let index = u32::try_from(entries.len() + 1).unwrap_or(u32::MAX);
     entries.push(ReferenceEntry {
         index,
         label,
-        raw: text.to_string(),
-        page,
+        raw: line.text.clone(),
+        page: line.page,
+        anchor: anchor_of(line),
         ..ReferenceEntry::default()
     });
 }
@@ -2046,7 +2057,7 @@ fn segment_numbered(lines: &[SectionLine], style: Style, context: &str) -> Vec<R
     let mut expected: Option<u32> = None;
     for line in lines {
         if let Some((number, label)) = entry_label(style, &line.text, expected) {
-            push_entry(&mut entries, Some(label), &line.text, line.page);
+            push_entry(&mut entries, Some(label), line);
             expected = Some(number + 1);
             continue;
         }
@@ -2378,7 +2389,7 @@ fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEnt
                 }
             };
         if starts {
-            push_entry(&mut entries, None, &line.text, line.page);
+            push_entry(&mut entries, None, line);
         } else {
             append_continuation(&mut entries, &line.text, context);
         }

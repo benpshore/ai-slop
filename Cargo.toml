@@ -42,6 +42,7 @@ docling = ["dep:docling-pdf", "dep:docling-core", "pdfium"]
 
 [dependencies]
 anyhow = "1"
+tpe-biblio = { path = "crates/tpe-biblio" }
 clap = { version = "4.5", features = ["derive"] }
 docling-core = { version = "=1.69.2", optional = true }
 docling-pdf = { version = "=1.69.2", optional = true }
