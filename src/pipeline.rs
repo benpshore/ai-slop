@@ -58,6 +58,9 @@ pub enum Progress {
     Opened { pages: u32, total: u32 },
     /// Page `page` (1-based) finished; `done` of `total` are processed.
     Page { page: u32, done: u32, total: u32 },
+    /// Bytes of the source file read so far, before the document opens; a
+    /// slow read (a network share) can be stopped here.
+    Reading { done: u64, total: u64 },
 }
 
 /// Milliseconds elapsed since `start`.
@@ -146,26 +149,39 @@ impl<'a> FigureStaging<'a> {
 
     /// The staging directory, made on first use (exclusively: an existing
     /// name is never reused).
+    ///
+    /// Runs that share a figures directory can clean up after each other:
+    /// one that filed nothing removes the empty directory it created, which
+    /// may be the one this run just found existing. So a `NotFound` while
+    /// making the staging directory means the directory vanished, and the
+    /// run makes it again (and re-notes what it created) instead of failing.
     fn root(&mut self, base: &Path) -> std::io::Result<PathBuf> {
         if let Some(root) = &self.root {
             return Ok(root.clone());
         }
-        self.made = base
-            .ancestors()
-            .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
-            .map(Path::to_path_buf)
-            .collect();
-        fs::create_dir_all(base)?;
-        loop {
-            let unique = FIGURE_STAGING.fetch_add(1, Ordering::Relaxed);
-            let root = base.join(format!(".staging-{}-{unique}", std::process::id()));
-            match fs::create_dir(&root) {
-                Ok(()) => {
-                    self.root = Some(root.clone());
-                    return Ok(root);
+        let mut vanished = 0;
+        'base: loop {
+            self.made = base
+                .ancestors()
+                .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
+                .map(Path::to_path_buf)
+                .collect();
+            fs::create_dir_all(base)?;
+            loop {
+                let unique = FIGURE_STAGING.fetch_add(1, Ordering::Relaxed);
+                let root = base.join(format!(".staging-{}-{unique}", std::process::id()));
+                match fs::create_dir(&root) {
+                    Ok(()) => {
+                        self.root = Some(root.clone());
+                        return Ok(root);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound && vanished < 16 => {
+                        vanished += 1;
+                        continue 'base;
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
             }
         }
     }
@@ -522,7 +538,14 @@ pub fn run_job_with_observed(
     let mut timings = StageTimings::default();
 
     let acquire_start = Instant::now();
-    let read = acquire::read_verified(Path::new(&job.path), job.max_bytes)?;
+    let read =
+        acquire::read_verified_polled(Path::new(&job.path), job.max_bytes, &mut |done, total| {
+            observe(Progress::Reading { done, total })
+        })
+        .map_err(|error| match error {
+            AcquireError::Stopped => PipelineError::Cancelled,
+            other => other.into(),
+        })?;
     timings.acquire_ms = elapsed_ms(acquire_start);
 
     // Figures are staged privately while pages are read and filed only once
@@ -1004,7 +1027,10 @@ mod tests {
         let (_dir, path) = three_page_fixture();
         let mut events = Vec::new();
         let result = run_job_observed(&lopdf_job(&path, Some((2, 3))), &mut |event| {
-            events.push(event);
+            // The read of the file comes first; this test is about pages.
+            if !matches!(event, Progress::Reading { .. }) {
+                events.push(event);
+            }
             ControlFlow::Continue(())
         })
         .unwrap();
@@ -1033,7 +1059,9 @@ mod tests {
         let (_dir, path) = three_page_fixture();
         let mut seen = Vec::new();
         let result = run_job_observed(&lopdf_job(&path, None), &mut |event| {
-            seen.push(event);
+            if !matches!(event, Progress::Reading { .. }) {
+                seen.push(event);
+            }
             if matches!(event, Progress::Page { done: 1, .. }) {
                 ControlFlow::Break(())
             } else {
@@ -1115,7 +1143,7 @@ mod tests {
     fn stop_at_a_page(event: Progress) -> ControlFlow<()> {
         match event {
             Progress::Page { .. } => ControlFlow::Break(()),
-            Progress::Opened { .. } => ControlFlow::Continue(()),
+            Progress::Opened { .. } | Progress::Reading { .. } => ControlFlow::Continue(()),
         }
     }
 
@@ -1153,6 +1181,57 @@ mod tests {
         );
         assert!(matches!(again, Err(PipelineError::Cancelled)));
         assert_eq!(walk(&figures), before, "the earlier run's export is kept");
+    }
+
+    #[test]
+    fn a_stop_while_the_file_is_read_cancels_before_the_document_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let backend = FakeExtractor {
+            reading_order: false,
+        };
+        let mut events = Vec::new();
+        let result = run_job_with_observed(&backend, &fake_job(&input, None), &mut |event| {
+            events.push(event);
+            ControlFlow::Break(())
+        });
+        assert!(
+            matches!(result, Err(PipelineError::Cancelled)),
+            "{result:?}"
+        );
+        assert!(
+            matches!(
+                events[..],
+                [Progress::Reading {
+                    done: 13,
+                    total: 13
+                }]
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// Two runs share a figures directory that does not exist yet; each
+    /// stages a figure and then is dropped without filing it, removing the
+    /// empty directory it made. Neither may fail because the other removed
+    /// the directory it had just found.
+    #[test]
+    fn runs_sharing_a_new_figures_directory_do_not_fail_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("figures");
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    for _ in 0..300 {
+                        let mut staging = crate::pipeline::FigureStaging::new(Some(&base));
+                        staging
+                            .stage((1, 1), "png", base.join("out.png"), b"x")
+                            .expect("staging survives another run's clean-up");
+                    }
+                });
+            }
+        });
+        assert!(!base.exists() || walk(&base).is_empty());
     }
 
     /// The fake backend, except that reading the document's info panics: a
