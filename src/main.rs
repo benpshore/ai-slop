@@ -8,8 +8,9 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::io::{self, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -20,14 +21,17 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use tpe::backend;
+use tpe::backend::{self, Extractor};
+use tpe::bibdb::{BibDb, BibDbError};
 use tpe::bibliography;
 use tpe::corpus::{self, Manifest, ManifestItem};
 use tpe::eval::{self, CorpusReport, PaperEval};
+use tpe::inputs::{self, Input, Planned};
 use tpe::latex_refs;
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, PipelineError, Progress};
 use tpe::schema::{ExtractionResult, Job, Metadata, Status};
+use tpe::update;
 
 /// Service-time target per 20-page chunk, in milliseconds.
 const TARGET_MS_PER_CHUNK: f64 = 30.0;
@@ -36,11 +40,98 @@ const TARGET_MS_PER_CHUNK: f64 = 30.0;
 const USER_AGENT: &str =
     "text-processing-engine eval (github.com/benpshore/text-processing-engine)";
 
+/// `--version` text after the program name: `<version> (<git sha>)`, both
+/// baked in by `build.rs`.
+const VERSION_STRING: &str = concat!(env!("TPE_VERSION"), " (", env!("TPE_GIT_SHA"), ")");
+
+/// Output directory of `tpe PATH...` when `--out` is not given.
+const DEFAULT_OUT_DIR: &str = "tpe-out";
+
+// `tpe PATH...` extracts text (and images) from PDFs; `tpe --bib PATH...`
+// scans them for their bibliographies. The subcommands are the older,
+// ledger-centred tools. Without any argument the help is printed and the
+// process exits with status 2.
 #[derive(Parser)]
-#[command(name = "tpe", version, about)]
+#[command(name = "tpe", version = VERSION_STRING, about)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+#[command(arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
+    #[command(flatten)]
+    run: RunArgs,
+}
+
+/// Arguments of the default command, `tpe [--bib] PATH...`.
+#[derive(Args)]
+struct RunArgs {
+    /// PDF files, or directories walked recursively for `*.pdf` (any case;
+    /// hidden entries skipped).
+    #[arg(required = true, value_name = "PATH")]
+    paths: Vec<PathBuf>,
+    /// Scan each PDF backward for its bibliography (one JSON line per PDF)
+    /// instead of extracting the whole text.
+    #[arg(long)]
+    bib: bool,
+    /// Output directory for text mode (default `./tpe-out`); with `--bib`,
+    /// a `.jsonl` file that receives the records instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    out: Option<PathBuf>,
+    /// Number of worker threads (default: the available CPUs).
+    #[arg(long, short, value_name = "N")]
+    jobs: Option<usize>,
+    /// Report progress as JSON lines on stderr (`opened`, `page`, `done`,
+    /// `summary`) instead of one human line per finished file.
+    #[arg(long)]
+    progress: bool,
+    /// Extraction backend name.
+    #[arg(long, default_value = "lopdf")]
+    backend: String,
+    /// Password for encrypted documents.
+    #[arg(long)]
+    password: Option<String>,
+    /// Reject inputs larger than this many bytes.
+    #[arg(long, value_name = "N")]
+    max_bytes: Option<u64>,
+    #[command(flatten)]
+    text: TextFlags,
+    #[command(flatten)]
+    bibliography: BibFlags,
+}
+
+/// Flags that only apply to text mode.
+#[derive(Args)]
+struct TextFlags {
+    /// Also write `<stem>.json`, the full extraction result, per PDF.
+    #[arg(long)]
+    json: bool,
+    /// Print the page text to stdout (files separated by a form feed)
+    /// instead of writing files.
+    #[arg(long)]
+    stdout: bool,
+    /// Do not export figure images to `<stem>.figures/`.
+    #[arg(long)]
+    no_images: bool,
+}
+
+/// Flags that only apply to `--bib`.
+#[derive(Args)]
+struct BibFlags {
+    /// Also store every record in this `SQLite` database (`papers` and
+    /// `refs` tables; see docs/CLI.md).
+    #[arg(long, value_name = "FILE")]
+    db: Option<PathBuf>,
+    /// Retry a PDF with the `pdfium` backend when the first scan finds no
+    /// list; ignored when `pdfium` is not compiled into this build.
+    #[arg(long)]
+    pdfium_fallback: bool,
+}
+
+#[derive(Args)]
+struct UpdateArgs {
+    /// Only report whether a newer release exists; install nothing.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Subcommand)]
@@ -69,6 +160,8 @@ enum Cmd {
     /// List every known backend, whether it is compiled in, and whether it
     /// opens a one-page probe PDF (native libraries found).
     Backends,
+    /// Replace this binary with the latest GitHub release (`--check` only reports).
+    Update(UpdateArgs),
 }
 
 #[derive(Subcommand)]
@@ -240,7 +333,10 @@ struct EvalArgs {
 
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
-    match cli.command {
+    let Some(command) = cli.command else {
+        return run_paths(&cli.run);
+    };
+    match command {
         Cmd::Extract(args) => run_extract(&args),
         Cmd::Bibliography(args) => run_bibliography(&args),
         Cmd::Stats { db } => {
@@ -264,6 +360,10 @@ fn main() -> anyhow::Result<ExitCode> {
         }
         Cmd::Backends => {
             run_backends()?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Update(args) => {
+            update::run(args.check)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -388,8 +488,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Pop the next input path, or `None` when the queue is empty or poisoned.
-fn next_path(queue: &Mutex<VecDeque<PathBuf>>) -> Option<PathBuf> {
+/// Pop the next queued item, or `None` when the queue is empty or poisoned.
+fn next_item<T>(queue: &Mutex<VecDeque<T>>) -> Option<T> {
     let mut guard = queue.lock().ok()?;
     guard.pop_front()
 }
@@ -443,7 +543,7 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
             let sender = sender.clone();
             let queue = &queue;
             scope.spawn(move || {
-                while let Some(path) = next_path(queue) {
+                while let Some(path) = next_item(queue) {
                     let outcome = extract_one(args, path);
                     if sender.send(outcome).is_err() {
                         break;
@@ -1031,12 +1131,725 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Worker count for the default command: `requested`, else the available
+/// CPUs, never more than one per input and never zero.
+fn worker_count(requested: Option<usize>, inputs: usize) -> usize {
+    let available = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    requested.unwrap_or(available).clamp(1, inputs.max(1))
+}
+
+/// Bytes as a short decimal size: `900 B`, `12.3 kB`, `1.3 MB`, `2.0 GB`.
+fn human_size(bytes: u64) -> String {
+    let value = bytes as f64;
+    if bytes < 1_000 {
+        format!("{bytes} B")
+    } else if bytes < 1_000_000 {
+        format!("{:.1} kB", value / 1e3)
+    } else if bytes < 1_000_000_000 {
+        format!("{:.1} MB", value / 1e6)
+    } else {
+        format!("{:.1} GB", value / 1e9)
+    }
+}
+
+/// `<stem>.<suffix>` without touching any dot already in the stem.
+fn with_suffix(stem: &Path, suffix: &str) -> PathBuf {
+    let mut name = stem.as_os_str().to_owned();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// How one input of the default command ended. Only `Ok` counts as success
+/// for the exit code.
+enum Verdict {
+    Ok,
+    /// The input could not be processed; the text says why.
+    Failed(String),
+    /// Not a PDF: the kind name and the refusal reason.
+    Unsupported { kind: &'static str, reason: String },
+    /// A PDF without a text layer (see `inputs::looks_scanned`).
+    Scanned,
+}
+
+impl Verdict {
+    fn succeeded(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+
+    /// The status word used in JSON events and records.
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed(_) => "failed",
+            Self::Unsupported { .. } => "unsupported",
+            Self::Scanned => "scanned",
+        }
+    }
+
+    /// The refusal reason of an `Unsupported` or `Scanned` verdict.
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Unsupported { reason, .. } => Some(reason.as_str()),
+            Self::Scanned => Some(inputs::SCANNED_REASON),
+            Self::Ok | Self::Failed(_) => None,
+        }
+    }
+
+    /// The input kind of an `Unsupported` verdict.
+    fn kind(&self) -> Option<&'static str> {
+        if let Self::Unsupported { kind, .. } = self {
+            Some(kind)
+        } else {
+            None
+        }
+    }
+}
+
+/// What the main thread learns about one finished input of the default
+/// command; small on purpose so the channel never holds whole results.
+struct Done {
+    /// Position among the expanded inputs (stdout output keeps this order).
+    index: usize,
+    path: String,
+    pages: u32,
+    bytes: u64,
+    ms: f64,
+    verdict: Verdict,
+    /// Page text for `--stdout`.
+    text: Option<String>,
+    /// The record for `--bib`.
+    record: Option<bibliography::Record>,
+    /// Something worth telling the user about this input (a renamed output).
+    note: Option<String>,
+}
+
+impl Done {
+    /// A blank, successful outcome for input `index` at `path`.
+    fn new(index: usize, path: String) -> Self {
+        Self {
+            index,
+            path,
+            pages: 0,
+            bytes: 0,
+            ms: 0.0,
+            verdict: Verdict::Ok,
+            text: None,
+            record: None,
+            note: None,
+        }
+    }
+
+    /// The small JSON record written for a refused input (`<stem>.json`
+    /// with `--json`): status, kind, reason, path and page count.
+    fn refusal_record(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.verdict.status(),
+            "kind": self.verdict.kind(),
+            "reason": self.verdict.reason(),
+            "path": self.path,
+            "pages": self.pages,
+        })
+    }
+}
+
+/// Print one finished input to stderr: a JSON `done` event with
+/// `--progress`, else `ok  <pages>p  <size>  <ms> ms  <path>`,
+/// `FAILED  <path>: <reason>`, `SKIP  <kind>  <path>` or `SCAN  <pages>p  <path>`.
+fn report_done(args: &RunArgs, done: &Done) {
+    if args.progress {
+        let error = if let Verdict::Failed(error) = &done.verdict {
+            Some(error.as_str())
+        } else {
+            None
+        };
+        let value = serde_json::json!({
+            "event": "done", "path": done.path, "status": done.verdict.status(),
+            "ok": done.verdict.succeeded(), "pages": done.pages, "bytes": done.bytes,
+            "ms": done.ms, "error": error, "kind": done.verdict.kind(),
+            "reason": done.verdict.reason(),
+        });
+        eprintln!("{value}");
+    } else {
+        match &done.verdict {
+            Verdict::Ok => eprintln!(
+                "ok  {}p  {}  {:.0} ms  {}",
+                done.pages,
+                human_size(done.bytes),
+                done.ms,
+                done.path
+            ),
+            Verdict::Failed(error) => eprintln!("FAILED  {}: {error}", done.path),
+            Verdict::Unsupported { kind, .. } => eprintln!("SKIP  {kind}  {}", done.path),
+            Verdict::Scanned => eprintln!("SCAN  {}p  {}", done.pages, done.path),
+        }
+    }
+    if let Some(note) = &done.note {
+        report_note(args, &done.path, note);
+    }
+}
+
+/// Print a per-input remark to stderr (JSON `note` event with `--progress`).
+fn report_note(args: &RunArgs, path: &str, message: &str) {
+    if args.progress {
+        let value = serde_json::json!({"event": "note", "path": path, "message": message});
+        eprintln!("{value}");
+    } else {
+        eprintln!("note  {path}: {message}");
+    }
+}
+
+/// Print the final summary line to stderr.
+fn report_summary(args: &RunArgs, ok: usize, failed: usize, ms: f64) {
+    if args.progress {
+        let value = serde_json::json!({"event": "summary", "ok": ok, "failed": failed, "ms": ms});
+        eprintln!("{value}");
+    } else {
+        eprintln!("{ok} ok, {failed} failed, {ms:.0} ms");
+    }
+}
+
+/// Run `work(index)` for every index below `count` on `workers` scoped
+/// threads that pull from one queue (the same bounded pool as
+/// `run_extract`), handing each outcome to `sink` on the calling thread.
+/// An error from `sink` stops the pool.
+fn run_pool<T, W, S>(count: usize, workers: usize, work: W, mut sink: S) -> anyhow::Result<()>
+where
+    T: Send,
+    W: Fn(usize) -> T + Sync,
+    S: FnMut(T) -> anyhow::Result<()>,
+{
+    let queue: Mutex<VecDeque<usize>> = Mutex::new((0..count).collect());
+    let (sender, receiver) = mpsc::channel::<T>();
+    thread::scope(|scope| -> anyhow::Result<()> {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let queue = &queue;
+            let work = &work;
+            scope.spawn(move || {
+                while let Some(index) = next_item(queue) {
+                    if sender.send(work(index)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for outcome in receiver {
+            sink(outcome)?;
+        }
+        Ok(())
+    })
+}
+
+/// Reject flag combinations that would silently do nothing.
+fn check_run_flags(args: &RunArgs) -> anyhow::Result<()> {
+    let text = &args.text;
+    if args.bib {
+        if text.json || text.stdout || text.no_images {
+            bail!("--json, --stdout and --no-images apply to text mode, not to --bib");
+        }
+    } else {
+        if args.bibliography.db.is_some() || args.bibliography.pdfium_fallback {
+            bail!("--db and --pdfium-fallback require --bib");
+        }
+        if text.stdout && (args.out.is_some() || text.json) {
+            bail!("--stdout writes no files, so --out and --json do not apply");
+        }
+    }
+    Ok(())
+}
+
+/// The default command: expand the paths, run text or bibliography mode
+/// over a worker pool, then print the once-a-day update notice if any.
+fn run_paths(args: &RunArgs) -> anyhow::Result<ExitCode> {
+    check_run_flags(args)?;
+    check_backend(&args.backend)?;
+    let passive = update::PassiveCheck::start();
+    pipeline::warm_up();
+    let inputs = inputs::expand(&args.paths).context("listing the input files")?;
+    if inputs.is_empty() {
+        bail!("no PDF files found under the given paths");
+    }
+    let exit = if args.bib {
+        run_bib(args, &inputs)?
+    } else {
+        run_text(args, inputs)?
+    };
+    if let Some(notice) = passive.finish() {
+        if args.progress {
+            let value = serde_json::json!({"event": "update", "message": notice});
+            eprintln!("{value}");
+        } else {
+            eprintln!("{notice}");
+        }
+    }
+    Ok(exit)
+}
+
+/// The page texts of `result` separated by form feeds, as `write_outputs`
+/// writes them.
+fn joined_text(result: &ExtractionResult) -> String {
+    let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
+    texts.join("\u{c}")
+}
+
+/// Write the refusal record of `done` as `<stem>.json` when `--json` asked
+/// for JSON output.
+fn write_refusal(args: &RunArgs, stem: &Path, done: &Done) -> Result<(), String> {
+    if !args.text.json || args.text.stdout {
+        return Ok(());
+    }
+    if let Some(parent) = stem.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    let json_path = with_suffix(stem, "json");
+    let json = serde_json::to_string_pretty(&done.refusal_record()).map_err(|e| e.to_string())?;
+    fs::write(&json_path, json).map_err(|e| format!("writing {}: {e}", json_path.display()))
+}
+
+/// Extract one input and write its outputs, filling `done` as it goes.
+fn text_job(args: &RunArgs, plan: &Planned, done: &mut Done) -> Result<(), String> {
+    let path = done.path.clone();
+    let mut stem = plan.stem.clone();
+    // Leading bytes decide what the file is; the extension never does.
+    let kind = inputs::classify(&plan.input.path).map_err(|e| format!("io: {e}"))?;
+    if kind != inputs::Kind::Pdf {
+        done.verdict = Verdict::Unsupported {
+            kind: kind.name(),
+            reason: kind.reason(),
+        };
+        return write_refusal(args, &stem, done);
+    }
+    if plan.needs_suffix && !args.text.stdout {
+        // The suffix needs the hash before the job names its figures
+        // directory, so a colliding input is read once more here.
+        let snapshot =
+            tpe::acquire::snapshot(&plan.input.path, args.max_bytes).map_err(|e| e.to_string())?;
+        let name = stem.file_name().map(|n| n.to_string_lossy().into_owned());
+        let name = name.unwrap_or_default();
+        stem.set_file_name(format!("{name}-{}", short_hash(&snapshot.hash.0)));
+        done.note = Some(format!(
+            "output name already taken; writing {}.txt instead",
+            stem.display()
+        ));
+    }
+    let figures = with_suffix(&stem, "figures");
+    let figures_dir = (!args.text.no_images && !args.text.stdout)
+        .then(|| figures.to_string_lossy().into_owned());
+    let job = Job {
+        path: path.clone(),
+        backend: args.backend.clone(),
+        pages: None,
+        password: args.password.clone(),
+        max_bytes: args.max_bytes,
+        figures_dir,
+    };
+    let mut observe = |event: Progress| {
+        if args.progress {
+            report_progress(&path, event);
+        }
+    };
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        pipeline::run_job_observed(&job, &mut observe)
+    }))
+    .map_or_else(
+        |payload| Err(format!("panic: {}", panic_message(&*payload))),
+        |outcome| outcome.map_err(|err| err.to_string()),
+    )?;
+    done.pages = result.document.pages;
+    done.bytes = result.document.size;
+    if inputs::looks_scanned(&result.pages) {
+        // Figures (if enabled) were exported by the job; no empty text file.
+        done.verdict = Verdict::Scanned;
+        return write_refusal(args, &stem, done);
+    }
+    let text = joined_text(&result);
+    if args.text.stdout {
+        done.text = Some(text);
+    } else {
+        if let Some(parent) = stem.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        let text_path = with_suffix(&stem, "txt");
+        fs::write(&text_path, text).map_err(|e| format!("writing {}: {e}", text_path.display()))?;
+        if args.text.json {
+            let json_path = with_suffix(&stem, "json");
+            let json = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+            fs::write(&json_path, json)
+                .map_err(|e| format!("writing {}: {e}", json_path.display()))?;
+        }
+    }
+    if result.status == Status::Failed {
+        let reason = result
+            .warnings
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "extraction failed".to_string());
+        return Err(reason);
+    }
+    Ok(())
+}
+
+/// Text mode for one input, on a worker thread.
+fn text_one(args: &RunArgs, plan: &Planned, index: usize) -> Done {
+    let started = Instant::now();
+    let mut done = Done::new(index, plan.input.path.to_string_lossy().into_owned());
+    if let Err(error) = text_job(args, plan, &mut done) {
+        done.verdict = Verdict::Failed(error);
+    }
+    done.ms = elapsed_ms(started);
+    done
+}
+
+/// `tpe PATH...`: text (and images) per PDF into `--out`, or to stdout.
+fn run_text(args: &RunArgs, inputs: Vec<Input>) -> anyhow::Result<ExitCode> {
+    let out_dir = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT_DIR));
+    let plans = inputs::plan(inputs, &out_dir);
+    if !args.text.stdout {
+        fs::create_dir_all(&out_dir)
+            .with_context(|| format!("creating output directory {}", out_dir.display()))?;
+    }
+    let workers = worker_count(args.jobs, plans.len());
+    let started = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    // `--stdout` prints inputs in command-line order, so texts that finish
+    // early wait here for their turn.
+    let mut pending: BTreeMap<usize, Option<String>> = BTreeMap::new();
+    let mut next = 0usize;
+    let mut first = true;
+    let mut stdout = io::stdout().lock();
+    run_pool(
+        plans.len(),
+        workers,
+        |index| text_one(args, &plans[index], index),
+        |done| {
+            report_done(args, &done);
+            if done.verdict.succeeded() {
+                ok += 1;
+            } else {
+                failed += 1;
+            }
+            if args.text.stdout {
+                pending.insert(done.index, done.text);
+                while let Some(text) = pending.remove(&next) {
+                    next += 1;
+                    let Some(text) = text else { continue };
+                    if !first {
+                        stdout.write_all(b"\x0c")?;
+                    }
+                    stdout.write_all(text.as_bytes())?;
+                    first = false;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    stdout.flush()?;
+    report_summary(args, ok, failed, elapsed_ms(started));
+    Ok(exit_code(failed > 0))
+}
+
+/// One backward scan of a file, plus what the scanned-document check needs.
+struct BibScan {
+    record: bibliography::Record,
+    /// Input size in bytes (0 when it could not be read).
+    size: u64,
+    /// The input bytes, kept so a `not_found` scan can be checked for a
+    /// missing text layer without reading the file again.
+    bytes: Option<Vec<u8>>,
+}
+
+/// One backward scan of `path` with `extractor`, exactly as
+/// `tpe bibliography` performs it.
+fn bib_scan(args: &RunArgs, extractor: &dyn Extractor, path: &Path, file: &str) -> BibScan {
+    let started = Instant::now();
+    let mut hash = None;
+    let mut size = 0u64;
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut observe = |event: Progress| {
+        if args.progress {
+            report_progress(file, event);
+        }
+    };
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
+        hash = Some(snapshot.hash.0);
+        size = snapshot.source.size;
+        let scan = bibliography::scan_backward_observed(
+            extractor,
+            &snapshot.bytes,
+            args.password.as_deref(),
+            &mut observe,
+        )?;
+        bytes = Some(snapshot.bytes);
+        Ok::<_, anyhow::Error>(scan)
+    }));
+    let elapsed = elapsed_ms(started);
+    let identity = extractor.identity();
+    let record = match result {
+        Ok(Ok(scan)) => {
+            bibliography::Record::from_scan(file, hash.unwrap_or_default(), identity, scan, elapsed)
+        }
+        Ok(Err(err)) => {
+            bibliography::Record::failed(file, hash, identity, err.to_string(), elapsed)
+        }
+        Err(payload) => {
+            let message = format!("panic: {}", panic_message(&*payload));
+            bibliography::Record::failed(file, hash, identity, message, elapsed)
+        }
+    };
+    BibScan {
+        record,
+        size,
+        bytes,
+    }
+}
+
+/// Whether the last `scanned` of `total` pages of `bytes` (the pages a
+/// `not_found` scan read) have no text layer. Any failure answers `false`.
+fn tail_is_scanned(
+    extractor: &dyn Extractor,
+    bytes: &[u8],
+    password: Option<&str>,
+    total: u32,
+    scanned: u32,
+) -> bool {
+    if total == 0 || scanned == 0 {
+        return false;
+    }
+    let first = total.saturating_sub(scanned).saturating_add(1).max(1);
+    let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| -> Option<bool> {
+        let mut session = extractor.open(bytes, password).ok()?;
+        let count = session.page_count().min(total);
+        let mut pages = Vec::new();
+        for page in first..=count {
+            pages.push(session.page_text(page).ok()?);
+        }
+        Some(inputs::looks_scanned(&pages))
+    }));
+    matches!(outcome, Ok(Some(true)))
+}
+
+/// Warning added to a `not_found` record whose scanned pages have no text.
+const SCANNED_WARNING: &str = "scanned document: no text layer";
+
+/// Bibliography mode for one input, on a worker thread. A non-PDF input is
+/// refused before any scan. With a `fallback` backend, a scan that finds no
+/// list is repeated with it and the fallback record is kept only when it
+/// found one. A `not_found` scan over image-only pages is marked scanned.
+fn bib_one(
+    args: &RunArgs,
+    extractor: &dyn Extractor,
+    fallback: Option<&dyn Extractor>,
+    input: &Input,
+    index: usize,
+) -> Done {
+    let started = Instant::now();
+    let file = input.path.to_string_lossy().into_owned();
+    let mut done = Done::new(index, file.clone());
+    let kind = match inputs::classify(&input.path) {
+        Ok(kind) => kind,
+        Err(err) => {
+            let reason = format!("io: {err}");
+            let identity = extractor.identity();
+            let record = bibliography::Record::failed(&file, None, identity, reason.clone(), 0.0);
+            done.record = Some(record);
+            done.verdict = Verdict::Failed(reason);
+            done.ms = elapsed_ms(started);
+            return done;
+        }
+    };
+    if kind != inputs::Kind::Pdf {
+        let reason = kind.reason();
+        let identity = extractor.identity();
+        let mut record = bibliography::Record::failed(&file, None, identity, reason.clone(), 0.0);
+        record.status = "unsupported";
+        done.record = Some(record);
+        done.verdict = Verdict::Unsupported {
+            kind: kind.name(),
+            reason,
+        };
+        done.ms = elapsed_ms(started);
+        return done;
+    }
+    let mut scan = bib_scan(args, extractor, &input.path, &file);
+    let mut backend_used = extractor;
+    if !scan.record.found()
+        && let Some(fallback) = fallback
+    {
+        let second = bib_scan(args, fallback, &input.path, &file);
+        if second.record.found() {
+            scan = second;
+            backend_used = fallback;
+        }
+    }
+    let BibScan {
+        mut record,
+        size,
+        bytes,
+    } = scan;
+    if record.status == "not_found"
+        && let Some(bytes) = &bytes
+        && tail_is_scanned(
+            backend_used,
+            bytes,
+            args.password.as_deref(),
+            record.total_pages.unwrap_or(0),
+            record.pages_scanned.unwrap_or(0),
+        )
+    {
+        record.warnings.push(SCANNED_WARNING.to_string());
+        done.verdict = Verdict::Scanned;
+    } else if !record.found() {
+        done.verdict = Verdict::Failed(
+            record
+                .error
+                .clone()
+                .unwrap_or_else(|| "no reference list found".to_string()),
+        );
+    }
+    done.pages = record.total_pages.unwrap_or(0);
+    done.bytes = size;
+    done.ms = elapsed_ms(started);
+    done.record = Some(record);
+    done
+}
+
+/// The JSON line for a `--bib` record: the `tpe bibliography` shape, plus
+/// `kind` and `reason` for a refused input and `reason: "scanned"` for a
+/// scanned one.
+fn bib_record_json(done: &Done, record: &bibliography::Record) -> anyhow::Result<String> {
+    let mut value = serde_json::to_value(record)?;
+    match &done.verdict {
+        Verdict::Unsupported { kind, reason } => {
+            value["kind"] = serde_json::json!(kind);
+            value["reason"] = serde_json::json!(reason);
+        }
+        Verdict::Scanned => {
+            value["reason"] = serde_json::json!("scanned");
+        }
+        Verdict::Ok | Verdict::Failed(_) => {}
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// The `pdfium` extractor for `--pdfium-fallback`, when that backend is
+/// compiled in and is not already the main backend.
+fn fallback_extractor(args: &RunArgs) -> Option<Box<dyn Extractor>> {
+    if !args.bibliography.pdfium_fallback || args.backend == "pdfium" {
+        return None;
+    }
+    if !backend::available().contains(&"pdfium") {
+        return None;
+    }
+    backend::by_name("pdfium")
+}
+
+/// `tpe --bib PATH...`: one `bibliography::Record` JSON line per PDF to
+/// stdout or `--out FILE`, optionally mirrored into `--db FILE`.
+fn run_bib(args: &RunArgs, inputs: &[Input]) -> anyhow::Result<ExitCode> {
+    let extractor = backend::by_name(&args.backend)
+        .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?;
+    let fallback = fallback_extractor(args);
+    let mut db = match &args.bibliography.db {
+        Some(path) => Some(
+            BibDb::open(path)
+                .with_context(|| format!("opening bibliography database {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let mut out: Box<dyn Write> = match &args.out {
+        Some(path) => {
+            let file =
+                fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+            Box::new(io::BufWriter::new(file))
+        }
+        None => Box::new(io::stdout().lock()),
+    };
+    let workers = worker_count(args.jobs, inputs.len());
+    let started = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    run_pool(
+        inputs.len(),
+        workers,
+        |index| {
+            bib_one(
+                args,
+                extractor.as_ref(),
+                fallback.as_deref(),
+                &inputs[index],
+                index,
+            )
+        },
+        |done| {
+            report_done(args, &done);
+            if done.verdict.succeeded() {
+                ok += 1;
+            } else {
+                failed += 1;
+            }
+            let Some(record) = &done.record else {
+                return Ok(());
+            };
+            writeln!(out, "{}", bib_record_json(&done, record)?)?;
+            if let Some(db) = db.as_mut() {
+                match db.write(record) {
+                    Ok(_) => {}
+                    Err(BibDbError::NoHash(_)) => {
+                        report_note(args, &done.path, "not stored in the database (no hash)");
+                    }
+                    Err(err) => bail!("writing {} to the database: {err}", done.path),
+                }
+            }
+            Ok(())
+        },
+    )?;
+    out.flush()?;
+    report_summary(args, ok, failed, elapsed_ms(started));
+    Ok(exit_code(failed > 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ManifestItem, Split, check_backend, parse_pages, percentile, probe_backend, short_hash,
+        ManifestItem, Split, check_backend, human_size, parse_pages, percentile, probe_backend,
+        short_hash, with_suffix, worker_count,
     };
     use tpe::backend;
+
+    #[test]
+    fn human_sizes_are_short() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(999), "999 B");
+        assert_eq!(human_size(12_345), "12.3 kB");
+        assert_eq!(human_size(1_300_000), "1.3 MB");
+        assert_eq!(human_size(2_000_000_000), "2.0 GB");
+    }
+
+    #[test]
+    fn suffix_keeps_dots_in_the_stem() {
+        let stem = std::path::Path::new("out/paper.v2");
+        assert_eq!(with_suffix(stem, "txt"), std::path::Path::new("out/paper.v2.txt"));
+        let short = std::path::Path::new("a");
+        assert_eq!(with_suffix(short, "figures"), std::path::Path::new("a.figures"));
+    }
+
+    #[test]
+    fn worker_count_is_bounded_by_inputs() {
+        assert_eq!(worker_count(Some(8), 3), 3);
+        assert_eq!(worker_count(Some(0), 3), 1);
+        assert_eq!(worker_count(Some(2), 0), 1);
+        assert!(worker_count(None, 100) >= 1);
+        assert_eq!(worker_count(None, 1), 1);
+    }
 
     /// A manifest item in the given split; the other fields do not matter here.
     fn item(split: &str) -> ManifestItem {
