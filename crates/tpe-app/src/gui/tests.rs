@@ -849,9 +849,12 @@ fn interaction_timings(cx: &mut TestAppContext) {
         });
         frame(&mut visual, &shell);
         arrivals.push(started.elapsed());
-        // Let the job finish (unmeasured), then start the next from empty.
+        // Let the job finish, clear it and draw the empty window, all outside
+        // the timer, so the next arrival is into an already-drawn empty view.
         visual.run_until_parked();
         shell.update(&mut visual, Shell::clear_done);
+        frame(&mut visual, &shell);
+        frame(&mut visual, &shell);
     }
     row("file arrives to its row drawn", median(&mut arrivals));
 
@@ -938,7 +941,7 @@ fn interaction_timings(cx: &mut TestAppContext) {
     frame(&mut visual, &shell);
     let mut page = 0u32;
     row(
-        "progress event to its frame, on the last of 5,000 rows",
+        "progress event (model update, not the channel hop) to its frame, last of 5,000 rows",
         timed(100, || {
             page += 1;
             shell.update(&mut visual, |shell, cx| {

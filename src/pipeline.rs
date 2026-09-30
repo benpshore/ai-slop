@@ -343,6 +343,7 @@ fn parse_while_hashing(
     job: &Job,
     bytes: &[u8],
     identity: &mut BackendIdentity,
+    staging: &mut FigureStaging,
     observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<Parsed, PipelineError> {
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
@@ -380,12 +381,11 @@ fn parse_while_hashing(
             hash_state = HashState::Done(hashed);
         }
         let export: Option<(&Path, &str)> = figures_dir.map(|dir| (dir, run_dir.as_str()));
-        let mut staging = FigureStaging::new(figures_dir);
         for page in first..=last {
             match session.page_text(page) {
                 Ok(mut text) => {
                     let figure_warnings =
-                        collect_figures(session.as_mut(), &mut text, export, &mut staging);
+                        collect_figures(session.as_mut(), &mut text, export, staging);
                     warnings.extend(figure_warnings);
                     pages.push(text);
                 }
@@ -409,7 +409,6 @@ fn parse_while_hashing(
                 return Err(PipelineError::Cancelled);
             }
         }
-        staging.publish(&mut pages, &mut warnings);
         let info: BTreeMap<String, String> = session.info();
         Ok(Parsed {
             hashed: hash_state.finish(),
@@ -488,6 +487,10 @@ pub fn run_job_with_observed(
     let read = acquire::read_verified(Path::new(&job.path), job.max_bytes)?;
     timings.acquire_ms = elapsed_ms(acquire_start);
 
+    // Figures are staged privately while pages are read and filed only once
+    // the whole result exists; dropping `staging` on any earlier return,
+    // cancellation, error or panic removes them.
+    let mut staging = FigureStaging::new(job.figures_dir.as_deref().map(Path::new));
     let parse_start = Instant::now();
     let Parsed {
         hashed,
@@ -496,7 +499,14 @@ pub fn run_job_with_observed(
         warnings,
         status,
         info,
-    } = parse_while_hashing(extractor, job, &read.bytes, &mut identity, observe)?;
+    } = parse_while_hashing(
+        extractor,
+        job,
+        &read.bytes,
+        &mut identity,
+        &mut staging,
+        observe,
+    )?;
     timings.parse_ms = elapsed_ms(parse_start);
     timings.hash_ms = hashed.ms;
     let snapshot = read.into_snapshot(hashed.hash);
@@ -532,7 +542,7 @@ pub fn run_job_with_observed(
         sources: vec![snapshot.source],
     };
 
-    Ok(ExtractionResult {
+    let mut result = ExtractionResult {
         schema_version: SCHEMA_VERSION,
         document,
         backend: identity,
@@ -544,7 +554,9 @@ pub fn run_job_with_observed(
         citations: markers,
         warnings,
         timings,
-    })
+    };
+    staging.publish(&mut result.pages, &mut result.warnings);
+    Ok(result)
 }
 
 /// Summarise pages into chunks of [`CHUNK_PAGES`] consecutive page numbers.
@@ -1103,6 +1115,66 @@ mod tests {
         );
         assert!(matches!(again, Err(PipelineError::Cancelled)));
         assert_eq!(walk(&figures), before, "the earlier run's export is kept");
+    }
+
+    /// The fake backend, except that reading the document's info panics: a
+    /// stage after the pages were read, as any later stage could.
+    struct PanicsInInfo(FakeExtractor);
+
+    struct PanickySession(Box<dyn crate::backend::DocumentSession>);
+
+    impl crate::backend::DocumentSession for PanickySession {
+        fn page_count(&self) -> u32 {
+            self.0.page_count()
+        }
+
+        fn page_text(&mut self, page: u32) -> Result<PageText, BackendError> {
+            self.0.page_text(page)
+        }
+
+        fn info(&self) -> BTreeMap<String, String> {
+            panic!("a stage after the last page fails");
+        }
+
+        fn take_figure_bytes(&mut self, page: u32, index: u32) -> Option<Vec<u8>> {
+            self.0.take_figure_bytes(page, index)
+        }
+    }
+
+    impl crate::backend::Extractor for PanicsInInfo {
+        fn identity(&self) -> BackendIdentity {
+            self.0.identity()
+        }
+
+        fn open(
+            &self,
+            bytes: &[u8],
+            password: Option<&str>,
+        ) -> Result<Box<dyn crate::backend::DocumentSession>, BackendError> {
+            Ok(Box::new(PanickySession(self.0.open(bytes, password)?)))
+        }
+
+        fn provides_reading_order(&self) -> bool {
+            self.0.provides_reading_order()
+        }
+    }
+
+    #[test]
+    fn a_panic_after_the_last_page_leaves_no_figures() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let figures = dir.path().join("figures");
+        let backend = PanicsInInfo(FakeExtractor {
+            reading_order: false,
+        });
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_job_with(&backend, &fake_job(&input, Some(&figures)))
+        }));
+        assert!(outcome.is_err(), "the stage panicked");
+        let left: Vec<_> = std::fs::read_dir(&figures)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "nothing filed, staging removed: {left:?}");
     }
 
     #[test]
