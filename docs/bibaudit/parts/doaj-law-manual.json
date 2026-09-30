@@ -1,0 +1,649 @@
+{
+ "stratum": "doaj-law-manual",
+ "seed": "20260930:doaj-law-manual",
+ "pool_desc": {
+  "doaj_query": "bibjson.subject.term:Law AND bibjson.year:[2015 TO 2025]",
+  "total_per_year": {
+   "2015": 9903,
+   "2020": 17128,
+   "2023": 20387,
+   "2021": 18097,
+   "2018": 14007,
+   "2019": 14969,
+   "2025": 19770,
+   "2024": 21404,
+   "2022": 17496,
+   "2016": 12221,
+   "2017": 12628
+  },
+  "window": "first 1000 hits per year"
+ },
+ "pool": [
+  {
+   "doi": "10.35316/lisanalhal.v9i1.81",
+   "title": "INTEGRASI IMAN & ISTIQOMAH DALAM MEMBENTUK MANUSIA PARIPURNA",
+   "journal": "Lisan Al-Hal: Jurnal Pengembangan Pemikiran dan Kebudayaan",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 128,
+   "subjects": [
+    "Islam",
+    "Islamic law",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.21608/bfdc.2023.330400",
+   "title": "أبرز وسائل البعد عن الشقاء كما يصورها القرآن الكريم ﴿ دراسة موضوعية ﴾",
+   "journal": "حولية کلية الدعوة الإسلامية بالقاهرة",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 495,
+   "subjects": [
+    "Islam",
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "10.31743/sp.12354",
+   "title": "Nauka administracji jako subdyscyplina łącząca  nauki prawne i nauki o zarządzaniu",
+   "journal": "Studia Prawnicze KUL",
+   "lang": [
+    "EN",
+    "PL",
+    "UK"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 183,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.24815/kanun.v21i3.11483",
+   "title": "Uqubat Denda Emas Murni dalam Qanun Jinayat",
+   "journal": "Kanun",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 628,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.5020/2317-2150.2018.6453",
+   "title": "A extrafiscalidade como instrumento de controle do impacto ambiental gerado pelos resíduos sólidos diante da globalização do mercado",
+   "journal": "Pensar",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "IT",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 413,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.34278/aujis.2021.170772",
+   "title": "AL-BAYHAQI’S PREFERENCES IN HIS BOOK “AL-KHILAIFAT” IN THE SECTION ON WHAT IS VALID FOR MARRIAGE، A COMPARATIVE JURISPRUDENTIAL STUDY",
+   "journal": "مجلة جامعة الأنبار للعلوم الإسلامية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "IQ",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 269,
+   "subjects": [
+    "Law",
+    "Religion (General)"
+   ]
+  },
+  {
+   "doi": "10.31178/aubd-fj.2021.3.04",
+   "title": "Continuarea judecăţii sau restituirea cauzei la procuror? Despre consecinţele procedurale naţionale ale deciziei CJUE din cauza C-282/20 ZX",
+   "journal": "Forum Juridic",
+   "lang": [
+    "EN",
+    "FR",
+    "RO"
+   ],
+   "country": "RO",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 336,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.1344/rbd2019.0.26973",
+   "title": "El deterioro cognitivo en la vejez. Entre la vulnerabilidad y la discapacidad",
+   "journal": "Revista de Bioética y Derecho",
+   "lang": [
+    "CA",
+    "EN",
+    "ES",
+    "IT",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 941,
+   "subjects": [
+    "Jurisprudence. Philosophy and theory of law",
+    "Medical philosophy. Medical ethics"
+   ]
+  },
+  {
+   "doi": "10.32631/pb.2025.1.02",
+   "title": "Personal transformations in the process of professional self-realization",
+   "journal": "Law and Safety",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 308,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.4000/criminocorpus.6264",
+   "title": "« L’esprit de la réforme » de 1975",
+   "journal": "Criminocorpus",
+   "lang": [
+    "EN",
+    "FR"
+   ],
+   "country": "FR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 445,
+   "subjects": [
+    "Criminal law and procedure"
+   ]
+  },
+  {
+   "doi": "10.22034/jccj.2024.437217.1472",
+   "title": "بررسی قصاص نفس مسلمان در قتل مرتد از منظر فقه و حقوق کیفری ایران",
+   "journal": "فقه جزای تطبیقی",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 309,
+   "subjects": [
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "10.24090/volksgeist.v5i1.6423",
+   "title": "Penegakan Hukum terhadap PT Rayon Utama Makmur Akibat Limbah Tekstil yang Merugikan Warga",
+   "journal": "Volksgeist",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 84,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.35292/ropj.v16i22.1018",
+   "title": "La inteligencia artificial en la justicia: protocolos para la presentación y la valoración de prueba digital obtenida mediante IA",
+   "journal": "Revista Oficial del Poder Judicial",
+   "lang": [
+    "ES"
+   ],
+   "country": "PE",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 550,
+   "subjects": [
+    "Public law",
+    "Jurisprudence. Philosophy and theory of law"
+   ]
+  },
+  {
+   "doi": "10.30497/rc.2023.243027.1901",
+   "title": "‌‌تغییر بازنمایی نقش‌های خانوادگی در آگهی‌های بازرگانی؛ ظهور الگوی وارونگی نقشی",
+   "journal": "Religion & Communication",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 686,
+   "subjects": [
+    "Islamic law",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.21684/2412-2343-2022-9-1-4-34",
+   "title": "BRICS Countries’ Economic and Legal Cooperation Through the Prism  of Strategic Planning Documents",
+   "journal": "BRICS Law Journal",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 851,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.33994/kndise.2019.64.85",
+   "title": "Перспективні напрямки розвитку криміналістики в Україні та світі",
+   "journal": "Криміналістика і судова експертиза",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 848,
+   "subjects": [
+    "Criminal law and procedure"
+   ]
+  },
+  {
+   "doi": "10.22054/jplr.2022.68563.2688",
+   "title": "Conditions and effects of the Force Majeure in the 2016 amendments to the French Civil Code, and use it to eliminate the shortcomings of the Iranian legal system",
+   "journal": "Faṣlnāmah-i Pizhūhish-i Huqūq-i Khuṣūṣī",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 425,
+   "subjects": [
+    "Law",
+    "Private international law. Conflict of laws"
+   ]
+  },
+  {
+   "doi": "10.19184/ejlh.v4i3.5587",
+   "title": "Perceraian dan Akibat Hukumnya terhadap Anak dan Harta Bersama Menurut Hukum Adat Osing di Desa Aliyan, Kecamatan Rogojampi, Kabupaten Banyuwangi",
+   "journal": "Lentera Hukum",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 864,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.21608/jlr.2025.386064.1743",
+   "title": "رسالة في القنوت في الفجر وغيرها من الأوقات عند حدوث النازلات تأليف: تاج الدين بن أحمد بن إبراهيم الدهان الحنفي المكي تحقيق ودراسة / A Treatise on Qunūt in the Fajr Prayer and Other Times During Calamities Authored by Tāj al-Dīn ibn Aḥmad ibn Ibrāhīm al-Dahhān, alhanafī almakiyi",
+   "journal": "مجلة البحوث الفقهیة والقانونیة",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 293,
+   "subjects": [
+    "Islamic law",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.22373/substantia.v19i1.2911",
+   "title": "Redefinisi Makna Nasakh Internal Ayat Al-Qur'an",
+   "journal": "Substantia: Jurnal Ilmu-Ilmu Ushuluddin",
+   "lang": [
+    "AR",
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 719,
+   "subjects": [
+    "Islam",
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "10.64016/parewasaraq.v4i2.61",
+   "title": "Fatwa and Virtual Reality",
+   "journal": "Parewa Saraq",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 915,
+   "subjects": [
+    "Religious ethics",
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "10.21608/jcia.2016.41583",
+   "title": "شعر غزوات النبي دراسة تحليلية",
+   "journal": "مجلة كلية الدراسات الإسلامية والعربية للبنات بدمنهور",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 86,
+   "subjects": [
+    "Islam",
+    "Islamic law",
+    "Oriental languages and literatures"
+   ]
+  },
+  {
+   "doi": "10.15388/teise.2016.99.10113",
+   "title": "ATVIROS KAINOS SUTARTIES MODELIS VIENOS KONVENCIJOJE, ŠVELNIOJOJE TEISĖJE IR LIETUVOS SUTARČIŲ TEISĖJE",
+   "journal": "Teisė",
+   "lang": [
+    "DE",
+    "EN",
+    "LT"
+   ],
+   "country": "LT",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 486,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.12345/ius.v3i8.213",
+   "title": "KEWENANGAN DEWAN PERWAKILAN DAERAH   DALAM SISTEM KETATANEGARAAN REPUBLIK INDONESIA BERDASARKAN UNDANG-UNDANG DASAR NEGARA REPUBLIK INDONESIA TAHUN 1945",
+   "journal": "Jurnal IUS",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 939,
+   "subjects": [
+    "Islamic law",
+    "Jurisprudence. Philosophy and theory of law"
+   ]
+  },
+  {
+   "doi": "10.21608/mjle.2022.294109",
+   "title": "الدور الاقتصادي لمصادر الطاقة المتجددة في ظل جائحة كورونا Covid-19 (دراسة تطبيقية على قطاع الكهرباء المصري)",
+   "journal": "مجلة البحوث القانونية و الاقتصادية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 345,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Islamic law",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.21608/mjle.2021.235336",
+   "title": "شرط التحکيم الإلزامي في عقود الوساطة لتداول الأوراق المالية بين الحظر التشريعي والتنظيم الموازي في القانون الأمريکي  دراسة تحليلية مقارنة",
+   "journal": "مجلة البحوث القانونية و الاقتصادية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 119,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Islamic law",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.47305/jlia21720103t",
+   "title": "MINORITY RIGHTS IN CENTRAL ASIA: INSIGHTS FROM KAZAKHSTAN, KYRGYZSTAN, AND UZBEKISTAN",
+   "journal": "Journal of Liberty and International Affairs",
+   "lang": [
+    "EN"
+   ],
+   "country": "MK",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 671,
+   "subjects": [
+    "Political theory",
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.14258/leglin(2023)2809",
+   "title": "Лингвистические аспекты юридической техники  (на примере функционирования слова «заведомо» и конструкции «знал или должен был знать» в Гражданском кодексе РФ)",
+   "journal": "Юрислингвистика",
+   "lang": [
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 246,
+   "subjects": [
+    "Philology. Linguistics",
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.31743/sp.12897",
+   "title": "Przyszłość Kodeksu Prawa Kanonicznego (Kodeks Jana Pawła II czy Franciszka?)",
+   "journal": "Studia Prawnicze KUL",
+   "lang": [
+    "EN",
+    "PL",
+    "UK"
+   ],
+   "country": "PL",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 455,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-law-manual-01",
+   "stratum": "doaj-law-manual",
+   "field": "law, no Crossref references deposited (manual count)",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.35316/lisanalhal.v9i1.81",
+   "title": "INTEGRASI IMAN &amp; ISTIQOMAH DALAM MEMBENTUK MANUSIA PARIPURNA",
+   "journal": "LISAN AL-HAL: Jurnal Pengembangan Pemikiran dan Kebudayaan",
+   "license": "cc-by-sa",
+   "url": "https://doi.org/10.35316/lisanalhal.v9i1.81",
+   "pdf_url": "https://journal.ibrahimy.ac.id/index.php/lisanalhal/article/download/81/69",
+   "pdf_host": "journal.ibrahimy.ac.id",
+   "pdf_bytes": 839223,
+   "pdf_sha256": "d8f57defdf20fac2ef58452539b25ff832d8dab2989f77a440d048f317d6b9ce",
+   "pages": 13,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "manual",
+   "truth_n": null,
+   "pool_rank": 0,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-law-manual-02",
+   "stratum": "doaj-law-manual",
+   "field": "law, no Crossref references deposited (manual count)",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.32631/pb.2025.1.02",
+   "title": "Personal transformations in the process of professional self-realization",
+   "journal": "Law and Safety",
+   "license": "cc-by",
+   "url": "https://doi.org/10.32631/pb.2025.1.02",
+   "pdf_url": "https://pb.univd.edu.ua/index.php/PB/article/download/848/685",
+   "pdf_host": "pb.univd.edu.ua",
+   "pdf_bytes": 419637,
+   "pdf_sha256": "597bdd9b9e6165c4f5d0067c9d4d366093791605c19461ff5d2690d3bedff5ae",
+   "pages": 8,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "manual",
+   "truth_n": null,
+   "pool_rank": 3,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-law-manual-03",
+   "stratum": "doaj-law-manual",
+   "field": "law, no Crossref references deposited (manual count)",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.31743/sp.12897",
+   "title": "Przyszłość Kodeksu Prawa Kanonicznego (Kodeks Jana Pawła II czy Franciszka?)",
+   "journal": "Studia Prawnicze KUL",
+   "license": "cc-by",
+   "url": "https://doi.org/10.31743/sp.12897",
+   "pdf_url": "https://czasopisma.kul.pl/index.php/sp/article/download/12897/12342",
+   "pdf_host": "czasopisma.kul.pl",
+   "pdf_bytes": 161580,
+   "pdf_sha256": "2960922377c8f64941e9d3ce515930e4184424acf44498e8577d9bf8469d188f",
+   "pages": 16,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "manual",
+   "truth_n": null,
+   "pool_rank": 9,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-law-manual-04",
+   "stratum": "doaj-law-manual",
+   "field": "law, no Crossref references deposited (manual count)",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.1344/rbd2019.0.26973",
+   "title": "El deterioro cognitivo en la vejez. Entre la vulnerabilidad y la discapacidad.",
+   "journal": "Revista de Bioética y Derecho",
+   "license": "cc-by-nc-nd",
+   "url": "https://doi.org/10.1344/rbd2019.0.26973",
+   "pdf_url": "https://revistes.ub.edu/index.php/RBD/article/download/26973/28654",
+   "pdf_host": "revistes.ub.edu",
+   "pdf_bytes": 598866,
+   "pdf_sha256": "d96e82f78f6a88ab5143e2f463ac7b574fdc90b53bf8a03b6f42207c28fee327",
+   "pages": 21,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "manual",
+   "truth_n": null,
+   "pool_rank": 10,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.24815/kanun.v21i3.11483",
+   "why": "pdf-fetch:jurnal.unsyiah.ac.id:<urlopen error [Errno -2] Name or service not known>"
+  },
+  {
+   "doi": "10.24815/kanun.v21i3.11483",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.21608/jcia.2016.41583",
+   "why": "pdf-fetch:jcia.journals.ekb.eg:<urlopen error [Errno 104] Connection reset by peer>"
+  },
+  {
+   "doi": "10.21608/jcia.2016.41583",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.19184/ejlh.v4i3.5587",
+   "why": "pdf-fetch:jurnal.unej.ac.id:<urlopen error [Errno 104] Connection reset by peer>"
+  },
+  {
+   "doi": "10.19184/ejlh.v4i3.5587",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.30497/rc.2023.243027.1901",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.4000/criminocorpus.6264",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.22034/jccj.2024.437217.1472",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.21608/jlr.2025.386064.1743",
+   "why": "pdf-fetch:jlr.journals.ekb.eg:<urlopen error [Errno 104] Connection reset by peer>"
+  },
+  {
+   "doi": "10.21608/jlr.2025.386064.1743",
+   "why": "no-usable-pdf-location"
+  }
+ ],
+ "date": "2026-09-30"
+}

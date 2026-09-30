@@ -1,0 +1,1990 @@
+{
+ "stratum": "doaj-law",
+ "seed": "20260930:doaj-law",
+ "pool_desc": {
+  "doaj_query": "bibjson.subject.term:Law AND bibjson.year:[2015 TO 2025]",
+  "total_per_year": {
+   "2015": 9903,
+   "2020": 17128,
+   "2019": 14969,
+   "2024": 21404,
+   "2021": 18097,
+   "2017": 12628,
+   "2023": 20387,
+   "2018": 14007,
+   "2016": 12221,
+   "2022": 17496,
+   "2025": 19770
+  },
+  "window": "first 1000 hits per year"
+ },
+ "pool": [
+  {
+   "doi": "10.12797/politeja.12.2015.35.01",
+   "title": "Od redaktorów",
+   "journal": "Politeja",
+   "lang": [
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 389,
+   "subjects": [
+    "Law",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.21564/2414-990x.149.201926",
+   "title": "Legal regulation of Hungarian activities regarding its kin-minority in Zakarpattia",
+   "journal": "Проблеми Законності",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 349,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.5380/rinc.v6i1.59564",
+   "title": "Estado, democracia e corrupção: equações complexas",
+   "journal": "Revista de Investigações Constitucionais",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 634,
+   "subjects": [
+    "Law",
+    "Law of nations",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.36796/biolex.v16i27.385",
+   "title": "Concepto de colonia cerrada, alcances y limitaciones desde una perspectiva de legalidad y de constitucionalidad ",
+   "journal": "Biolex",
+   "lang": [
+    "ES"
+   ],
+   "country": "MX",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 698,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.22133/clj.2021.306189.1063",
+   "title": "Conceptual pattern of factors affecting the adoption of electronic contract technology in Iran",
+   "journal": "حقوق فناوریهای نوین",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 479,
+   "subjects": [
+    "Regulation of industry, trade, and commerce. Occupational law",
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.47623/ivap-rvap.107.2017.2.03",
+   "title": "El principio de autonomía local en el régimen vasco del gobierno local",
+   "journal": "Revista Vasca de Administración Pública",
+   "lang": [
+    "ES",
+    "EU"
+   ],
+   "country": "ES",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 364,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.20873/uft.2359-0106.2020.v7n1.pi-ii",
+   "title": "Editorial",
+   "journal": "Vertentes do Direito",
+   "lang": [
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 590,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Civil law",
+    "Public law"
+   ]
+  },
+  {
+   "doi": "10.32353/acfs.8.2023.02",
+   "title": "Combating Child Sexual Violence And Exploitation: Psycho-Legal Experience Of Ukraine And The World",
+   "journal": "Архів кримінології та судових наук",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 578,
+   "subjects": [
+    "Social pathology. Social and public welfare. Criminology",
+    "Criminal law and procedure"
+   ]
+  },
+  {
+   "doi": "10.1186/s41935-017-0031-9",
+   "title": "Correction to: A medicolegal study of domestic violence in south region of Jordan",
+   "journal": "Egyptian Journal of Forensic Sciences",
+   "lang": [
+    "EN"
+   ],
+   "country": "GB",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 324,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Medicine (General)"
+   ]
+  },
+  {
+   "doi": "10.21697/zp.2011.11.1.07",
+   "title": "„PRZYJAZNY CUDZOZIEMIEC”. UCIECZKA I DŁUGA DROGA ADOLFA BERGERA DO STANÓW ZJEDNOCZONYCH (1938-1942)",
+   "journal": "Zeszyty Prawnicze",
+   "lang": [
+    "EN",
+    "IT",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 820,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.52249/ilr.v1i3.30",
+   "title": "MENIMBANG DEMOKRASI DELIBERATIF DALAM  PROSES PEMBENTUKAN HUKUM YANG DEMOKRATIS DI  INDONESIA",
+   "journal": "IBLAM Law Review",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 108,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.18041/0124-0102/a.30.5037",
+   "title": "Antecedentes de la organización del territorio en el desarrollo Constitucional Colombiano",
+   "journal": "Advocatus",
+   "lang": [
+    "ES"
+   ],
+   "country": "CO",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 980,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.17533/udea.esde.v75n165a01",
+   "title": "Editorial Vol. 75 Num. 165.",
+   "journal": "Estudios de Derecho",
+   "lang": [
+    "ES"
+   ],
+   "country": "CO",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 804,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Political science (General)"
+   ]
+  },
+  {
+   "doi": "10.31009/indret.2020.i4.02",
+   "title": "El control de transparencia de las cláusulas relativas a índices de referencia y sus efectos El IRPH en la llamada jurisprudencia menor tras la STJUE 3.3.2020",
+   "journal": "InDret",
+   "lang": [
+    "CA",
+    "EN",
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 521,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.51825/nhk.v7i1.22298",
+   "title": "Drone Warfare in the Mirror of Human Rights",
+   "journal": "Nurani Hukum",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 187,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.25267/paix_secur_int.2020.i8.19",
+   "title": "CARRERA, S., SANTOS VARA, J., Y STRIK, T. (Eds.): Constitutionalising the external dimensions of EU migration policies in times of crisis. Legality, rule of law and fundamental rights reconsidered, Edward Elgar Publishing, Northampton, 2019, 323 pp.",
+   "journal": "Paix et Sécurité Internationales",
+   "lang": [
+    "EN",
+    "ES",
+    "FR"
+   ],
+   "country": "ES",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 146,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "International relations"
+   ]
+  },
+  {
+   "doi": "10.33650/jhi.v1i2.71",
+   "title": "LELANG HARTA WARIS BERDASARKAN PUTUSAN PENGADILAN AGAMA",
+   "journal": "Hakam: Jurnal Kajian Hukum Islam dan Hukum Ekonomi Islam",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 841,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.24144/2788-6018.2024.06.124",
+   "title": "Створення з метою протиправного використання, розповсюдження або збуту шкідливих програмних чи технічних засобів, а також їх розповсюдження або збут (стаття 361-1 КК України): окремі аспекти та проблеми кримінально-правової кваліфікації",
+   "journal": "Аналітично-порівняльне правознавство",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 465,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.21608/jelc.2019.243537",
+   "title": "النظام القانوني لسندات الشحن البحرية الدولية الاختصاص القضائي والاختصاص التشريعي",
+   "journal": "مجلة العلوم القانونیة والاقتصادیة",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 539,
+   "subjects": [
+    "Economics as a science",
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.1344/rbd2018.0.20112",
+   "title": "El mercado de regulado de órganos: el caso de Irán",
+   "journal": "Revista de Bioética y Derecho",
+   "lang": [
+    "CA",
+    "EN",
+    "ES",
+    "IT",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 20,
+   "subjects": [
+    "Jurisprudence. Philosophy and theory of law",
+    "Medical philosophy. Medical ethics"
+   ]
+  },
+  {
+   "doi": "10.7172/2299-5749.ikar.2.6.4",
+   "title": "Bezpieczeństwo pracowników obsługi naziemnej",
+   "journal": "internetowy Kwartalnik Antymonopolowy i Regulacyjny",
+   "lang": [
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 774,
+   "subjects": [
+    "Law",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.14201/ais2022101145180",
+   "title": "Análisis del régimen de responsabilidad de los prestadores de servicios para compartir contenidos en línea establecido por el artículo 17 de la Directiva 2019/790",
+   "journal": "Ars Iuris Salmanticensis",
+   "lang": [
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 697,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Political science (General)"
+   ]
+  },
+  {
+   "doi": "10.3390/laws10020045",
+   "title": "Making Sense of Indigenous ⬄ Colonial Encounters: New Zealand’s Treaty of Waitangi in a Digital Age",
+   "journal": "Laws",
+   "lang": [
+    "EN"
+   ],
+   "country": "CH",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 736,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.21608/cfdj.2025.401454.2316",
+   "title": "أثر التكامل مع سلاسل القيمة العالمية على معدل نمو الصادرات في مصر",
+   "journal": "المجلة العلمية للدراسات والبحوث المالية والتجارية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 977,
+   "subjects": [
+    "Finance",
+    "Law",
+    "Accounting. Bookkeeping"
+   ]
+  },
+  {
+   "doi": "10.5944/rdp.94.2015.15742",
+   "title": "Problemas y contradicciones de la regulación de la cláusula de conciencia periodística // Problems and contradictions of the journalists’ conscience clause regulation",
+   "journal": "Revista de Derecho Político",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 731,
+   "subjects": [
+    "Law of Europe",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.17345/rcda1854",
+   "title": "Derecho y políticas ambientales en las Islas Canarias (Segundo semestre 2017)",
+   "journal": "Revista Catalana de Dret Ambiental",
+   "lang": [
+    "CA",
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 60,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Environmental law"
+   ]
+  },
+  {
+   "doi": "10.36475/10.2.1",
+   "title": "WOMEN’S POLITICAL RIGHTS IN INTERNATIONAL LAW AND PRACTICE IN VIETNAM ",
+   "journal": "სამართალი და მსოფლიო",
+   "lang": [
+    "EN"
+   ],
+   "country": "GE",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 919,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.47712/rd.2021.v6i1.121",
+   "title": "Competencias digitales en adultos mayores y acceso a la justicia: una revisión sistemática",
+   "journal": "Revista de Derecho",
+   "lang": [
+    "ES"
+   ],
+   "country": "PE",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 864,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.17345/rcda1508",
+   "title": "Jurisprudencia ambiental en Aragón (Segundo semestre 2014)",
+   "journal": "Revista Catalana de Dret Ambiental",
+   "lang": [
+    "CA",
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 176,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Environmental law"
+   ]
+  },
+  {
+   "doi": "10.25041/iplr.v4i1.2962",
+   "title": "THE LIMITATIONS OF CLINICAL AUTHORITY AND MEDICAL PRACTICE IN APPLICATION-BASED TELEMEDICINE",
+   "journal": "Indonesia Private Law Review",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 697,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.23969/litigasi.v23i2.5786",
+   "title": "RELEVANSI KEBIJAKAN TPPA 2011 TERHADAP NEGARA-NEGARA ANGGOTA WTO DALAM PERDAGANGAN INTERNASIONAL",
+   "journal": "Jurnal Litigasi",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 421,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.22201/iij.24487880e.2015.32.10582",
+   "title": "Índice del Diccionario de historia del derecho",
+   "journal": "Revista Mexicana de Historia del Derecho",
+   "lang": [
+    "ES"
+   ],
+   "country": "MX",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 944,
+   "subjects": [
+    "Law of nations",
+    "History of Law"
+   ]
+  },
+  {
+   "doi": "10.24144/2788-6018.2024.03.43",
+   "title": "Правове регулювання видобутку дорогоцінного каміння: проблеми та шляхи вдосконалення",
+   "journal": "Аналітично-порівняльне правознавство",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 373,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.30925/zpfsr.39.1.22",
+   "title": "TROŠKOVI UPRAVNOG SPORA NAKON NOVELE ZAKONA O UPRAVNIM SPOROVIMA 2017.",
+   "journal": "Zbornik Pravnog Fakulteta Sveučilišta u Rijeci",
+   "lang": [
+    "DE",
+    "EN",
+    "HR",
+    "IT"
+   ],
+   "country": "HR",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 207,
+   "subjects": [
+    "Law",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.21684/2412-2343-2015-2-1-100-124",
+   "title": "WRONGFUL TRADING: COMPARATIVE APPROACH (ENGLAND AND WALES,  RUSSIA  AND THE USA)",
+   "journal": "BRICS Law Journal",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "RU",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 2,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.1016/j.fsisyn.2021.100199",
+   "title": "Describing communication during a forensic investigation using the Pebbles on a Scale metaphor",
+   "journal": "Forensic Science International: Synergy",
+   "lang": [
+    "EN"
+   ],
+   "country": "NL",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 877,
+   "subjects": [
+    "Criminal law and procedure"
+   ]
+  },
+  {
+   "doi": "10.32457/rjyd.v8it.2874",
+   "title": "Inteligencia artificial y evaluación de la solvencia",
+   "journal": "Revista Justicia y Derecho",
+   "lang": [
+    "EN",
+    "ES"
+   ],
+   "country": "CL",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 299,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.48398/imist.prsm/jemed-v2i3.18457",
+   "title": "L’investissement responsable et financement vert: un nouveau levier de développement durable",
+   "journal": "Journal d’Economie, de Management, d’Environnement et de Droit",
+   "lang": [
+    "AR",
+    "EN",
+    "FR"
+   ],
+   "country": "MA",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 315,
+   "subjects": [
+    "Law",
+    "Economic theory. Demography"
+   ]
+  },
+  {
+   "doi": "10.19092/reed.v8i.560",
+   "title": "A pesquisa jurídica em questão",
+   "journal": "Brazilian Journal of Empirical Legal Studies",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 946,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.7172/1689-9024.yars.2025.18.31.3",
+   "title": " Peculiarities of Europeanisation of State Aid Control in Ukraine during Martial Law",
+   "journal": "Yearbook of Antitrust and Regulatory Studies",
+   "lang": [
+    "EN"
+   ],
+   "country": "PL",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 479,
+   "subjects": [
+    "Law",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.61279/382v1e30",
+   "title": "الصراع الدولي في منطقة الشرق الأوسط وأثره في امن الطاقة",
+   "journal": "مجلة كلية القانون والعلوم السياسية",
+   "lang": [
+    "AR"
+   ],
+   "country": "IQ",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 528,
+   "subjects": [
+    "Law",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.5937/zrpfni1569295b",
+   "title": "The procedure for granting concessions under the Concessions Act of Republika Srpska",
+   "journal": "Zbornik Radova Pravnog Fakulteta u Nišu",
+   "lang": [
+    "DE",
+    "EN",
+    "FR",
+    "RU",
+    "SR"
+   ],
+   "country": "RS",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 620,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.12731/2576-9634-2024-8-1-174",
+   "title": "ADMINISTRATIVE AND LEGAL REGIME OF THE NORTHERN DELIVERY AS A FACTOR OF SUSTAINABLE DEVELOPMENT OF THE NORTH AND THE ARCTIC ZONE OF RUSSIAN FEDERATION",
+   "journal": "Russian Studies in Law and Politics",
+   "lang": [
+    "EN",
+    "RU"
+   ],
+   "country": "US",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 934,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.5937/analipfb2002124c",
+   "title": "Direct representation in Roman law with reference to modern law",
+   "journal": "Anali Pravnog Fakulteta u Beogradu",
+   "lang": [
+    "EN",
+    "SR"
+   ],
+   "country": "RS",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 280,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.21697/im.2016.27.4.08",
+   "title": "Ks. Wojciech Góralski, Adhoracja apostolska Amoris laetitia papieża Franciszka. Prezentacja dokumentu z komentarzem do nn. 300-308, Płocki Instytut Wydawniczy, Płock 2016, 106 ss.",
+   "journal": "Jus Matrimoniale",
+   "lang": [
+    "EN",
+    "FR",
+    "IT",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 51,
+   "subjects": [
+    "Law",
+    "The family. Marriage. Woman"
+   ]
+  },
+  {
+   "doi": "10.24144/2788-6018.2022.06.46",
+   "title": "Завдання та функції Управління дотримання прав людини Національної поліції України як учасника адміністративно-правових відносин у сферах дотримання прав людини під час надання поліцесйьких послуг",
+   "journal": "Аналітично-порівняльне правознавство",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 885,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.21608/cfdj.2024.324783",
+   "title": "الدور الوسيط للانتماء والثقة في العلاقة بين دعم الإدارة العليا ومشاركة المعرفة بين الأكاديميين\"دراسة تطبيقية على الجامعات الخاصة المصرية\"",
+   "journal": "المجلة العلمية للدراسات والبحوث المالية والتجارية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 658,
+   "subjects": [
+    "Finance",
+    "Law",
+    "Accounting. Bookkeeping"
+   ]
+  },
+  {
+   "doi": "10.55173/yurisdiksi.v21i1.294",
+   "title": "Philosophy of Justice In The Shadow of Plurality A Feminist Interpretation of Legal Inequality Towards Women",
+   "journal": "Yurisdiksi: Jurnal Wacana Hukum dan Sains",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 380,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.32631/pb.2025.1.02",
+   "title": "Personal transformations in the process of professional self-realization",
+   "journal": "Law and Safety",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 308,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.24144/2788-6018.2022.04.66",
+   "title": "Зловживання правом на початок проведення окремих слідчих (розшукових) та негласних слідчих (розшукових) дій без дозволу слідчого судді",
+   "journal": "Аналітично-порівняльне правознавство",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 26,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.31743/sp.16760",
+   "title": "International human rights law in the era of digital disinformation and propaganda: case studies from Myanmar and Ukraine",
+   "journal": "Studia Prawnicze KUL",
+   "lang": [
+    "EN",
+    "PL",
+    "UK"
+   ],
+   "country": "PL",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 940,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.22146/jmh.15903",
+   "title": "CRITICIZE THE USE OF ANALOGY PROHIBITION IN CRIMINAL LAW",
+   "journal": "Mimbar Hukum",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 849,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.21608/jcia.2024.394307",
+   "title": "المستشرقون من أصل عربي: المستشرق جورج مقدسي: منهجه وآراؤه- أنموذجا Orientalists of Arab origin: the orientalist George Makdisi: his approach and views - a model",
+   "journal": "مجلة كلية الدراسات الإسلامية والعربية للبنات بدمنهور",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 929,
+   "subjects": [
+    "Islam",
+    "Islamic law",
+    "Oriental languages and literatures"
+   ]
+  },
+  {
+   "doi": "10.22478/ufpb.1678-2593.2025v24n56.76048",
+   "title": "Vozes Silenciadas: o não reconhecimento da comunidade quilombola da Ilha Redonda, em Macapá/AP, como sujeito coletivo de direitos.",
+   "journal": "Prim@ Facie",
+   "lang": [
+    "EN",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 184,
+   "subjects": [
+    "Law",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "https://doi.org/10.18523/2617-2607.2023.11.56-63",
+   "title": "Припинення повноважень посадової особи як підстава для розірвання трудового договору (контракту) з керівником: особливості та проблеми реалізації",
+   "journal": "Наукові записки НаУКМА: Юридичні науки",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 402,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.7206/kp.2080-1084.743",
+   "title": "Inadequacies of the Transgender Persons’ (Protection of Rights) Act, 2019: A Juxtaposition with International Legal Frameworks & Conventions",
+   "journal": "Krytyka Prawa",
+   "lang": [
+    "DE",
+    "EN",
+    "ES",
+    "FR",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 655,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.14201/reb20163486100",
+   "title": "Is Brazil going through a process of de-industrialization?",
+   "journal": "Revista de Estudios Brasileños",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "ES",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 242,
+   "subjects": [
+    "History of scholarship and learning. The humanities",
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.14746/rpeis.2021.83.3.2",
+   "title": "Zasada trójpodziału władzy a tak zwane specustawy inwestycyjne konkretnego celu – refleksje w przedmiocie granic pomiędzy stanowieniem a stosowaniem prawa",
+   "journal": "Ruch Prawniczy, Ekonomiczny i Socjologiczny",
+   "lang": [
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 461,
+   "subjects": [
+    "Law",
+    "Social Sciences"
+   ]
+  },
+  {
+   "doi": "10.26905/idjch.v6i1.686",
+   "title": "PERSPEKTIF HISTORIS DAN PERBANDINGAN PENGATURAN MASALAH LINGKUNGAN HIDUP DI INDONESIA",
+   "journal": "Jurnal Cakrawala Hukum",
+   "lang": [
+    "EN"
+   ],
+   "country": "ID",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 983,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.32631/pb.2020.1.13",
+   "title": "Essence and Content of Legal Settlement and Tax Amnesty",
+   "journal": "Law and Safety",
+   "lang": [
+    "EN",
+    "RU",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 993,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.22066/cilamag.2015.15783",
+   "title": "فناوری زیستی تراریخت و حق بر کار در قلمرو حقوق بین‌الملل بشر با رویکردی بر جوامع روستایی",
+   "journal": "Majallah-i Huqūqī-i Biyn/al-milalī-i",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 195,
+   "subjects": [
+    "Law",
+    "Comparative law. International uniform law",
+    "Private international law. Conflict of laws"
+   ]
+  },
+  {
+   "doi": "10.21608/cfdj.2022.230795",
+   "title": "أثر تطبيق مدخل التکاليف على أساس الأنشطة الموجهة بالوقت (TDABC) على اتخاذ القرارات الإدارية الرشيدة بشرکات  التأمين المصرية: دراسة حالة",
+   "journal": "المجلة العلمية للدراسات والبحوث المالية والتجارية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 835,
+   "subjects": [
+    "Finance",
+    "Law",
+    "Accounting. Bookkeeping"
+   ]
+  },
+  {
+   "doi": "10.18041/0124-0102/advocatus.24.984",
+   "title": "Establecimiento de comercio en relación con los hosting web",
+   "journal": "Advocatus",
+   "lang": [
+    "ES"
+   ],
+   "country": "CO",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 498,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Social sciences (General)"
+   ]
+  },
+  {
+   "doi": "10.25267/rejucrim.2025.i12.07",
+   "title": "Aspectos criminológicos del delito de apropiación indebida en la compraventa de vivienda sobre plano como delito de cuello blanco",
+   "journal": "Revista de Estudios Jurídicos y Criminológicos",
+   "lang": [
+    "ES"
+   ],
+   "country": "ES",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 181,
+   "subjects": [
+    "Law",
+    "Social pathology. Social and public welfare. Criminology"
+   ]
+  },
+  {
+   "doi": "10.25041/fiatjustisia.v10no1.666",
+   "title": "PERTANGGUNGJAWABAN PIDANA TERHADAP PELAKU TINDAK PIDANA PEMILU LEGISLATIF TAHUN 2014 (Studi Putusan Nomor: 70/Pid./2014/PT.TJK.)",
+   "journal": "Fiat Justisia",
+   "lang": [
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 251,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.15388/teise.2020.115.2",
+   "title": "Peculiarities of the Image of Correctional Agencies and Employees",
+   "journal": "Teisė",
+   "lang": [
+    "DE",
+    "EN",
+    "LT"
+   ],
+   "country": "LT",
+   "year": "2020",
+   "draw_year": 2020,
+   "rank": 533,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.22197/rbdpp.v4i3.186",
+   "title": "The objective limits of the ne bis in idem in Italy between national and European rules",
+   "journal": "Revista Brasileira de Direito Processual Penal",
+   "lang": [
+    "EN",
+    "ES",
+    "IT",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 630,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.21608/mjle.2025.467400",
+   "title": "أطراف المسؤولية الجنائية في مجال الذكاء الاصطناعي.",
+   "journal": "مجلة البحوث القانونية و الاقتصادية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 263,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Islamic law",
+    "Economics as a science"
+   ]
+  },
+  {
+   "doi": "10.6092/issn.2421-2695/14102",
+   "title": "\"Agile work\": emerging critical issues and proposals for reform",
+   "journal": "Labour & Law Issues",
+   "lang": [
+    "EN"
+   ],
+   "country": "IT",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 916,
+   "subjects": [
+    "Law",
+    "Labor systems"
+   ]
+  },
+  {
+   "doi": "10.33102/mjsl.vol12no1.498",
+   "title": "PARLIAMENTARY QUESTIONS IN THE PRACTICE OF UNITED ARAB EMIRATES (UAE)’S FEDERAL NATIONAL COUNCIL (FNC)",
+   "journal": "Malaysian Journal of Syariah and Law",
+   "lang": [
+    "AR",
+    "EN",
+    "MS"
+   ],
+   "country": "MY",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 522,
+   "subjects": [
+    "Islamic law",
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.1017/err.2025.9",
+   "title": "Understanding the Regulatory Approach of the Cyber Resilience Act: Protection of Fundamental Rights in Disguise?",
+   "journal": "European Journal of Risk Regulation",
+   "lang": [
+    "EN"
+   ],
+   "country": "GB",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 567,
+   "subjects": [
+    "Law",
+    "Political science"
+   ]
+  },
+  {
+   "doi": "10.21608/fica.2023.357524",
+   "title": "اللذة بين أرستيب وأبيقور دراسة تحليلية نقدية",
+   "journal": "Mağallaẗ Kulliyyaẗ al-dirāsāt al-islāmiyyaẗ wa al-ʿarabiyyaẗ lil banat bi ğāmiʿaẗ Al-Ahzhar farʿ kafr Al-Sheikh",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 45,
+   "subjects": [
+    "Islam",
+    "Islamic law",
+    "Oriental languages and literatures"
+   ]
+  },
+  {
+   "doi": "10.15388/teise.2018.106.11660",
+   "title": "Nemokumo reglamento naujovės",
+   "journal": "Teisė",
+   "lang": [
+    "DE",
+    "EN",
+    "LT"
+   ],
+   "country": "LT",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 64,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.36633/ulr.974",
+   "title": "The Architecture of Authority in Global Space Governance: The Moon Agreement as a Deconflicting Mechanism of Space Activities",
+   "journal": "Utrecht Law Review",
+   "lang": [
+    "EN"
+   ],
+   "country": "NL",
+   "year": "2024",
+   "draw_year": 2024,
+   "rank": 747,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.33994/kndise.2019.64.17",
+   "title": "Основні завдання слідчого для верифікації показань свідка",
+   "journal": "Криміналістика і судова експертиза",
+   "lang": [
+    "EN",
+    "UK"
+   ],
+   "country": "UA",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 474,
+   "subjects": [
+    "Criminal law and procedure"
+   ]
+  },
+  {
+   "doi": "10.30800/mises.2015.v3.711",
+   "title": "Em Defesa do “Apriorismo Extremo”",
+   "journal": "Mises",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2015",
+   "draw_year": 2015,
+   "rank": 219,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Economic history and conditions"
+   ]
+  },
+  {
+   "doi": "10.17561/tahrj.v21.7806",
+   "title": "Addressing the Emerging Issues of Xenophobic Attack and Human Rights Violations in South Africa: Adopting a Human Rights-Based Approach",
+   "journal": "Age of Human Rights Journal",
+   "lang": [
+    "EN"
+   ],
+   "country": "ES",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 918,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.18601/01229893.n58.15",
+   "title": "Tortura, Derecho y el concepto de Derecho. A propósito de La justicia de la tortura. Sobre Derecho y fuerza de Massimo La Torre, Madrid: Trotta, 2022 ",
+   "journal": "Revista Derecho del Estado",
+   "lang": [
+    "EN",
+    "ES",
+    "FR",
+    "PT"
+   ],
+   "country": "CO",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 58,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.33899/arlj.2023.177380",
+   "title": "['کلمة العدد', 'Editorial']",
+   "journal": "الرافدین للحقوق",
+   "lang": [
+    "AR",
+    "EN",
+    "FR"
+   ],
+   "country": "IQ",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 46,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.21608/bfdc.2018.40577",
+   "title": "قضية الفهم الخاطئ للنصوص [الأسباب – النتائج والآثار – العلاج]",
+   "journal": "حولية کلية الدعوة الإسلامية بالقاهرة",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 470,
+   "subjects": [
+    "Islam",
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "10.21608/mkdaf.2023.211660.1093",
+   "title": "العلاقة بين علماء الحرمين الشريفين والأمراء الأشراف خلال العصرين الأيوبي والمملوكي (567- 923هـ /1171 - 1517م) بحث مستل من رسالة ماجستير بعنوان: الدور السياسي والحضاري للعلماء في بلاد الحرمين الشريفين خلال العصرين الأيوبي والمملوكي (567- 923هـ /1171",
+   "journal": "Maǧallaẗ Kulliyyaẗ Dar Al-ʿulūm - Ǧāmiʿaẗ Al-Fayūm",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 768,
+   "subjects": [
+    "Oriental languages and literatures",
+    "Islamic law"
+   ]
+  },
+  {
+   "doi": "10.22197/rbdpp.v4i2.134",
+   "title": "Central foundation of the right against self-incrimination",
+   "journal": "Revista Brasileira de Direito Processual Penal",
+   "lang": [
+    "EN",
+    "ES",
+    "IT",
+    "PT"
+   ],
+   "country": "BR",
+   "year": "2018",
+   "draw_year": 2018,
+   "rank": 200,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.51197/lj.v4i4.591",
+   "title": "La congruencia procesal en la tenencia del niño, niña o adolescente",
+   "journal": "Llapanchikpaq: Justicia",
+   "lang": [
+    "EN",
+    "ES",
+    "PT"
+   ],
+   "country": "PE",
+   "year": "2022",
+   "draw_year": 2022,
+   "rank": 698,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.1017/glj.2019.58",
+   "title": "The Foundational Myth of Mercosur and the European Union Analogy",
+   "journal": "German Law Journal",
+   "lang": [
+    "EN"
+   ],
+   "country": "GB",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 781,
+   "subjects": [
+    "Law of Europe",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.18566/rfdcp.v46n124.a05",
+   "title": "O papel da soft law perante a concorrência fiscal internacional: o código de conduta no domínio da fiscalidade das empresas",
+   "journal": "Revista de la Facultad de Derecho y Ciencias Políticas",
+   "lang": [
+    "ES"
+   ],
+   "country": "CO",
+   "year": "2016",
+   "draw_year": 2016,
+   "rank": 640,
+   "subjects": [
+    "Law",
+    "Law in general. Comparative and uniform law. Jurisprudence",
+    "Political science (General)"
+   ]
+  },
+  {
+   "doi": "10.29303/ius.v7i1.607",
+   "title": "Konsep Hasil Tindak Pidana Dalam Undang-Undang Nomor 8 Tahun 2010 tentang Pencegahan dan Pemberantasan Tindak Pidana Pencucian Uang",
+   "journal": "Jurnal IUS",
+   "lang": [
+    "EN",
+    "ID"
+   ],
+   "country": "ID",
+   "year": "2019",
+   "draw_year": 2019,
+   "rank": 43,
+   "subjects": [
+    "Islamic law",
+    "Jurisprudence. Philosophy and theory of law"
+   ]
+  },
+  {
+   "doi": "10.21608/jlr.2025.420265.1835",
+   "title": "إحكام التحقيق في أحكام التعليق لبدر الدين محمد بن يحيى بن عمر القرافي المصري المالكي ت(1008هـ) دراسة وتحقيقا / Iḥkām al-Taḥqīq fī Aḥkām al-taʿlīq li-Badr al-Dīn Muḥammad ibn Yaḥyā ibn ʿUmar al-Qarāfī al-Miṣrī al-Mālikī, d. 1008 h. \"Study and Critical Edition\"",
+   "journal": "مجلة البحوث الفقهیة والقانونیة",
+   "lang": [
+    "AR"
+   ],
+   "country": "EG",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 810,
+   "subjects": [
+    "Islamic law",
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.21608/cfdj.2021.207583",
+   "title": "أثر الجدارات السلوکية للأفراد العاملين في  ظل التحول الرقمى على الأداء الإبداعي بالتطبيق على المستشفيات الخاصة المصرية \"دراسة ميدانية",
+   "journal": "المجلة العلمية للدراسات والبحوث المالية والتجارية",
+   "lang": [
+    "AR",
+    "EN"
+   ],
+   "country": "EG",
+   "year": "2021",
+   "draw_year": 2021,
+   "rank": 363,
+   "subjects": [
+    "Finance",
+    "Law",
+    "Accounting. Bookkeeping"
+   ]
+  },
+  {
+   "doi": "10.17561/tahrj.n9.2",
+   "title": "The convention on the rights of persons with disabilities (CRPD) and Qatar's domestic legislation: the potential impact on the main legal domains",
+   "journal": "Age of Human Rights Journal",
+   "lang": [
+    "EN"
+   ],
+   "country": "ES",
+   "year": "2017",
+   "draw_year": 2017,
+   "rank": 190,
+   "subjects": [
+    "Law in general. Comparative and uniform law. Jurisprudence"
+   ]
+  },
+  {
+   "doi": "10.4467/25444654spp.23.017.17898",
+   "title": "Konsekwencje prawne zatrudniania cudzoziemców przebywających w Polsce nielegalnie",
+   "journal": "Studia z Zakresu Prawa Pracy i Polityki Społecznej",
+   "lang": [
+    "EN",
+    "PL"
+   ],
+   "country": "PL",
+   "year": "2023",
+   "draw_year": 2023,
+   "rank": 406,
+   "subjects": [
+    "Law"
+   ]
+  },
+  {
+   "doi": "10.22081/jislamicgo.2025.71113.1011",
+   "title": "An Introduction to the Governance and Management ‎of Social Harm: Begging Based on Religious ‎Teachings",
+   "journal": "مطالعات حکمرانی اسلامی",
+   "lang": [
+    "FA"
+   ],
+   "country": "IR",
+   "year": "2025",
+   "draw_year": 2025,
+   "rank": 227,
+   "subjects": [
+    "Civil law"
+   ]
+  }
+ ],
+ "items": [
+  {
+   "id": "doaj-law-01",
+   "stratum": "doaj-law",
+   "field": "law",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.36475/10.2.1",
+   "title": "WOMEN’S POLITICAL RIGHTS IN INTERNATIONAL LAW AND PRACTICE IN VIETNAM",
+   "journal": "Law and World",
+   "license": "cc-by-sa",
+   "url": "https://doi.org/10.36475/10.2.1",
+   "pdf_url": "https://lawandworld.ge/index.php/law/article/download/521/400",
+   "pdf_host": "lawandworld.ge",
+   "pdf_bytes": 619404,
+   "pdf_sha256": "a54497e2c989f29462be6e0c3d2c0b508403393beb4cb820cb312bf2510a1351",
+   "pages": 12,
+   "language": "ka",
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 15,
+   "pool_rank": 60,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-law-02",
+   "stratum": "doaj-law",
+   "field": "law",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.33102/mjsl.vol12no1.498",
+   "title": "PARLIAMENTARY QUESTIONS IN THE PRACTICE OF UNITED ARAB EMIRATES (UAE)’S FEDERAL NATIONAL COUNCIL (FNC)",
+   "journal": "Malaysian Journal of Syariah and Law",
+   "license": "cc-by-nc",
+   "url": "https://doi.org/10.33102/mjsl.vol12no1.498",
+   "pdf_url": "https://mjsl.usim.edu.my/index.php/jurnalmjsl/article/download/498/337",
+   "pdf_host": "mjsl.usim.edu.my",
+   "pdf_bytes": 525427,
+   "pdf_sha256": "9669d4f1aaad11ca24f26ba55711b2be57df3783fa226815d941e74b0f915778",
+   "pages": 17,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 48,
+   "pool_rank": 68,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-law-03",
+   "stratum": "doaj-law",
+   "field": "law",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.32631/pb.2025.1.02",
+   "title": "Personal transformations in the process of professional self-realization",
+   "journal": "Law and Safety",
+   "license": "cc-by",
+   "url": "https://doi.org/10.32631/pb.2025.1.02",
+   "pdf_url": "https://pb.univd.edu.ua/index.php/PB/article/download/848/685",
+   "pdf_host": "pb.univd.edu.ua",
+   "pdf_bytes": 419637,
+   "pdf_sha256": "597bdd9b9e6165c4f5d0067c9d4d366093791605c19461ff5d2690d3bedff5ae",
+   "pages": 8,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 27,
+   "pool_rank": 75,
+   "version": "publishedVersion"
+  },
+  {
+   "id": "doaj-law-04",
+   "stratum": "doaj-law",
+   "field": "law",
+   "layout_hint": "footnote-style expected",
+   "source": "DOAJ + Unpaywall + Crossref",
+   "doi": "10.31743/sp.16760",
+   "title": "International human rights law in the era of digital disinformation and propaganda: case studies from Myanmar and Ukraine",
+   "journal": "Studia Prawnicze KUL",
+   "license": "cc-by",
+   "url": "https://doi.org/10.31743/sp.16760",
+   "pdf_url": "https://czasopisma.kul.pl/index.php/sp/article/download/16760/14908",
+   "pdf_host": "czasopisma.kul.pl",
+   "pdf_bytes": 364943,
+   "pdf_sha256": "235d715e4f8efcec368be31eb1266fb8968e9d5d681f72a798b8c3d1f7328264",
+   "pages": 20,
+   "language": null,
+   "crossref_type": "journal-article",
+   "truth_kind": "crossref",
+   "truth_n": 31,
+   "pool_rank": 83,
+   "version": "publishedVersion"
+  }
+ ],
+ "rejected_draws": [
+  {
+   "doi": "10.12731/2576-9634-2024-8-1-174",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.14201/reb20163486100",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/jlr.2025.420265.1835",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.30800/mises.2015.v3.711",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/jcia.2024.394307",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.19092/reed.v8i.560",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21697/im.2016.27.4.08",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.29303/ius.v7i1.607",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5944/rdp.94.2015.15742",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.7172/2299-5749.ikar.2.6.4",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.24144/2788-6018.2024.06.124",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.18041/0124-0102/advocatus.24.984",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.18601/01229893.n58.15",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5380/rinc.v6i1.59564",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.33650/jhi.v1i2.71",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "https://doi.org/10.47623/ivap-rvap.107.2017.2.03",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.33994/kndise.2019.64.17",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22197/rbdpp.v4i3.186",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22146/jmh.15903",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22201/iij.24487880e.2015.32.10582",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.5937/analipfb2002124c",
+   "why": "not-pdf:ralf.ius.bg.ac.rs"
+  },
+  {
+   "doi": "10.5937/analipfb2002124c",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.26905/idjch.v6i1.686",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.22478/ufpb.1678-2593.2025v24n56.76048",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.18041/0124-0102/a.30.5037",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.36633/ulr.974",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.47712/rd.2021.v6i1.121",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.52249/ilr.v1i3.30",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.12797/politeja.12.2015.35.01",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.33899/arlj.2023.177380",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/cfdj.2025.401454.2316",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.24144/2788-6018.2024.03.43",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.32631/pb.2020.1.13",
+   "why": "title-mismatch:pb.univd.edu.ua:0.14"
+  },
+  {
+   "doi": "10.32631/pb.2020.1.13",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.3390/laws10020045",
+   "why": "pdf-fetch:www.mdpi.com:HTTP Error 403: Forbidden"
+  },
+  {
+   "doi": "10.3390/laws10020045",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.20873/uft.2359-0106.2020.v7n1.pi-ii",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.17533/udea.esde.v75n165a01",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22197/rbdpp.v4i2.134",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22066/cilamag.2015.15783",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.23969/litigasi.v23i2.5786",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/mjle.2025.467400",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.25041/fiatjustisia.v10no1.666",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.4467/25444654spp.23.017.17898",
+   "why": "pdf-fetch:www.ejournals.eu:<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+  },
+  {
+   "doi": "10.4467/25444654spp.23.017.17898",
+   "why": "pdf-fetch:ruj.uj.edu.pl:<urlopen error [Errno 104] Connection reset by peer>"
+  },
+  {
+   "doi": "10.4467/25444654spp.23.017.17898",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.32353/acfs.8.2023.02",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21697/zp.2011.11.1.07",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.25267/paix_secur_int.2020.i8.19",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.17345/rcda1854",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.15388/teise.2020.115.2",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.7172/1689-9024.yars.2025.18.31.3",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21564/2414-990x.149.201926",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.1344/rbd2018.0.20112",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.1017/glj.2019.58",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.1017/err.2025.9",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.25267/rejucrim.2025.i12.07",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/fica.2023.357524",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.48398/imist.prsm/jemed-v2i3.18457",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.5937/zrpfni1569295b",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.61279/382v1e30",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.18566/rfdcp.v46n124.a05",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/cfdj.2021.207583",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.7206/kp.2080-1084.743",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.17345/rcda1508",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.17561/tahrj.n9.2",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/bfdc.2018.40577",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.6092/issn.2421-2695/14102",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.31009/indret.2020.i4.02",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.15388/teise.2018.106.11660",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.25041/iplr.v4i1.2962",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.24144/2788-6018.2022.04.66",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21608/cfdj.2022.230795",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.14201/ais2022101145180",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.24144/2788-6018.2022.06.46",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.21684/2412-2343-2015-2-1-100-124",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.21608/jelc.2019.243537",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.51197/lj.v4i4.591",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.32457/rjyd.v8it.2874",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.22081/jislamicgo.2025.71113.1011",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.22133/clj.2021.306189.1063",
+   "why": "crossref:HTTPError"
+  },
+  {
+   "doi": "10.1186/s41935-017-0031-9",
+   "why": "not-pdf:ejfs.springeropen.com"
+  },
+  {
+   "doi": "10.1186/s41935-017-0031-9",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.1016/j.fsisyn.2021.100199",
+   "why": "no-usable-pdf-location"
+  },
+  {
+   "doi": "10.14746/rpeis.2021.83.3.2",
+   "why": "crossref-refs=0"
+  },
+  {
+   "doi": "10.36796/biolex.v16i27.385",
+   "why": "no-usable-pdf-location"
+  }
+ ],
+ "date": "2026-09-30"
+}
