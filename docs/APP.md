@@ -13,12 +13,13 @@ per-page progress bar.
 | Get text | `pipeline::run_job_observed` (what `tpe extract` runs), then the ledger write `tpe extract` does | `paper.txt` (ordered page text, pages separated by form feed, as `tpe extract --out` writes it) |
 | Get bibliography | `bibliography::scan_backward_observed` (what `tpe bibliography` runs) | `paper.references.json` (the CLI's record, `bibliography::Record`, [BIBLIOGRAPHY](BIBLIOGRAPHY.md)) and `paper.references.txt` (one entry per line, label then `raw`) |
 
-An existing file is never overwritten: the next run writes `paper 2.txt`
-(`jobs::output_path`, test `output_names_avoid_existing_files`); the two
-bibliography files share one number, so a pair never mixes two runs
-(`jobs::output_paths`). A failed
-job, an engine panic included, writes nothing next to the source (test
-`malformed_input_fails_and_writes_nothing`). A bibliography the engine
+Outputs are staged completely and synced before final names are published
+with exclusive hard links. A filename collision moves the whole bibliography
+pair to the next number. The ledger transaction commits after publication;
+handled failures roll back the ledger and remove this job's output links.
+Cleanup failures identify retained paths. This is not an atomic multi-file
+crash transaction; see [Publication](PUBLICATION.md) for the precise boundary.
+A bibliography the engine
 reports `not_found` is shown as such and writes nothing. The ledger `tpe
 extract` requires lives at
 `~/Library/Application Support/PDFTextract/ledger.sqlite`; bibliography jobs
@@ -59,7 +60,7 @@ and queued once it does (`jobs::Mailbox`, test
   foreground task keeps only the newest event waiting at each frame, so a
   15,000-page document does not queue 15,000 re-renders.
 - Outputs are written by the background task and moved into place only when
-  complete; the ledger write is the engine's own (`Ledger::write_result`).
+  complete; the ledger replacement stays uncommitted until publication succeeds.
 
 Measured numbers are still owed: launch time, click-to-row latency and
 per-page progress cost on an M1 have not been recorded.
@@ -129,7 +130,8 @@ Reasoned from the code:
 
 - One job at a time; a 15,000-page document holds the queue while the engine
   works on it, and cannot be cancelled once started (quitting the app is the
-  only way to stop it; nothing half-written is left next to the PDF).
+  only way to stop it; a crash during publication can leave complete orphan
+  outputs or staging files, as described in [Publication](PUBLICATION.md)).
 - Progress for a bibliography counts pages read from the end against the
   whole page count, so its bar usually finishes early. That is the true
   state of the backward scan, not an estimate.
