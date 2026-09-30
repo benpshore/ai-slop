@@ -970,10 +970,16 @@ fn interaction_timings(cx: &mut TestAppContext) {
         });
         frame(&mut visual, &shell);
         arrivals.push(started.elapsed());
-        // Let the job finish, clear it and draw the empty window, all outside
-        // the timer, so the next arrival is into an already-drawn empty view.
+        // Let the job finish, empty the list and draw the empty window, all
+        // outside the timer, so the next arrival is into an already-drawn
+        // empty view. The model is cleared directly: `Shell::clear_done` also
+        // schedules a list scroll that an empty window (which draws no list)
+        // would leave pending for the timed frame.
         visual.run_until_parked();
-        shell.update(&mut visual, Shell::clear_done);
+        shell.update(&mut visual, |shell, cx| {
+            shell.jobs.clear_done();
+            cx.notify();
+        });
         frame(&mut visual, &shell);
         frame(&mut visual, &shell);
     }
