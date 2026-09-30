@@ -803,8 +803,11 @@ fn run_bibliography(
         started.elapsed().as_secs_f64() * 1000.0,
     );
     if !record.found() {
-        // Nothing is written, so a stop asked for is still honoured.
-        if cancel.is_requested() {
+        // Nothing is written, but the job still ends by the same atomic
+        // decision: a stop asked for first wins (Cancelled); otherwise this
+        // success is final and a later stop request is refused, so the row
+        // never shows "Cancelling" for a job that then finishes.
+        if !cancel.commit() {
             return Err(RunError::Cancelled);
         }
         return Ok(Outcome {
@@ -862,6 +865,9 @@ mod tests {
     };
     use futures::{FutureExt, StreamExt};
     use tpe::pipeline::Progress;
+
+    /// A hand-written one-page PDF whose only text is "Just a note.".
+    const NO_LIST_PDF: &[u8] = b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n4 0 obj << /Length 44 >> stream\nBT /F1 12 Tf 72 720 Td (Just a note.) Tj ET\nendstream endobj\n5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\ntrailer << /Root 1 0 R /Size 6 >>\n%%EOF\n";
 
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1383,6 +1389,37 @@ mod tests {
             );
         }
         assert!(dir.path().join("paper.txt").is_file());
+    }
+
+    #[test]
+    fn a_no_list_result_also_refuses_a_late_stop() {
+        // A one-line PDF with no reference list: the job succeeds writing
+        // nothing, and must still end by the same atomic decision.
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("note.pdf");
+        std::fs::write(&pdf, NO_LIST_PDF).unwrap();
+        let ledger = dir.path().join("ledger.sqlite");
+
+        let cancel = CancelToken::new();
+        let outcome = run(Action::Bibliography, &pdf, &ledger, &mut |_| {}, &cancel).unwrap();
+        assert!(outcome.outputs.is_empty(), "{outcome:?}");
+        assert_eq!(outcome.summary, "No reference list found");
+        assert!(!cancel.request(), "the success was final");
+
+        // A stop that wins the race cancels it instead of finishing.
+        let stopped = CancelToken::new();
+        let result = run(
+            Action::Bibliography,
+            &pdf,
+            &ledger,
+            &mut |event| {
+                if matches!(event, Progress::Page { .. }) {
+                    stopped.request();
+                }
+            },
+            &stopped,
+        );
+        assert_eq!(result, Err(RunError::Cancelled));
     }
 
     #[test]
