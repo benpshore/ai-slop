@@ -285,24 +285,84 @@ fn queue_only(shell: &Entity<Shell>, cx: &mut TestAppContext, paths: Vec<PathBuf
     });
 }
 
-/// Draw the window once and return the bounds of a `debug_selector`.
+/// Draw the window twice at `viewport` and return the bounds of a
+/// `debug_selector` (bounds are clipped to what is visible in the viewport).
+fn bounds_in(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    shell: &Entity<Shell>,
+    selector: &'static str,
+    viewport: gpui::Size<Pixels>,
+) -> Option<gpui::Bounds<Pixels>> {
+    let mut visual = VisualTestContext::from_window(window, cx);
+    // Twice: a scroll requested by a key is applied while the list lays out,
+    // so the rows for the new position are built by the second frame.
+    for _ in 0..2 {
+        visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
+            shell.clone()
+        });
+    }
+    visual.debug_bounds(selector)
+}
+
+/// [`bounds_in`] at the default 640 by 480 viewport.
 fn bounds_of(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
     shell: &Entity<Shell>,
     selector: &'static str,
 ) -> Option<gpui::Bounds<Pixels>> {
-    let mut visual = VisualTestContext::from_window(window, cx);
-    // Twice: a scroll requested by a key is applied while the list lays out,
-    // so the rows for the new position are built by the second frame.
-    for _ in 0..2 {
-        visual.draw(
-            gpui::point(px(0.0), px(0.0)),
-            size(px(640.0), px(480.0)),
-            |_, _| shell.clone(),
-        );
+    bounds_in(cx, window, shell, selector, size(px(640.0), px(480.0)))
+}
+
+/// A finished row, a failed one, and a failed one whose message is long
+/// enough to wrap to the status's two lines: rows 1, 2 and 3.
+fn rows_with_a_long_status(cx: &mut TestAppContext) -> (Fixture, Entity<Shell>, AnyWindowHandle) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let junk = fixture.dir.path().join("junk.pdf");
+    std::fs::write(&junk, b"not a pdf").unwrap();
+    fixture
+        .mailbox
+        .send((Action::Text, vec![fixture.pdf.clone(), junk]));
+    cx.run_until_parked();
+    queue_only(&shell, cx, copies(&fixture, 1));
+    shell.update(cx, |shell, cx| {
+        let message = "the message is long enough to need more than one line ".repeat(8);
+        shell.jobs.finish(3, Err(jobs::RunError::Failed(message)));
+        cx.notify();
+    });
+    (fixture, shell, window)
+}
+
+/// Every row of `ids` is the same height and its title and status lie inside
+/// it, at `viewport`.
+fn assert_rows_fit(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    shell: &Entity<Shell>,
+    ids: &[usize],
+    viewport: gpui::Size<Pixels>,
+    when: &str,
+) {
+    let mut heights = Vec::new();
+    for id in ids {
+        let selector: &'static str = Box::leak(format!("job-{id}").into_boxed_str());
+        let row = bounds_in(cx, window, shell, selector, viewport).expect("row drawn");
+        heights.push(row.size.height);
+        for part in ["title", "status"] {
+            let name: &'static str = Box::leak(format!("job-{id}-{part}").into_boxed_str());
+            let inner = bounds_in(cx, window, shell, name, viewport).expect("content drawn");
+            assert!(
+                inner.top() >= row.top() && inner.bottom() <= row.bottom(),
+                "{name} {inner:?} fits its row {row:?} {when}"
+            );
+        }
     }
-    visual.debug_bounds(selector)
+    assert!(
+        heights.windows(2).all(|pair| pair[0] == pair[1]),
+        "rows are the same height {when}: {heights:?}"
+    );
 }
 
 /// Three finished rows and the window with focus on the list (Tab from Get
@@ -496,32 +556,9 @@ fn clicking_a_row_selects_it_and_focuses_the_list(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn rows_are_uniform_and_their_content_fits(cx: &mut TestAppContext) {
-    let fixture = Fixture::new();
-    let (shell, window) = fixture.open(cx);
-    let junk = fixture.dir.path().join("junk.pdf");
-    std::fs::write(&junk, b"not a pdf").unwrap();
-    fixture
-        .mailbox
-        .send((Action::Text, vec![fixture.pdf.clone(), junk]));
-    cx.run_until_parked();
-    let row_1 = bounds_of(cx, window, &shell, "job-1").expect("finished row");
-    let row_2 = bounds_of(cx, window, &shell, "job-2").expect("failed row");
-    assert_eq!(
-        row_1.size.height, row_2.size.height,
-        "rows are the same height"
-    );
-    for (row, title, status) in [
-        (row_1, "job-1-title", "job-1-status"),
-        (row_2, "job-2-title", "job-2-status"),
-    ] {
-        for part in [title, status] {
-            let inner = bounds_of(cx, window, &shell, part).expect("content is drawn");
-            assert!(
-                inner.top() >= row.top() && inner.bottom() <= row.bottom(),
-                "{part} {inner:?} fits its row {row:?}"
-            );
-        }
-    }
+    let (_fixture, shell, window) = rows_with_a_long_status(cx);
+    let tall = size(px(1000.0), px(3000.0));
+    assert_rows_fit(cx, window, &shell, &[1, 2, 3], tall, "at the base size");
 }
 
 #[gpui::test]
@@ -1082,6 +1119,109 @@ fn interaction_timings(cx: &mut TestAppContext) {
         }
         row(what, &Stats::of(&mut samples));
     }
+}
+
+/// The window's root text size in pixels.
+fn rem_px(cx: &mut TestAppContext, window: AnyWindowHandle) -> f32 {
+    cx.update_window(window, |_, window, _| f32::from(window.rem_size()))
+        .unwrap()
+}
+
+#[gpui::test]
+fn cmd_plus_minus_and_zero_change_the_text_size(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (_shell, window) = fixture.open(cx);
+    assert!(
+        (rem_px(cx, window) - 16.0).abs() < 0.01,
+        "starts at the base size"
+    );
+    keys(cx, window, "cmd-=");
+    assert!((rem_px(cx, window) - 18.0).abs() < 0.01);
+    keys(cx, window, "cmd-+");
+    assert!(
+        (rem_px(cx, window) - 20.0).abs() < 0.01,
+        "cmd-+ is cmd-= with shift"
+    );
+    keys(cx, window, "cmd--");
+    assert!((rem_px(cx, window) - 18.0).abs() < 0.01);
+    keys(cx, window, "cmd-0");
+    assert!(
+        (rem_px(cx, window) - 16.0).abs() < 0.01,
+        "cmd-0 is the actual size"
+    );
+    for _ in 0..20 {
+        keys(cx, window, "cmd-=");
+    }
+    assert!((rem_px(cx, window) - 32.0).abs() < 0.01, "stops at 200%");
+    for _ in 0..40 {
+        keys(cx, window, "cmd--");
+    }
+    assert!((rem_px(cx, window) - 12.0).abs() < 0.01, "stops at 75%");
+}
+
+#[gpui::test]
+fn the_text_size_survives_a_relaunch(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (_shell, window) = fixture.open(cx);
+    keys(cx, window, "cmd-= cmd-=");
+    let stored =
+        std::fs::read_to_string(fixture.dir.path().join("state").join("text-scale")).unwrap();
+    assert_eq!(stored.trim(), "1.25");
+
+    // A second launch on the same settings directory opens at that size.
+    let mut relaunched = cx.new_app();
+    let (_shell, window) = fixture.open(&mut relaunched);
+    assert!((rem_px(&mut relaunched, window) - 20.0).abs() < 0.01);
+}
+
+#[gpui::test]
+fn a_damaged_settings_file_opens_at_the_base_size(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let settings = fixture.dir.path().join("state");
+    std::fs::create_dir_all(&settings).unwrap();
+    std::fs::write(settings.join("text-scale"), b"\xff\xfe huge please").unwrap();
+    let (_shell, window) = fixture.open(cx);
+    assert!((rem_px(cx, window) - 16.0).abs() < 0.01);
+    keys(cx, window, "cmd-=");
+    assert!(
+        (rem_px(cx, window) - 18.0).abs() < 0.01,
+        "and it can still be changed"
+    );
+}
+
+#[gpui::test]
+fn at_200_percent_the_controls_scale_and_rows_still_fit(cx: &mut TestAppContext) {
+    let (_fixture, shell, window) = rows_with_a_long_status(cx);
+    let tall = size(px(1000.0), px(3000.0));
+    let button_1x = bounds_in(cx, window, &shell, "get-text", tall)
+        .expect("button")
+        .size
+        .height;
+    let row_1x = bounds_in(cx, window, &shell, "job-1", tall)
+        .expect("row")
+        .size
+        .height;
+    for _ in 0..8 {
+        keys(cx, window, "cmd-=");
+    }
+    assert!((rem_px(cx, window) - 32.0).abs() < 0.01);
+    let button_2x = bounds_in(cx, window, &shell, "get-text", tall)
+        .expect("button")
+        .size
+        .height;
+    let row_2x = bounds_in(cx, window, &shell, "job-1", tall)
+        .expect("row")
+        .size
+        .height;
+    assert!(
+        f32::from(button_2x) >= 1.9 * f32::from(button_1x),
+        "the big buttons scale: {button_1x:?} to {button_2x:?}"
+    );
+    assert!(
+        (f32::from(row_2x) / f32::from(row_1x) - 2.0).abs() < 0.05,
+        "rows scale: {row_1x:?} to {row_2x:?}"
+    );
+    assert_rows_fit(cx, window, &shell, &[1, 2, 3], tall, "at 200%");
 }
 
 /// Rows added without starting the engine: the first `done` are failed

@@ -47,6 +47,7 @@ use gpui::{
 
 use tpe::pipeline::Progress;
 use tpe_app::jobs::{self, Action, CancelToken, JobList, JobRow, Mailbox, Phase, Step};
+use tpe_app::view::TextScale;
 
 actions!(
     pdftextract,
@@ -65,7 +66,10 @@ actions!(
         CopyText,
         RevealSelected,
         RemoveSelected,
-        CancelSelected
+        CancelSelected,
+        TextLarger,
+        TextSmaller,
+        TextReset
     ]
 );
 
@@ -104,8 +108,10 @@ const LIST_TAB_INDEX: isize = 3;
 const CLEAR_TAB_INDEX: isize = 4;
 
 /// Height of one job row, in rems so it follows the text size. Rows are all
-/// this tall, which is what lets the list draw only the ones on screen.
-const ROW_HEIGHT_REMS: f32 = 6.0;
+/// this tall, which is what lets the list draw only the ones on screen. It
+/// holds the worst case: a title, the bar slot and a status wrapped to two
+/// lines (about 5.8 rem with the row's border and padding).
+const ROW_HEIGHT_REMS: f32 = 6.5;
 
 /// The smallest window (points): the action header, one whole row and the
 /// Clear finished button still fit at the default text size.
@@ -154,6 +160,9 @@ pub struct Shell {
     selected: Option<usize>,
     /// The running job and the flag that stops it.
     running: Option<(usize, Arc<CancelToken>)>,
+    /// The text size; stored beside the ledger so it survives a relaunch.
+    text_scale: TextScale,
+    scale_file: PathBuf,
 }
 
 impl Shell {
@@ -161,6 +170,8 @@ impl Shell {
     /// line), `ledger` is where Get text records its runs, `host` answers
     /// the platform calls.
     fn new(intake: &Mailbox<Intake>, ledger: PathBuf, host: Host, cx: &mut Context<Self>) -> Self {
+        let scale_file = ledger.with_file_name("text-scale");
+        let text_scale = TextScale::load(&scale_file);
         let text_focus = cx.focus_handle().tab_index(1).tab_stop(true);
         let biblio_focus = cx.focus_handle().tab_index(2).tab_stop(true);
         let list_focus = cx.focus_handle().tab_index(LIST_TAB_INDEX).tab_stop(true);
@@ -194,6 +205,8 @@ impl Shell {
             scroll: UniformListScrollHandle::new(),
             selected: None,
             running: None,
+            text_scale,
+            scale_file,
         }
     }
 
@@ -474,6 +487,27 @@ impl Shell {
         self.step_selection(Step::Last, window, cx);
     }
 
+    /// Change the text size, apply it to this window and remember it.
+    fn set_text_scale(&mut self, scale: TextScale, window: &mut Window, cx: &mut Context<Self>) {
+        self.text_scale = scale;
+        window.set_rem_size(px(scale.rem_px()));
+        // A file that cannot be written just means the size is not kept.
+        let _ = scale.save(&self.scale_file);
+        cx.notify();
+    }
+
+    fn on_text_larger(&mut self, _: &TextLarger, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_text_scale(self.text_scale.larger(), window, cx);
+    }
+
+    fn on_text_smaller(&mut self, _: &TextSmaller, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_text_scale(self.text_scale.smaller(), window, cx);
+    }
+
+    fn on_text_reset(&mut self, _: &TextReset, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_text_scale(TextScale::default(), window, cx);
+    }
+
     fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
         window.focus_next();
         self.select_first_if_landed_on_list(window, cx);
@@ -523,7 +557,7 @@ impl Shell {
             .items_center()
             .justify_center()
             .gap_1()
-            .min_h(px(132.0))
+            .min_h(rems(8.25))
             .rounded_md()
             .border_2()
             .border_color(rgb(if focused { ACCENT } else { BORDER }))
@@ -614,7 +648,7 @@ impl Shell {
             _ => MUTED,
         };
         let buttons = Self::row_buttons(row, cx);
-        let mut bar = div().w_full().h(px(6.0)).rounded_md();
+        let mut bar = div().w_full().h(rems(0.375)).rounded_md();
         if row.phase == Phase::Running {
             bar = bar.bg(rgb(TRACK)).child(
                 div()
@@ -654,29 +688,34 @@ impl Shell {
             );
         // The outer element is the list item (fixed height, with the gap
         // between rows as padding); the inner one is the visible panel.
-        div().id(("job", id)).h(rems(ROW_HEIGHT_REMS)).py_1().child(
-            div()
-                .debug_selector(|| format!("job-{id}"))
-                .flex()
-                .items_center()
-                .gap_4()
-                .size_full()
-                .px_3()
-                .rounded_md()
-                .border_2()
-                .border_color(rgb(border))
-                .bg(rgb(PANEL))
-                .overflow_hidden()
-                .on_mouse_down(gpui::MouseButton::Left, {
-                    let listener = cx.listener(move |this, _, window: &mut Window, cx| {
-                        this.select(id, cx);
-                        window.focus(&this.list_focus);
-                    });
-                    move |event, window, cx| listener(event, window, cx)
-                })
-                .child(column)
-                .child(buttons),
-        )
+        div()
+            .id(("job", id))
+            .h(rems(ROW_HEIGHT_REMS))
+            .flex_shrink_0()
+            .py_1()
+            .child(
+                div()
+                    .debug_selector(|| format!("job-{id}"))
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .size_full()
+                    .px_3()
+                    .rounded_md()
+                    .border_2()
+                    .border_color(rgb(border))
+                    .bg(rgb(PANEL))
+                    .overflow_hidden()
+                    .on_mouse_down(gpui::MouseButton::Left, {
+                        let listener = cx.listener(move |this, _, window: &mut Window, cx| {
+                            this.select(id, cx);
+                            window.focus(&this.list_focus);
+                        });
+                        move |event, window, cx| listener(event, window, cx)
+                    })
+                    .child(column)
+                    .child(buttons),
+            )
     }
 
     /// The job list: one tab stop, only the rows on screen are built.
@@ -729,6 +768,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_reveal_selected))
             .on_action(cx.listener(Self::on_remove_selected))
             .on_action(cx.listener(Self::on_cancel_selected))
+            .on_action(cx.listener(Self::on_text_larger))
+            .on_action(cx.listener(Self::on_text_smaller))
+            .on_action(cx.listener(Self::on_text_reset))
             .flex()
             .flex_col()
             .size_full()
@@ -817,7 +859,11 @@ fn open_main_window(cx: &mut App) {
         ..WindowOptions::default()
     };
     match cx.open_window(options, |window, cx| {
-        let focus = shell.read(cx).text_focus.clone();
+        let (focus, scale) = {
+            let shell = shell.read(cx);
+            (shell.text_focus.clone(), shell.text_scale)
+        };
+        window.set_rem_size(px(scale.rem_px()));
         window.focus(&focus);
         shell.clone()
     }) {
@@ -843,6 +889,10 @@ fn setup(cx: &mut App) {
         KeyBinding::new("space", Activate, Some("Shell")),
         KeyBinding::new("tab", FocusNext, Some("Shell")),
         KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
+        KeyBinding::new("cmd-=", TextLarger, Some("Shell")),
+        KeyBinding::new("cmd-+", TextLarger, Some("Shell")),
+        KeyBinding::new("cmd--", TextSmaller, Some("Shell")),
+        KeyBinding::new("cmd-0", TextReset, Some("Shell")),
         KeyBinding::new("up", SelectPrev, Some("Jobs")),
         KeyBinding::new("down", SelectNext, Some("Jobs")),
         KeyBinding::new("home", SelectFirst, Some("Jobs")),
@@ -897,6 +947,14 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action("Show in Finder", RevealSelected),
                 MenuItem::action("Cancel Job", CancelSelected),
                 MenuItem::action("Clear Finished", ClearDone),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Bigger Text", TextLarger),
+                MenuItem::action("Smaller Text", TextSmaller),
+                MenuItem::action("Actual Size", TextReset),
             ],
         },
     ]);

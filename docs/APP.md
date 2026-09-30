@@ -103,6 +103,41 @@ debug build, 400 ms bound against roughly 3 s before). These are not M1
 numbers and not click-to-pixel latency; launch time, click-to-row latency and
 per-page progress cost on an M1 have not been recorded.
 
+### Measured: interactions on Apple silicon (CI)
+
+`interaction_timings` (an ignored test the App workflow runs with `--release`)
+on a GitHub `macos-15-arm64` runner (run for `cdb896a`). This is GPUI's test
+platform: view state, layout and scene building on the CPU, no GPU and no
+display, so it is the app's own cost per interaction and not click-to-pixel
+latency. Every row shows the range and the tail, not just the middle: a
+median alone would hide the stalls a person actually notices.
+
+| interaction (ms) | n | min | median | p95 | max | max/median |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| first frame, empty window (one cold draw) | 1 | 0.28 | 0.28 | 0.28 | 0.28 | 1.0x |
+| frame, empty window | 50 | 0.11 | 0.13 | 0.19 | 0.19 | 1.5x |
+| file arrives to its row drawn | 30 | 0.42 | 0.48 | 0.82 | 0.86 | 1.8x |
+| frame, 1 row | 20 | 0.39 | 0.41 | 0.47 | 0.49 | 1.2x |
+| frame, 100 rows | 20 | 0.55 | 0.60 | 0.62 | 0.65 | 1.1x |
+| frame, 5,000 rows | 20 | 0.61 | 0.70 | 1.17 | 1.27 | 1.8x |
+| Down key to selection drawn, rows 4,850-4,950 of 5,000 | 100 | 0.56 | 0.59 | 0.88 | 2.00 | 3.4x |
+| End / Home to the new rows drawn (two frames), 5,000 rows | 20 | 0.96 | 1.01 | 2.01 | 2.15 | 2.1x |
+| progress event (model update, not the channel hop) to its frame, last of 5,000 rows | 100 | 0.65 | 0.70 | 2.02 | 2.56 | 3.7x |
+| Get text job, 2-page paper (engine, new ledger, file) | 20 | 5.90 | 8.65 | 14.08 | 54.86 | 6.3x |
+| Get bibliography job, 2-page paper (engine, files) | 20 | 2.13 | 2.87 | 3.26 | 3.27 | 1.1x |
+
+What the tails say. Every interaction stays at or under 2.6 ms even at its
+worst sample, against a 16.7 ms frame at 60 Hz, and frame cost does not grow
+with the row count. The spread is real, though: the slowest key press and
+progress event are 3-4x their median, and the one outlier that matters is the
+text job, whose slowest of 20 runs took 54.9 ms against a median of 8.7 ms
+(6.3x). That outlier has not been investigated: each sample gets a new
+directory and a new ledger, so a slow first-touch of the file system or the
+database is the first suspect, not a conclusion. The two jobs run on a tiny
+synthetic paper, not a real article. The runner's chip is a virtualised
+Apple-silicon part, so an M1 at home will differ. Not measured: launch time,
+GPU present, real PDFs.
+
 ## Layout
 
 - `src/jobs.rs` (library, every platform, tested): `Action`, the `JobList`
@@ -164,7 +199,9 @@ the same height and their text fits; Escape and Delete stop the running job
 queue moves on), and neither touches a queued or finished row; a cancelled
 row can be shown in Finder and cleared; closing the window keeps a running
 job and the app quits itself once idle; the Dock icon reopens the window on the same rows;
-a bad file fails its row and the queue moves on.
+a bad file fails its row and the queue moves on; ⌘= ⌘- ⌘0 change the text
+size, at 200% the controls have grown and rows still hold their text, and
+the size survives a relaunch (a damaged settings file opens at normal).
 
 They run in the macOS App workflow. They were also run on Linux, with GPUI
 built as an ordinary dependency and `libxkbcommon-x11-dev` and friends
@@ -183,8 +220,17 @@ drop.
 Nothing below has been run by a person on a Mac yet. Verified by CI: the
 crate builds with GPUI and passes clippy and its tests, including the
 headless keyboard tests above; the bundle declares its document type and
-Services and signs; the Services provider answers both messages. Reasoned
-from the code:
+Services and signs; the Services provider answers both messages; and the
+built bundle, opened with a PDF through Launch Services (the Open With and
+Dock-drop path), starts, shows one window (640×508 points with its title
+bar), processes the file and writes `paper.txt`, then quits when asked. The
+App workflow keeps that window list and a screenshot as an artifact; the
+first one:
+
+![PDFTextract on macOS 15 (CI screenshot, after opening paper.pdf)](images/pdftextract-launch-macos.png)
+
+Not covered by that run: the Finder Services menu, a real drop or click, and
+anything by voice or switch. Reasoned from the code:
 
 - **Screen readers and switch access: not supported by the framework.**
   GPUI 0.2.2 exposes no accessibility tree (see the accessibility note in
@@ -200,8 +246,12 @@ from the code:
 - Targets: the two buttons are full-width and at least 132 pt tall; row
   buttons are padded. Drop is an alternative to the button, never the only
   path.
-- Text: fixed sizes for now; the previous window's ⌘= / ⌘- scaling was not
-  carried over yet (row heights are already in rems for it).
+- Text: ⌘= / ⌘+ larger, ⌘- smaller, ⌘0 back to normal (View menu too), in
+  steps of 12.5% from 75% to 200%. Everything is sized in rems, so buttons
+  and rows grow with it (rows are 6.5 rem: at 200% a two-line status still
+  fits, which a 6 rem row did not). The size is remembered in `text-scale`
+  beside the ledger; a missing or damaged file opens at normal size. At
+  200% the default 640×480 window shows only a few rows; resize it.
 
 ## Known limits
 
