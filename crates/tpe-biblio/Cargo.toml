@@ -9,6 +9,7 @@ description = "Scholarly metadata and full-text location clients (OpenAlex, Cros
 serde_json = "1"
 thiserror = "2"
 tpe-common = { path = "../tpe-common" }
+unicode-normalization = "0.1"
 ureq = "3"
 
 [lints]
