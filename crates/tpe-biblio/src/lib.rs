@@ -25,6 +25,7 @@ pub mod client;
 pub mod crossref;
 pub mod dedupe;
 pub mod error;
+pub mod filename;
 pub mod openalex;
 pub mod openurl;
 pub mod pmc;

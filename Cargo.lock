@@ -7440,6 +7440,8 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "tpe-biblio",
+ "tpe-common",
  "unicode-normalization",
  "ureq",
 ]
@@ -7863,6 +7865,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tpe-common",
+ "unicode-normalization",
  "ureq",
 ]
 
