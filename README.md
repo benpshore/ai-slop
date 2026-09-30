@@ -6,6 +6,57 @@ The eventual application is a compact, accessible, Zed-inspired Rust document wo
 
 **Status: early engine, measured accuracy, nothing production-ready.** A pure-Rust extraction engine (`tpe`) and an evaluation harness exist. As of 2026-09-29 (Eval runs 36511221210 dev / 36511549138 holdout, backend `lopdf`, `ubuntu-24.04-arm`, after PRs #39, #40 and #41), reference recall/precision are 100%/100% on the 60-paper `dev` split and 100%/100% on the 10-paper `holdout` split; see "What exists today" below for the full table. Body-text alignment (0.950 dev / 0.940 holdout, body only; exact word LCS; math, digit and operator tokens dropped on both sides; appendices included) remains far from the error-free-chunk target below, and no chunk-level exact-match rate has been measured yet: these are reference/metadata/marker diagnostics, not the acceptance measurement. The eval timing (whole-document eval time on hosted arm64 runners, averaged over nominal 20-page chunks, without durable ledger writes) is a diagnostic and is not comparable with the M1 service-time target, though this diagnostic p50 is below 30 ms on these hosted arm64 runners (27.5 ms dev / 25.5 ms holdout); the M1 service-time target is not yet measured. The PDFium and docling backends build and pass their unit tests in the Native workflow; a pre-loop-10 three-backend comparison (Native run 36491886979) put the full `docling` pipeline at a routed exception of about 4.9 s per chunk, and `pdfium` at about 6x slower than `lopdf` on the reference-metrics path — see "What exists today" below for the full breakdown. The workbench crates are libraries with offline tests. A minimal macOS app (`crates/tpe-app`, GPUI over the engine in one process: text or bibliography per PDF, per-page progress, Finder Open With and Services) builds and passes its tests in the App workflow but has not yet been exercised by hand on a Mac ([App](docs/APP.md)); the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
 
+## Install
+
+Every merge to `main` publishes a GitHub release with prebuilt `tpe` binaries
+for Apple Silicon macOS (`aarch64-apple-darwin`), Linux arm64 and Linux
+x86_64, plus `SHA256SUMS` and build-provenance attestations. Nothing needs to
+be compiled on the installing machine.
+
+With [mise](https://mise.jdx.dev) (installs from the release assets, verifies
+the attestation, and `mise upgrade` keeps it current; the install check in
+`.github/workflows/install-check.yml` runs this exact path on macOS and Linux
+arm64 after every release):
+
+```sh
+mise use -g github:benpshore/pdftextract
+tpe --version
+```
+
+mise deliberately waits before offering a brand-new release: its
+`minimum_release_age` guard (one day by default) hides releases younger than
+that, and its shared version cache (`mise-versions.jdx.dev`) can lag by some
+hours. That is a reasonable default for a tool that releases on every merge.
+To install a release the moment it is published, either name the version or
+lift both for that one command:
+
+```sh
+mise use -g github:benpshore/pdftextract@0.42.0
+MISE_MINIMUM_RELEASE_AGE=0 MISE_USE_VERSIONS_HOST=0 mise upgrade github:benpshore/pdftextract
+```
+
+Without mise, download the archive for your platform from the
+[latest release](https://github.com/benpshore/pdftextract/releases/latest),
+check it against `SHA256SUMS`, and put `tpe` on your `PATH`:
+
+```sh
+curl -fsSLO https://github.com/benpshore/pdftextract/releases/latest/download/tpe-aarch64-apple-darwin.tar.gz
+curl -fsSLO https://github.com/benpshore/pdftextract/releases/latest/download/SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf tpe-aarch64-apple-darwin.tar.gz -C ~/.local/bin tpe
+```
+
+To verify that a downloaded archive was built by this repository's release
+workflow:
+
+```sh
+gh attestation verify tpe-aarch64-apple-darwin.tar.gz --repo benpshore/pdftextract
+```
+
+A `tpe update` command that replaces the binary in place after checking the
+checksum is in progress; when the binary is managed by mise it defers to
+`mise upgrade`.
+
 ## What exists today
 
 The engine is the root crate `tpe` ([Engine](docs/ENGINE.md)):

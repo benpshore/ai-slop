@@ -1,0 +1,66 @@
+name: Install check
+
+# Installs a published release the way a user does, with mise's `github:`
+# backend, on macOS arm64 and Linux arm64, and runs the binary. Called by
+# auto-release and release after publishing; on pull requests that change
+# this file it checks the latest existing release instead.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release tag to install, e.g. v0.42.0 (empty = latest)
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to install, e.g. v0.42.0 (empty = latest)
+        type: string
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - .github/workflows/install-check.yml
+
+permissions:
+  contents: read
+
+jobs:
+  mise:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      # mise normally lists versions through its own cache host, which lags
+      # GitHub by up to a day and resolved "latest" to a stale release; ask
+      # the GitHub API directly so a just-published release is installable.
+      MISE_USE_VERSIONS_HOST: "0"
+      # mise also hides releases younger than its minimum_release_age (a
+      # supply-chain guard, default one day); this check installs the release
+      # that was just published.
+      MISE_MINIMUM_RELEASE_AGE: "0"
+    steps:
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
+        with:
+          install: false
+          cache: false
+      - name: Install with mise from the release assets
+        run: |
+          set -eux
+          spec="github:benpshore/pdftextract"
+          if [ -n "$VERSION" ]; then spec="$spec@${VERSION#v}"; fi
+          mkdir -p "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj"
+          mise ls-remote "github:benpshore/pdftextract" | tail -3
+          mise use "$spec"
+          mise ls
+          mise which tpe
+          mise exec -- tpe --version
+          mise exec -- tpe backends
+          mise exec -- sh -c 'command -v tpe'
