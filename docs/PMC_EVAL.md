@@ -93,7 +93,8 @@ papers (rates are sums of counts, not means of per-paper rates).
 | surname, strict | NFC, whitespace-collapsed, case- and diacritic-sensitive equality of the surname part of the first extracted author and the truth `<surname>` (or `<collab>`) | strict fails for `van der Berg` vs `Berg` and for case differences; those show up as loose passes |
 | surname, loose | NFKC, casefolded, diacritics stripped; equal, or equal last word | passes `Obtulowicz` for `Obtułowicz`, which the user does not consider correct |
 | year | integer equality | |
-| DOI | lowercase, prefix-stripped equality where the truth has a DOI; `extracted DOI where truth has none` is counted separately | a DOI printed in the PDF but absent from the XML is not an error, but is not verified either |
+| DOI (truth has one) | lowercase, prefix-stripped equality where the truth has a DOI; a missing extracted DOI counts as wrong | publishers add DOIs to the XML that the PDF never prints, so this is mostly a measure of what the PDF shows |
+| DOI, when one was extracted | the same equality over pairs where a DOI was extracted (a precision); `truth DOI but none extracted` and `extracted DOI where truth has none` are counted separately | a DOI printed in the PDF but absent from the XML is not an error, but is not verified either |
 | title, strict | NFC, whitespace-collapsed, one trailing period ignored, otherwise exact | |
 | title, loose | similarity of the loose forms at least 0.9 | |
 | entries with U+FFFD | share of extracted entries with a replacement character | |

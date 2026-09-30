@@ -391,9 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         count = len(manifest["items"])
         log(f"{count} items, {failed} files failed")
         return 1 if failed else 0
-    manifest = sample(
-        args.seed, args.target, args.workers, args.max_candidates, args.time_budget_s
-    )
+    manifest = sample(args.seed, args.target, args.workers, args.max_candidates, args.time_budget_s)
     text = manifest_text(manifest)
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)

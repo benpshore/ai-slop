@@ -138,6 +138,8 @@ def test_field_scores_strict_and_loose(tmp_path):
     assert fields["surname_loose"] == {"correct": 3, "total": 3}
     assert fields["year"] == {"correct": 2, "total": 3}
     assert fields["doi"] == {"correct": 2, "total": 2}
+    assert fields["doi_present"] == {"correct": 2, "total": 2}
+    assert fields["doi_missing"] == 0
     assert fields["title_strict"] == {"correct": 1, "total": 1}
     assert result["count_exact"]
     assert [m.name for m in mismatches] == ["surname", "year"]
@@ -240,6 +242,7 @@ def test_report_numbers_end_to_end(tmp_path):
     assert back["fields"]["surname_strict"] == {"correct": 5, "total": 6}
     assert back["fields"]["year"] == {"correct": 5, "total": 6}
     assert back["fields"]["doi"] == {"correct": 4, "total": 4}
+    assert back["fields"]["doi_missing"] == 0
     assert back["fffd_entries"] == 1
     assert back["leak_entries"] == 1
     assert back["extracted_entries"] == 6

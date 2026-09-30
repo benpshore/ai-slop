@@ -129,6 +129,12 @@ jobs:
             --bibliography out/bibliography.jsonl --extract out/extract.jsonl \
             --bibliography-wall-s "$(cat out/bib_wall_s)" --extract-wall-s "$(cat out/extract_wall_s)" \
             --out out/report
+      - name: Print the report and the failures in the log (no artifact download needed)
+        if: always()
+        run: |
+          for f in out/report/report.md out/report/failures.md; do
+            if [ -f "$f" ]; then echo "===== BEGIN $f ====="; cat "$f"; echo "===== END $f ====="; fi
+          done
       - name: Publish the report in the job summary
         if: always()
         run: test -f out/report/report.md && cat out/report/report.md >> "$GITHUB_STEP_SUMMARY" || true

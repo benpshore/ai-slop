@@ -76,9 +76,11 @@ class Fields:
     surname_loose: FieldScore = field(default_factory=FieldScore)
     year: FieldScore = field(default_factory=FieldScore)
     doi: FieldScore = field(default_factory=FieldScore)
+    doi_present: FieldScore = field(default_factory=FieldScore)
     title_strict: FieldScore = field(default_factory=FieldScore)
     title_loose: FieldScore = field(default_factory=FieldScore)
     doi_extra: int = 0
+    doi_missing: int = 0
     surname_missing: int = 0
     title_missing: int = 0
 
@@ -448,6 +450,10 @@ def score_fields(
         if ref.doi:
             ok = ext.doi == ref.doi
             fields.doi.add(ok)
+            if ext.doi:
+                fields.doi_present.add(ok)
+            else:
+                fields.doi_missing += 1
             if not ok and ext.doi:
                 score = similarity(ref.doi, ext.doi)
                 mismatches.append(Mismatch(pmcid, ref.index, "doi", ref.doi, ext.doi, score))
@@ -769,13 +775,19 @@ def render_report(summary: dict, papers: list[dict]) -> str:
         ("first-author surname, strict", "surname_strict"),
         ("first-author surname, loose", "surname_loose"),
         ("year", "year"),
-        ("DOI (truth has one)", "doi"),
+        ("DOI (truth has one; missing counts as wrong)", "doi"),
+        ("DOI, when one was extracted", "doi_present"),
         ("title, strict", "title_strict"),
         ("title, loose (similarity >= 0.9)", "title_loose"),
     ):
         rows.append([label, field_cell(back["fields"], key), field_cell(fwd["fields"], key)])
     rows.extend(
         [
+            [
+                "matched entries with a truth DOI but none extracted",
+                str(back["fields"].get("doi_missing", 0)),
+                str(fwd["fields"].get("doi_missing", 0)),
+            ],
             [
                 "extracted DOI where truth has none",
                 str(back["fields"].get("doi_extra", 0)),
