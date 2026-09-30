@@ -103,9 +103,11 @@ app at a release tag (the latest by default) on a macOS runner and attaches
 Nothing triggers it automatically, so merges and pull requests never queue a
 macOS build for it. It runs the App workflow's checks (fmt, clippy, tests,
 bundle smoke test) on the tagged source first, only accepts a tag of the form
-`vN.N.N`, never replaces an asset (if the zip or its checksum is already
-attached it stops, and says which to delete), and gives the write token only
-to its two `gh` steps, not to the build. It fails, with a message, on a tag
+`vN.N.N`, and never replaces an asset (if the zip or its checksum is already
+attached it stops, and says which to delete). The build job, which runs the
+tag's code, has a read-only token; a second job on a fresh runner runs
+nothing from the tag, downloads the packaged zip, checks it, and is the only
+place the write token exists. It fails, with a message, on a tag
 from before the app landed.
 
 The bundle is ad-hoc signed and not notarized. After unzipping, either
