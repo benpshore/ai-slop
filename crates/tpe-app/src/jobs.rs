@@ -700,9 +700,23 @@ pub fn run(
             ControlFlow::Continue(())
         }
     };
-    match action {
+    let result = match action {
         Action::Text => run_text(source, ledger, &mut watch, cancel),
         Action::Bibliography => run_bibliography(source, &mut watch, cancel),
+    };
+    // Every ending is one atomic decision: the paths that write (or succeed
+    // writing nothing) have already committed. A failure settles it here, so
+    // a stop request that arrives after the error is refused, and one that
+    // arrived first reports Cancelled, never "Cancelling" then Failed.
+    match result {
+        Err(RunError::Failed(message)) => {
+            if cancel.commit() {
+                Err(RunError::Failed(message))
+            } else {
+                Err(RunError::Cancelled)
+            }
+        }
+        other => other,
     }
 }
 
@@ -1389,6 +1403,23 @@ mod tests {
             );
         }
         assert!(dir.path().join("paper.txt").is_file());
+    }
+
+    #[test]
+    fn a_failed_job_settles_the_stop_decision_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.pdf");
+        std::fs::write(&junk, b"not a pdf").unwrap();
+        let ledger = dir.path().join("ledger.sqlite");
+        for action in [Action::Text, Action::Bibliography] {
+            let cancel = CancelToken::new();
+            let result = run(action, &junk, &ledger, &mut |_| {}, &cancel);
+            assert!(matches!(result, Err(RunError::Failed(_))), "{action:?}");
+            assert!(
+                !cancel.request(),
+                "{action:?}: the failure was final, a later stop is refused"
+            );
+        }
     }
 
     #[test]

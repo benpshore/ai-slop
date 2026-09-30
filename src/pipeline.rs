@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
 
@@ -304,19 +304,37 @@ struct TimedHash {
     ms: f64,
 }
 
-/// SHA-256 of `bytes`, timed.
-fn hash_timed(bytes: &[u8]) -> TimedHash {
+/// SHA-256 of `bytes`, timed. Read in 1 MiB steps so that a run that is being
+/// abandoned (cancelled, failed) can set `stop` and get its thread back at
+/// once instead of waiting out the whole document; `None` then.
+fn hash_timed(bytes: &[u8], stop: &AtomicBool) -> Option<TimedHash> {
+    use sha2::{Digest, Sha256};
     let start = Instant::now();
-    let hash = ContentHash(sha256_hex(bytes));
-    TimedHash {
-        hash,
+    let mut hasher = Sha256::new();
+    for step in bytes.chunks(1 << 20) {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        hasher.update(step);
+    }
+    Some(TimedHash {
+        hash: ContentHash(hex::encode(hasher.finalize().as_slice())),
         ms: elapsed_ms(start),
+    })
+}
+
+/// Tells the hashing thread to give up when the run leaves its scope early.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
 /// The document hash, either still being computed on its thread or done.
 enum HashState<'scope> {
-    Running(ScopedJoinHandle<'scope, TimedHash>),
+    Running(ScopedJoinHandle<'scope, Option<TimedHash>>),
     Done(TimedHash),
 }
 
@@ -326,7 +344,9 @@ impl HashState<'_> {
     fn finish(self) -> TimedHash {
         match self {
             Self::Running(handle) => match handle.join() {
-                Ok(hashed) => hashed,
+                // Only a run that has left its scope sets `stop`, and then
+                // nobody is waiting for the hash.
+                Ok(hashed) => hashed.expect("the hash is only stopped once the run is abandoned"),
                 Err(payload) => std::panic::resume_unwind(payload),
             },
             Self::Done(hashed) => hashed,
@@ -360,8 +380,12 @@ fn parse_while_hashing(
     staging: &mut FigureStaging,
     observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<Parsed, PipelineError> {
+    let stop = AtomicBool::new(false);
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
-        let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
+        // Dropped on every way out of this closure, before the scope joins
+        // the hashing thread: a cancelled or failed run does not wait for it.
+        let _stop_hashing = StopOnDrop(&stop);
+        let mut hash_state = HashState::Running(scope.spawn(|| hash_timed(bytes, &stop)));
 
         let mut session = extractor.open(bytes, job.password.as_deref())?;
         let page_count = session.page_count();
@@ -1186,6 +1210,26 @@ mod tests {
         }));
         assert!(outcome.is_err(), "the stage panicked");
         assert!(!figures.exists(), "nothing filed, nothing left");
+    }
+
+    #[test]
+    fn a_stopped_hash_gives_up_and_a_running_one_matches_sha256_hex() {
+        use std::sync::atomic::AtomicBool;
+        // Bigger than one 1 MiB step so the chunk loop really runs twice.
+        let bytes: Vec<u8> = (0..3_000_000u32).map(|n| (n % 251) as u8).collect();
+        let go = AtomicBool::new(false);
+        let hashed = super::hash_timed(&bytes, &go).expect("not stopped");
+        assert_eq!(hashed.hash.0, sha256_hex(&bytes), "same digest as one-shot");
+        let halt = AtomicBool::new(true);
+        assert!(
+            super::hash_timed(&bytes, &halt).is_none(),
+            "a stopped hash gives up instead of finishing"
+        );
+        assert_eq!(
+            super::hash_timed(&[], &go).unwrap().hash.0,
+            sha256_hex(&[]),
+            "the empty input still hashes"
+        );
     }
 
     #[test]
