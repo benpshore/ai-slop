@@ -28,6 +28,12 @@ BREAKDOWN_KEYS = ("publisher", "is_manuscript", "style")
 RAW_PREVIEW = 220
 XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
 DOI_PREFIXES = ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/")
+HEADING_RE = re.compile(
+    r"^\s*(?:\d+\.?\s*)?(?:references?|bibliography|literature cited|works cited|reference list)\b",
+    re.IGNORECASE,
+)
+CONTEXT_LINES = 6
+CLOSEST_TITLES = 20
 LEAK_PATTERNS = [
     r"\bpage \d+ of \d+\b",
     r"\bauthor manuscript\b",
@@ -324,6 +330,7 @@ def forward_records(path: Path | None) -> dict[str, dict]:
                 "references": rec.get("references") or [],
                 "elapsed_ms": ms,
                 "error": None,
+                "pages_text": [page.get("text") or "" for page in rec.get("pages") or []],
             }
         else:
             out[pmcid_of_path(rec.get("path", ""))] = {
@@ -394,6 +401,20 @@ def align(truth: list[TruthRef], extracted: list[ExtractedRef]) -> tuple[Pairs, 
             take(i, best)
     pairs.sort()
     return pairs, "matched"
+
+
+def heading_context(pages_text: list[str]) -> dict:
+    """Forward page text at the last reference-heading line, else the last page's start."""
+    for page_no in range(len(pages_text), 0, -1):
+        lines = pages_text[page_no - 1].splitlines()
+        for i in range(len(lines) - 1, -1, -1):
+            if HEADING_RE.match(lines[i]):
+                shown = [line[:160] for line in lines[i : i + CONTEXT_LINES]]
+                return {"page": page_no, "heading": True, "lines": shown}
+    if pages_text:
+        lines = pages_text[-1].splitlines()[:CONTEXT_LINES]
+        return {"page": len(pages_text), "heading": False, "lines": [line[:160] for line in lines]}
+    return {"page": None, "heading": False, "lines": []}
 
 
 # ---------------------------------------------------------------- scoring
@@ -583,6 +604,7 @@ def evaluate_paper(
                 for e in entries
             ]
         paper[name] = result
+    paper["forward_context"] = heading_context((forward or {}).get("pages_text") or [])
     numbered = truth_numbered or paper["backward"].get("numbered", False)
     paper["style"] = "numbered" if numbered else "unnumbered"
     return paper
@@ -964,6 +986,15 @@ def render_failures(papers: list[dict], mismatches: dict[str, list[Mismatch]]) -
         for ref in ends(paper["truth"]):
             lines.append("- ..." if ref is None else f"- {truth_line(ref)}")
         lines.append("")
+        context = paper.get("forward_context") or {}
+        page = context.get("page")
+        if context.get("heading"):
+            lines.append(f"Forward page text at the last reference heading (page {page}):")
+        else:
+            lines.append(f"No reference heading in the forward page text; page {page} starts:")
+        lines.append("")
+        lines.extend(f"    {line}" for line in context.get("lines") or ["(no page text)"])
+        lines.append("")
     lines.append("## Worst field mismatches (backward path, both values present)")
     lines.append("")
     worst = sorted(mismatches["backward"], key=lambda m: (m.similarity, m.name, m.pmcid, m.entry))
@@ -972,6 +1003,16 @@ def render_failures(papers: list[dict], mismatches: dict[str, list[Mismatch]]) -
         for m in worst[:WORST_MISMATCHES]
     ]
     lines.extend(table(["pmcid", "entry", "field", "truth", "extracted", "similarity"], rows))
+    lines.append("")
+    closest = [m for m in mismatches["backward"] if m.name == "title"]
+    closest.sort(key=lambda m: (-m.similarity, m.pmcid, m.entry))
+    rows = [
+        [m.pmcid, str(m.entry), cell(m.truth), cell(m.extracted), f"{m.similarity:.2f}"]
+        for m in closest[:CLOSEST_TITLES]
+    ]
+    lines.append("## Closest title mismatches (backward path; the typical strict-title failure)")
+    lines.append("")
+    lines.extend(table(["pmcid", "entry", "truth", "extracted", "similarity"], rows))
     lines.append("")
     counts = Counter(m.name for m in mismatches["backward"])
     lines.append(f"All backward field mismatches by field: {counts_cell(counts)}")

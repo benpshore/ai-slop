@@ -111,8 +111,12 @@ truth labels (or, when found, the extracted labels) contain a digit, otherwise
 `failures.md` lists every paper whose backward record is `not_found`, `failed`
 or missing, and every found list whose count differs from the truth, with the
 first and last three extracted raw entries and the first and last three truth
-entries (surname / year / title); then the 30 worst field mismatches where
-both values are present. Both files contain article data only.
+entries (surname / year / title), plus the forward path's page text at the
+last reference-heading line (or the start of the last page when no heading
+line exists) so a `not_found` can be read against what the PDF shows; then
+the 30 worst field mismatches where both values are present, and the 20
+closest title mismatches (the typical strict-title failure). Both files
+contain article data only.
 
 `tests/test_pmc_bib_eval.py` exercises the truth parser on both citation
 element types, the surname shapes and strictness, the alignment order, and

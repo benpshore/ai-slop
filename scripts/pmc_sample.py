@@ -72,9 +72,9 @@ def fetch_bytes(url: str, retries: int = 5, timeout: float = 60.0) -> bytes | No
     delay = 1.0
     last = "no attempt"
     for attempt in range(retries):
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        # S310: every URL is built from BUCKET, so the scheme is always https.
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})  # noqa: S310
         try:
-            # S310: the scheme is fixed to https by BUCKET; no user-supplied scheme.
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
                 return response.read()
         except urllib.error.HTTPError as err:
