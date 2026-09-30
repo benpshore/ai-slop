@@ -162,8 +162,8 @@ impl BibDb {
 
 /// The single integer that `sql` selects.
 fn count_rows(conn: &Connection, sql: &str) -> Result<u64, BibDbError> {
-    let count: u64 = conn.query_row(sql, [], |row| row.get(0))?;
-    Ok(count)
+    let count: i64 = conn.query_row(sql, [], |row| row.get(0))?;
+    Ok(u64::try_from(count).unwrap_or(0))
 }
 
 /// Insert one reference row.
