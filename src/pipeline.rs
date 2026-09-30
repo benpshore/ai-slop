@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
 
@@ -58,9 +58,6 @@ pub enum Progress {
     Opened { pages: u32, total: u32 },
     /// Page `page` (1-based) finished; `done` of `total` are processed.
     Page { page: u32, done: u32, total: u32 },
-    /// Bytes of the source file read so far, before the document opens; a
-    /// slow read (a network share) can be stopped here.
-    Reading { done: u64, total: u64 },
 }
 
 /// Milliseconds elapsed since `start`.
@@ -149,39 +146,26 @@ impl<'a> FigureStaging<'a> {
 
     /// The staging directory, made on first use (exclusively: an existing
     /// name is never reused).
-    ///
-    /// Runs that share a figures directory can clean up after each other:
-    /// one that filed nothing removes the empty directory it created, which
-    /// may be the one this run just found existing. So a `NotFound` while
-    /// making the staging directory means the directory vanished, and the
-    /// run makes it again (and re-notes what it created) instead of failing.
     fn root(&mut self, base: &Path) -> std::io::Result<PathBuf> {
         if let Some(root) = &self.root {
             return Ok(root.clone());
         }
-        let mut vanished = 0;
-        'base: loop {
-            self.made = base
-                .ancestors()
-                .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
-                .map(Path::to_path_buf)
-                .collect();
-            fs::create_dir_all(base)?;
-            loop {
-                let unique = FIGURE_STAGING.fetch_add(1, Ordering::Relaxed);
-                let root = base.join(format!(".staging-{}-{unique}", std::process::id()));
-                match fs::create_dir(&root) {
-                    Ok(()) => {
-                        self.root = Some(root.clone());
-                        return Ok(root);
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound && vanished < 16 => {
-                        vanished += 1;
-                        continue 'base;
-                    }
-                    Err(error) => return Err(error),
+        self.made = base
+            .ancestors()
+            .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
+            .map(Path::to_path_buf)
+            .collect();
+        fs::create_dir_all(base)?;
+        loop {
+            let unique = FIGURE_STAGING.fetch_add(1, Ordering::Relaxed);
+            let root = base.join(format!(".staging-{}-{unique}", std::process::id()));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    self.root = Some(root.clone());
+                    return Ok(root);
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
             }
         }
     }
@@ -320,37 +304,19 @@ struct TimedHash {
     ms: f64,
 }
 
-/// SHA-256 of `bytes`, timed. Read in 1 MiB steps so that a run that is being
-/// abandoned (cancelled, failed) can set `stop` and get its thread back at
-/// once instead of waiting out the whole document; `None` then.
-fn hash_timed(bytes: &[u8], stop: &AtomicBool) -> Option<TimedHash> {
-    use sha2::{Digest, Sha256};
+/// SHA-256 of `bytes`, timed.
+fn hash_timed(bytes: &[u8]) -> TimedHash {
     let start = Instant::now();
-    let mut hasher = Sha256::new();
-    for step in bytes.chunks(1 << 20) {
-        if stop.load(Ordering::Relaxed) {
-            return None;
-        }
-        hasher.update(step);
-    }
-    Some(TimedHash {
-        hash: ContentHash(hex::encode(hasher.finalize().as_slice())),
+    let hash = ContentHash(sha256_hex(bytes));
+    TimedHash {
+        hash,
         ms: elapsed_ms(start),
-    })
-}
-
-/// Tells the hashing thread to give up when the run leaves its scope early.
-struct StopOnDrop<'a>(&'a AtomicBool);
-
-impl Drop for StopOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
     }
 }
 
 /// The document hash, either still being computed on its thread or done.
 enum HashState<'scope> {
-    Running(ScopedJoinHandle<'scope, Option<TimedHash>>),
+    Running(ScopedJoinHandle<'scope, TimedHash>),
     Done(TimedHash),
 }
 
@@ -360,9 +326,7 @@ impl HashState<'_> {
     fn finish(self) -> TimedHash {
         match self {
             Self::Running(handle) => match handle.join() {
-                // Only a run that has left its scope sets `stop`, and then
-                // nobody is waiting for the hash.
-                Ok(hashed) => hashed.expect("the hash is only stopped once the run is abandoned"),
+                Ok(hashed) => hashed,
                 Err(payload) => std::panic::resume_unwind(payload),
             },
             Self::Done(hashed) => hashed,
@@ -396,12 +360,8 @@ fn parse_while_hashing(
     staging: &mut FigureStaging,
     observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<Parsed, PipelineError> {
-    let stop = AtomicBool::new(false);
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
-        // Dropped on every way out of this closure, before the scope joins
-        // the hashing thread: a cancelled or failed run does not wait for it.
-        let _stop_hashing = StopOnDrop(&stop);
-        let mut hash_state = HashState::Running(scope.spawn(|| hash_timed(bytes, &stop)));
+        let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
 
         let mut session = extractor.open(bytes, job.password.as_deref())?;
         let page_count = session.page_count();
@@ -538,14 +498,7 @@ pub fn run_job_with_observed(
     let mut timings = StageTimings::default();
 
     let acquire_start = Instant::now();
-    let read =
-        acquire::read_verified_polled(Path::new(&job.path), job.max_bytes, &mut |done, total| {
-            observe(Progress::Reading { done, total })
-        })
-        .map_err(|error| match error {
-            AcquireError::Stopped => PipelineError::Cancelled,
-            other => other.into(),
-        })?;
+    let read = acquire::read_verified(Path::new(&job.path), job.max_bytes)?;
     timings.acquire_ms = elapsed_ms(acquire_start);
 
     // Figures are staged privately while pages are read and filed only once
@@ -1027,10 +980,7 @@ mod tests {
         let (_dir, path) = three_page_fixture();
         let mut events = Vec::new();
         let result = run_job_observed(&lopdf_job(&path, Some((2, 3))), &mut |event| {
-            // The read of the file comes first; this test is about pages.
-            if !matches!(event, Progress::Reading { .. }) {
-                events.push(event);
-            }
+            events.push(event);
             ControlFlow::Continue(())
         })
         .unwrap();
@@ -1059,9 +1009,7 @@ mod tests {
         let (_dir, path) = three_page_fixture();
         let mut seen = Vec::new();
         let result = run_job_observed(&lopdf_job(&path, None), &mut |event| {
-            if !matches!(event, Progress::Reading { .. }) {
-                seen.push(event);
-            }
+            seen.push(event);
             if matches!(event, Progress::Page { done: 1, .. }) {
                 ControlFlow::Break(())
             } else {
@@ -1143,7 +1091,7 @@ mod tests {
     fn stop_at_a_page(event: Progress) -> ControlFlow<()> {
         match event {
             Progress::Page { .. } => ControlFlow::Break(()),
-            Progress::Opened { .. } | Progress::Reading { .. } => ControlFlow::Continue(()),
+            Progress::Opened { .. } => ControlFlow::Continue(()),
         }
     }
 
@@ -1181,57 +1129,6 @@ mod tests {
         );
         assert!(matches!(again, Err(PipelineError::Cancelled)));
         assert_eq!(walk(&figures), before, "the earlier run's export is kept");
-    }
-
-    #[test]
-    fn a_stop_while_the_file_is_read_cancels_before_the_document_opens() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = fake_input(dir.path());
-        let backend = FakeExtractor {
-            reading_order: false,
-        };
-        let mut events = Vec::new();
-        let result = run_job_with_observed(&backend, &fake_job(&input, None), &mut |event| {
-            events.push(event);
-            ControlFlow::Break(())
-        });
-        assert!(
-            matches!(result, Err(PipelineError::Cancelled)),
-            "{result:?}"
-        );
-        assert!(
-            matches!(
-                events[..],
-                [Progress::Reading {
-                    done: 13,
-                    total: 13
-                }]
-            ),
-            "{events:?}"
-        );
-    }
-
-    /// Two runs share a figures directory that does not exist yet; each
-    /// stages a figure and then is dropped without filing it, removing the
-    /// empty directory it made. Neither may fail because the other removed
-    /// the directory it had just found.
-    #[test]
-    fn runs_sharing_a_new_figures_directory_do_not_fail_each_other() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("figures");
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                scope.spawn(|| {
-                    for _ in 0..300 {
-                        let mut staging = crate::pipeline::FigureStaging::new(Some(&base));
-                        staging
-                            .stage((1, 1), "png", base.join("out.png"), b"x")
-                            .expect("staging survives another run's clean-up");
-                    }
-                });
-            }
-        });
-        assert!(!base.exists() || walk(&base).is_empty());
     }
 
     /// The fake backend, except that reading the document's info panics: a
@@ -1289,26 +1186,6 @@ mod tests {
         }));
         assert!(outcome.is_err(), "the stage panicked");
         assert!(!figures.exists(), "nothing filed, nothing left");
-    }
-
-    #[test]
-    fn a_stopped_hash_gives_up_and_a_running_one_matches_sha256_hex() {
-        use std::sync::atomic::AtomicBool;
-        // Bigger than one 1 MiB step so the chunk loop really runs twice.
-        let bytes: Vec<u8> = (0..3_000_000u32).map(|n| (n % 251) as u8).collect();
-        let go = AtomicBool::new(false);
-        let hashed = super::hash_timed(&bytes, &go).expect("not stopped");
-        assert_eq!(hashed.hash.0, sha256_hex(&bytes), "same digest as one-shot");
-        let halt = AtomicBool::new(true);
-        assert!(
-            super::hash_timed(&bytes, &halt).is_none(),
-            "a stopped hash gives up instead of finishing"
-        );
-        assert_eq!(
-            super::hash_timed(&[], &go).unwrap().hash.0,
-            sha256_hex(&[]),
-            "the empty input still hashes"
-        );
     }
 
     #[test]

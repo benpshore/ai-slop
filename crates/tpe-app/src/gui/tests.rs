@@ -817,85 +817,11 @@ fn a_cancelled_row_can_be_shown_in_finder_and_cleared(cx: &mut TestAppContext) {
 /// Median of `samples` (sorts them).
 fn median(samples: &mut [std::time::Duration]) -> std::time::Duration {
     samples.sort();
-    let mid = samples.len() / 2;
-    if samples.len().is_multiple_of(2) {
-        // Even count: the average of the two middle observations.
-        (samples[mid - 1] + samples[mid]) / 2
-    } else {
-        samples[mid]
-    }
+    samples[samples.len() / 2]
 }
 
-/// What a set of timings looks like: the middle *and* the tail. A median
-/// alone hides jitter and the occasional slow interaction, which is exactly
-/// what a user notices, so the table always shows the range and the 95th
-/// percentile beside it.
-#[derive(Debug, PartialEq, Eq)]
-struct Stats {
-    n: usize,
-    min: std::time::Duration,
-    median: std::time::Duration,
-    /// Nearest-rank 95th percentile (the slowest one in twenty).
-    p95: std::time::Duration,
-    max: std::time::Duration,
-}
-
-impl Stats {
-    fn of(samples: &mut [std::time::Duration]) -> Self {
-        let median = median(samples); // sorts
-        let n = samples.len();
-        // Nearest rank: the smallest sample at or above 95% of them.
-        let rank = (n * 95).div_ceil(100).max(1);
-        Self {
-            n,
-            min: samples[0],
-            median,
-            p95: samples[rank - 1],
-            max: samples[n - 1],
-        }
-    }
-}
-
-#[test]
-fn the_median_of_an_even_count_averages_the_middle_pair() {
-    let ms = std::time::Duration::from_millis;
-    assert_eq!(median(&mut [ms(4), ms(1), ms(3), ms(2)]), ms(2) + ms(1) / 2);
-    assert_eq!(median(&mut [ms(9), ms(1)]), ms(5));
-    assert_eq!(median(&mut [ms(3), ms(1), ms(2)]), ms(2));
-    assert_eq!(median(&mut [ms(7)]), ms(7));
-}
-
-#[test]
-fn the_stats_keep_the_outliers_a_median_would_hide() {
-    let ms = std::time::Duration::from_millis;
-    // Four fast samples and one 100 ms stall: the median says 1 ms, the
-    // range and the tail say the stall happened.
-    let stats = Stats::of(&mut [ms(1), ms(100), ms(1), ms(1), ms(1)]);
-    assert_eq!(
-        stats,
-        Stats {
-            n: 5,
-            min: ms(1),
-            median: ms(1),
-            p95: ms(100),
-            max: ms(100)
-        }
-    );
-    // 1..=100 ms: nearest-rank p95 is the 95th value.
-    let mut hundred: Vec<_> = (1..=100).map(ms).collect();
-    let stats = Stats::of(&mut hundred);
-    assert_eq!((stats.p95, stats.max, stats.min), (ms(95), ms(100), ms(1)));
-    assert_eq!(stats.median, ms(50) + ms(1) / 2);
-    // A single sample is its own everything.
-    let stats = Stats::of(&mut [ms(7)]);
-    assert_eq!(
-        (stats.min, stats.median, stats.p95, stats.max),
-        (ms(7), ms(7), ms(7), ms(7))
-    );
-}
-
-/// `f` timed `runs` times.
-fn timed(runs: usize, mut f: impl FnMut()) -> Stats {
+/// `f` timed `runs` times; the median.
+fn timed(runs: usize, mut f: impl FnMut()) -> std::time::Duration {
     let mut samples: Vec<_> = (0..runs)
         .map(|_| {
             let started = std::time::Instant::now();
@@ -903,22 +829,12 @@ fn timed(runs: usize, mut f: impl FnMut()) -> Stats {
             started.elapsed()
         })
         .collect();
-    Stats::of(&mut samples)
+    median(&mut samples)
 }
 
-/// One row of the published timings table.
-fn row(what: &str, stats: &Stats) {
-    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
-    // How far the slowest sample is from the median: 1.0 is perfectly steady.
-    let spread = ms(stats.max) / ms(stats.median).max(f64::EPSILON);
-    eprintln!(
-        "| {what} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {spread:.1}x |",
-        stats.n,
-        ms(stats.min),
-        ms(stats.median),
-        ms(stats.p95),
-        ms(stats.max),
-    );
+/// Print one row of the timings table.
+fn row(what: &str, time: std::time::Duration) {
+    eprintln!("| {what} | {:.2} ms |", time.as_secs_f64() * 1000.0);
 }
 
 /// One frame: layout, prepaint and paint of the window with the view.
@@ -941,8 +857,8 @@ fn frame(visual: &mut VisualTestContext, shell: &Entity<Shell>) {
 // One long table-printing script reads better than helpers per row.
 #[allow(clippy::too_many_lines)]
 fn interaction_timings(cx: &mut TestAppContext) {
-    eprintln!("| interaction (ms) | n | min | median | p95 | max | max/median |");
-    eprintln!("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
+    eprintln!("| interaction | median |");
+    eprintln!("| --- | ---: |");
 
     // A window with no rows: the first frame, then a steady one.
     let fixture = Fixture::new();
@@ -951,12 +867,12 @@ fn interaction_timings(cx: &mut TestAppContext) {
     let started = std::time::Instant::now();
     frame(&mut visual, &shell);
     row(
-        "first frame, empty window (one cold draw)",
-        &Stats::of(&mut [started.elapsed()]),
+        "first frame, empty window (one cold draw, not a median)",
+        started.elapsed(),
     );
     row(
         "frame, empty window",
-        &timed(50, || frame(&mut visual, &shell)),
+        timed(50, || frame(&mut visual, &shell)),
     );
 
     // A file arrives (a drop, a chooser, Finder) through `Shell::enqueue`,
@@ -970,20 +886,14 @@ fn interaction_timings(cx: &mut TestAppContext) {
         });
         frame(&mut visual, &shell);
         arrivals.push(started.elapsed());
-        // Let the job finish, empty the list and draw the empty window, all
-        // outside the timer, so the next arrival is into an already-drawn
-        // empty view. The model is cleared directly: `Shell::clear_done` also
-        // schedules a list scroll that an empty window (which draws no list)
-        // would leave pending for the timed frame.
+        // Let the job finish, clear it and draw the empty window, all outside
+        // the timer, so the next arrival is into an already-drawn empty view.
         visual.run_until_parked();
-        shell.update(&mut visual, |shell, cx| {
-            shell.jobs.clear_done();
-            cx.notify();
-        });
+        shell.update(&mut visual, Shell::clear_done);
         frame(&mut visual, &shell);
         frame(&mut visual, &shell);
     }
-    row("file arrives to its row drawn", &Stats::of(&mut arrivals));
+    row("file arrives to its row drawn", median(&mut arrivals));
 
     // The list at scale.
     for rows in [1usize, 100, 5000] {
@@ -996,7 +906,7 @@ fn interaction_timings(cx: &mut TestAppContext) {
             shell.update(&mut visual, |_, cx| cx.notify());
             frame(&mut visual, &shell);
         });
-        row(&format!("frame, {rows} rows"), &time);
+        row(&format!("frame, {rows} rows"), time);
     }
 
     // With 5,000 rows: a key press to the new selection drawn, a jump to the
@@ -1028,10 +938,10 @@ fn interaction_timings(cx: &mut TestAppContext) {
     }
     row(
         "Down key to selection drawn, rows 4,850-4,950 of 5,000",
-        &Stats::of(&mut presses),
+        median(&mut presses),
     );
     let mut jumps = Vec::new();
-    for key in ["end", "home"].repeat(10) {
+    for key in ["end", "home", "end", "home", "end", "home"] {
         let started = std::time::Instant::now();
         visual
             .cx
@@ -1042,7 +952,7 @@ fn interaction_timings(cx: &mut TestAppContext) {
     }
     row(
         "End / Home to the new rows drawn (two frames), 5,000 rows",
-        &Stats::of(&mut jumps),
+        median(&mut jumps),
     );
     // The job being timed is the last row: every earlier one has finished
     // (a real batch reaches its late rows only after the early ones), so a
@@ -1052,16 +962,9 @@ fn interaction_timings(cx: &mut TestAppContext) {
         let (tail, earlier) = ids.split_last().unwrap();
         for &id in earlier {
             shell.jobs.start(id);
-            // As a successful text batch leaves them: a summary and a .txt
-            // result, so the visible rows carry Copy and Show in Finder.
-            shell.jobs.finish(
-                id,
-                Ok(jobs::Outcome {
-                    outputs: vec![PathBuf::from(format!("/tmp/tpe-timing-{id}.txt"))],
-                    summary: "text \u{b7} 2 pages, 3 references".into(),
-                    warnings: Vec::new(),
-                }),
-            );
+            shell
+                .jobs
+                .finish(id, Err(jobs::RunError::Failed("done".into())));
         }
         shell.jobs.start(*tail);
         *tail
@@ -1076,7 +979,7 @@ fn interaction_timings(cx: &mut TestAppContext) {
     let mut page = 0u32;
     row(
         "progress event (model update, not the channel hop) to its frame, last of 5,000 rows",
-        &timed(100, || {
+        timed(100, || {
             page += 1;
             shell.update(&mut visual, |shell, cx| {
                 shell.jobs.progress(
@@ -1117,7 +1020,7 @@ fn interaction_timings(cx: &mut TestAppContext) {
             jobs::run(action, &job.pdf, &ledger, &mut |_| {}, &cancel).unwrap();
             samples.push(started.elapsed());
         }
-        row(what, &Stats::of(&mut samples));
+        row(what, median(&mut samples));
     }
 }
 

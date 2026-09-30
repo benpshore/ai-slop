@@ -301,7 +301,7 @@ fn elapsed_ms(start: Instant) -> f64 {
 /// this run will process); `page` carries the finished `page`, `done` and
 /// `total`. Each line is written with one locked `stderr` write, so worker
 /// threads never interleave within a line.
-fn progress_line(path: &str, event: Progress) -> Option<String> {
+fn progress_line(path: &str, event: Progress) -> String {
     let value = match event {
         Progress::Opened { pages, total } => serde_json::json!({
             "event": "opened", "path": path, "pages": pages, "total": total,
@@ -309,17 +309,13 @@ fn progress_line(path: &str, event: Progress) -> Option<String> {
         Progress::Page { page, done, total } => serde_json::json!({
             "event": "page", "path": path, "page": page, "done": done, "total": total,
         }),
-        // Not part of the `--progress` stream (its lines are unchanged).
-        Progress::Reading { .. } => return None,
     };
-    Some(value.to_string())
+    value.to_string()
 }
 
 /// Print a `--progress` line to stderr.
 fn report_progress(path: &str, event: Progress) {
-    if let Some(line) = progress_line(path, event) {
-        eprintln!("{line}");
-    }
+    eprintln!("{}", progress_line(path, event));
 }
 
 /// Open the ledger at `db`, naming the path in any error.
