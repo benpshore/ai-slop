@@ -115,6 +115,13 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -eu
+          # The file name says arm64, so the binary must be: read it from the
+          # binary rather than trusting the runner label.
+          arch=$(lipo -archs target/release/PDFTextract.app/Contents/MacOS/PDFTextract)
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::the binary is '$arch', not arm64; not publishing it as macos-arm64"
+            exit 1
+          fi
           name="PDFTextract-${VERSION}-macos-arm64.zip"
           ditto -c -k --keepParent target/release/PDFTextract.app "$name"
           shasum -a 256 "$name" > "$name.sha256"
