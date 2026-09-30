@@ -140,6 +140,15 @@ impl JobRow {
     }
 }
 
+/// A move of the selection through the rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Up,
+    Down,
+    First,
+    Last,
+}
+
 /// The rows of the window, in arrival order, and the queue discipline: one
 /// job runs at a time (the ledger has one writer).
 #[derive(Debug, Default)]
@@ -241,6 +250,36 @@ impl JobList {
 
     pub fn has_done(&self) -> bool {
         self.rows.iter().any(|row| !row.is_active())
+    }
+
+    /// Position of row `id` in the list.
+    pub fn index_of(&self, id: usize) -> Option<usize> {
+        self.rows.iter().position(|row| row.id == id)
+    }
+
+    /// The row a selection lands on after `step` from `current` (`None`:
+    /// nothing selected). Up and Down stop at the ends rather than wrap; with
+    /// nothing selected Down lands on the first row and Up on the last.
+    /// `None` only when the list is empty.
+    pub fn stepped(&self, current: Option<usize>, step: Step) -> Option<usize> {
+        let last = self.rows.len().checked_sub(1)?;
+        let at = current.and_then(|id| self.index_of(id));
+        let target = match (step, at) {
+            (Step::First, _) | (Step::Down, None) => 0,
+            (Step::Last, _) | (Step::Up, None) => last,
+            (Step::Up, Some(i)) => i.saturating_sub(1),
+            (Step::Down, Some(i)) => (i + 1).min(last),
+        };
+        self.rows.get(target).map(|row| row.id)
+    }
+
+    /// The row to select when the one at `index` is gone: the row now at that
+    /// position, else the last, else none.
+    pub fn nearest_to(&self, index: usize) -> Option<usize> {
+        self.rows
+            .get(index)
+            .or_else(|| self.rows.last())
+            .map(|row| row.id)
     }
 
     /// Whether any row is queued or running.
@@ -553,7 +592,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        Action, JobList, Mailbox, Outcome, Phase, file_url_to_path, output_path, output_paths, run,
+        Action, JobList, Mailbox, Outcome, Phase, Step, file_url_to_path, output_path,
+        output_paths, run,
     };
     use futures::{FutureExt, StreamExt};
     use tpe::pipeline::Progress;
@@ -778,6 +818,43 @@ mod tests {
         assert_eq!(list.rows()[0].status_line(), "bibliography · Failed: boom");
         assert_eq!(list.rows()[0].phase, Phase::Failed("boom".into()));
         assert_eq!(list.rows()[0].copyable(), None);
+    }
+
+    #[test]
+    fn selection_steps_stop_at_the_ends() {
+        let (dir, pdf, _ledger) = scratch();
+        let mut list = JobList::default();
+        assert_eq!(
+            list.stepped(None, Step::Down),
+            None,
+            "an empty list selects nothing"
+        );
+        let paths: Vec<_> = (0..3)
+            .map(|n| {
+                let path = dir.path().join(format!("p{n}.pdf"));
+                std::fs::copy(&pdf, &path).unwrap();
+                path
+            })
+            .collect();
+        list.enqueue(paths, Action::Text);
+        let ids: Vec<usize> = list.rows().iter().map(|row| row.id).collect();
+
+        assert_eq!(list.stepped(None, Step::Down), Some(ids[0]));
+        assert_eq!(list.stepped(None, Step::Up), Some(ids[2]));
+        assert_eq!(list.stepped(Some(ids[0]), Step::Down), Some(ids[1]));
+        assert_eq!(list.stepped(Some(ids[2]), Step::Down), Some(ids[2]));
+        assert_eq!(list.stepped(Some(ids[0]), Step::Up), Some(ids[0]));
+        assert_eq!(list.stepped(Some(ids[1]), Step::First), Some(ids[0]));
+        assert_eq!(list.stepped(Some(ids[1]), Step::Last), Some(ids[2]));
+        assert_eq!(
+            list.stepped(Some(999), Step::Down),
+            Some(ids[0]),
+            "a vanished row acts as none"
+        );
+
+        assert_eq!(list.index_of(ids[1]), Some(1));
+        assert_eq!(list.nearest_to(1), Some(ids[1]));
+        assert_eq!(list.nearest_to(10), Some(ids[2]));
     }
 
     #[test]

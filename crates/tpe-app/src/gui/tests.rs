@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
+use gpui::{AnyWindowHandle, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
 
 use super::*;
 
@@ -239,35 +239,292 @@ fn files_sent_while_open_are_queued_in_order(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn row_buttons_are_reachable_and_work_from_the_keyboard(cx: &mut TestAppContext) {
+/// Copies of the fixture paper named `p0.pdf`, `p1.pdf`, …
+fn copies(fixture: &Fixture, count: usize) -> Vec<PathBuf> {
+    (0..count)
+        .map(|n| {
+            let path = fixture.dir.path().join(format!("p{n}.pdf"));
+            std::fs::copy(FIXTURE, &path).unwrap();
+            path
+        })
+        .collect()
+}
+
+fn ids(shell: &Entity<Shell>, cx: &TestAppContext) -> Vec<usize> {
+    shell.read_with(cx, |shell, _| {
+        shell.jobs.rows().iter().map(|row| row.id).collect()
+    })
+}
+
+fn selected(shell: &Entity<Shell>, cx: &TestAppContext) -> Option<usize> {
+    shell.read_with(cx, |shell, _| shell.selected)
+}
+
+/// Rows added without starting the engine, so they stay queued.
+fn queue_only(shell: &Entity<Shell>, cx: &mut TestAppContext, paths: Vec<PathBuf>) {
+    shell.update(cx, |shell, cx| {
+        shell.jobs.enqueue(paths, Action::Text);
+        cx.notify();
+    });
+}
+
+/// Draw the window once and return the bounds of a `debug_selector`.
+fn bounds_of(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    shell: &Entity<Shell>,
+    selector: &'static str,
+) -> Option<gpui::Bounds<Pixels>> {
+    let mut visual = VisualTestContext::from_window(window, cx);
+    // Twice: a scroll requested by a key is applied while the list lays out,
+    // so the rows for the new position are built by the second frame.
+    for _ in 0..2 {
+        visual.draw(
+            gpui::point(px(0.0), px(0.0)),
+            size(px(640.0), px(480.0)),
+            |_, _| shell.clone(),
+        );
+    }
+    visual.debug_bounds(selector)
+}
+
+/// Three finished rows and the window with focus on the list (Tab from Get
+/// text: Get bibliography, then the list), first row selected.
+fn three_finished_rows(cx: &mut TestAppContext) -> (Fixture, Entity<Shell>, AnyWindowHandle) {
     let fixture = Fixture::new();
     let (shell, window) = fixture.open(cx);
+    fixture.mailbox.send((Action::Text, copies(&fixture, 3)));
+    cx.run_until_parked();
+    assert!(
+        row_phase(&shell, cx)
+            .iter()
+            .all(|phase| matches!(phase, Phase::Finished(_)))
+    );
+    keys(cx, window, "tab tab");
+    (fixture, shell, window)
+}
+
+#[gpui::test]
+fn tabbing_into_the_list_selects_its_first_row(cx: &mut TestAppContext) {
+    let (_fixture, shell, window) = three_finished_rows(cx);
+    let ids = ids(&shell, cx);
+    assert_eq!(selected(&shell, cx), Some(ids[0]));
+    let focused = cx
+        .update_window(window, |_, window, cx| {
+            shell.read(cx).list_focus.is_focused(window)
+        })
+        .unwrap();
+    assert!(focused);
+}
+
+#[gpui::test]
+fn arrow_keys_move_the_selection_and_stop_at_the_ends(cx: &mut TestAppContext) {
+    let (_fixture, shell, window) = three_finished_rows(cx);
+    let ids = ids(&shell, cx);
+    keys(cx, window, "down");
+    assert_eq!(selected(&shell, cx), Some(ids[1]));
+    keys(cx, window, "down down down");
+    assert_eq!(selected(&shell, cx), Some(ids[2]), "stops at the last row");
+    keys(cx, window, "up");
+    assert_eq!(selected(&shell, cx), Some(ids[1]));
+    keys(cx, window, "home");
+    assert_eq!(selected(&shell, cx), Some(ids[0]));
+    keys(cx, window, "up");
+    assert_eq!(selected(&shell, cx), Some(ids[0]), "stops at the first row");
+    keys(cx, window, "end");
+    assert_eq!(selected(&shell, cx), Some(ids[2]));
+    keys(cx, window, "cmd-up");
+    assert_eq!(selected(&shell, cx), Some(ids[0]));
+    keys(cx, window, "cmd-down");
+    assert_eq!(selected(&shell, cx), Some(ids[2]));
+}
+
+#[gpui::test]
+fn enter_shows_the_selected_rows_result_in_finder(cx: &mut TestAppContext) {
+    let (fixture, _shell, window) = three_finished_rows(cx);
+    keys(cx, window, "down enter");
+    assert_eq!(
+        *fixture.log.reveals.borrow(),
+        [fixture.dir.path().join("p1.txt")]
+    );
+    keys(cx, window, "space");
+    assert_eq!(
+        fixture.log.reveals.borrow().len(),
+        2,
+        "space does the same as enter"
+    );
+}
+
+#[gpui::test]
+fn cmd_c_copies_the_selected_rows_text(cx: &mut TestAppContext) {
+    let (_fixture, _shell, window) = three_finished_rows(cx);
+    keys(cx, window, "cmd-c");
+    let text = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .expect("text on the clipboard");
+    assert!(text.contains("Faithful Extraction of Citations from Academic PDFs"));
+}
+
+#[gpui::test]
+fn clear_finished_is_the_stop_after_the_list(cx: &mut TestAppContext) {
+    let (_fixture, shell, window) = three_finished_rows(cx);
+    keys(cx, window, "tab enter");
+    assert!(row_phase(&shell, cx).is_empty());
+    assert_eq!(
+        selected(&shell, cx),
+        None,
+        "nothing is selected once nothing is listed"
+    );
+}
+
+#[gpui::test]
+fn delete_removes_a_queued_row_and_leaves_finished_ones(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    queue_only(&shell, cx, copies(&fixture, 3));
+    let ids = ids(&shell, cx);
+    keys(cx, window, "tab tab down");
+    assert_eq!(selected(&shell, cx), Some(ids[1]));
+    keys(cx, window, "backspace");
+    assert_eq!(super::tests::ids(&shell, cx), [ids[0], ids[2]]);
+    assert_eq!(
+        selected(&shell, cx),
+        Some(ids[2]),
+        "selection lands on the next row"
+    );
+    keys(cx, window, "delete");
+    assert_eq!(super::tests::ids(&shell, cx), [ids[0]]);
+    assert_eq!(
+        selected(&shell, cx),
+        Some(ids[0]),
+        "or the last one when there is no next"
+    );
+
+    // A finished row is not removed by a stray key.
     fixture
         .mailbox
         .send((Action::Text, vec![fixture.pdf.clone()]));
+    shell.update(cx, |shell, cx| {
+        shell.jobs.clear_done();
+        cx.notify();
+    });
     cx.run_until_parked();
-    assert!(matches!(
-        row_phase(&shell, cx).as_slice(),
-        [Phase::Finished(_)]
-    ));
+    keys(cx, window, "end");
+    let before = row_phase(&shell, cx);
+    keys(cx, window, "backspace");
+    assert_eq!(row_phase(&shell, cx), before);
+}
 
-    // Tab order: Get text, Get bibliography, Copy, Show in Finder, Clear.
-    keys(cx, window, "tab tab enter");
-    let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
-    let text = clipboard.expect("Copy put the text on the clipboard");
-    assert!(text.contains("Faithful Extraction of Citations from Academic PDFs"));
-
-    keys(cx, window, "tab enter");
-    assert_eq!(
-        *fixture.log.reveals.borrow(),
-        [fixture.dir.path().join("paper.txt")]
+#[gpui::test]
+fn keys_reach_rows_that_are_off_screen(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    queue_only(&shell, cx, copies(&fixture, 200));
+    let ids = ids(&shell, cx);
+    // The list measures row 0 once, so "not built" is checked on a middle row.
+    let middle: &'static str = Box::leak(format!("job-{}", ids[100]).into_boxed_str());
+    let last: &'static str = Box::leak(format!("job-{}", ids[199]).into_boxed_str());
+    assert!(
+        bounds_of(cx, window, &shell, "job-1").is_some(),
+        "the first row is drawn"
+    );
+    assert!(
+        bounds_of(cx, window, &shell, last).is_none(),
+        "the last row is not built yet"
     );
 
-    keys(cx, window, "tab enter");
+    keys(cx, window, "tab tab end");
+    assert_eq!(selected(&shell, cx), Some(ids[199]));
     assert!(
-        row_phase(&shell, cx).is_empty(),
-        "Clear finished removed the row"
+        bounds_of(cx, window, &shell, last).is_some(),
+        "End scrolled the last row into view"
+    );
+    assert!(
+        bounds_of(cx, window, &shell, middle).is_none(),
+        "rows in between are not built"
+    );
+
+    let offset = |cx: &TestAppContext| {
+        shell.read_with(cx, |shell, _| {
+            f32::from(shell.scroll.0.borrow().base_handle.offset().y)
+        })
+    };
+    assert!(offset(cx) < -1000.0, "End scrolled the list down");
+
+    keys(cx, window, "home");
+    assert_eq!(selected(&shell, cx), Some(ids[0]));
+    let _ = bounds_of(cx, window, &shell, "job-1");
+    assert!(offset(cx).abs() < 0.5, "Home scrolled back to the top");
+    assert!(bounds_of(cx, window, &shell, "job-1").is_some());
+}
+
+#[gpui::test]
+fn clicking_a_row_selects_it_and_focuses_the_list(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    queue_only(&shell, cx, copies(&fixture, 3));
+    let ids = ids(&shell, cx);
+    let row = bounds_of(cx, window, &shell, "job-2").expect("row 2 is drawn");
+    VisualTestContext::from_window(window, cx)
+        .simulate_click(row.center(), gpui::Modifiers::none());
+    assert_eq!(selected(&shell, cx), Some(ids[1]));
+    let focused = cx
+        .update_window(window, |_, window, cx| {
+            shell.read(cx).list_focus.is_focused(window)
+        })
+        .unwrap();
+    assert!(focused);
+}
+
+#[gpui::test]
+fn rows_are_uniform_and_their_content_fits(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let junk = fixture.dir.path().join("junk.pdf");
+    std::fs::write(&junk, b"not a pdf").unwrap();
+    fixture
+        .mailbox
+        .send((Action::Text, vec![fixture.pdf.clone(), junk]));
+    cx.run_until_parked();
+    let row_1 = bounds_of(cx, window, &shell, "job-1").expect("finished row");
+    let row_2 = bounds_of(cx, window, &shell, "job-2").expect("failed row");
+    assert_eq!(
+        row_1.size.height, row_2.size.height,
+        "rows are the same height"
+    );
+    for (row, title, status) in [
+        (row_1, "job-1-title", "job-1-status"),
+        (row_2, "job-2-title", "job-2-status"),
+    ] {
+        for part in [title, status] {
+            let inner = bounds_of(cx, window, &shell, part).expect("content is drawn");
+            assert!(
+                inner.top() >= row.top() && inner.bottom() <= row.bottom(),
+                "{part} {inner:?} fits its row {row:?}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn drawing_cost_does_not_grow_with_the_number_of_rows(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    queue_only(&shell, cx, copies(&fixture, 5000));
+    let mut visual = VisualTestContext::from_window(window, cx);
+    let started = std::time::Instant::now();
+    visual.draw(
+        gpui::point(px(0.0), px(0.0)),
+        size(px(640.0), px(480.0)),
+        |_, _| shell.clone(),
+    );
+    let elapsed = started.elapsed();
+    // Building every row took about 3 s at 5,000 rows in a debug build; only
+    // the rows on screen are built now. The bound is generous on purpose.
+    assert!(
+        elapsed < std::time::Duration::from_millis(400),
+        "one draw of 5,000 rows took {elapsed:?}"
     );
 }
 
