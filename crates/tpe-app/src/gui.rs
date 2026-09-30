@@ -47,7 +47,10 @@ use gpui::{
 
 use tpe::pipeline::Progress;
 use tpe_app::jobs::{self, Action, CancelToken, JobList, JobRow, Mailbox, Phase, Step};
+use tpe_app::probe;
 use tpe_app::view::TextScale;
+
+mod instrument;
 
 actions!(
     pdftextract,
@@ -220,7 +223,16 @@ impl Shell {
 
     /// Add rows and start work if idle. The rows show before the engine runs.
     fn enqueue(&mut self, paths: Vec<PathBuf>, action: Action, cx: &mut Context<Self>) {
-        if self.jobs.enqueue(paths, action) > 0 {
+        let _t = probe::span("Shell::enqueue");
+        if let Some(probe) = probe::get() {
+            probe.count("paths offered to enqueue", paths.len() as u64);
+        }
+        let added = {
+            let _t = probe::span("JobList::enqueue (a stat per path)");
+            self.jobs.enqueue(paths, action)
+        };
+        if added > 0 {
+            instrument::files_arrived(added, action.noun());
             cx.notify();
             self.pump(cx);
         }
@@ -262,24 +274,47 @@ impl Shell {
         let cancel = Arc::new(CancelToken::new());
         self.running = Some((id, cancel.clone()));
         let (sender, mut receiver) = mpsc::unbounded::<Progress>();
+        if let Some(probe) = probe::get() {
+            probe.mark(format!("job {id} started"));
+        }
         let task = cx.background_executor().spawn(async move {
-            jobs::run(
+            let started = std::time::Instant::now();
+            let mut last_event = started;
+            let result = jobs::run(
                 action,
                 &source,
                 &ledger,
                 &mut |event| {
+                    if let Some(probe) = probe::get() {
+                        probe.record(
+                            "engine: time between progress events (background thread)",
+                            last_event.elapsed(),
+                        );
+                        last_event = std::time::Instant::now();
+                    }
                     let _ = sender.unbounded_send(event);
                 },
                 &cancel,
-            )
+            );
+            if let Some(probe) = probe::get() {
+                probe.record("engine: whole job (background thread)", started.elapsed());
+            }
+            result
         });
         // Progress: keep only the newest event waiting at each frame.
         cx.spawn(async move |this, cx| {
             while let Some(mut event) = receiver.next().await {
+                let mut drained = 1;
                 while let Some(Some(later)) = receiver.next().now_or_never() {
                     event = later;
+                    drained += 1;
+                }
+                if let Some(probe) = probe::get() {
+                    probe.count("progress events received", drained);
+                    probe.count("progress updates applied (each a cx.notify)", 1);
                 }
                 let applied = this.update(cx, |this, cx| {
+                    let _t = probe::span("progress update (jobs.progress + notify)");
                     this.jobs.progress(id, event);
                     cx.notify();
                 });
@@ -292,10 +327,14 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                let _t = probe::span("job finish (jobs.finish + pump next + quit check)");
                 this.jobs.finish(id, result);
                 this.running = None;
                 cx.notify();
                 this.pump(cx);
+                if !this.jobs.has_active() {
+                    instrument::queue_drained();
+                }
                 this.quit_if_idle(cx);
             });
         })
@@ -306,6 +345,7 @@ impl Shell {
         let Some(path) = self.jobs.row(id).and_then(JobRow::copyable) else {
             return;
         };
+        let _t = probe::span("Copy: read the .txt and write the clipboard (main thread)");
         if let Ok(text) = fs::read_to_string(path) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -489,6 +529,10 @@ impl Shell {
 
     /// Change the text size, apply it to this window and remember it.
     fn set_text_scale(&mut self, scale: TextScale, window: &mut Window, cx: &mut Context<Self>) {
+        let _t = probe::span("text size change (set_rem_size + save file)");
+        if let Some(probe) = probe::get() {
+            probe.mark(format!("text size {}", scale.rem_px()));
+        }
         self.text_scale = scale;
         window.set_rem_size(px(scale.rem_px()));
         // A file that cannot be written just means the size is not kept.
@@ -731,6 +775,7 @@ impl Shell {
                     "job-rows",
                     self.jobs.rows().len(),
                     cx.processor(|this, range: Range<usize>, window, cx| {
+                        let _t = probe::span("list rows build (uniform_list processor)");
                         let focused = this.list_focus.is_focused(window);
                         let selected = this.selected;
                         let rows: Vec<JobRow> =
@@ -748,6 +793,7 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = probe::span("Shell::render (view build)");
         let empty = self.jobs.rows().is_empty();
         let has_done = self.jobs.has_done();
         div()
@@ -865,6 +911,7 @@ fn open_main_window(cx: &mut App) {
         };
         window.set_rem_size(px(scale.rem_px()));
         window.focus(&focus);
+        instrument::window_opened(window);
         shell.clone()
     }) {
         Ok(_) => cx.activate(true),
@@ -967,11 +1014,16 @@ pub fn run(paths: Vec<PathBuf>) {
     // Files opened with the app (Open With, a drop on the Dock icon): there
     // is no way to say which action, so text is the default. At launch
     // these arrive before `run`'s callback; the mailbox keeps them.
+    let probing = probe::init();
     app.on_open_urls(|urls| {
+        let _t = probe::span("on_open_urls handler (url to path, hand to mailbox)");
         let paths: Vec<PathBuf> = urls
             .iter()
             .filter_map(|url| jobs::file_url_to_path(url))
             .collect();
+        if let Some(probe) = probe::get() {
+            probe.mark(format!("on_open_urls: {} urls", urls.len()));
+        }
         intake(Action::Text, paths);
     });
     // The Dock icon, once the window was closed with jobs still running.
@@ -992,6 +1044,9 @@ pub fn run(paths: Vec<PathBuf>) {
             cx.new(|cx| Shell::new(&INTAKE, jobs::default_ledger_path(), Host::system(), cx));
         cx.set_global(ShellHandle(shell));
         open_main_window(cx);
+        if probing {
+            instrument::start(cx);
+        }
         crate::services::install();
         if !paths.is_empty() {
             intake(Action::Text, paths);
