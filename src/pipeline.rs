@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
 
@@ -105,34 +106,118 @@ fn figure_extension(mime: Option<&str>) -> &'static str {
     }
 }
 
-/// Write `bytes` to `target`, creating its parent directory. Returns whether
-/// this call created the file: creation is exclusive, so that answer is
-/// unambiguous even when another run exports the same figure at the same
-/// moment. A file that already exists is overwritten (the same bytes, filed
-/// under the document hash) and is not this call's to take back.
-fn write_figure(target: &Path, bytes: &[u8]) -> std::io::Result<bool> {
-    use std::io::Write;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
+/// Distinguishes the private staging directories of runs in one process.
+static FIGURE_STAGING: AtomicU64 = AtomicU64::new(0);
+
+/// A figure written to the run's staging directory, waiting to be filed
+/// under its final name.
+struct PendingFigure {
+    page: u32,
+    index: u32,
+    staged: PathBuf,
+    target: PathBuf,
+}
+
+/// The run's private place for figure files: `<figures_dir>/.staging-<pid>-<n>`,
+/// created on the first figure and removed when dropped. Figures are written
+/// here while pages are processed and moved to their final names only once
+/// the whole run has succeeded ([`FigureStaging::publish`]), so a cancelled,
+/// failed or panicking run removes only its own private directory and never
+/// touches a file another run may be using.
+struct FigureStaging<'a> {
+    base: Option<&'a Path>,
+    root: Option<PathBuf>,
+    pending: Vec<PendingFigure>,
+}
+
+impl<'a> FigureStaging<'a> {
+    fn new(base: Option<&'a Path>) -> Self {
+        Self {
+            base,
+            root: None,
+            pending: Vec::new(),
+        }
     }
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)
-    {
-        Ok(mut file) => {
-            if let Err(error) = file.write_all(bytes) {
-                drop(file);
-                let _ = fs::remove_file(target);
-                return Err(error);
+
+    /// The staging directory, made on first use (exclusively: an existing
+    /// name is never reused).
+    fn root(&mut self, base: &Path) -> std::io::Result<PathBuf> {
+        if let Some(root) = &self.root {
+            return Ok(root.clone());
+        }
+        fs::create_dir_all(base)?;
+        loop {
+            let unique = FIGURE_STAGING.fetch_add(1, Ordering::Relaxed);
+            let root = base.join(format!(".staging-{}-{unique}", std::process::id()));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    self.root = Some(root.clone());
+                    return Ok(root);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
             }
-            Ok(true)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            fs::write(target, bytes)?;
-            Ok(false)
+    }
+
+    /// Write one figure's bytes to staging, to be filed as `target`.
+    fn stage(
+        &mut self,
+        (page, index): (u32, u32),
+        ext: &str,
+        target: PathBuf,
+        bytes: &[u8],
+    ) -> std::io::Result<()> {
+        let Some(base) = self.base else {
+            return Ok(());
+        };
+        let staged = self.root(base)?.join(format!("p{page}-f{index}.{ext}"));
+        fs::write(&staged, bytes)?;
+        self.pending.push(PendingFigure {
+            page,
+            index,
+            staged,
+            target,
+        });
+        Ok(())
+    }
+
+    /// The run succeeded: move every staged figure to its final name (an
+    /// existing file of the same document and backend is replaced by the
+    /// same bytes). A figure that cannot be filed loses its `file` and adds
+    /// a warning, as a failed write does.
+    fn publish(&mut self, pages: &mut [PageText], warnings: &mut Vec<String>) {
+        for pending in std::mem::take(&mut self.pending) {
+            let filed = pending
+                .target
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::rename(&pending.staged, &pending.target));
+            let Err(err) = filed else {
+                continue;
+            };
+            let warning = format!(
+                "figure export: page {} figure {}: {}: {err}",
+                pending.page,
+                pending.index,
+                pending.target.display()
+            );
+            if let Some(page) = pages.iter_mut().find(|page| page.page == pending.page) {
+                if let Some(figure) = page.figures.iter_mut().find(|f| f.index == pending.index) {
+                    figure.file = None;
+                }
+                page.warnings.push(warning.clone());
+            }
+            warnings.push(warning);
         }
-        Err(error) => Err(error),
+    }
+}
+
+impl Drop for FigureStaging<'_> {
+    fn drop(&mut self) {
+        if let Some(root) = &self.root {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 }
 
@@ -150,18 +235,17 @@ fn figure_run_dir(hash: &str, identity: &BackendIdentity) -> String {
 
 /// Take the bytes of every figure on `page` from `session` and record their
 /// SHA-256. With `export = Some((figures_dir, run_dir))` (see
-/// [`figure_run_dir`]), also write them to
-/// `<figures_dir>/<run_dir>/p<page>-f<index>.<ext>` and set `file` to that
-/// path relative to `figures_dir` (always `/`-separated). A failed write
-/// leaves `file` unset and returns a warning (never prefixed `failed:`, which
-/// is reserved for pages whose text could not be extracted). Files this call
-/// newly created (not ones that already existed) are added to `created`, so
-/// a cancelled run can take them back.
+/// [`figure_run_dir`]), also stage them to be filed as
+/// `<figures_dir>/<run_dir>/p<page>-f<index>.<ext>` when the run succeeds
+/// ([`FigureStaging::publish`]), and set `file` to that path relative to
+/// `figures_dir` (always `/`-separated). A failed write leaves `file` unset
+/// and returns a warning (never prefixed `failed:`, which is reserved for
+/// pages whose text could not be extracted).
 fn collect_figures(
     session: &mut dyn DocumentSession,
     page: &mut PageText,
     export: Option<(&Path, &str)>,
-    created: &mut Vec<PathBuf>,
+    staging: &mut FigureStaging,
 ) -> Vec<String> {
     let page_no = page.page;
     let mut warnings: Vec<String> = Vec::new();
@@ -177,13 +261,8 @@ fn collect_figures(
         let ext = figure_extension(figure.mime.as_deref());
         let relative = format!("{run_dir}/p{page_no}-f{index}.{ext}");
         let target = dir.join(&relative);
-        match write_figure(&target, &bytes) {
-            Ok(created_here) => {
-                figure.file = Some(relative);
-                if created_here {
-                    created.push(target);
-                }
-            }
+        match staging.stage((page_no, index), ext, target.clone(), &bytes) {
+            Ok(()) => figure.file = Some(relative),
             Err(err) => warnings.push(format!(
                 "figure export: page {page_no} figure {index}: {}: {err}",
                 target.display()
@@ -192,24 +271,6 @@ fn collect_figures(
     }
     page.warnings.extend(warnings.iter().cloned());
     warnings
-}
-
-/// Remove the figure files a cancelled run created, and the run's directories
-/// when that leaves them empty. Files that existed before the run stay.
-fn discard_exports(export: Option<(&Path, &str)>, created: &[PathBuf]) {
-    if created.is_empty() {
-        return;
-    }
-    for path in created {
-        let _ = fs::remove_file(path);
-    }
-    if let Some((dir, run_dir)) = export {
-        let run = dir.join(run_dir);
-        let _ = fs::remove_dir(&run); // fails, harmlessly, if anything is left
-        if let Some(hash_dir) = run.parent() {
-            let _ = fs::remove_dir(hash_dir);
-        }
-    }
 }
 
 /// Compile every lazily built regex of the text stages (and of the `LaTeX`
@@ -319,12 +380,12 @@ fn parse_while_hashing(
             hash_state = HashState::Done(hashed);
         }
         let export: Option<(&Path, &str)> = figures_dir.map(|dir| (dir, run_dir.as_str()));
-        let mut exported: Vec<PathBuf> = Vec::new();
+        let mut staging = FigureStaging::new(figures_dir);
         for page in first..=last {
             match session.page_text(page) {
                 Ok(mut text) => {
                     let figure_warnings =
-                        collect_figures(session.as_mut(), &mut text, export, &mut exported);
+                        collect_figures(session.as_mut(), &mut text, export, &mut staging);
                     warnings.extend(figure_warnings);
                     pages.push(text);
                 }
@@ -345,10 +406,10 @@ fn parse_while_hashing(
             })
             .is_break()
             {
-                discard_exports(export, &exported);
                 return Err(PipelineError::Cancelled);
             }
         }
+        staging.publish(&mut pages, &mut warnings);
         let info: BTreeMap<String, String> = session.info();
         Ok(Parsed {
             hashed: hash_state.finish(),
@@ -1000,56 +1061,83 @@ mod tests {
         assert!(result.pages[0].warnings.is_empty());
     }
 
+    /// The observer that stops a run at its first page.
+    fn stop_at_a_page(event: Progress) -> ControlFlow<()> {
+        match event {
+            Progress::Page { .. } => ControlFlow::Break(()),
+            Progress::Opened { .. } => ControlFlow::Continue(()),
+        }
+    }
+
     #[test]
-    fn a_cancelled_run_takes_back_the_figures_it_exported() {
+    fn a_cancelled_run_leaves_no_figures_and_no_directories() {
         let dir = tempfile::tempdir().unwrap();
         let input = fake_input(dir.path());
         let figures = dir.path().join("figures");
         let backend = FakeExtractor {
             reading_order: false,
         };
-        let result =
-            run_job_with_observed(&backend, &fake_job(&input, Some(&figures)), &mut |event| {
-                match event {
-                    Progress::Page { .. } => ControlFlow::Break(()),
-                    Progress::Opened { .. } => ControlFlow::Continue(()),
-                }
-            });
+        let result = run_job_with_observed(
+            &backend,
+            &fake_job(&input, Some(&figures)),
+            &mut stop_at_a_page,
+        );
         assert!(
             matches!(result, Err(PipelineError::Cancelled)),
             "{result:?}"
         );
-        let left: Vec<_> = walk(&figures);
+        let left: Vec<_> = std::fs::read_dir(&figures)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
         assert!(left.is_empty(), "nothing left behind: {left:?}");
 
-        // Files that were already there (an earlier complete run) stay.
+        // A file an earlier complete run filed is never touched by a
+        // cancelled one (it only ever writes to its own staging directory).
         run_job_with(&backend, &fake_job(&input, Some(&figures))).unwrap();
         let before = walk(&figures);
         assert_eq!(before.len(), 1, "{before:?}");
-        let again =
-            run_job_with_observed(&backend, &fake_job(&input, Some(&figures)), &mut |event| {
-                match event {
-                    Progress::Page { .. } => ControlFlow::Break(()),
-                    Progress::Opened { .. } => ControlFlow::Continue(()),
-                }
-            });
+        let again = run_job_with_observed(
+            &backend,
+            &fake_job(&input, Some(&figures)),
+            &mut stop_at_a_page,
+        );
         assert!(matches!(again, Err(PipelineError::Cancelled)));
         assert_eq!(walk(&figures), before, "the earlier run's export is kept");
     }
 
     #[test]
-    fn a_figure_file_is_owned_only_by_the_call_that_created_it() {
+    fn figures_are_filed_only_when_the_run_has_succeeded() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("hash/run/p1-f0.png");
+        let input = fake_input(dir.path());
+        let figures = dir.path().join("figures");
+        let backend = FakeExtractor {
+            reading_order: false,
+        };
+        let mut during = Vec::new();
+        let result =
+            run_job_with_observed(&backend, &fake_job(&input, Some(&figures)), &mut |event| {
+                if matches!(event, Progress::Page { .. }) {
+                    during = walk(&figures);
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(during.len(), 1, "the page's figure is staged: {during:?}");
         assert!(
-            super::write_figure(&target, b"one").unwrap(),
-            "created here"
+            during[0].to_string_lossy().contains(".staging-"),
+            "not under its final name yet: {during:?}"
         );
-        assert!(
-            !super::write_figure(&target, b"two").unwrap(),
-            "already there: overwritten, not owned"
+        let after = walk(&figures);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert!(!after[0].to_string_lossy().contains(".staging-"));
+        assert_eq!(
+            std::fs::read(&after[0]).unwrap(),
+            FIGURE_BYTES,
+            "filed with its bytes"
         );
-        assert_eq!(std::fs::read(&target).unwrap(), b"two");
+        assert!(result.pages[0].figures[0].file.is_some());
+        let entries = std::fs::read_dir(&figures).unwrap().count();
+        assert_eq!(entries, 1, "the staging directory is gone");
     }
 
     /// Every file under `root`, recursively (empty when `root` is absent).
