@@ -17,6 +17,11 @@
 //! - `latex_refs`: `.bbl`/`.bib`/`\cite` parsing into reference ground truth.
 //! - `eval`: reference matching, field accuracy, marker resolution, report.
 //!
+//! Command line (`tpe PATH...`, `tpe --bib`, `tpe update`):
+//! - `inputs`: path expansion (files and recursive directory walks).
+//! - `bibdb`: the query-friendly `SQLite` store of `tpe --bib --db`.
+//! - `update`: version string, self-update and the passive update check.
+//!
 //! Native backends (batch 3), each behind a Cargo feature so the default
 //! build stays pure Rust: `backend::pdfium_backend` (feature `pdfium`) and
 //! `backend::docling_backend` (feature `docling`, implies `pdfium`). Figure
@@ -35,10 +40,12 @@
 
 pub mod acquire;
 pub mod backend;
+pub mod bibdb;
 pub mod bibliography;
 pub mod citations;
 pub mod corpus;
 pub mod eval;
+pub mod inputs;
 pub mod latex_refs;
 pub mod ledger;
 pub mod metadata;
@@ -47,3 +54,4 @@ pub mod reading_order;
 pub mod regions;
 pub mod schema;
 pub mod text_cleanup;
+pub mod update;
