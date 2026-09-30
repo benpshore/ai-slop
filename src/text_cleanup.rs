@@ -1154,6 +1154,8 @@ impl LineGeom {
 struct PageGeom {
     lines: Vec<LineGeom>,
     by_baseline: Vec<(f32, usize)>,
+    window_limited: std::cell::Cell<bool>,
+    work_limited: std::cell::Cell<bool>,
     max_size: f32,
 }
 
@@ -1167,6 +1169,8 @@ impl PageGeom {
         let mut geom = Self {
             lines,
             by_baseline: Vec::new(),
+            window_limited: std::cell::Cell::new(false),
+            work_limited: std::cell::Cell::new(false),
             max_size: 0.0,
         };
         geom.index();
@@ -1221,7 +1225,11 @@ impl PageGeom {
         let end =
             start + self.by_baseline[start..].partition_point(|(baseline, _)| *baseline <= high);
         let inspected = (end - start).min(SUPERSCRIPT_SCAN_LIMIT);
+        if end - start > inspected {
+            self.window_limited.set(true);
+        }
         if inspected > *work_left {
+            self.work_limited.set(true);
             *work_left = 0;
             return false;
         }
@@ -1438,6 +1446,7 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
             continue;
         }
         let superscript = if work_left == 0 {
+            geom.work_limited.set(true);
             None
         } else {
             superscript_target(page, w, &geom, k, &mut window, &mut work_left)
@@ -1453,6 +1462,7 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
                 .map_or(0, |line| line.text.len().saturating_add(line.spans.len()))
         });
         if target.is_some() && cost > work_left {
+            geom.work_limited.set(true);
             work_left = 0;
             previous_body = Some(k);
             continue;
@@ -1470,6 +1480,20 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
             merged += 1;
         } else {
             previous_body = Some(k);
+        }
+    }
+    for (limited, message) in [
+        (
+            geom.window_limited.get(),
+            "resource_limit: superscript candidate window truncated (limit=256)",
+        ),
+        (
+            geom.work_limited.get(),
+            "resource_limit: script cleanup budget exhausted; fragments kept separate",
+        ),
+    ] {
+        if limited && !page.warnings.iter().any(|w| w == message) {
+            page.warnings.push(message.to_string());
         }
     }
     (merged, superscripts)
@@ -4685,6 +4709,12 @@ mod tests {
 
         let report = clean_document(&mut pages);
 
+        assert!(
+            pages[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("script cleanup budget exhausted"))
+        );
         let merged = report.scripts_merged + report.superscripts_merged;
         assert!(merged > 0);
         assert!(merged < fragments as usize);
@@ -4940,6 +4970,7 @@ mod tests {
             superscript_target(&page, &w, &geom, 0, &mut window, &mut work_left),
             None
         );
+        assert!(geom.window_limited.get());
         assert_eq!(window.len(), SUPERSCRIPT_SCAN_LIMIT - 1);
         assert_eq!(work_left, usize::MAX - SUPERSCRIPT_SCAN_LIMIT);
     }
