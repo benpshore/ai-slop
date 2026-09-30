@@ -1,0 +1,302 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PDFTextract local API",
+    "version": "v1",
+    "description": "Loopback-only HTTP API over the PDFTextract job model (docs/API.md). Every request must carry Host 127.0.0.1:<port>, [::1]:<port> or localhost:<port>; a browser Origin other than the server's own is refused; every endpoint except /v1/health needs Authorization: Bearer <token>. Every non-2xx response has the Error shape."
+  },
+  "servers": [{ "url": "http://127.0.0.1:47470" }],
+  "security": [{ "bearer": [] }],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "operationId": "health",
+        "security": [],
+        "summary": "Liveness; needs no token and says nothing else.",
+        "responses": {
+          "200": { "description": "Up.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } } }
+        }
+      }
+    },
+    "/v1/version": {
+      "get": {
+        "operationId": "version",
+        "summary": "API and server version, this run's instance id, and the actions offered.",
+        "responses": {
+          "200": { "description": "Version.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Version" } } } },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "summary": "This document.",
+        "responses": {
+          "200": { "description": "The OpenAPI document.", "content": { "application/json": {} } },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "get": {
+        "operationId": "listJobs",
+        "summary": "Every job in arrival order. Jobs stay until deleted.",
+        "responses": {
+          "200": { "description": "Jobs.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobList" } } } },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "createJobs",
+        "summary": "Queue one job per PDF, all or none. Jobs run one at a time, oldest first.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "1 to 128 visible ASCII characters. Repeating a batch with the same key returns the jobs it made (200) instead of queueing them again, for as long as any of them exists.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateJobs" } } }
+        },
+        "responses": {
+          "201": { "description": "Queued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobList" } } } },
+          "200": { "description": "A repeat of an earlier batch (same Idempotency-Key); nothing new was queued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobList" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "415": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/JobId" }],
+      "get": {
+        "operationId": "getJob",
+        "summary": "One job.",
+        "responses": {
+          "200": { "description": "The job.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteJob",
+        "summary": "Forget a queued or finished job (its output files stay on disk). A running job must be cancelled first (409 job_running).",
+        "responses": {
+          "204": { "description": "Deleted." },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/jobs/{id}/cancel": {
+      "parameters": [{ "$ref": "#/components/parameters/JobId" }],
+      "post": {
+        "operationId": "cancelJob",
+        "summary": "Stop a job. A queued job is cancelled at once; a running one stops at its next page and writes nothing. Refused (409 cancel_too_late) once the job has started writing its results, and (409 already_finished) for a finished or failed job. Cancelling a cancelled job is accepted again. No request body.",
+        "responses": {
+          "200": { "description": "Accepted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CancelResult" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/jobs/{id}/events": {
+      "parameters": [{ "$ref": "#/components/parameters/JobId" }],
+      "get": {
+        "operationId": "jobEvents",
+        "summary": "The job's state as Server-Sent Events: `event: job`, `id: <seq>`, `data: <Job>`. Coalesced: each event is the job's current state. The stream ends after the final state; `event: removed` if the job is deleted. Comment lines keep an idle stream alive.",
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "Resume after this event id (a Job's seq).",
+            "schema": { "type": "string", "pattern": "^[0-9]+$" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "The event stream.", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
+          "204": { "description": "The client already has the job's final state (tells EventSource to stop)." },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/jobs/{id}/output/{n}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/JobId" },
+        { "name": "n", "in": "path", "required": true, "description": "Index into the job's outputs.", "schema": { "type": "integer", "minimum": 0 } }
+      ],
+      "get": {
+        "operationId": "jobOutput",
+        "summary": "A file the job wrote, as it wrote it: text/plain for .txt, application/json for .references.json (the engine's bibliography Record, as `tpe bibliography` prints it). Served only while the name still refers to the file the job wrote.",
+        "responses": {
+          "200": { "description": "The file.", "content": { "text/plain": { "schema": { "type": "string" } }, "application/json": {} } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "410": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": { "type": "http", "scheme": "bearer", "description": "The token in the state directory's api-token file (tpe-serve --print-token)." }
+    },
+    "parameters": {
+      "JobId": { "name": "id", "in": "path", "required": true, "description": "<instance>-<n>, as returned when the job was queued.", "schema": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9]+$" } }
+    },
+    "responses": {
+      "Error": { "description": "An error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "required": ["ok"],
+        "additionalProperties": false,
+        "properties": { "ok": { "const": true } }
+      },
+      "Version": {
+        "type": "object",
+        "required": ["api", "name", "version", "instance", "actions"],
+        "additionalProperties": false,
+        "properties": {
+          "api": { "const": "v1" },
+          "name": { "const": "tpe-serve" },
+          "version": { "type": "string" },
+          "instance": { "type": "string", "description": "Random per server run; prefixes every job id." },
+          "actions": { "type": "array", "items": { "enum": ["text", "bibliography"] } }
+        }
+      },
+      "CreateJobs": {
+        "type": "object",
+        "required": ["action", "paths"],
+        "additionalProperties": false,
+        "properties": {
+          "action": { "enum": ["text", "bibliography"] },
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "description": "Absolute paths of existing regular files ending in .pdf; no . or .. segments. Symbolic links are resolved and must also end on a .pdf file.",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "required": ["jobs"],
+        "additionalProperties": false,
+        "properties": { "jobs": { "type": "array", "items": { "$ref": "#/components/schemas/Job" } } }
+      },
+      "Job": {
+        "type": "object",
+        "required": ["id", "action", "path", "state", "done", "total", "progress", "summary", "warnings", "error", "outputs", "seq"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "action": { "enum": ["text", "bibliography"] },
+          "path": { "type": "string", "description": "The path as sent." },
+          "state": { "enum": ["queued", "running", "cancelling", "finished", "failed", "cancelled"] },
+          "done": { "type": "integer", "minimum": 0, "description": "Pages processed so far." },
+          "total": { "type": ["integer", "null"], "description": "Pages this run covers, once the PDF is open." },
+          "progress": {
+            "description": "The engine's last progress event: reading (bytes of the PDF read so far, before it opens), then opened and page, the last two as tpe extract --progress prints them (without the path).",
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": ["event", "done", "total"],
+                "additionalProperties": false,
+                "properties": { "event": { "const": "reading" }, "done": { "type": "integer", "description": "Bytes read so far." }, "total": { "type": "integer", "description": "Bytes in the file." } }
+              },
+              {
+                "type": "object",
+                "required": ["event", "pages", "total"],
+                "additionalProperties": false,
+                "properties": { "event": { "const": "opened" }, "pages": { "type": "integer" }, "total": { "type": "integer" } }
+              },
+              {
+                "type": "object",
+                "required": ["event", "page", "done", "total"],
+                "additionalProperties": false,
+                "properties": { "event": { "const": "page" }, "page": { "type": "integer" }, "done": { "type": "integer" }, "total": { "type": "integer" } }
+              }
+            ]
+          },
+          "summary": { "type": ["string", "null"], "description": "One line for a finished job, as the app shows it." },
+          "warnings": { "type": "array", "items": { "type": "string" } },
+          "error": { "type": ["string", "null"], "description": "Why a failed job failed." },
+          "outputs": { "type": "array", "items": { "$ref": "#/components/schemas/Output" } },
+          "seq": { "type": "integer", "description": "Sequence number of the job's latest change; the SSE event id." }
+        }
+      },
+      "Output": {
+        "type": "object",
+        "required": ["index", "name", "path", "url"],
+        "additionalProperties": false,
+        "properties": {
+          "index": { "type": "integer" },
+          "name": { "type": "string" },
+          "path": { "type": "string", "description": "Where the job wrote it: next to the PDF (the resolved PDF, if a link was sent)." },
+          "url": { "type": "string" }
+        }
+      },
+      "CancelResult": {
+        "type": "object",
+        "required": ["accepted", "job"],
+        "additionalProperties": false,
+        "properties": { "accepted": { "const": true }, "job": { "$ref": "#/components/schemas/Job" } }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "details"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "bad_host", "bad_origin", "unauthorized", "no_route", "method_not_allowed", "not_found",
+                  "malformed_json", "invalid_request", "invalid_path", "idempotency_key_reused",
+                  "unsupported_media_type", "payload_too_large", "request_timeout", "job_limit",
+                  "job_running", "cancel_too_late", "already_finished", "not_finished", "output_changed",
+                  "shutting_down", "internal"
+                ]
+              },
+              "message": { "type": "string" },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["index", "reason"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "index": { "type": "integer" },
+                    "reason": { "enum": ["invalid", "not_absolute", "dot_segment", "not_found", "not_a_file", "not_pdf", "unreadable"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
