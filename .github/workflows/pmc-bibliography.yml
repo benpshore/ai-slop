@@ -1,0 +1,148 @@
+name: PMC bibliography
+
+# Measures `tpe bibliography` (backward scan) and the forward `tpe extract`
+# reference path against publisher reference lists from the PubMed Central
+# Open Access dataset (docs/PMC_EVAL.md). Diagnostic only: it is not part of
+# the required `ci` check, needs the network, and never uploads the PDFs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: Draw a fresh sample and print the manifest in the log (instead of corpus/pmc-manifest.json)
+        type: boolean
+        default: false
+      seed:
+        description: Sampling seed (sample=true only)
+        type: string
+        default: "20260930"
+      target:
+        description: Number of articles to sample (sample=true only)
+        type: string
+        default: "200"
+  pull_request:
+    paths:
+      - src/bibliography.rs
+      - src/citations.rs
+      - src/reading_order.rs
+      - src/text_cleanup.rs
+      - src/regions.rs
+      - src/backend/lopdf_backend.rs
+      - scripts/pmc_*.py
+      - corpus/pmc-manifest.json
+      - .github/workflows/pmc-bibliography.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pmc:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      SAMPLE: ${{ inputs.sample == true && 'true' || 'false' }}
+      SEED: ${{ inputs.seed || '20260930' }}
+      TARGET: ${{ inputs.target || '200' }}
+      CACHE_DIR: .corpus-cache/pmc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustc --version --verbose && uname -m && python3 --version
+      - name: Choose the manifest (sample=true or a missing pinned manifest draws a fresh sample)
+        run: |
+          if [ "$SAMPLE" = true ] || [ ! -f corpus/pmc-manifest.json ]; then
+            mkdir -p out/report
+            python3 scripts/pmc_sample.py --seed "$SEED" --target "$TARGET" --out out/report/pmc-manifest.json
+            echo "SAMPLE=true" >> "$GITHUB_ENV"
+            echo "MANIFEST=out/report/pmc-manifest.json" >> "$GITHUB_ENV"
+            echo "===== BEGIN PMC MANIFEST ====="
+            cat out/report/pmc-manifest.json
+            echo "===== END PMC MANIFEST ====="
+          else
+            echo "MANIFEST=corpus/pmc-manifest.json" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: cargo
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-release-ubuntu-24.04-arm-
+      - run: cargo build --release
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.cargo.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock') }}
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: corpus
+        with:
+          path: .corpus-cache/pmc
+          key: pmc-corpus-${{ env.SAMPLE == 'true' && github.run_id || hashFiles('corpus/pmc-manifest.json') }}
+          restore-keys: pmc-corpus-
+      - name: Fetch the pinned PDFs and JATS XML (cached files are verified and reused)
+        run: python3 scripts/pmc_sample.py --fetch --manifest "$MANIFEST" --cache "$CACHE_DIR"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.corpus.outputs.cache-hit != 'true'
+        with:
+          path: .corpus-cache/pmc
+          key: pmc-corpus-${{ env.SAMPLE == 'true' && github.run_id || hashFiles('corpus/pmc-manifest.json') }}
+      - name: Backward scan (tpe bibliography, 4 parallel batches)
+        run: |
+          mkdir -p out/report
+          python3 scripts/pmc_sample.py --list --manifest "$MANIFEST" --cache "$CACHE_DIR" > out/pdfs.txt
+          total=$(wc -l < out/pdfs.txt)
+          per_batch=$(( (total + 3) / 4 ))
+          split -d -l "$per_batch" out/pdfs.txt out/batch-
+          start=$(date +%s.%N)
+          for batch in out/batch-??; do
+            ( xargs -a "$batch" ./target/release/tpe bibliography > "$batch.jsonl" || true ) &
+          done
+          wait
+          end=$(date +%s.%N)
+          awk -v s="$start" -v e="$end" 'BEGIN { printf "%.3f\n", e - s }' > out/bib_wall_s
+          cat out/batch-??.jsonl > out/bibliography.jsonl
+          echo "backward scan: $(wc -l < out/bibliography.jsonl) records in $(cat out/bib_wall_s) s"
+      - name: Forward full-document path (tpe extract --json, 4 workers)
+        run: |
+          start=$(date +%s.%N)
+          xargs -a out/pdfs.txt ./target/release/tpe extract --db out/ledger.db --json -j 4 > out/extract.jsonl || true
+          end=$(date +%s.%N)
+          awk -v s="$start" -v e="$end" 'BEGIN { printf "%.3f\n", e - s }' > out/extract_wall_s
+          echo "forward path: $(wc -l < out/extract.jsonl) records in $(cat out/extract_wall_s) s"
+      - name: Score against the JATS reference lists
+        run: |
+          python3 scripts/pmc_bib_eval.py \
+            --manifest "$MANIFEST" --cache "$CACHE_DIR" \
+            --bibliography out/bibliography.jsonl --extract out/extract.jsonl \
+            --bibliography-wall-s "$(cat out/bib_wall_s)" --extract-wall-s "$(cat out/extract_wall_s)" \
+            --out out/report
+      - name: Print the report and the failures in the log (no artifact download needed)
+        if: always()
+        run: |
+          for f in out/report/report.md out/report/failures.md; do
+            if [ -f "$f" ]; then echo "===== BEGIN $f ====="; cat "$f"; echo "===== END $f ====="; fi
+          done
+      - name: Publish the report in the job summary
+        if: always()
+        run: test -f out/report/report.md && cat out/report/report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: pmc-bibliography-report
+          path: |
+            out/report
+            out/bibliography.jsonl
+          if-no-files-found: ignore
