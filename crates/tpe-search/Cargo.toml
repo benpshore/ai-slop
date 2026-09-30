@@ -2,7 +2,7 @@
 name = "tpe-search"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Lexical (SQLite FTS5) and semantic (embedding) search over text-processing-engine ledgers"
 
 [[bin]]

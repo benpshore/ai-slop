@@ -207,4 +207,4 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build
 
 `main` is protected: open a PR; the `ci` check must pass before merging (squash only). Never force-push `main`.
 
-Inherited merge-release automation currently publishes Python artifacts; it is not the intended ARM Rust distribution pipeline. Align packaging, tag-derived versions, and native CI in a focused implementation PR before declaring the engine releasable. The scaffold's MIT license does not replace native-library or model licenses.
+Inherited merge-release automation currently publishes Python artifacts; it is not the intended ARM Rust distribution pipeline. Align packaging, tag-derived versions, and native CI in a focused implementation PR before declaring the engine releasable. The software is proprietary (see LICENSE); native-library and model licenses still apply to their components.

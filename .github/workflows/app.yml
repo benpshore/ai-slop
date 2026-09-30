@@ -11,11 +11,11 @@ name: App
 
 on:
   workflow_dispatch:
+  # On pull requests only for app changes; a workspace dependency bump is
+  # checked on main after merge rather than on every PR (macOS runners queue).
   pull_request:
     paths:
       - crates/tpe-app/**
-      - Cargo.toml
-      - Cargo.lock
       - .github/workflows/app.yml
   push:
     branches: [main]

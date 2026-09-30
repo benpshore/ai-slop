@@ -2,7 +2,7 @@
 name = "tpe-app"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "PDFTextract: the GPUI app over the engine (get text or bibliography per PDF), plus the workbench library modules"
 
 [lib]
