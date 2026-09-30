@@ -1595,27 +1595,78 @@ fn resume_index(
     style: Style,
     expected: Option<u32>,
 ) -> Option<usize> {
+    if matches!(style, Style::AuthorYear | Style::Detached) {
+        return resume_author_year(lines, cut);
+    }
     if !matches!(style, Style::Bracket | Style::Dot | Style::Paren) {
         return None;
     }
     let expected = expected?;
-    let is_heading = |line: &SectionLine| {
-        line.text.chars().count() <= 80 && end_heading_re().is_match(&line.text)
-    };
-    if is_heading(lines.get(cut)?) {
+    // An appendix is a new section: its numbered items never continue the
+    // list. A back-matter heading at the cut (`Conflict of interest`,
+    // `Supplementary material`, `Funding`) is how a two-column page reads:
+    // the band above the list comes after the first column of entries, and
+    // the list resumes at its next label, provided that entry carries
+    // reference evidence (a year, a venue) within its first lines. A smaller
+    // label first (a table or appendix numbering its own items) ends it.
+    if appendix_heading_re().is_match(&lines.get(cut)?.text) {
         return None;
     }
-    for (k, line) in lines.iter().enumerate().skip(cut + 1) {
-        if is_heading(line) {
-            return None;
-        }
+    for (k, line) in lines.iter().enumerate().skip(cut + 1).take(RESUME_REACH) {
         if let Some((number, _)) = numbered_label(style, &line.text) {
             if number == expected {
-                return Some(k);
+                let head: String = lines[k..lines.len().min(k + 6)]
+                    .iter()
+                    .map(|l| l.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return has_reference_evidence(&head).then_some(k);
             }
             if number < expected {
                 return None;
             }
+        }
+    }
+    None
+}
+
+/// `Appendix A`, `Appendices`, `Supplementary Appendix`: a section heading
+/// after which a numbered list never resumes.
+fn appendix_heading_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*(?:(?:\d+|[A-Z]|[IVX]+)[.:]?\s+)?(?:supplementary\s+|online\s+)?appendi(?:x|ces)\b")
+            .expect("valid regex")
+    })
+}
+
+/// Fewest consecutive author-year entry starts that mark a resumed list.
+const RESUME_RUN: usize = 2;
+/// Lines searched after an interrupting heading for the resumed list.
+const RESUME_REACH: usize = 60;
+
+/// Where an author-year list cut at `lines[cut]` resumes. In a two-column
+/// page the band above the list (author contributions, funding,
+/// acknowledgments) is read after the first column of entries, so the list
+/// is "ended" by a heading and then continues. The list resumes at the
+/// first run of [`RESUME_RUN`] consecutive lines that open like entries
+/// ([`is_author_year_start`]) within [`RESUME_REACH`] lines; `None` when
+/// no such run follows.
+fn resume_author_year(lines: &[SectionLine], cut: usize) -> Option<usize> {
+    let mut run_start: Option<usize> = None;
+    let mut run = 0usize;
+    for (k, line) in lines.iter().enumerate().skip(cut + 1).take(RESUME_REACH) {
+        if is_author_year_start(&line.text) {
+            if run == 0 {
+                run_start = Some(k);
+            }
+            run += 1;
+            if run >= RESUME_RUN {
+                return run_start;
+            }
+        } else {
+            run = 0;
+            run_start = None;
         }
     }
     None
@@ -1680,14 +1731,9 @@ fn segment_by_label_rows(
             used[k] = true;
             matched += 1;
             let number = rows[k].number;
-            push_entry(
-                &mut entries,
-                Some(format!("[{number}]")),
-                &line.text,
-                line.page,
-            );
+            push_entry(&mut entries, Some(format!("[{number}]")), line);
         } else if entries.is_empty() {
-            push_entry(&mut entries, None, &line.text, line.page);
+            push_entry(&mut entries, None, line);
         } else {
             append_continuation(&mut entries, &line.text, context);
         }
@@ -1789,13 +1835,29 @@ pub fn segment_entries(pages: &[PageText], section: &ReferenceSection) -> Vec<Re
     segment_list(pages, section, stop)
 }
 
-fn push_entry(entries: &mut Vec<ReferenceEntry>, label: Option<String>, text: &str, page: u32) {
+/// The first line's left edge, baseline and size as an anchor box, for
+/// attaching link annotations to the entry.
+fn anchor_of(line: &SectionLine) -> Option<BBox> {
+    let (Some(x0), Some(y0)) = (line.x0, line.y0) else {
+        return None;
+    };
+    let size = line.size.unwrap_or(10.0);
+    Some(BBox {
+        x0,
+        y0,
+        x1: x0,
+        y1: y0 + size,
+    })
+}
+
+fn push_entry(entries: &mut Vec<ReferenceEntry>, label: Option<String>, line: &SectionLine) {
     let index = u32::try_from(entries.len() + 1).unwrap_or(u32::MAX);
     entries.push(ReferenceEntry {
         index,
         label,
-        raw: text.to_string(),
-        page,
+        raw: line.text.clone(),
+        page: line.page,
+        anchor: anchor_of(line),
         ..ReferenceEntry::default()
     });
 }
@@ -1995,7 +2057,7 @@ fn segment_numbered(lines: &[SectionLine], style: Style, context: &str) -> Vec<R
     let mut expected: Option<u32> = None;
     for line in lines {
         if let Some((number, label)) = entry_label(style, &line.text, expected) {
-            push_entry(&mut entries, Some(label), &line.text, line.page);
+            push_entry(&mut entries, Some(label), line);
             expected = Some(number + 1);
             continue;
         }
@@ -2327,7 +2389,7 @@ fn segment_author_year(lines: &[SectionLine], context: &str) -> Vec<ReferenceEnt
                 }
             };
         if starts {
-            push_entry(&mut entries, None, &line.text, line.page);
+            push_entry(&mut entries, None, line);
         } else {
             append_continuation(&mut entries, &line.text, context);
         }
