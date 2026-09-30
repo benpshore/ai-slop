@@ -8,7 +8,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{AnyWindowHandle, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    AnyWindowHandle, Entity, Keystroke, Pixels, TestAppContext, VisualTestContext, px, size,
+};
 
 use super::*;
 
@@ -619,6 +621,147 @@ fn a_bad_file_fails_its_row_and_the_queue_moves_on(cx: &mut TestAppContext) {
     );
 }
 
+/// One key, without stepping the executor: unlike `keys`, a job that is
+/// running stays running (the test executor only advances when parked).
+fn key_now(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
+    cx.dispatch_keystroke(window, Keystroke::parse(key).unwrap());
+}
+
+/// The window with two queued files, the first running, and the list focused
+/// with the running row selected, all without giving the engine a turn.
+fn running_and_queued(cx: &mut TestAppContext) -> (Fixture, Entity<Shell>, AnyWindowHandle) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    shell.update(cx, |shell, cx| {
+        shell.enqueue(copies(&fixture, 2), Action::Text, cx);
+    });
+    let phases = row_phase(&shell, cx);
+    assert_eq!(phases, [Phase::Running, Phase::Queued]);
+    key_now(cx, window, "tab");
+    key_now(cx, window, "tab");
+    assert_eq!(selected(&shell, cx), ids(&shell, cx).first().copied());
+    (fixture, shell, window)
+}
+
+/// After the stop: the first row ended cancelled with nothing written for
+/// it, and the queue moved on to the second.
+fn assert_first_cancelled_second_finished(
+    fixture: &Fixture,
+    shell: &Entity<Shell>,
+    cx: &TestAppContext,
+) {
+    let phases = row_phase(shell, cx);
+    assert!(
+        matches!(phases.as_slice(), [Phase::Cancelled, Phase::Finished(_)]),
+        "{phases:?}"
+    );
+    assert!(
+        !fixture.dir.path().join("p0.txt").exists(),
+        "nothing for the cancelled job"
+    );
+    assert!(
+        fixture.dir.path().join("p1.txt").exists(),
+        "the next job ran"
+    );
+}
+
+#[gpui::test]
+fn escape_stops_the_running_job_and_the_queue_moves_on(cx: &mut TestAppContext) {
+    let (fixture, shell, window) = running_and_queued(cx);
+    key_now(cx, window, "escape");
+    let (phase, cancelling) = shell.read_with(cx, |shell, _| {
+        let row = &shell.jobs.rows()[0];
+        (row.phase.clone(), row.cancelling)
+    });
+    assert_eq!(
+        (phase, cancelling),
+        (Phase::Running, true),
+        "a stop is pending, shown at once"
+    );
+    cx.run_until_parked();
+    assert_first_cancelled_second_finished(&fixture, &shell, cx);
+}
+
+#[gpui::test]
+fn delete_on_a_running_row_stops_it_too(cx: &mut TestAppContext) {
+    let (fixture, shell, window) = running_and_queued(cx);
+    key_now(cx, window, "backspace");
+    cx.run_until_parked();
+    assert_first_cancelled_second_finished(&fixture, &shell, cx);
+}
+
+#[gpui::test]
+fn the_running_row_offers_cancel_and_shows_a_pending_stop(cx: &mut TestAppContext) {
+    // A simulated click steps the executor between mouse-down and mouse-up,
+    // which would finish the job first; so the button's presence is checked
+    // and its handler (`Shell::cancel`) is called directly.
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    shell.update(cx, |shell, cx| {
+        shell.enqueue(copies(&fixture, 2), Action::Text, cx);
+    });
+    assert!(
+        bounds_of(cx, window, &shell, "cancel-1").is_some(),
+        "the running row has a Cancel button"
+    );
+    assert!(
+        bounds_of(cx, window, &shell, "cancel-2").is_none(),
+        "a queued row has Remove, not Cancel"
+    );
+    shell.update(cx, |shell, cx| shell.cancel(1, cx));
+    let status = shell.read_with(cx, |shell, _| shell.jobs.rows()[0].status_line());
+    assert_eq!(
+        status, "text · Cancelling",
+        "a stop is pending, shown at once"
+    );
+    cx.run_until_parked();
+    assert_first_cancelled_second_finished(&fixture, &shell, cx);
+}
+
+#[gpui::test]
+fn escape_leaves_queued_and_finished_rows_alone(cx: &mut TestAppContext) {
+    let (_fixture, shell, window) = running_and_queued(cx);
+    key_now(cx, window, "down");
+    key_now(cx, window, "escape");
+    assert_eq!(
+        row_phase(&shell, cx),
+        [Phase::Running, Phase::Queued],
+        "a queued row is not touched"
+    );
+    cx.run_until_parked();
+    let phases = row_phase(&shell, cx);
+    assert!(
+        phases
+            .iter()
+            .all(|phase| matches!(phase, Phase::Finished(_))),
+        "{phases:?}"
+    );
+    keys(cx, window, "escape");
+    assert_eq!(
+        row_phase(&shell, cx),
+        phases,
+        "a finished row is not touched"
+    );
+}
+
+#[gpui::test]
+fn a_cancelled_row_can_be_shown_in_finder_and_cleared(cx: &mut TestAppContext) {
+    let (fixture, shell, window) = running_and_queued(cx);
+    key_now(cx, window, "escape");
+    cx.run_until_parked();
+    keys(cx, window, "enter");
+    assert_eq!(
+        *fixture.log.reveals.borrow(),
+        [fixture.dir.path().join("p0.pdf")],
+        "the source is shown"
+    );
+    keys(cx, window, "tab enter");
+    assert!(
+        row_phase(&shell, cx).is_empty(),
+        "Clear finished removed the cancelled row too"
+    );
+}
+
 /// Rows added without starting the engine: the first `done` are failed
 /// (finished), the rest queued.
 fn finished_then_queued(
@@ -632,7 +775,9 @@ fn finished_then_queued(
     shell.update(cx, |shell, _| {
         for &id in &all[..done] {
             shell.jobs.start(id);
-            shell.jobs.finish(id, Err("failed".into()));
+            shell
+                .jobs
+                .finish(id, Err(jobs::RunError::Failed("failed".into())));
         }
     });
     all

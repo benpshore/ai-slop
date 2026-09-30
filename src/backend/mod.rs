@@ -33,6 +33,9 @@ pub enum BackendError {
     Unsupported(String),
     #[error("limit exceeded: {0}")]
     Limit(String),
+    /// The caller's observer asked the run to stop (`ControlFlow::Break`).
+    #[error("cancelled")]
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

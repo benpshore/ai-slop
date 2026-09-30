@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::ops::ControlFlow;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -300,7 +301,7 @@ fn elapsed_ms(start: Instant) -> f64 {
 /// this run will process); `page` carries the finished `page`, `done` and
 /// `total`. Each line is written with one locked `stderr` write, so worker
 /// threads never interleave within a line.
-fn progress_line(path: &str, event: Progress) -> String {
+fn progress_line(path: &str, event: Progress) -> Option<String> {
     let value = match event {
         Progress::Opened { pages, total } => serde_json::json!({
             "event": "opened", "path": path, "pages": pages, "total": total,
@@ -308,13 +309,17 @@ fn progress_line(path: &str, event: Progress) -> String {
         Progress::Page { page, done, total } => serde_json::json!({
             "event": "page", "path": path, "page": page, "done": done, "total": total,
         }),
+        // Not part of the `--progress` stream (its lines are unchanged).
+        Progress::Reading { .. } => return None,
     };
-    value.to_string()
+    Some(value.to_string())
 }
 
 /// Print a `--progress` line to stderr.
 fn report_progress(path: &str, event: Progress) {
-    eprintln!("{}", progress_line(path, event));
+    if let Some(line) = progress_line(path, event) {
+        eprintln!("{line}");
+    }
 }
 
 /// Open the ledger at `db`, naming the path in any error.
@@ -409,6 +414,7 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         if args.progress {
             report_progress(&job.path, event);
         }
+        ControlFlow::Continue(())
     };
     // A panic inside a backend must fail this file only, not the whole batch.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -483,6 +489,7 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
             if args.progress {
                 report_progress(&file, event);
             }
+            ControlFlow::Continue(())
         };
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;

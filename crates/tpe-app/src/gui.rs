@@ -34,6 +34,7 @@ use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, StreamExt};
@@ -45,7 +46,7 @@ use gpui::{
 };
 
 use tpe::pipeline::Progress;
-use tpe_app::jobs::{self, Action, JobList, JobRow, Mailbox, Phase, Step};
+use tpe_app::jobs::{self, Action, CancelToken, JobList, JobRow, Mailbox, Phase, Step};
 
 actions!(
     pdftextract,
@@ -63,7 +64,8 @@ actions!(
         SelectLast,
         CopyText,
         RevealSelected,
-        RemoveSelected
+        RemoveSelected,
+        CancelSelected
     ]
 );
 
@@ -150,6 +152,8 @@ pub struct Shell {
     scroll: UniformListScrollHandle,
     /// The selected row's id.
     selected: Option<usize>,
+    /// The running job and the flag that stops it.
+    running: Option<(usize, Arc<CancelToken>)>,
 }
 
 impl Shell {
@@ -189,6 +193,7 @@ impl Shell {
             clear_focus,
             scroll: UniformListScrollHandle::new(),
             selected: None,
+            running: None,
         }
     }
 
@@ -241,11 +246,19 @@ impl Shell {
         self.jobs.start(id);
         cx.notify();
 
+        let cancel = Arc::new(CancelToken::new());
+        self.running = Some((id, cancel.clone()));
         let (sender, mut receiver) = mpsc::unbounded::<Progress>();
         let task = cx.background_executor().spawn(async move {
-            jobs::run(action, &source, &ledger, &mut |event| {
-                let _ = sender.unbounded_send(event);
-            })
+            jobs::run(
+                action,
+                &source,
+                &ledger,
+                &mut |event| {
+                    let _ = sender.unbounded_send(event);
+                },
+                &cancel,
+            )
         });
         // Progress: keep only the newest event waiting at each frame.
         cx.spawn(async move |this, cx| {
@@ -267,6 +280,7 @@ impl Shell {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.jobs.finish(id, result);
+                this.running = None;
                 cx.notify();
                 this.pump(cx);
                 this.quit_if_idle(cx);
@@ -298,6 +312,18 @@ impl Shell {
             if self.selected == Some(id) {
                 self.selected = index.and_then(|index| self.jobs.nearest_to(index));
             }
+            cx.notify();
+        }
+    }
+
+    /// Stop running job `id` at its next page. Nothing is written for it. A
+    /// job that has already begun writing its results is not stopped: the
+    /// request is refused and the row stays as it is until it finishes.
+    fn cancel(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some((running, token)) = &self.running else {
+            return;
+        };
+        if *running == id && token.request() && self.jobs.mark_cancelling(id) {
             cx.notify();
         }
     }
@@ -413,12 +439,22 @@ impl Shell {
         }
     }
 
-    /// Delete on the selected row: a queued row leaves the list; a finished
-    /// one stays (Clear finished removes those), so a stray key cannot lose
-    /// a result.
+    /// Delete on the selected row: a queued row leaves the list and a running
+    /// one is stopped; a finished, failed or cancelled one stays (Clear
+    /// finished removes those), so a stray key cannot lose a result.
     fn on_remove_selected(&mut self, _: &RemoveSelected, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else { return };
+        match self.jobs.row(id).map(|row| &row.phase) {
+            Some(Phase::Queued) => self.remove(id, cx),
+            Some(Phase::Running) => self.cancel(id, cx),
+            _ => {}
+        }
+    }
+
+    /// Escape on the selected row: stop it if it is running (never removes).
+    fn on_cancel_selected(&mut self, _: &CancelSelected, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.selected {
-            self.remove(id, cx);
+            self.cancel(id, cx);
         }
     }
 
@@ -517,20 +553,10 @@ impl Shell {
             )
     }
 
-    /// One row: name, a bar slot (drawn only while running, but always
-    /// reserved), and a two-line status; the buttons are for the pointer,
-    /// the same actions are on keys for the selected row.
-    fn render_row(
-        row: &JobRow,
-        selected: bool,
-        list_focused: bool,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    /// The pointer buttons of one row, by phase; the same actions are on keys
+    /// for the selected row.
+    fn row_buttons(row: &JobRow, cx: &mut Context<Self>) -> Div {
         let id = row.id;
-        let status_color = match row.phase {
-            Phase::Failed(_) => FAILED,
-            _ => MUTED,
-        };
         let mut buttons = div().flex().gap_2().flex_shrink_0();
         match row.phase {
             Phase::Queued => {
@@ -540,7 +566,21 @@ impl Shell {
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.remove(id, cx)),
                 ));
             }
+            Phase::Running if !row.cancelling => {
+                buttons = buttons.child(small_button(
+                    ("cancel", id),
+                    "Cancel",
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.cancel(id, cx)),
+                ));
+            }
             Phase::Running => {}
+            Phase::Cancelled => {
+                buttons = buttons.child(small_button(
+                    ("reveal", id),
+                    "Show in Finder",
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.reveal(id, cx)),
+                ));
+            }
             Phase::Finished(_) | Phase::Failed(_) => {
                 if row.copyable().is_some() {
                     buttons = buttons.child(small_button(
@@ -556,6 +596,24 @@ impl Shell {
                 ));
             }
         }
+        buttons
+    }
+
+    /// One row: name, a bar slot (drawn only while running, but always
+    /// reserved), and a two-line status; the buttons are for the pointer,
+    /// the same actions are on keys for the selected row.
+    fn render_row(
+        row: &JobRow,
+        selected: bool,
+        list_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = row.id;
+        let status_color = match row.phase {
+            Phase::Failed(_) => FAILED,
+            _ => MUTED,
+        };
+        let buttons = Self::row_buttons(row, cx);
         let mut bar = div().w_full().h(px(6.0)).rounded_md();
         if row.phase == Phase::Running {
             bar = bar.bg(rgb(TRACK)).child(
@@ -670,6 +728,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_copy_text))
             .on_action(cx.listener(Self::on_reveal_selected))
             .on_action(cx.listener(Self::on_remove_selected))
+            .on_action(cx.listener(Self::on_cancel_selected))
             .flex()
             .flex_col()
             .size_full()
@@ -726,6 +785,7 @@ fn small_button(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || format!("{}-{}", id.0, id.1))
         .px_3()
         .py_2()
         .rounded_md()
@@ -792,6 +852,7 @@ fn setup(cx: &mut App) {
         KeyBinding::new("cmd-c", CopyText, Some("Jobs")),
         KeyBinding::new("backspace", RemoveSelected, Some("Jobs")),
         KeyBinding::new("delete", RemoveSelected, Some("Jobs")),
+        KeyBinding::new("escape", CancelSelected, Some("Jobs")),
     ]);
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     cx.on_window_closed(|cx| {
@@ -834,6 +895,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Copy Text", CopyText),
                 MenuItem::action("Show in Finder", RevealSelected),
+                MenuItem::action("Cancel Job", CancelSelected),
                 MenuItem::action("Clear Finished", ClearDone),
             ],
         },
