@@ -829,7 +829,10 @@ fn interaction_timings(cx: &mut TestAppContext) {
     let mut visual = VisualTestContext::from_window(window, cx);
     let started = std::time::Instant::now();
     frame(&mut visual, &shell);
-    row("first frame, empty window", started.elapsed());
+    row(
+        "first frame, empty window (one cold draw, not a median)",
+        started.elapsed(),
+    );
     row(
         "frame, empty window",
         timed(50, || frame(&mut visual, &shell)),
@@ -926,6 +929,13 @@ fn interaction_timings(cx: &mut TestAppContext) {
         shell.jobs.start(*tail);
         *tail
     });
+    // Show the running row: only the rows on screen are built, so with the
+    // list left at the top the frames would draw unchanged rows.
+    shell.update(&mut visual, |shell, _| {
+        shell.scroll.scroll_to_item(4_999, ScrollStrategy::Bottom);
+    });
+    frame(&mut visual, &shell);
+    frame(&mut visual, &shell);
     let mut page = 0u32;
     row(
         "progress event to its frame, on the last of 5,000 rows",
