@@ -105,12 +105,35 @@ fn figure_extension(mime: Option<&str>) -> &'static str {
     }
 }
 
-/// Write `bytes` to `target`, creating its parent directory.
-fn write_figure(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Write `bytes` to `target`, creating its parent directory. Returns whether
+/// this call created the file: creation is exclusive, so that answer is
+/// unambiguous even when another run exports the same figure at the same
+/// moment. A file that already exists is overwritten (the same bytes, filed
+/// under the document hash) and is not this call's to take back.
+fn write_figure(target: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    use std::io::Write;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(target, bytes)
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+    {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(bytes) {
+                drop(file);
+                let _ = fs::remove_file(target);
+                return Err(error);
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::write(target, bytes)?;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The export directory of one run, relative to the figures directory:
@@ -154,11 +177,10 @@ fn collect_figures(
         let ext = figure_extension(figure.mime.as_deref());
         let relative = format!("{run_dir}/p{page_no}-f{index}.{ext}");
         let target = dir.join(&relative);
-        let fresh = !target.exists();
         match write_figure(&target, &bytes) {
-            Ok(()) => {
+            Ok(created_here) => {
                 figure.file = Some(relative);
-                if fresh {
+                if created_here {
                     created.push(target);
                 }
             }
@@ -1013,6 +1035,21 @@ mod tests {
             });
         assert!(matches!(again, Err(PipelineError::Cancelled)));
         assert_eq!(walk(&figures), before, "the earlier run's export is kept");
+    }
+
+    #[test]
+    fn a_figure_file_is_owned_only_by_the_call_that_created_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("hash/run/p1-f0.png");
+        assert!(
+            super::write_figure(&target, b"one").unwrap(),
+            "created here"
+        );
+        assert!(
+            !super::write_figure(&target, b"two").unwrap(),
+            "already there: overwritten, not owned"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"two");
     }
 
     /// Every file under `root`, recursively (empty when `root` is absent).

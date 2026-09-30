@@ -446,15 +446,24 @@ fn stage(source: &Path, files: &[(&str, Vec<u8>)]) -> std::io::Result<Staged> {
     let directory = source.parent().unwrap_or_else(|| Path::new(""));
     let mut staged = Staged(Vec::new());
     for (suffix, bytes) in files {
-        let unique = STAGING.fetch_add(1, Ordering::Relaxed);
-        let temporary = directory.join(format!(
-            ".pdftextract-{}-{unique}{suffix}.partial",
-            std::process::id()
-        ));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        // A name a force-quit left behind (a later process can get the same
+        // PID and restart the counter) is skipped, not an error.
+        let (mut file, temporary) = loop {
+            let unique = STAGING.fetch_add(1, Ordering::Relaxed);
+            let temporary = directory.join(format!(
+                ".pdftextract-{}-{unique}{suffix}.partial",
+                std::process::id()
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => break (file, temporary),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        };
         staged.0.push(temporary);
         file.write_all(bytes)?;
         file.sync_all()?;
@@ -1401,6 +1410,28 @@ mod tests {
         drop(staged);
         assert_eq!(partials(dir.path()), 0, "the temporary name is gone");
         assert_eq!(std::fs::read(&free[0]).unwrap(), b"new", "the link remains");
+    }
+
+    #[test]
+    fn a_stale_staging_name_from_a_killed_run_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("paper.pdf");
+        std::fs::write(&source, b"pdf").unwrap();
+        // What a force-quit leaves: the names the next few stagings would take
+        // (this process's id, counters from wherever the counter is now).
+        let now = super::STAGING.load(std::sync::atomic::Ordering::Relaxed);
+        for n in now..now + 40 {
+            std::fs::write(
+                dir.path().join(format!(
+                    ".pdftextract-{}-{n}.txt.partial",
+                    std::process::id()
+                )),
+                b"stale",
+            )
+            .unwrap();
+        }
+        let published = publish(&source, &[(".txt", b"fresh".to_vec())]).unwrap();
+        assert_eq!(std::fs::read(&published[0]).unwrap(), b"fresh");
     }
 
     #[test]
