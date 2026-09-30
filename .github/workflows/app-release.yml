@@ -1,7 +1,10 @@
 name: App release
 
-# Builds PDFTextract.app at a release tag on a macOS runner and attaches the
-# zipped, ad-hoc-signed app and its checksum to that release. Run by hand
+# Builds PDFTextract.app at a release tag on a macOS runner, runs the App
+# workflow's checks on that tag (fmt, clippy, tests, bundle smoke test), and
+# attaches the zipped, ad-hoc-signed app and its checksum to that release.
+# It never replaces an asset: if either is already attached it stops. The
+# write token is given only to the two `gh` steps, never to the build. Run by hand
 # (Actions > App release > Run workflow); nothing triggers it, so it adds no
 # macOS runs to merges or pull requests. The release itself is still made by
 # auto-release.yml; this only adds the app to it.
@@ -32,24 +35,36 @@ jobs:
     permissions:
       contents: write
     env:
-      GH_TOKEN: ${{ github.token }}
       TAG_INPUT: ${{ inputs.tag }}
     steps:
       - name: Resolve the release tag
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           tag="${TAG_INPUT:-}"
           if [ -z "$tag" ]; then
             tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
           fi
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::not a release tag: $tag"; exit 1 ;;
-          esac
+          # Exactly v<digits>.<digits>.<digits>, nothing before or after.
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not a release tag: $tag"
+            exit 1
+          fi
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          version="${tag#v}"
+          # Never replace a published asset (a failed replacement upload would
+          # leave the release without it): stop here, before the long build.
+          names=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for want in "PDFTextract-${version}-macos-arm64.zip" "PDFTextract-${version}-macos-arm64.zip.sha256"; do
+            if printf '%s\n' "$names" | grep -Fxq "$want"; then
+              echo "::error::$want is already attached to $tag; remove it (gh release delete-asset $tag $want) to publish again"
+              exit 1
+            fi
+          done
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ steps.tag.outputs.tag }}
@@ -72,10 +87,23 @@ jobs:
             target
           key: cargo-app-macos-15-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-app-macos-15-
+      # The App workflow's checks, on the tagged source, so a macOS-only
+      # regression cannot be published.
+      - run: cargo fmt --check -p tpe-app
+      - run: cargo clippy -p tpe-app --all-targets -- -D warnings
+      - run: cargo test -p tpe-app
       - name: Build the bundle at the tag's version
         env:
           VERSION: ${{ steps.tag.outputs.version }}
         run: sh crates/tpe-app/bundle.sh
+      - name: Bundle smoke test
+        run: |
+          set -eu
+          APP=target/release/PDFTextract.app
+          test -x "$APP/Contents/MacOS/PDFTextract"
+          plutil -extract NSServices json -o - "$APP/Contents/Info.plist"
+          plutil -extract CFBundleDocumentTypes json -o - "$APP/Contents/Info.plist"
+          codesign --verify --strict --verbose=2 "$APP"
       - name: Package
         env:
           VERSION: ${{ steps.tag.outputs.version }}
@@ -88,7 +116,17 @@ jobs:
           echo "ZIP=$name" >> "$GITHUB_ENV"
       - name: Attach to the release
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          set -eu
+          # Checked again: another run may have attached it during the build.
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for want in "$ZIP" "$ZIP.sha256"; do
+            if printf '%s\n' "$names" | grep -Fxq "$want"; then
+              echo "::error::$want is already attached to $TAG; not replacing it"
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --repo "$GITHUB_REPOSITORY"
           echo "Attached $ZIP to $TAG" >> "$GITHUB_STEP_SUMMARY"

@@ -101,8 +101,12 @@ release > Run workflow** (`.github/workflows/app-release.yml`): it builds the
 app at a release tag (the latest by default) on a macOS runner and attaches
 `PDFTextract-<version>-macos-arm64.zip` and its `.sha256` to that release.
 Nothing triggers it automatically, so merges and pull requests never queue a
-macOS build for it. It fails, with a message, on a tag from before the app
-landed.
+macOS build for it. It runs the App workflow's checks (fmt, clippy, tests,
+bundle smoke test) on the tagged source first, only accepts a tag of the form
+`vN.N.N`, never replaces an asset (if the zip or its checksum is already
+attached it stops, and says which to delete), and gives the write token only
+to its two `gh` steps, not to the build. It fails, with a message, on a tag
+from before the app landed.
 
 The bundle is ad-hoc signed and not notarized. After unzipping, either
 right-click the app and choose Open the first time, or run
