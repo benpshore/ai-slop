@@ -35,7 +35,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, StreamExt};
@@ -47,7 +46,7 @@ use gpui::{
 };
 
 use tpe::pipeline::Progress;
-use tpe_app::jobs::{self, Action, JobList, JobRow, Mailbox, Phase, Step};
+use tpe_app::jobs::{self, Action, CancelToken, JobList, JobRow, Mailbox, Phase, Step};
 
 actions!(
     pdftextract,
@@ -150,7 +149,7 @@ pub struct Shell {
     /// The selected row's id.
     selected: Option<usize>,
     /// The running job and the flag that stops it.
-    running: Option<(usize, Arc<AtomicBool>)>,
+    running: Option<(usize, Arc<CancelToken>)>,
 }
 
 impl Shell {
@@ -243,7 +242,7 @@ impl Shell {
         self.jobs.start(id);
         cx.notify();
 
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(CancelToken::new());
         self.running = Some((id, cancel.clone()));
         let (sender, mut receiver) = mpsc::unbounded::<Progress>();
         let task = cx.background_executor().spawn(async move {
@@ -313,25 +312,41 @@ impl Shell {
         }
     }
 
-    /// Stop running job `id` at its next page. Nothing is written for it.
+    /// Stop running job `id` at its next page. Nothing is written for it. A
+    /// job that has already begun writing its results is not stopped: the
+    /// request is refused and the row stays as it is until it finishes.
     fn cancel(&mut self, id: usize, cx: &mut Context<Self>) {
-        let Some((running, flag)) = &self.running else {
+        let Some((running, token)) = &self.running else {
             return;
         };
-        if *running == id && self.jobs.mark_cancelling(id) {
-            flag.store(true, Ordering::Relaxed);
+        if *running == id && token.request() && self.jobs.mark_cancelling(id) {
             cx.notify();
         }
     }
 
     fn clear_done(&mut self, cx: &mut Context<Self>) {
-        let index = self.selected.and_then(|id| self.jobs.index_of(id));
+        // Rows that will survive, ahead of the selected one: the first
+        // survivor after a removed selection lands at exactly that index.
+        let survivors_before = self
+            .selected
+            .and_then(|id| self.jobs.index_of(id))
+            .map(|at| {
+                self.jobs.rows()[..at]
+                    .iter()
+                    .filter(|row| row.is_active())
+                    .count()
+            });
         self.jobs.clear_done();
         if self.selected.is_some_and(|id| self.jobs.row(id).is_none()) {
-            // The selected row went with the finished ones; land where it was.
-            let survivors_before = index.map_or(0, |index| index.min(self.jobs.rows().len()));
-            self.selected = self.jobs.nearest_to(survivors_before);
+            self.selected = self.jobs.nearest_to(survivors_before.unwrap_or(0));
         }
+        // The list is shorter and its rows have new indices: the old scroll
+        // offset would point past them or away from the selection.
+        let at = self
+            .selected
+            .and_then(|id| self.jobs.index_of(id))
+            .unwrap_or(0);
+        self.scroll.scroll_to_item(at, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -399,8 +414,13 @@ impl Shell {
         }
     }
 
+    /// Show the selected row's result in Finder. Queued and running rows have
+    /// no result yet (and no button), so the key does nothing on them rather
+    /// than opening their input PDF.
     fn reveal_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.selected {
+        if let Some(id) = self.selected
+            && self.jobs.row(id).is_some_and(|row| !row.is_active())
+        {
             self.reveal(id, cx);
         }
     }
