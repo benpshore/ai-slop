@@ -688,6 +688,10 @@ pub fn run(
     observe: &mut dyn FnMut(Progress),
     cancel: &CancelToken,
 ) -> Result<Outcome, RunError> {
+    // A stop asked for before the task got its turn: do not read the file.
+    if cancel.is_requested() {
+        return Err(RunError::Cancelled);
+    }
     let mut watch = |event: Progress| {
         observe(event);
         if cancel.is_requested() {
@@ -791,11 +795,6 @@ fn run_bibliography(
         Ok::<_, RunError>((snapshot.hash.0, scan))
     }))
     .unwrap_or_else(|payload| Err(panic_error(&*payload).into()))?;
-    // The rest builds the record and writes it: the last moment a stop is
-    // accepted, and after it a stop request is refused.
-    if !cancel.commit() {
-        return Err(RunError::Cancelled);
-    }
     let record = Record::from_scan(
         &path_text,
         sha256,
@@ -804,6 +803,10 @@ fn run_bibliography(
         started.elapsed().as_secs_f64() * 1000.0,
     );
     if !record.found() {
+        // Nothing is written, so a stop asked for is still honoured.
+        if cancel.is_requested() {
+            return Err(RunError::Cancelled);
+        }
         return Ok(Outcome {
             outputs: Vec::new(),
             summary: "No reference list found".to_string(),
@@ -812,11 +815,17 @@ fn run_bibliography(
     }
     let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     line.push('\n');
+    let plain = record.plain_text();
+    // Publication is the first write: the last moment a stop is accepted, and
+    // after it a stop request is refused.
+    if !cancel.commit() {
+        return Err(RunError::Cancelled);
+    }
     let outputs = publish(
         source,
         &[
             (".references.json", line.into_bytes()),
-            (".references.txt", record.plain_text().into_bytes()),
+            (".references.txt", plain.into_bytes()),
         ],
     )
     .map_err(|e| format!("writing next to {}: {e}", source.display()))?;
@@ -1316,16 +1325,10 @@ mod tests {
         let cancel = CancelToken::new();
         assert!(cancel.request());
         for action in [Action::Text, Action::Bibliography] {
-            let mut pages = 0;
-            let result = run(
-                action,
-                &pdf,
-                &ledger,
-                &mut |event| pages += usize::from(matches!(event, Progress::Page { .. })),
-                &cancel,
-            );
+            let mut events = 0;
+            let result = run(action, &pdf, &ledger, &mut |_| events += 1, &cancel);
             assert_eq!(result, Err(RunError::Cancelled), "{action:?}");
-            assert_eq!(pages, 0);
+            assert_eq!(events, 0, "the file was not even opened");
         }
         assert_eq!(listing(dir.path()), ["paper.pdf"]);
     }
