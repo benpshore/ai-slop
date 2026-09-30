@@ -280,6 +280,7 @@ impl JobList {
                 row.done = done;
                 row.total = Some(total);
             }
+            Progress::Reading { .. } => {}
         }
     }
 
@@ -710,9 +711,23 @@ pub fn run(
             ControlFlow::Continue(())
         }
     };
-    match action {
+    let result = match action {
         Action::Text => run_text(source, ledger, &mut watch, cancel),
         Action::Bibliography => run_bibliography(source, &mut watch, cancel),
+    };
+    // Every ending is one atomic decision: the paths that write (or succeed
+    // writing nothing) have already committed. A failure settles it here, so
+    // a stop request that arrives after the error is refused, and one that
+    // arrived first reports Cancelled, never "Cancelling" then Failed.
+    match result {
+        Err(RunError::Failed(message)) => {
+            if cancel.commit() {
+                Err(RunError::Failed(message))
+            } else {
+                Err(RunError::Cancelled)
+            }
+        }
+        other => other,
     }
 }
 
@@ -799,7 +814,13 @@ fn run_bibliography(
     let extractor = backend::by_name(BACKEND).ok_or("backend unavailable".to_string())?;
     let path_text = source.to_string_lossy();
     let (sha256, scan) = panic::catch_unwind(AssertUnwindSafe(|| {
-        let snapshot = acquire::snapshot(source, None).map_err(|e| e.to_string())?;
+        let snapshot = acquire::snapshot_polled(source, None, &mut |done, total| {
+            watch(Progress::Reading { done, total })
+        })
+        .map_err(|error| match error {
+            acquire::AcquireError::Stopped => RunError::Cancelled,
+            other => RunError::Failed(other.to_string()),
+        })?;
         let scan =
             bibliography::scan_backward_observed(extractor.as_ref(), &snapshot.bytes, None, watch)?;
         Ok::<_, RunError>((snapshot.hash.0, scan))
@@ -813,8 +834,11 @@ fn run_bibliography(
         started.elapsed().as_secs_f64() * 1000.0,
     );
     if !record.found() {
-        // Nothing is written, so a stop asked for is still honoured.
-        if cancel.is_requested() {
+        // Nothing is written, but the job still ends by the same atomic
+        // decision: a stop asked for first wins (Cancelled); otherwise this
+        // success is final and a later stop request is refused, so the row
+        // never shows "Cancelling" for a job that then finishes.
+        if !cancel.commit() {
             return Err(RunError::Cancelled);
         }
         return Ok(Outcome {
@@ -873,6 +897,9 @@ mod tests {
     use futures::{FutureExt, StreamExt};
     use tpe::pipeline::Progress;
 
+    /// A hand-written one-page PDF whose only text is "Just a note.".
+    const NO_LIST_PDF: &[u8] = b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n4 0 obj << /Length 44 >> stream\nBT /F1 12 Tf 72 720 Td (Just a note.) Tj ET\nendstream endobj\n5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\ntrailer << /Root 1 0 R /Size 6 >>\n%%EOF\n";
+
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/synthetic-paper.pdf"
@@ -904,7 +931,12 @@ mod tests {
             Action::Text,
             &pdf,
             &ledger,
-            &mut |e| events.push(e),
+            &mut |e| {
+                // The read of the file is not a page event.
+                if !matches!(e, Progress::Reading { .. }) {
+                    events.push(e);
+                }
+            },
             &CancelToken::new(),
         )
         .unwrap();
@@ -960,7 +992,12 @@ mod tests {
             Action::Bibliography,
             &pdf,
             &ledger,
-            &mut |e| events.push(e),
+            &mut |e| {
+                // The read of the file is not a page event.
+                if !matches!(e, Progress::Reading { .. }) {
+                    events.push(e);
+                }
+            },
             &CancelToken::new(),
         )
         .unwrap();
@@ -1334,7 +1371,9 @@ mod tests {
             &pdf,
             &ledger,
             &mut |event| {
-                seen.push(event);
+                if !matches!(event, Progress::Reading { .. }) {
+                    seen.push(event);
+                }
                 if matches!(event, Progress::Page { .. }) {
                     cancel.request();
                 }
@@ -1367,6 +1406,30 @@ mod tests {
             assert_eq!(events, 0, "the file was not even opened");
         }
         assert_eq!(listing(dir.path()), ["paper.pdf"]);
+    }
+
+    #[test]
+    fn a_stop_while_the_file_is_read_ends_either_job_kind_with_nothing_written() {
+        for action in [Action::Text, Action::Bibliography] {
+            let (dir, pdf, ledger) = scratch();
+            let cancel = CancelToken::new();
+            let mut pages = 0;
+            let result = run(
+                action,
+                &pdf,
+                &ledger,
+                &mut |event| match event {
+                    Progress::Reading { .. } => {
+                        cancel.request();
+                    }
+                    _ => pages += 1,
+                },
+                &cancel,
+            );
+            assert_eq!(result, Err(RunError::Cancelled), "{action:?}");
+            assert_eq!(pages, 0, "{action:?}: the document was never opened");
+            assert_eq!(listing(dir.path()), ["paper.pdf"], "{action:?}");
+        }
     }
 
     #[test]
@@ -1419,6 +1482,54 @@ mod tests {
             );
         }
         assert!(dir.path().join("paper.txt").is_file());
+    }
+
+    #[test]
+    fn a_failed_job_settles_the_stop_decision_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.pdf");
+        std::fs::write(&junk, b"not a pdf").unwrap();
+        let ledger = dir.path().join("ledger.sqlite");
+        for action in [Action::Text, Action::Bibliography] {
+            let cancel = CancelToken::new();
+            let result = run(action, &junk, &ledger, &mut |_| {}, &cancel);
+            assert!(matches!(result, Err(RunError::Failed(_))), "{action:?}");
+            assert!(
+                !cancel.request(),
+                "{action:?}: the failure was final, a later stop is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_no_list_result_also_refuses_a_late_stop() {
+        // A one-line PDF with no reference list: the job succeeds writing
+        // nothing, and must still end by the same atomic decision.
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("note.pdf");
+        std::fs::write(&pdf, NO_LIST_PDF).unwrap();
+        let ledger = dir.path().join("ledger.sqlite");
+
+        let cancel = CancelToken::new();
+        let outcome = run(Action::Bibliography, &pdf, &ledger, &mut |_| {}, &cancel).unwrap();
+        assert!(outcome.outputs.is_empty(), "{outcome:?}");
+        assert_eq!(outcome.summary, "No reference list found");
+        assert!(!cancel.request(), "the success was final");
+
+        // A stop that wins the race cancels it instead of finishing.
+        let stopped = CancelToken::new();
+        let result = run(
+            Action::Bibliography,
+            &pdf,
+            &ledger,
+            &mut |event| {
+                if matches!(event, Progress::Page { .. }) {
+                    stopped.request();
+                }
+            },
+            &stopped,
+        );
+        assert_eq!(result, Err(RunError::Cancelled));
     }
 
     #[test]
