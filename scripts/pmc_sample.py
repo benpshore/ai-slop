@@ -43,6 +43,7 @@ LISTINGS_PER_ROUND = 12
 LISTING_SIZE = 12
 PICKS_PER_LISTING = 3
 MIN_REFS = 5
+EMPTY_ROUNDS_LIMIT = 5
 MAX_PER_JOURNAL = 4
 ALLOWED_TYPES = {
     "research-article",
@@ -108,7 +109,8 @@ def list_prefixes(start_after: str, max_keys: int = LISTING_SIZE) -> list[str]:
     if data is None:
         return []
     root = parse_xml(data)
-    return [element.text for element in root.iter("{*}Prefix") if element.text]
+    # `Element.iter` takes literal tags only; the `{*}` wildcard needs `iterfind`.
+    return [element.text for element in root.iterfind(".//{*}Prefix") if element.text]
 
 
 def split_s3_url(url: str) -> tuple[str, str | None]:
@@ -196,7 +198,9 @@ def inspect_candidate(prefix: str) -> tuple[str, dict | None]:
         return "xml-missing", None
     try:
         facts = article_facts(xml_bytes)
-    except (ET.ParseError, ValueError):
+    except ET.ParseError:
+        return "xml-unparsable", None
+    except ValueError:
         return "xml-unparsable", None
     if facts["ref_count"] < MIN_REFS:
         return "few-refs", None
@@ -225,8 +229,14 @@ def inspect_candidate(prefix: str) -> tuple[str, dict | None]:
     return "accepted", item
 
 
-def sample(seed: int, target: int, workers: int, max_candidates: int) -> dict:
-    """Seeded sample of up to `target` qualifying articles."""
+def sample(seed: int, target: int, workers: int, max_candidates: int, budget_s: float) -> dict:
+    """Seeded sample of up to `target` qualifying articles.
+
+    Stops early, keeping what was accepted, when `budget_s` seconds have
+    passed; fails after `EMPTY_ROUNDS_LIMIT` rounds without any candidate.
+    """
+    started = time.monotonic()
+    empty_rounds = 0
     rng = random.Random(seed)  # noqa: S311 - reproducible sampling, not security
     accepted: list[dict] = []
     per_journal: Counter[str] = Counter()
@@ -235,6 +245,9 @@ def sample(seed: int, target: int, workers: int, max_candidates: int) -> dict:
     tried = 0
     rounds = 0
     while len(accepted) < target and tried < max_candidates:
+        if time.monotonic() - started > budget_s:
+            log(f"time budget of {budget_s} s reached after {rounds} rounds")
+            break
         rounds += 1
         starts = [f"PMC{rng.randint(ID_MIN, ID_MAX)}" for _ in range(LISTINGS_PER_ROUND)]
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -245,6 +258,12 @@ def sample(seed: int, target: int, workers: int, max_candidates: int) -> dict:
             picks = rng.sample(fresh, min(PICKS_PER_LISTING, len(fresh)))
             seen.update(picks)
             batch.extend(picks)
+        if not batch:
+            empty_rounds += 1
+            if empty_rounds >= EMPTY_ROUNDS_LIMIT:
+                raise SystemExit(f"{empty_rounds} listing rounds in a row returned no candidates")
+            continue
+        empty_rounds = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(inspect_candidate, batch))
         for reason, item in results:
@@ -356,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20260930)
     parser.add_argument("--target", type=int, default=200)
     parser.add_argument("--max-candidates", type=int, default=3000)
+    parser.add_argument("--time-budget-s", type=float, default=1500.0)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--out", type=Path, help="manifest to write (sampling mode)")
     args = parser.parse_args(argv)
@@ -371,7 +391,9 @@ def main(argv: list[str] | None = None) -> int:
         count = len(manifest["items"])
         log(f"{count} items, {failed} files failed")
         return 1 if failed else 0
-    manifest = sample(args.seed, args.target, args.workers, args.max_candidates)
+    manifest = sample(
+        args.seed, args.target, args.workers, args.max_candidates, args.time_budget_s
+    )
     text = manifest_text(manifest)
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
