@@ -23,12 +23,16 @@ mise use -g github:benpshore/pdftextract
 tpe --version
 ```
 
-mise lists versions through its shared cache (`mise-versions.jdx.dev`), which
-can lag a new release by some hours. To pick up a release the moment it is
-published, bypass the cache for that command:
+mise deliberately waits before offering a brand-new release: its
+`minimum_release_age` guard (one day by default) hides releases younger than
+that, and its shared version cache (`mise-versions.jdx.dev`) can lag by some
+hours. That is a reasonable default for a tool that releases on every merge.
+To install a release the moment it is published, either name the version or
+lift both for that one command:
 
 ```sh
-MISE_USE_VERSIONS_HOST=0 mise upgrade github:benpshore/pdftextract
+mise use -g github:benpshore/pdftextract@0.42.0
+MISE_MINIMUM_RELEASE_AGE=0 MISE_USE_VERSIONS_HOST=0 mise upgrade github:benpshore/pdftextract
 ```
 
 Without mise, download the archive for your platform from the

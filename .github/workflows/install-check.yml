@@ -42,6 +42,10 @@ jobs:
       # GitHub by up to a day and resolved "latest" to a stale release; ask
       # the GitHub API directly so a just-published release is installable.
       MISE_USE_VERSIONS_HOST: "0"
+      # mise also hides releases younger than its minimum_release_age (a
+      # supply-chain guard, default one day); this check installs the release
+      # that was just published.
+      MISE_MINIMUM_RELEASE_AGE: "0"
     steps:
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
