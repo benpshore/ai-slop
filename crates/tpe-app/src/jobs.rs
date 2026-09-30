@@ -280,6 +280,7 @@ impl JobList {
                 row.done = done;
                 row.total = Some(total);
             }
+            Progress::Reading { .. } => {}
         }
     }
 
@@ -803,7 +804,13 @@ fn run_bibliography(
     let extractor = backend::by_name(BACKEND).ok_or("backend unavailable".to_string())?;
     let path_text = source.to_string_lossy();
     let (sha256, scan) = panic::catch_unwind(AssertUnwindSafe(|| {
-        let snapshot = acquire::snapshot(source, None).map_err(|e| e.to_string())?;
+        let snapshot = acquire::snapshot_polled(source, None, &mut |done, total| {
+            watch(Progress::Reading { done, total })
+        })
+        .map_err(|error| match error {
+            acquire::AcquireError::Stopped => RunError::Cancelled,
+            other => RunError::Failed(other.to_string()),
+        })?;
         let scan =
             bibliography::scan_backward_observed(extractor.as_ref(), &snapshot.bytes, None, watch)?;
         Ok::<_, RunError>((snapshot.hash.0, scan))
@@ -914,7 +921,12 @@ mod tests {
             Action::Text,
             &pdf,
             &ledger,
-            &mut |e| events.push(e),
+            &mut |e| {
+                // The read of the file is not a page event.
+                if !matches!(e, Progress::Reading { .. }) {
+                    events.push(e);
+                }
+            },
             &CancelToken::new(),
         )
         .unwrap();
@@ -970,7 +982,12 @@ mod tests {
             Action::Bibliography,
             &pdf,
             &ledger,
-            &mut |e| events.push(e),
+            &mut |e| {
+                // The read of the file is not a page event.
+                if !matches!(e, Progress::Reading { .. }) {
+                    events.push(e);
+                }
+            },
             &CancelToken::new(),
         )
         .unwrap();
@@ -1318,7 +1335,9 @@ mod tests {
             &pdf,
             &ledger,
             &mut |event| {
-                seen.push(event);
+                if !matches!(event, Progress::Reading { .. }) {
+                    seen.push(event);
+                }
                 if matches!(event, Progress::Page { .. }) {
                     cancel.request();
                 }
@@ -1351,6 +1370,30 @@ mod tests {
             assert_eq!(events, 0, "the file was not even opened");
         }
         assert_eq!(listing(dir.path()), ["paper.pdf"]);
+    }
+
+    #[test]
+    fn a_stop_while_the_file_is_read_ends_either_job_kind_with_nothing_written() {
+        for action in [Action::Text, Action::Bibliography] {
+            let (dir, pdf, ledger) = scratch();
+            let cancel = CancelToken::new();
+            let mut pages = 0;
+            let result = run(
+                action,
+                &pdf,
+                &ledger,
+                &mut |event| match event {
+                    Progress::Reading { .. } => {
+                        cancel.request();
+                    }
+                    _ => pages += 1,
+                },
+                &cancel,
+            );
+            assert_eq!(result, Err(RunError::Cancelled), "{action:?}");
+            assert_eq!(pages, 0, "{action:?}: the document was never opened");
+            assert_eq!(listing(dir.path()), ["paper.pdf"], "{action:?}");
+        }
     }
 
     #[test]

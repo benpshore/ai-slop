@@ -3,6 +3,8 @@
 //! the read so a concurrent modification is reported instead of hashed.
 
 use std::fs;
+use std::io::Read;
+use std::ops::ControlFlow;
 use std::path::Path;
 
 use thiserror::Error;
@@ -22,7 +24,14 @@ pub enum AcquireError {
     ChangedDuringRead,
     #[error("not a regular file")]
     NotAFile,
+    /// The caller's poll answered `Break` while the file was being read.
+    #[error("stopped while reading")]
+    Stopped,
 }
+
+/// The file is read (and hashed) in pieces of this size, so a stop request
+/// is noticed after at most one piece of a slow read.
+const CHUNK: u64 = 4 << 20;
 
 /// The bytes of one file at one instant, plus their identity and origin.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,9 +121,45 @@ pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, Acquire
     Ok(read.into_snapshot(hash))
 }
 
+/// [`snapshot`] that reads and hashes in one pass and calls `poll(done,
+/// total)` (bytes) after every piece; `Break` gives up with
+/// [`AcquireError::Stopped`]. For a caller that must stay stoppable while a
+/// slow file, such as one on a network share, is being read.
+pub fn snapshot_polled(
+    path: &Path,
+    max_bytes: Option<u64>,
+    poll: &mut dyn FnMut(u64, u64) -> ControlFlow<()>,
+) -> Result<Snapshot, AcquireError> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let read = read_impl(path, max_bytes, poll, Some(&mut hasher))?;
+    let hash = ContentHash(hex::encode(hasher.finalize().as_slice()));
+    Ok(read.into_snapshot(hash))
+}
+
 /// [`snapshot`] without the hash: read `path` completely with the same
 /// checks, and leave hashing to the caller.
 pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, AcquireError> {
+    read_verified_polled(path, max_bytes, &mut |_, _| ControlFlow::Continue(()))
+}
+
+/// [`read_verified`] calling `poll(done, total)` (bytes) after every piece;
+/// `Break` gives up with [`AcquireError::Stopped`].
+pub fn read_verified_polled(
+    path: &Path,
+    max_bytes: Option<u64>,
+    poll: &mut dyn FnMut(u64, u64) -> ControlFlow<()>,
+) -> Result<Unhashed, AcquireError> {
+    read_impl(path, max_bytes, poll, None)
+}
+
+fn read_impl(
+    path: &Path,
+    max_bytes: Option<u64>,
+    poll: &mut dyn FnMut(u64, u64) -> ControlFlow<()>,
+    mut hasher: Option<&mut sha2::Sha256>,
+) -> Result<Unhashed, AcquireError> {
+    use sha2::Digest;
     let before_meta = fs::metadata(path)?;
     if !before_meta.is_file() {
         return Err(AcquireError::NotAFile);
@@ -132,7 +177,25 @@ pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, Ac
         });
     }
 
-    let bytes = fs::read(path)?;
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(usize::try_from(before.size).unwrap_or(0));
+    loop {
+        let start = bytes.len();
+        let got = (&mut file).take(CHUNK).read_to_end(&mut bytes)?;
+        if got == 0 {
+            break;
+        }
+        if let Some(hasher) = hasher.as_deref_mut() {
+            hasher.update(&bytes[start..]);
+        }
+        // Longer than it was: a writer is appending, so stop reading it.
+        if bytes.len() as u64 > before.size {
+            return Err(AcquireError::ChangedDuringRead);
+        }
+        if poll(bytes.len() as u64, before.size).is_break() {
+            return Err(AcquireError::Stopped);
+        }
+    }
 
     let after_meta = fs::metadata(path)?;
     let after = observe(&after_meta);
@@ -156,6 +219,32 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
+
+    #[test]
+    fn a_stop_between_pieces_gives_up_and_a_polled_hash_matches() {
+        // Two full pieces and a partial one.
+        let bytes: Vec<u8> = (0..(9u32 << 20)).map(|n| (n % 251) as u8).collect();
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
+
+        let mut seen = Vec::new();
+        let snap = snapshot_polled(file.path(), None, &mut |done, total| {
+            seen.push((done, total));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        let total = bytes.len() as u64;
+        assert_eq!(seen, [(4 << 20, total), (8 << 20, total), (total, total)]);
+        assert_eq!(snap.hash, snapshot(file.path(), None).unwrap().hash);
+
+        let mut polls = 0;
+        let stopped = read_verified_polled(file.path(), None, &mut |_, _| {
+            polls += 1;
+            ControlFlow::Break(())
+        });
+        assert!(matches!(stopped, Err(AcquireError::Stopped)), "{stopped:?}");
+        assert_eq!(polls, 1, "it gave up at the first piece, not at the end");
+    }
 
     #[test]
     fn snapshot_has_hash_size_and_path() {
