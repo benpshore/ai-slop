@@ -44,7 +44,7 @@ pub use usearch_store::UsearchStore;
 /// Errors raised while building or querying a search index.
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {
-    /// An error from SQLite (ledger or index database).
+    /// An error from `SQLite` (ledger or index database).
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     /// A filesystem error.
@@ -62,7 +62,7 @@ pub enum SearchError {
     /// The index was built with a different embedder than the one supplied.
     #[error("index was built with embedder `{index}` but `{given}` was supplied")]
     EmbedderMismatch { index: String, given: String },
-    /// The linked SQLite has no FTS5 module.
+    /// The linked `SQLite` has no FTS5 module.
     #[error("SQLite was built without FTS5: {0}")]
     Fts5Unavailable(String),
     /// An index file could not be decoded.
