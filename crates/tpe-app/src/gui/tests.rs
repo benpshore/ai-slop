@@ -761,3 +761,173 @@ fn a_cancelled_row_can_be_shown_in_finder_and_cleared(cx: &mut TestAppContext) {
         "Clear finished removed the cancelled row too"
     );
 }
+
+/// Median of `samples` (sorts them).
+fn median(samples: &mut [std::time::Duration]) -> std::time::Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+/// `f` timed `runs` times; the median.
+fn timed(runs: usize, mut f: impl FnMut()) -> std::time::Duration {
+    let mut samples: Vec<_> = (0..runs)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            f();
+            started.elapsed()
+        })
+        .collect();
+    median(&mut samples)
+}
+
+/// Print one row of the timings table.
+fn row(what: &str, time: std::time::Duration) {
+    eprintln!("| {what} | {:.2} ms |", time.as_secs_f64() * 1000.0);
+}
+
+/// One frame: layout, prepaint and paint of the window with the view.
+fn frame(visual: &mut VisualTestContext, shell: &Entity<Shell>) {
+    visual.draw(
+        gpui::point(px(0.0), px(0.0)),
+        size(px(640.0), px(480.0)),
+        |_, _| shell.clone(),
+    );
+}
+
+/// How long the interactions the app must answer at once take, on GPUI's
+/// test platform: view state, layout and scene building on the CPU, with no
+/// GPU and no display, so the frame is measured up to the point a renderer
+/// would take over. The App workflow runs this on a macOS runner in release
+/// mode and prints the table (`--release -- --ignored --nocapture`). It
+/// measures; it asserts nothing.
+#[gpui::test]
+#[ignore = "a measurement: run with --release -- --ignored --nocapture"]
+// One long table-printing script reads better than helpers per row.
+#[allow(clippy::too_many_lines)]
+fn interaction_timings(cx: &mut TestAppContext) {
+    eprintln!("| interaction | median |");
+    eprintln!("| --- | ---: |");
+
+    // A window with no rows: the first frame, then a steady one.
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    let started = std::time::Instant::now();
+    frame(&mut visual, &shell);
+    row("first frame, empty window", started.elapsed());
+    row(
+        "frame, empty window",
+        timed(50, || frame(&mut visual, &shell)),
+    );
+
+    // A file arrives (a drop, a chooser, Finder): the row is there, drawn.
+    let paths = copies(&fixture, 1);
+    let mut arrivals = Vec::new();
+    for _ in 0..30 {
+        let started = std::time::Instant::now();
+        shell.update(&mut visual, |shell, cx| {
+            shell.jobs.enqueue(paths.clone(), Action::Text);
+            cx.notify();
+        });
+        frame(&mut visual, &shell);
+        arrivals.push(started.elapsed());
+        shell.update(&mut visual, |shell, _| shell.jobs.clear_done());
+        shell.update(&mut visual, |shell, _| {
+            shell.jobs = JobList::default();
+        });
+    }
+    row("file arrives to its row drawn", median(&mut arrivals));
+
+    // The list at scale.
+    for rows in [1usize, 100, 5000] {
+        let scale = Fixture::new();
+        let (shell, window) = scale.open(cx);
+        queue_only(&shell, cx, copies(&scale, rows));
+        let mut visual = VisualTestContext::from_window(window, cx);
+        frame(&mut visual, &shell);
+        let time = timed(20, || {
+            shell.update(&mut visual, |_, cx| cx.notify());
+            frame(&mut visual, &shell);
+        });
+        row(&format!("frame, {rows} rows"), time);
+    }
+
+    // With 5,000 rows: a key press to the new selection drawn, a jump to the
+    // end, and a progress event to its frame.
+    let big = Fixture::new();
+    let (shell, window) = big.open(cx);
+    queue_only(&shell, cx, copies(&big, 5000));
+    let mut visual = VisualTestContext::from_window(window, cx);
+    frame(&mut visual, &shell);
+    let list = shell.read_with(&visual, |shell, _| shell.list_focus.clone());
+    visual.update(|window, _| window.focus(&list));
+    let mut presses = Vec::new();
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        visual
+            .cx
+            .dispatch_keystroke(window, Keystroke::parse("down").unwrap());
+        frame(&mut visual, &shell);
+        presses.push(started.elapsed());
+    }
+    row(
+        "Down key to selection drawn, 5,000 rows",
+        median(&mut presses),
+    );
+    let mut jumps = Vec::new();
+    for key in ["end", "home", "end", "home", "end", "home"] {
+        let started = std::time::Instant::now();
+        visual
+            .cx
+            .dispatch_keystroke(window, Keystroke::parse(key).unwrap());
+        frame(&mut visual, &shell);
+        frame(&mut visual, &shell);
+        jumps.push(started.elapsed());
+    }
+    row(
+        "End / Home to the new rows drawn (two frames), 5,000 rows",
+        median(&mut jumps),
+    );
+    let running = shell.update(&mut visual, |shell, _| {
+        let id = shell.jobs.next_queued().unwrap();
+        shell.jobs.start(id);
+        id
+    });
+    let mut page = 0u32;
+    row(
+        "progress event to its frame, 5,000 rows",
+        timed(100, || {
+            page += 1;
+            shell.update(&mut visual, |shell, cx| {
+                shell.jobs.progress(
+                    running,
+                    tpe::pipeline::Progress::Page {
+                        page,
+                        done: page,
+                        total: 20_000,
+                    },
+                );
+                cx.notify();
+            });
+            frame(&mut visual, &shell);
+        }),
+    );
+
+    // The engine itself, on the two-page paper.
+    let job = Fixture::new();
+    let never = AtomicBool::new(false);
+    let ledger = job.dir.path().join("timing-ledger.sqlite");
+    tpe::pipeline::warm_up();
+    row(
+        "Get text job on the 2-page paper (engine, ledger, file)",
+        timed(20, || {
+            jobs::run(Action::Text, &job.pdf, &ledger, &mut |_| {}, &never).unwrap();
+        }),
+    );
+    row(
+        "Get bibliography job on the 2-page paper (engine, files)",
+        timed(20, || {
+            jobs::run(Action::Bibliography, &job.pdf, &ledger, &mut |_| {}, &never).unwrap();
+        }),
+    );
+}
