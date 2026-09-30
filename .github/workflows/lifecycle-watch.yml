@@ -1,0 +1,52 @@
+name: Lifecycle watch
+
+# Daily and read-only: verifies that every pinned action SHA is the tag its
+# comment names, checks the native upstreams (PDFium binaries, Docling crates,
+# pdfium-render, GPUI) against the pins in Cargo.lock and native/manifest.json,
+# and reports runner-image deprecations (docs/LIFECYCLE.md). A candidate that is
+# past the cooldown becomes one GitHub issue; closing it records "not adopted".
+# It edits no file, opens no pull request and merges nothing. Not part of the
+# required `ci` check. One ubuntu job of about a minute; no macOS runner.
+#
+# It fails only on integrity problems (a pin that is not what it claims to be);
+# failed lookups are annotations. Manual runs report only, unless asked to file.
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+    inputs:
+      file_issues:
+        description: Open issues for new candidates (otherwise report only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lifecycle-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    # Never on forks.
+    if: github.repository == 'benpshore/pdftextract'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # only to open candidate issues; nothing else is written
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Watch and open issues for new candidates
+        if: github.event_name == 'schedule' || inputs.file_issues
+        run: uv run --no-project --python '>=3.12' scripts/lifecycle_watch.py watch --file-issues
+      - name: Watch (report only)
+        if: github.event_name != 'schedule' && !inputs.file_issues
+        run: uv run --no-project --python '>=3.12' scripts/lifecycle_watch.py watch
