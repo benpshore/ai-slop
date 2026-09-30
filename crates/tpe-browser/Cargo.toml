@@ -2,7 +2,7 @@
 name = "tpe-browser"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Research-browser session model: URL normalisation, DOI and PDF detection, scholarly-host policy and a cookie bridge; CEF embedding behind the `cef` feature"
 
 [features]

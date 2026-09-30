@@ -2,7 +2,7 @@
 name = "tpe-biblio"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Scholarly metadata and full-text location clients (OpenAlex, Crossref, Semantic Scholar, PMC, Unpaywall, OpenURL)"
 
 [dependencies]
