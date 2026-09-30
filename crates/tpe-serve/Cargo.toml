@@ -1,0 +1,46 @@
+[package]
+name = "tpe-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local (loopback-only) HTTP API over the PDFTextract job model: get text or a bibliography per PDF"
+
+[lib]
+name = "tpe_serve"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tpe-serve"
+path = "src/main.rs"
+
+# Every crate below was already in Cargo.lock before this crate existed
+# (tokio, hyper, hyper-util and http-body-util through reqwest and
+# tpe-speech's optional kokoro-tts; subtle through rustls; getrandom through
+# lopdf). The lock file gains one package, httpdate, which hyper's `server`
+# feature uses for the Date header. Why each is needed: docs/API.md,
+# "Dependencies".
+[dependencies]
+bytes = "1"
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+getrandom = "0.4"
+hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2.6"
+text-processing-engine = { path = "../.." }
+tokio = { version = "1", default-features = false, features = ["fs", "io-util", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tpe-app = { path = "../tpe-app" }
+
+[dev-dependencies]
+lopdf = "0.45"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3"
+
+[lints]
+workspace = true
