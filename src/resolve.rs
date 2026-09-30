@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
+use tpe_biblio::util::with_query;
 use tpe_biblio::{BiblioError, Client, PaperRecord, crossref};
 use unicode_normalization::UnicodeNormalization;
 
@@ -38,11 +39,9 @@ const RETRIES: u32 = 4;
 /// First backoff after a failed request.
 const RETRY_BASE: Duration = Duration::from_millis(1500);
 /// Rows asked from a bibliographic query.
-const QUERY_ROWS: u32 = 3;
+const QUERY_ROWS: u32 = 5;
 /// Longest entry text sent as a query.
 const QUERY_CHARS: usize = 300;
-/// Least first-author agreement for an accepted record.
-const AUTHOR_MIN: f32 = 0.8;
 /// Least title agreement for an accepted record when no author was parsed.
 const TITLE_MIN: f32 = 0.7;
 /// Least title agreement for the paper's own record found by query.
@@ -181,6 +180,7 @@ fn family_of(name: &str) -> String {
 /// Agreement between the record's first author and the printed first
 /// author: 1 when the record's family name is a word of the printed name,
 /// otherwise the best similarity of the family name to any printed word.
+#[cfg(test)]
 fn author_agreement(printed: &str, record: &str) -> f32 {
     let family = folded(&family_of(record));
     let printed = folded(printed);
@@ -208,38 +208,140 @@ fn title_agreement(a: &str, b: &str) -> f32 {
     similarity(&a, &b)
 }
 
+/// Least share of a record title's words that must appear in the entry.
+const TITLE_OVERLAP_MIN: f32 = 0.6;
+/// Least similarity between a record family name and an entry word.
+const FAMILY_WORD_MIN: f32 = 0.8;
+
+/// Words of `folded` text that are at least `min` chars long, deduplicated.
+fn words(text: &str, min: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in text.split_whitespace() {
+        if w.chars().count() >= min && !out.iter().any(|o| o == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
+/// Does the record's first-author family name appear in the printed entry?
+/// A word match, a match with the spaces removed (a floating accent glyph
+/// splits `Rühland` into `Ru Èhland`), or a close word.
+fn family_in_entry(family: &str, raw_folded: &str) -> bool {
+    let family = folded(family);
+    if family.is_empty() {
+        return false;
+    }
+    if raw_folded.split_whitespace().any(|w| w == family) {
+        return true;
+    }
+    let squashed: String = raw_folded.chars().filter(|c| !c.is_whitespace()).collect();
+    let family_squashed: String = family.chars().filter(|c| !c.is_whitespace()).collect();
+    // The first author opens the entry: `RowJR` for `Row JR`.
+    if squashed.starts_with(&family_squashed) {
+        return true;
+    }
+    if family_squashed.chars().count() >= 4 && squashed.contains(&family_squashed) {
+        return true;
+    }
+    // A floating accent glyph splits a name (`Ru Èhland`, `Arau Âjo`): compare
+    // one- and two-word windows of the entry's opening with the spaces removed.
+    let opening: Vec<&str> = raw_folded.split_whitespace().take(8).collect();
+    for (k, w) in opening.iter().enumerate() {
+        if w.chars().count() >= 4 && similarity(w, &family_squashed) >= FAMILY_WORD_MIN {
+            return true;
+        }
+        if let Some(next) = opening.get(k + 1) {
+            let pair = format!("{w}{next}");
+            if pair.chars().count() >= 4 && similarity(&pair, &family_squashed) >= FAMILY_WORD_MIN {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Share of the record title's words (4+ chars) that the entry contains,
+/// or `None` when the title has fewer than two such words.
+fn title_overlap(title: &str, raw_folded: &str) -> Option<f32> {
+    let needles = words(&folded(title), 4);
+    if needles.len() < 2 {
+        return None;
+    }
+    let hay = words(raw_folded, 1);
+    let hits = needles
+        .iter()
+        .filter(|n| hay.iter().any(|h| h == *n))
+        .count();
+    Some(hits as f32 / needles.len() as f32)
+}
+
+/// Does the record year, or the year before or after it, appear in the entry?
+fn year_in_entry(year: u16, raw_folded: &str) -> bool {
+    let candidates = [year.saturating_sub(1), year, year.saturating_add(1)];
+    raw_folded
+        .split_whitespace()
+        .any(|w| candidates.iter().any(|y| w == y.to_string()))
+}
+
 /// Verify `record` against the printed `entry`: the score, or why not
-/// (which field disagreed, with both values).
+/// (which check failed, with both values). The checks read the raw entry
+/// text, not the parsed fields, so a parser slip cannot reject a correct
+/// record: the record's first-author family name must appear in the
+/// entry, its year (within one) must appear, and, when the record title
+/// has words to check, most of them must appear.
 fn verify(record: &PaperRecord, entry: &ReferenceEntry) -> Result<f32, String> {
-    if let (Some(printed), Some(found)) = (entry.year, record.year)
-        && printed.abs_diff(found) > 1
-    {
-        return Err(format!("year: printed {printed}, record {found}"));
+    let raw = folded(&entry.raw);
+    let mut score_parts: Vec<f32> = Vec::new();
+    if let Some(year) = record.year {
+        if !year_in_entry(year, &raw) {
+            return Err(format!(
+                "year: record {year} not in entry (printed {})",
+                entry.year.map_or("none".to_string(), |y| y.to_string())
+            ));
+        }
+        score_parts.push(1.0);
     }
-    if let (Some(printed), Some(found)) = (entry.authors.first(), record.authors.first()) {
-        let score = author_agreement(printed, found);
-        return if score >= AUTHOR_MIN {
-            Ok(score)
-        } else {
-            Err(format!(
-                "first author: printed {printed:?}, record {found:?}"
-            ))
+    let title = title_overlap(&record.title, &raw);
+    if let Some(first) = record.authors.first() {
+        let family = family_of(first);
+        if !family_in_entry(&family, &raw) {
+            return Err(format!(
+                "first author: record {first:?} ({family}) not in entry (printed {})",
+                entry
+                    .authors
+                    .first()
+                    .map_or("none".to_string(), |a| format!("{a:?}"))
+            ));
+        }
+        score_parts.push(1.0);
+        if let Some(overlap) = title {
+            if overlap < TITLE_OVERLAP_MIN {
+                return Err(format!(
+                    "title: record {:?} shares {:.0}% of its words with the entry",
+                    record.title,
+                    overlap * 100.0
+                ));
+            }
+            score_parts.push(overlap);
+        }
+    } else {
+        let Some(overlap) = title else {
+            return Err("nothing to compare: record has no author and no usable title".to_string());
         };
+        if overlap < TITLE_MIN {
+            return Err(format!(
+                "title: record {:?} shares {:.0}% of its words with the entry (no record author)",
+                record.title,
+                overlap * 100.0
+            ));
+        }
+        score_parts.push(overlap);
     }
-    if let Some(printed) = entry.title.as_deref()
-        && !record.title.is_empty()
-    {
-        let score = title_agreement(printed, &record.title);
-        return if score >= TITLE_MIN {
-            Ok(score)
-        } else {
-            Err(format!(
-                "title: printed {printed:?}, record {:?}",
-                record.title
-            ))
-        };
+    if score_parts.is_empty() {
+        return Err("nothing to compare: record has no year, author or title".to_string());
     }
-    Err("nothing to compare: no author, no title parsed".to_string())
+    Ok(score_parts.iter().sum::<f32>() / score_parts.len() as f32)
 }
 
 /// The accepted record as stored on the entry.
@@ -267,6 +369,35 @@ pub struct Outcome {
     /// Requests that failed (network, rate limit); those entries are unresolved.
     pub errors: usize,
     pub by_method: BTreeMap<String, usize>,
+}
+
+/// Crossref `/works?query.bibliographic=…`: the query field meant for whole
+/// citation strings (author, title, venue and year weighed together), unlike
+/// the plain `query`.
+fn bibliographic_search(
+    client: &Client,
+    text: &str,
+    rows: u32,
+) -> Result<Vec<tpe_biblio::Found>, BiblioError> {
+    let n = rows.to_string();
+    let mut pairs: Vec<(&str, &str)> = vec![("query.bibliographic", text), ("rows", n.as_str())];
+    if let Some(m) = client.mailto() {
+        pairs.push(("mailto", m));
+    }
+    let url = with_query(&format!("{}/works", crossref::BASE), &pairs);
+    crossref::parse_crossref_found(&client.get_text(&url, &[])?)
+}
+
+/// Does a word of the record's venue (3+ chars, `RNA`, `Lancet`) appear in
+/// the entry? Journal names are how an article is told from its preprint or
+/// poster when title, authors and year all agree.
+fn venue_in_entry(venue: &str, raw_folded: &str) -> bool {
+    let needles = words(&folded(venue), 3);
+    if needles.is_empty() {
+        return false;
+    }
+    let hay = words(raw_folded, 1);
+    needles.iter().any(|n| hay.iter().any(|h| h == n))
 }
 
 /// Run `request` again after a rate limit or transport failure, backing
@@ -381,7 +512,7 @@ impl Resolver {
             }
         }
         let query: String = entry.raw.chars().take(QUERY_CHARS).collect();
-        let found = match with_retry(|| crossref::fetch_search(&self.client, &query, QUERY_ROWS)) {
+        let found = match with_retry(|| bibliographic_search(&self.client, &query, QUERY_ROWS)) {
             Ok(found) => found,
             Err(err) => {
                 entry.attempts.push(Attempt {
@@ -401,6 +532,11 @@ impl Resolver {
                 detail: None,
             });
         }
+        // Several candidates can verify (a journal article and its preprint or
+        // poster share title, authors and year): keep the best score, where a
+        // venue named in the entry counts extra.
+        let raw = folded(&entry.raw);
+        let mut best: Option<(f32, Resolved)> = None;
         for candidate in found {
             let record = candidate.record;
             let Some(doi) = record.doi.clone() else {
@@ -409,14 +545,28 @@ impl Resolver {
             saw_record = true;
             match verify(&record, entry) {
                 Ok(score) => {
+                    let venue_bonus = if record
+                        .venue
+                        .as_deref()
+                        .is_some_and(|v| venue_in_entry(v, &raw))
+                    {
+                        0.5
+                    } else {
+                        0.0
+                    };
+                    let total = score + venue_bonus;
                     entry.attempts.push(Attempt {
                         method: "query".to_string(),
                         doi: Some(doi.clone()),
                         outcome: "verified".to_string(),
-                        detail: None,
+                        detail: record
+                            .venue
+                            .as_ref()
+                            .map(|v| format!("venue {v:?}, score {total:.2}")),
                     });
-                    entry.resolved = Some(resolved_from(&record, &doi, "query", score));
-                    return Ok(Some("query"));
+                    if best.as_ref().is_none_or(|(b, _)| total > *b) {
+                        best = Some((total, resolved_from(&record, &doi, "query", score)));
+                    }
                 }
                 Err(detail) => entry.attempts.push(Attempt {
                     method: "query".to_string(),
@@ -425,6 +575,10 @@ impl Resolver {
                     detail: Some(detail),
                 }),
             }
+        }
+        if let Some((_, resolved)) = best {
+            entry.resolved = Some(resolved);
+            return Ok(Some("query"));
         }
         if saw_record {
             outcome.rejected += 1;
@@ -482,7 +636,7 @@ impl Resolver {
         if title.len() < 12 {
             return None;
         }
-        let found = with_retry(|| crossref::fetch_search(&self.client, title, QUERY_ROWS)).ok()?;
+        let found = with_retry(|| bibliographic_search(&self.client, title, QUERY_ROWS)).ok()?;
         for candidate in found {
             let record = candidate.record;
             let Some(doi) = record.doi.clone() else {
@@ -579,22 +733,31 @@ mod tests {
             source_id: None,
         };
         let mut entry = ReferenceEntry {
-            authors: vec!["Smith, J.".to_string()],
-            year: Some(2021),
+            raw: "Smith, J., Jones, B. (2021). A study of things. J. Stuff 3, 1-9.".to_string(),
             ..ReferenceEntry::default()
         };
         assert!(verify(&record, &entry).is_ok());
-        entry.year = Some(2015);
+        entry.raw = "Smith, J., Jones, B. (2015). A study of things. J. Stuff 3, 1-9.".to_string();
         assert!(verify(&record, &entry).unwrap_err().starts_with("year"));
-        entry.year = Some(2020);
-        entry.authors = vec!["Brown, T.".to_string()];
+        entry.raw = "Brown, T. (2020). A study of things. J. Stuff 3, 1-9.".to_string();
         assert!(
             verify(&record, &entry)
                 .unwrap_err()
                 .starts_with("first author")
         );
-        entry.authors.clear();
-        entry.title = Some("A study of things".to_string());
-        assert!(verify(&record, &entry).is_ok());
+        entry.raw = "Smith, J. (2020). Something else entirely. J. Stuff 3, 1-9.".to_string();
+        assert!(verify(&record, &entry).unwrap_err().starts_with("title"));
+        entry.raw = "Ru Èhland K, Smith J. (2020). A study of things.".to_string();
+        let record2 = PaperRecord {
+            authors: vec!["K. M. Rühland".to_string()],
+            ..record.clone()
+        };
+        assert!(verify(&record2, &entry).is_ok());
+        entry.raw = "RowJR, Smith J. (2020). A study of things.".to_string();
+        let record3 = PaperRecord {
+            authors: vec!["Jeffrey R. Row".to_string()],
+            ..record
+        };
+        assert!(verify(&record3, &entry).is_ok());
     }
 }

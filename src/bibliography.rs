@@ -226,7 +226,15 @@ fn scan_window(
                 entry.index = u32::try_from(i + 1).unwrap_or(u32::MAX);
                 citations::parse_entry(entry);
             }
-            crate::resolve::attach_links(&mut references, &checked);
+            // Link annotations come from the PDF structure, which only `lopdf`
+            // reads; a scan by another backend gets them from a `lopdf` pass over
+            // the same pages.
+            if checked.iter().any(|page| !page.links.is_empty()) {
+                crate::resolve::attach_links(&mut references, &checked);
+            } else {
+                let link_pages = link_pages_via_lopdf(bytes, password, &checked);
+                crate::resolve::attach_links(&mut references, &link_pages);
+            }
             let mut warnings: Vec<String> = checked
                 .iter()
                 .flat_map(|page| page.warnings.iter().cloned())
@@ -267,6 +275,27 @@ fn scan_window(
         assessment,
         plausible: true,
     })
+}
+
+/// For each page of `pages`, a `PageText` holding only that page's size and
+/// link annotations as `lopdf` reads them; empty when the file does not
+/// open with `lopdf`.
+fn link_pages_via_lopdf(bytes: &[u8], password: Option<&str>, pages: &[PageText]) -> Vec<PageText> {
+    let Some(lopdf) = router::extractor_for(Route::Lopdf) else {
+        return Vec::new();
+    };
+    let Ok(mut session) = lopdf.open(bytes, password) else {
+        return Vec::new();
+    };
+    pages
+        .iter()
+        .filter_map(|page| {
+            let read = session.page_text(page.page).ok()?;
+            let mut only_links = PageText::new(page.page, read.width, read.height, read.rotation);
+            only_links.links = read.links;
+            Some(only_links)
+        })
+        .collect()
 }
 
 /// Fewest trailing pages a fallback backend converts when the `lopdf` scan
