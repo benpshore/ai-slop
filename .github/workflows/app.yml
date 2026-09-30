@@ -76,6 +76,48 @@ jobs:
           plutil -extract CFBundleDocumentTypes json -o - "$APP/Contents/Info.plist"
           codesign --verify --strict --verbose=2 "$APP"
           ditto -c -k --keepParent "$APP" PDFTextract.app.zip
+      - name: Launch the bundle and open a PDF with it (the Open With path)
+        run: |
+          set -eu
+          APP=target/release/PDFTextract.app
+          dir=$(mktemp -d)
+          cp crates/tpe-app/tests/fixtures/synthetic-paper.pdf "$dir/paper.pdf"
+          # Launch Services hands the file to a cold app, as Finder's Open With does.
+          open -a "$APP" "$dir/paper.pdf"
+          for _ in $(seq 1 90); do [ -f "$dir/paper.txt" ] && break; sleep 1; done
+          ls -la "$dir"
+          test -f "$dir/paper.txt"
+          grep -q 'Faithful Extraction of Citations from Academic PDFs' "$dir/paper.txt"
+          pgrep -x PDFTextract >/dev/null
+          echo "the app is running and wrote paper.txt"
+          sleep 2
+          cat > "$RUNNER_TEMP/windows.swift" <<'SWIFT'
+          import CoreGraphics
+          let all = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+          var found = 0
+          for w in all where (w[kCGWindowOwnerName as String] as? String) == "PDFTextract" {
+              found += 1
+              print("window:", w[kCGWindowName as String] ?? "(untitled)", w[kCGWindowBounds as String] ?? [:])
+          }
+          print("on-screen PDFTextract windows:", found)
+          SWIFT
+          swift "$RUNNER_TEMP/windows.swift" | tee "$RUNNER_TEMP/windows.txt" || true
+          screencapture -x "$RUNNER_TEMP/window.png" || echo "screencapture failed"
+          ls -la "$RUNNER_TEMP/window.png" || true
+          osascript -e 'tell application "PDFTextract" to quit' || true
+          for _ in $(seq 1 20); do pgrep -x PDFTextract >/dev/null || break; sleep 1; done
+          if pgrep -x PDFTextract >/dev/null; then
+            echo "::warning::the app did not quit on request; killing it"
+            pkill -x PDFTextract
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: PDFTextract-launch
+          path: |
+            ${{ runner.temp }}/window.png
+            ${{ runner.temp }}/windows.txt
+          if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: PDFTextract.app
