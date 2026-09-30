@@ -63,6 +63,14 @@ pub enum Progress {
     Reading { done: u64, total: u64 },
 }
 
+/// A polled read that the observer stopped ends the run as cancelled.
+fn acquired<T>(result: Result<T, AcquireError>) -> Result<T, PipelineError> {
+    result.map_err(|error| match error {
+        AcquireError::Stopped => PipelineError::Cancelled,
+        other => other.into(),
+    })
+}
+
 /// Milliseconds elapsed since `start`.
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
@@ -394,6 +402,7 @@ fn parse_while_hashing(
     bytes: &[u8],
     identity: &mut BackendIdentity,
     staging: &mut FigureStaging,
+    early_hash: Option<TimedHash>,
     observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<Parsed, PipelineError> {
     let stop = AtomicBool::new(false);
@@ -401,7 +410,10 @@ fn parse_while_hashing(
         // Dropped on every way out of this closure, before the scope joins
         // the hashing thread: a cancelled or failed run does not wait for it.
         let _stop_hashing = StopOnDrop(&stop);
-        let mut hash_state = HashState::Running(scope.spawn(|| hash_timed(bytes, &stop)));
+        let mut hash_state = match early_hash {
+            Some(hashed) => HashState::Done(hashed),
+            None => HashState::Running(scope.spawn(|| hash_timed(bytes, &stop))),
+        };
 
         let mut session = extractor.open(bytes, job.password.as_deref())?;
         let page_count = session.page_count();
@@ -538,14 +550,32 @@ pub fn run_job_with_observed(
     let mut timings = StageTimings::default();
 
     let acquire_start = Instant::now();
-    let read =
-        acquire::read_verified_polled(Path::new(&job.path), job.max_bytes, &mut |done, total| {
-            observe(Progress::Reading { done, total })
-        })
-        .map_err(|error| match error {
-            AcquireError::Stopped => PipelineError::Cancelled,
-            other => other.into(),
-        })?;
+    let path = Path::new(&job.path);
+    let mut reading = |done, total| observe(Progress::Reading { done, total });
+    // With figures, the hash names the export directory and is needed before
+    // page 1. Computing it in the same polled pass as the read means the run
+    // never waits for it where a stop could not reach it; without figures it
+    // overlaps the parse on its own thread. `hash_ms` is then 0: the time is
+    // in `acquire_ms`.
+    let (read, early_hash) = if job.figures_dir.is_some() {
+        let snapshot = acquired(acquire::snapshot_polled(path, job.max_bytes, &mut reading))?;
+        let hashed = TimedHash {
+            hash: snapshot.hash,
+            ms: 0.0,
+        };
+        let read = acquire::Unhashed {
+            bytes: snapshot.bytes,
+            source: snapshot.source,
+        };
+        (read, Some(hashed))
+    } else {
+        let read = acquired(acquire::read_verified_polled(
+            path,
+            job.max_bytes,
+            &mut reading,
+        ))?;
+        (read, None)
+    };
     timings.acquire_ms = elapsed_ms(acquire_start);
 
     // Figures are staged privately while pages are read and filed only once
@@ -566,6 +596,7 @@ pub fn run_job_with_observed(
         &read.bytes,
         &mut identity,
         &mut staging,
+        early_hash,
         observe,
     )?;
     timings.parse_ms = elapsed_ms(parse_start);
@@ -1209,6 +1240,28 @@ mod tests {
             ),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn a_run_with_figures_hashes_while_it_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fake_input(dir.path());
+        let figures = dir.path().join("figures");
+        let backend = FakeExtractor {
+            reading_order: false,
+        };
+        let mut events = Vec::new();
+        let result =
+            run_job_with_observed(&backend, &fake_job(&input, Some(&figures)), &mut |event| {
+                events.push(event);
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(
+            result.document.hash.0,
+            sha256_hex(&std::fs::read(&input).unwrap())
+        );
+        assert!(matches!(events[0], Progress::Reading { .. }), "{events:?}");
     }
 
     /// Two runs share a figures directory that does not exist yet; each
