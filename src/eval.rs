@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tpe_common::text::match_key;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::citations::{find_reference_section, find_reference_sections, segment_entries};
@@ -1597,28 +1598,11 @@ fn normalize_arxiv(s: &str) -> String {
     strip_arxiv_version(rest.trim_end_matches(['.', ',', ';'])).to_string()
 }
 
-/// Lower-case ASCII-only letters and digits of `s`: canonical decomposition
-/// drops combining marks, and the common non-decomposable letters are mapped
-/// by hand (`ß` -> `ss`, `ø` -> `o`, `ł` -> `l`, ...).
+/// Letters and digits of `s` in the shared matching fold
+/// ([`tpe_common::text::match_key`]: accents, case and `ß`/`ø`/`ł`-style
+/// letters folded), with the spaces between its words removed.
 fn fold_ascii(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.nfd() {
-        if !c.is_alphanumeric() {
-            continue;
-        }
-        match c {
-            'ß' => out.push_str("ss"),
-            'ø' | 'Ø' => out.push('o'),
-            'æ' | 'Æ' => out.push_str("ae"),
-            'œ' | 'Œ' => out.push_str("oe"),
-            'ł' | 'Ł' => out.push('l'),
-            'đ' | 'Đ' | 'ð' | 'Ð' => out.push('d'),
-            'þ' | 'Þ' => out.push_str("th"),
-            'ı' => out.push('i'),
-            _ => out.extend(c.to_lowercase()),
-        }
-    }
-    out
+    match_key(s).replace(' ', "")
 }
 
 /// Whether a name token is an initial (`J.`, `AB`) rather than a name word.
@@ -1666,9 +1650,10 @@ fn author_year_key(first_author: Option<&String>, year: Option<u16>) -> Option<S
     Some(format!("{sur}|{year}"))
 }
 
-/// Non-empty normalized title, or `None`.
+/// Non-empty title in the shared matching fold
+/// ([`tpe_common::text::match_key`]), or `None`.
 fn title_key(title: Option<&String>) -> Option<String> {
-    let normalized = normalize_title(title?);
+    let normalized = match_key(title?);
     if normalized.is_empty() {
         None
     } else {

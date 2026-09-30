@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod text;
+
 /// A bibliographic record as the integrations exchange it. Every field is
 /// optional except `title`; identifiers are stored normalised (lower-case
 /// DOI without a resolver prefix, arXiv id without version).

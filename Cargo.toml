@@ -63,6 +63,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 tar = "0.4"
 thiserror = "2"
+# Name/title repair and the matching fold shared with the workbench crates.
+tpe-common = { path = "crates/tpe-common" }
 unicode-normalization = "0.1"
 ureq = "3"
 

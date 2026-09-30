@@ -79,6 +79,8 @@ use std::cmp::Ordering;
 
 use unicode_normalization::UnicodeNormalization;
 
+use tpe_common::text::{repair_display, spacing_accent_mark};
+
 use crate::schema::{BBox, Line, PageText, Span};
 
 /// Maximum XY-cut recursion depth.
@@ -365,30 +367,18 @@ fn is_combining(ch: char) -> bool {
     ('\u{0300}'..='\u{036F}').contains(&ch)
 }
 
-/// The combining mark a spacing accent glyph stands for: the spacing
-/// accents of the Latin-1 and Spacing Modifier blocks as `lopdf` decodes
-/// the accent glyph names (`acute`, `dieresis`, `circumflex`, `tilde`,
-/// `caron`, ...), the ASCII grave, circumflex and tilde, and the modifier
-/// acute and grave. A combining mark stands for itself.
+/// The combining mark a spacing accent glyph stands for
+/// ([`spacing_accent_mark`]); the glyph's position makes the ASCII grave,
+/// circumflex and tilde accents here too. A combining mark stands for
+/// itself.
 fn combining_accent(ch: char) -> Option<char> {
-    let mark = match ch {
-        '\u{00B4}' | '\u{02CA}' => '\u{0301}',
-        '\u{0060}' | '\u{02CB}' => '\u{0300}',
-        '\u{00A8}' => '\u{0308}',
-        '\u{005E}' | '\u{02C6}' => '\u{0302}',
-        '\u{007E}' | '\u{02DC}' => '\u{0303}',
-        '\u{00AF}' => '\u{0304}',
-        '\u{02D8}' => '\u{0306}',
-        '\u{02D9}' => '\u{0307}',
-        '\u{02DA}' => '\u{030A}',
-        '\u{02DB}' => '\u{0328}',
-        '\u{02DD}' => '\u{030B}',
-        '\u{00B8}' => '\u{0327}',
-        '\u{02C7}' => '\u{030C}',
-        mark if is_combining(mark) => mark,
-        _ => return None,
-    };
-    Some(mark)
+    match ch {
+        '`' => Some('\u{0300}'),
+        '^' => Some('\u{0302}'),
+        '~' => Some('\u{0303}'),
+        mark if is_combining(mark) => Some(mark),
+        other => spacing_accent_mark(other),
+    }
 }
 
 /// The combining marks of a span that shows nothing but accent glyphs;
@@ -2128,6 +2118,24 @@ pub fn order_page(page: &mut PageText) {
     }
     page.lines = lines;
     page.text = text;
+    repair_accents(page);
+}
+
+/// Rejoin accents the text layer split from their letters (`M¨uller`,
+/// `Kovařı́k`) in every line and in `page.text`, with
+/// [`tpe_common::text::repair_display`]; ASCII text is left alone. The
+/// repair never looks across a line break, so the lines and the text stay
+/// consistent.
+fn repair_accents(page: &mut PageText) {
+    if page.text.is_ascii() {
+        return;
+    }
+    for line in &mut page.lines {
+        if !line.text.is_ascii() {
+            line.text = repair_display(&line.text);
+        }
+    }
+    page.text = repair_display(&page.text);
 }
 
 /// Fill `page.lines` and `page.text` for a backend that already emits spans
@@ -2158,6 +2166,7 @@ pub fn lines_in_backend_order(page: &mut PageText) {
     let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
     page.text = texts.join("\n");
     page.lines = lines;
+    repair_accents(page);
 }
 
 #[cfg(test)]
@@ -2225,6 +2234,36 @@ mod tests {
             *seq += 1;
         }
         spans
+    }
+
+    #[test]
+    fn dotless_i_under_an_accent_and_spacing_accents_are_repaired() {
+        // `Kovařı́k` as the arXiv dev corpus extracts it (dotless i plus a
+        // combining acute), and an OT1 `M¨uller` set as one run of text.
+        let mut page = page_with(vec![
+            span(
+                "Kovar\u{30C}\u{131}\u{301}k, J.",
+                72.0,
+                700.0,
+                200.0,
+                710.0,
+                0,
+            ),
+            span("M\u{a8}uller, K.", 72.0, 680.0, 200.0, 690.0, 1),
+        ]);
+        order_page(&mut page);
+        assert_eq!(texts(&page), ["Kovařík, J.", "Müller, K."]);
+        assert_eq!(page.text, "Kovařík, J.\nMüller, K.");
+        let mut backend = page_with(vec![span(
+            "Beno\u{131}\u{302}t",
+            72.0,
+            700.0,
+            200.0,
+            710.0,
+            0,
+        )]);
+        lines_in_backend_order(&mut backend);
+        assert_eq!(backend.text, "Benoît");
     }
 
     #[test]
