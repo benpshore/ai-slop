@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn doi_is_lowercased_and_stripped() {
-        assert_eq!(normalize_doi("https://doi.org/10.1000/ABC"), "10.1000/abc");
+        assert_eq!(normalize_doi("https://doi.org/10.1/ABC"), "10.1/abc");
         assert_eq!(normalize_doi("doi:10.1000/x"), "10.1000/x");
         assert_eq!(normalize_doi(" 10.1000/Y "), "10.1000/y");
         assert_eq!(normalize_doi("http://dx.doi.org/10.1/z"), "10.1/z");
@@ -332,12 +332,12 @@ mod tests {
     fn rerun_replaces_rows() {
         let mut db = BibDb::open_in_memory().unwrap();
         let sha = "a".repeat(64);
-        let first = record(&sha, vec![entry(1, Some("10.1000/ABC")), entry(2, None)]);
+        let first = record(&sha, vec![entry(1, Some("10.1/ABC")), entry(2, None)]);
         assert_eq!(db.write(&first).unwrap(), 2);
         assert_eq!(db.paper_count().unwrap(), 1);
         assert_eq!(db.ref_count().unwrap(), 2);
 
-        let second = record(&sha, vec![entry(1, Some("doi:10.1000/ABC"))]);
+        let second = record(&sha, vec![entry(1, Some("doi:10.1/ABC"))]);
         assert_eq!(db.write(&second).unwrap(), 1);
         assert_eq!(db.paper_count().unwrap(), 1);
         assert_eq!(db.ref_count().unwrap(), 1);
@@ -350,7 +350,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(doi, "10.1000/abc");
+        assert_eq!(doi, "10.1/abc");
         assert_eq!(first_author, "A. Author");
         assert_eq!(authors, "[\"A. Author\",\"B. Other\"]");
     }

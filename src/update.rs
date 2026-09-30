@@ -378,7 +378,8 @@ fn download_and_replace(
     let archive_path = &staging.archive_path;
     let staged = &staging.staged;
     let exe = &staging.exe;
-    fs::write(archive_path, &bytes).with_context(|| format!("writing {}", archive_path.display()))?;
+    fs::write(archive_path, &bytes)
+        .with_context(|| format!("writing {}", archive_path.display()))?;
     unpack_tpe(archive_path, staged)?;
     make_executable(staged)?;
     fs::rename(staged, exe)
@@ -608,10 +609,7 @@ mod tests {
 
     #[test]
     fn targets_map_to_release_archives() {
-        assert_eq!(
-            target_for("aarch64", "macos"),
-            Some("aarch64-apple-darwin")
-        );
+        assert_eq!(target_for("aarch64", "macos"), Some("aarch64-apple-darwin"));
         assert_eq!(
             target_for("aarch64", "linux"),
             Some("aarch64-unknown-linux-gnu")

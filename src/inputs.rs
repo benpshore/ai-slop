@@ -367,14 +367,14 @@ mod tests {
     fn magic_bytes_classify_inputs() {
         assert_eq!(classify_bytes(b"%PDF-1.7\n", &[]), Kind::Pdf);
         assert_eq!(classify_bytes(b"junk\n%PDF-1.4", &[]), Kind::Pdf);
-        assert_eq!(classify_bytes(&[0xFF, 0xD8, 0xFF, 0xE0], &[]), Kind::Image);
+        assert_eq!(classify_bytes(&[0xFF, 0xD8, 0xFF], &[]), Kind::Image);
         assert_eq!(classify_bytes(b"\x89PNG\r\n", &[]), Kind::Image);
         assert_eq!(classify_bytes(b"GIF89a", &[]), Kind::Image);
         assert_eq!(classify_bytes(b"II*\0abc", &[]), Kind::Image);
         assert_eq!(classify_bytes(b"MM\0*abc", &[]), Kind::Image);
         assert_eq!(classify_bytes(b"RIFF\0\0\0\0WEBPVP8 ", &[]), Kind::Image);
-        assert_eq!(classify_bytes(b"\0\0\0\x18ftypheic\0\0", &[]), Kind::Image);
-        assert_eq!(classify_bytes(b"\0\0\0\x18ftypmif1\0\0", &[]), Kind::Image);
+        assert_eq!(classify_bytes(b"\0\0\0\x18ftypheic", &[]), Kind::Image);
+        assert_eq!(classify_bytes(b"\0\0\0\x18ftypmif1", &[]), Kind::Image);
         assert_eq!(classify_bytes(b"hello", &[]), Kind::Unknown);
         assert_eq!(classify_bytes(b"", &[]), Kind::Unknown);
     }

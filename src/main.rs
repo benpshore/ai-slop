@@ -1167,7 +1167,10 @@ enum Verdict {
     /// The input could not be processed; the text says why.
     Failed(String),
     /// Not a PDF: the kind name and the refusal reason.
-    Unsupported { kind: &'static str, reason: String },
+    Unsupported {
+        kind: &'static str,
+        reason: String,
+    },
     /// A PDF without a text layer (see `inputs::looks_scanned`).
     Scanned,
 }
@@ -1406,7 +1409,8 @@ fn write_refusal(args: &RunArgs, stem: &Path, done: &Done) -> Result<(), String>
         fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let json_path = with_suffix(stem, "json");
-    let json = serde_json::to_string_pretty(&done.refusal_record()).map_err(|e| e.to_string())?;
+    let record = done.refusal_record();
+    let json = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
     fs::write(&json_path, json).map_err(|e| format!("writing {}: {e}", json_path.display()))
 }
 
@@ -1437,8 +1441,8 @@ fn text_job(args: &RunArgs, plan: &Planned, done: &mut Done) -> Result<(), Strin
         ));
     }
     let figures = with_suffix(&stem, "figures");
-    let figures_dir = (!args.text.no_images && !args.text.stdout)
-        .then(|| figures.to_string_lossy().into_owned());
+    let figures_dir =
+        (!args.text.no_images && !args.text.stdout).then(|| figures.to_string_lossy().into_owned());
     let job = Job {
         path: path.clone(),
         backend: args.backend.clone(),
@@ -1473,7 +1477,8 @@ fn text_job(args: &RunArgs, plan: &Planned, done: &mut Done) -> Result<(), Strin
         if let Some(parent) = stem.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
         let text_path = with_suffix(&stem, "txt");
         fs::write(&text_path, text).map_err(|e| format!("writing {}: {e}", text_path.display()))?;
@@ -1626,16 +1631,28 @@ fn tail_is_scanned(
         return false;
     }
     let first = total.saturating_sub(scanned).saturating_add(1).max(1);
-    let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| -> Option<bool> {
-        let mut session = extractor.open(bytes, password).ok()?;
-        let count = session.page_count().min(total);
-        let mut pages = Vec::new();
-        for page in first..=count {
-            pages.push(session.page_text(page).ok()?);
-        }
-        Some(inputs::looks_scanned(&pages))
+    let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        tail_pages_scanned(extractor, bytes, password, first, total)
     }));
     matches!(outcome, Ok(Some(true)))
+}
+
+/// Read pages `first..=total` of `bytes` and apply the scanned-document
+/// rule; `None` when the document or a page cannot be read.
+fn tail_pages_scanned(
+    extractor: &dyn Extractor,
+    bytes: &[u8],
+    password: Option<&str>,
+    first: u32,
+    total: u32,
+) -> Option<bool> {
+    let mut session = extractor.open(bytes, password).ok()?;
+    let count = session.page_count().min(total);
+    let mut pages = Vec::new();
+    for page in first..=count {
+        pages.push(session.page_text(page).ok()?);
+    }
+    Some(inputs::looks_scanned(&pages))
 }
 
 /// Warning added to a `not_found` record whose scanned pages have no text.
@@ -1682,8 +1699,8 @@ fn bib_one(
     }
     let mut scan = bib_scan(args, extractor, &input.path, &file);
     let mut backend_used = extractor;
-    if !scan.record.found()
-        && let Some(fallback) = fallback
+    if let Some(fallback) = fallback
+        && !scan.record.found()
     {
         let second = bib_scan(args, fallback, &input.path, &file);
         if second.record.found() {
@@ -1696,16 +1713,14 @@ fn bib_one(
         size,
         bytes,
     } = scan;
-    if record.status == "not_found"
-        && let Some(bytes) = &bytes
-        && tail_is_scanned(
-            backend_used,
-            bytes,
-            args.password.as_deref(),
-            record.total_pages.unwrap_or(0),
-            record.pages_scanned.unwrap_or(0),
-        )
-    {
+    let total = record.total_pages.unwrap_or(0);
+    let scanned_pages = record.pages_scanned.unwrap_or(0);
+    let password = args.password.as_deref();
+    let tail = bytes.as_deref().unwrap_or_default();
+    let scanned = record.status == "not_found"
+        && !tail.is_empty()
+        && tail_is_scanned(backend_used, tail, password, total, scanned_pages);
+    if scanned {
         record.warnings.push(SCANNED_WARNING.to_string());
         done.verdict = Verdict::Scanned;
     } else if !record.found() {
@@ -1716,7 +1731,7 @@ fn bib_one(
                 .unwrap_or_else(|| "no reference list found".to_string()),
         );
     }
-    done.pages = record.total_pages.unwrap_or(0);
+    done.pages = total;
     done.bytes = size;
     done.ms = elapsed_ms(started);
     done.record = Some(record);
@@ -1837,9 +1852,15 @@ mod tests {
     #[test]
     fn suffix_keeps_dots_in_the_stem() {
         let stem = std::path::Path::new("out/paper.v2");
-        assert_eq!(with_suffix(stem, "txt"), std::path::Path::new("out/paper.v2.txt"));
+        assert_eq!(
+            with_suffix(stem, "txt"),
+            std::path::Path::new("out/paper.v2.txt")
+        );
         let short = std::path::Path::new("a");
-        assert_eq!(with_suffix(short, "figures"), std::path::Path::new("a.figures"));
+        assert_eq!(
+            with_suffix(short, "figures"),
+            std::path::Path::new("a.figures")
+        );
     }
 
     #[test]
