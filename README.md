@@ -79,6 +79,7 @@ Workbench crates under `crates/` (each is a library with offline tests; see [Tra
 | `tpe-speech` | text-to-speech with a speech-recognition round trip |
 | `tpe-app` | PDFTextract, the GPUI macOS app: two buttons over the engine, progress bars, Finder integration ([App](docs/APP.md)); plus the workbench library modules |
 | `tpe-browser` | research-browser model (DOI/PDF detection, host policy, cookies). CEF embedding is design-only ([Browser](docs/BROWSER.md)) |
+| `tpe-serve` | loopback-only HTTP API over the app's job model (get text, get bibliography), for a TUI, browser page, MCP server or scripts; tested on Linux only, no client uses it yet ([API](docs/API.md)) |
 
 ## Performance and fidelity targets
 
