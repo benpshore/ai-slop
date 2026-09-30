@@ -93,6 +93,41 @@ impl TextScale {
         Self::BASE_REM_PX * self.0
     }
 
+    /// The scale a stored value names: a number, rounded to the nearest step
+    /// and clamped to the allowed range. Anything else (empty, garbled,
+    /// not finite) is `None`, so a damaged settings file never breaks launch.
+    pub fn parse(text: &str) -> Option<Self> {
+        let value: f32 = text.trim().parse().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        let steps = ((value.clamp(Self::MIN, Self::MAX) - Self::MIN) / Self::STEP).round();
+        Some(Self(
+            (Self::MIN + steps * Self::STEP).clamp(Self::MIN, Self::MAX),
+        ))
+    }
+
+    /// The scale stored in `path`, or the default when there is none or it is
+    /// unreadable.
+    pub fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Store the scale in `path`, creating its directory. Failure is
+    /// returned, not fatal: the scale then simply does not persist.
+    ///
+    /// # Errors
+    /// The file system's error.
+    pub fn save(self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, format!("{}\n", self.0))
+    }
+
     /// Human-readable percentage, e.g. `125%`.
     pub fn percent_label(self) -> String {
         let percent = (self.0 * 100.0).round();
@@ -468,6 +503,41 @@ mod tests {
         }
         assert!((small.0 - TextScale::MIN).abs() < f32::EPSILON);
         assert_eq!(TextScale(1.25).percent_label(), "125%");
+    }
+
+    #[test]
+    fn text_scale_reads_only_sensible_stored_values() {
+        assert_eq!(TextScale::parse("1.25\n"), Some(TextScale(1.25)));
+        assert_eq!(TextScale::parse(" 1 "), Some(TextScale(1.0)));
+        assert_eq!(
+            TextScale::parse("1.3"),
+            Some(TextScale(1.25)),
+            "rounded to a step"
+        );
+        assert_eq!(TextScale::parse("9"), Some(TextScale(TextScale::MAX)));
+        assert_eq!(TextScale::parse("0.01"), Some(TextScale(TextScale::MIN)));
+        for bad in ["", "big", "NaN", "inf", "-inf", "1,5"] {
+            assert_eq!(TextScale::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn text_scale_persists_and_survives_a_damaged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings").join("text-scale");
+        assert_eq!(
+            TextScale::load(&path),
+            TextScale::default(),
+            "no file: the default"
+        );
+        TextScale(1.5).save(&path).unwrap();
+        assert_eq!(TextScale::load(&path), TextScale(1.5));
+        std::fs::write(&path, b"\xff\xfe not a number").unwrap();
+        assert_eq!(
+            TextScale::load(&path),
+            TextScale::default(),
+            "a damaged file: the default"
+        );
     }
 
     #[test]

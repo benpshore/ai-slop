@@ -164,7 +164,9 @@ the same height and their text fits; Escape and Delete stop the running job
 queue moves on), and neither touches a queued or finished row; a cancelled
 row can be shown in Finder and cleared; closing the window keeps a running
 job and the app quits itself once idle; the Dock icon reopens the window on the same rows;
-a bad file fails its row and the queue moves on.
+a bad file fails its row and the queue moves on; ⌘= ⌘- ⌘0 change the text
+size, at 200% the controls have grown and rows still hold their text, and
+the size survives a relaunch (a damaged settings file opens at normal).
 
 They run in the macOS App workflow. They were also run on Linux, with GPUI
 built as an ordinary dependency and `libxkbcommon-x11-dev` and friends
@@ -200,8 +202,12 @@ from the code:
 - Targets: the two buttons are full-width and at least 132 pt tall; row
   buttons are padded. Drop is an alternative to the button, never the only
   path.
-- Text: fixed sizes for now; the previous window's ⌘= / ⌘- scaling was not
-  carried over yet (row heights are already in rems for it).
+- Text: ⌘= / ⌘+ larger, ⌘- smaller, ⌘0 back to normal (View menu too), in
+  steps of 12.5% from 75% to 200%. Everything is sized in rems, so buttons
+  and rows grow with it (rows are 6.5 rem: at 200% a two-line status still
+  fits, which a 6 rem row did not). The size is remembered in `text-scale`
+  beside the ledger; a missing or damaged file opens at normal size. At
+  200% the default 640×480 window shows only a few rows; resize it.
 
 ## Known limits
 
