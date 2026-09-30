@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::ops::ControlFlow;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -409,6 +410,7 @@ fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
         if args.progress {
             report_progress(&job.path, event);
         }
+        ControlFlow::Continue(())
     };
     // A panic inside a backend must fail this file only, not the whole batch.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -483,6 +485,7 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
             if args.progress {
                 report_progress(&file, event);
             }
+            ControlFlow::Continue(())
         };
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;

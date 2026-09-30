@@ -36,8 +36,9 @@ Ways in:
 - the job list from the keyboard: Tab reaches it (one stop, after the two
   big buttons); Up and Down move a selection, Home/End or ⌘↑/⌘↓ jump to the
   first or last row, Enter or Space shows the selected row's result in
-  Finder, ⌘C copies its text, Delete removes it if it is still queued (a
-  finished row is never removed by a stray key; Clear finished, ⌘K, does
+  Finder, ⌘C copies its text, Delete removes it if it is still queued or
+  stops it if it is running, Escape stops a running one (a finished, failed
+  or cancelled row is never removed by a stray key; Clear finished, ⌘K, does
   that). The buttons on each row do the same for the pointer;
 - Finder: Open With PDFTextract, or drop PDFs on the Dock icon
   (`CFBundleDocumentTypes`, delivered through `Application::on_open_urls`;
@@ -45,8 +46,13 @@ Ways in:
 - `tpe-app paper.pdf …` from a shell queues the files for text.
 
 Jobs run one at a time (the ledger has one writer). A queued row can be
-removed; a running one runs to completion (the in-process engine has no
-cancellation hook yet). Finished rows offer Copy (the text output to the
+removed; a running one is stopped with Cancel (or Escape, or Delete): the
+row shows "Cancelling" at once and the engine stops at its next page, after
+which nothing has been written for it, not even to the ledger, and the queue
+moves on. The row stays as "Cancelled" until cleared. What cannot be
+interrupted: one page's extraction, and the ordering, cleanup and citation
+passes after the last page; a stop requested during those is honoured just
+before anything is written. Finished rows offer Copy (the text output to the
 clipboard) and Show in Finder. Closing the window while rows are queued or
 running does not stop them: the view lives on, the app quits itself once
 idle, and the Dock icon reopens the window on the same rows. Files opened
@@ -64,10 +70,15 @@ and queued once it does (`jobs::Mailbox`, test
 - Progress is one `Progress` event per page over an unbounded channel; the
   foreground task keeps only the newest event waiting at each frame, so a
   15,000-page document does not queue 15,000 re-renders.
-- Outputs are written by the background task after the engine finishes and
-  a failed job writes nothing; the files are written in place (not yet
-  through a temporary file and rename), so a force-quit during the write
-  could leave a short file. The ledger write is the engine's own
+- Outputs are written by the background task after the engine finishes;
+  a failed or cancelled job writes nothing. Each file is written completely
+  to a hidden temporary name beside the PDF and given its final name with a
+  hard link, which fails rather than replace an existing file: a force-quit
+  leaves no short file, and two writers can never take the same name
+  (`jobs::publish`, tested with eight at once). On a file system without
+  hard links (FAT, some network shares) it creates the final name
+  exclusively and writes in place instead, where a force-quit mid-write can
+  leave a short file. The ledger write is the engine's own
   (`Ledger::write_result`).
 
 ### Measured: cost of drawing the job list
@@ -148,15 +159,22 @@ and Clear finished; arrow keys, Home and End move a selection that keeps
 itself in view; Enter shows the selected row in Finder, ⌘C copies its text
 (to the clipboard), Delete removes only queued rows; keys reach rows that are
 not on screen; clicking a row selects it and focuses the list; rows are all
-the same height and their text fits; closing the window keeps a running job and the app
-quits itself once idle; the Dock icon reopens the window on the same rows;
+the same height and their text fits; Escape and Delete stop the running job
+(row shown as "Cancelling" at once, then "Cancelled", nothing written, the
+queue moves on), and neither touches a queued or finished row; a cancelled
+row can be shown in Finder and cleared; closing the window keeps a running
+job and the app quits itself once idle; the Dock icon reopens the window on the same rows;
 a bad file fails its row and the queue moves on.
 
 They run in the macOS App workflow. They were also run on Linux, with GPUI
 built as an ordinary dependency and `libxkbcommon-x11-dev` and friends
 installed, through a local patch that is not part of the repository (GPUI
 stays macOS-only in `Cargo.toml` so the Linux `ci` legs need none of that).
-GPUI has no public way to build a file-drop event, so drops are covered
+A simulated click steps the executor between mouse-down and mouse-up, which
+would finish a job before its Cancel button is released, so the Cancel button
+is checked for presence and its handler (`Shell::cancel`) is called directly;
+the keys are dispatched without stepping the executor. GPUI has no public
+way to build a file-drop event, so drops are covered
 through `Shell::enqueue`, which the drop listener calls, and not by an actual
 drop.
 
@@ -187,9 +205,8 @@ from the code:
 
 ## Known limits
 
-- One job at a time; a 15,000-page document holds the queue while the engine
-  works on it, and cannot be cancelled once started (quitting the app is the
-  only way to stop it; nothing half-written is left next to the PDF).
+- One job at a time; a 15,000-page document holds the queue until it is
+  finished or cancelled (Cancel takes effect at the next page).
 - Progress for a bibliography counts pages read from the end against the
   whole page count, so its bar usually finishes early. That is the true
   state of the backward scan, not an estimate.

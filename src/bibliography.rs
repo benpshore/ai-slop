@@ -3,6 +3,8 @@
 //! This path deliberately leaves full-document metadata, in-text markers,
 //! figures, and ledger publication to the existing extraction pipeline.
 
+use std::ops::ControlFlow;
+
 use serde::Serialize;
 
 use crate::backend::{BackendError, Extractor};
@@ -133,26 +135,34 @@ pub fn scan_backward(
     bytes: &[u8],
     password: Option<&str>,
 ) -> Result<BibliographyScan, BackendError> {
-    scan_backward_observed(extractor, bytes, password, &mut |_| {})
+    scan_backward_observed(extractor, bytes, password, &mut |_| {
+        ControlFlow::Continue(())
+    })
 }
 
 /// [`scan_backward`] reporting a [`Progress`] event when the document opens
-/// and after each page read from the end. `total` is the page count: how
+/// and after each page read from the end (the observer can stop the scan with
+/// `ControlFlow::Break`, which fails it with [`BackendError::Cancelled`]).
+/// `total` is the page count: how
 /// many pages the scan will need is unknown until the boundary is found, so
 /// `done` counts pages scanned so far and usually stops well short of it.
 pub fn scan_backward_observed(
     extractor: &dyn Extractor,
     bytes: &[u8],
     password: Option<&str>,
-    observe: &mut dyn FnMut(Progress),
+    observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<BibliographyScan, BackendError> {
     let mut session = extractor.open(bytes, password)?;
     let total_pages = session.page_count();
     let mut pages: Vec<PageText> = Vec::new();
-    observe(Progress::Opened {
+    if observe(Progress::Opened {
         pages: total_pages,
         total: total_pages,
-    });
+    })
+    .is_break()
+    {
+        return Err(BackendError::Cancelled);
+    }
 
     for number in (1..=total_pages).rev() {
         let mut page = session.page_text(number)?;
@@ -162,11 +172,15 @@ pub fn scan_backward_observed(
             reading_order::order_page(&mut page);
         }
         pages.insert(0, page);
-        observe(Progress::Page {
+        if observe(Progress::Page {
             page: number,
             done: u32::try_from(pages.len()).unwrap_or(u32::MAX),
             total: total_pages,
-        });
+        })
+        .is_break()
+        {
+            return Err(BackendError::Cancelled);
+        }
 
         // Cleanup uses the selected document context. Keep the ordered source
         // pages untouched so an earlier page can change that context safely.
@@ -225,6 +239,8 @@ pub fn scan_backward_observed(
 
 #[cfg(test)]
 mod tests {
+    use std::ops::ControlFlow;
+
     use lopdf::content::{Content, Operation};
     use lopdf::{Document, Object, Stream, dictionary};
 
@@ -326,6 +342,7 @@ mod tests {
         let mut events = Vec::new();
         let scan = scan_backward_observed(&LopdfBackend::default(), &bytes, None, &mut |event| {
             events.push(event);
+            ControlFlow::Continue(())
         })
         .unwrap();
         assert!(scan.found);
@@ -386,6 +403,44 @@ mod tests {
         assert_eq!(value["warnings"], serde_json::json!(["malformed"]));
         assert_eq!(value["error"], "malformed");
         assert_eq!(failed.plain_text(), "");
+    }
+
+    #[test]
+    fn an_observer_can_stop_the_scan() {
+        let bytes = pdf(&[
+            &["Introduction"],
+            &["[1] A. One, First cited work, 2020."],
+            &[
+                "[2] B. Two, Second cited work, 2021.",
+                "[3] C. Three, Third cited work, 2022.",
+            ],
+        ]);
+        let mut pages_seen = 0;
+        let result = scan_backward_observed(&LopdfBackend::default(), &bytes, None, &mut |event| {
+            if matches!(event, Progress::Page { .. }) {
+                pages_seen += 1;
+            }
+            ControlFlow::Break(())
+        });
+        assert!(matches!(
+            result,
+            Err(crate::backend::BackendError::Cancelled)
+        ));
+        assert_eq!(pages_seen, 0, "stopped at the open, before any page");
+
+        let mut pages_seen = 0;
+        let result = scan_backward_observed(&LopdfBackend::default(), &bytes, None, &mut |event| {
+            if matches!(event, Progress::Page { .. }) {
+                pages_seen += 1;
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        assert!(matches!(
+            result,
+            Err(crate::backend::BackendError::Cancelled)
+        ));
+        assert_eq!(pages_seen, 1);
     }
 
     #[test]

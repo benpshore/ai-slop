@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Instant;
@@ -39,10 +40,16 @@ pub enum PipelineError {
     Backend(#[from] BackendError),
     #[error("unknown backend: {0}")]
     UnknownBackend(String),
+    /// The observer asked the run to stop (`ControlFlow::Break`); nothing was
+    /// produced.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// A page-level progress notification for one document, delivered on the
-/// calling thread while the job runs (see [`run_job_observed`]).
+/// calling thread while the job runs (see [`run_job_observed`]). The observer
+/// answers `ControlFlow::Continue(())` to go on or `Break(())` to stop the
+/// run at that point: the run then fails with [`PipelineError::Cancelled`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
     /// The document opened: it has `pages` pages and `total` of them will be
@@ -226,7 +233,7 @@ fn parse_while_hashing(
     job: &Job,
     bytes: &[u8],
     identity: &mut BackendIdentity,
-    observe: &mut dyn FnMut(Progress),
+    observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<Parsed, PipelineError> {
     thread::scope(|scope| -> Result<Parsed, PipelineError> {
         let mut hash_state = HashState::Running(scope.spawn(move || hash_timed(bytes)));
@@ -236,10 +243,14 @@ fn parse_while_hashing(
         let (first, last) = resolve_page_range(job.pages, page_count)?;
         let covers_all_pages = first <= 1 && last >= page_count;
         let total = last - first + 1;
-        observe(Progress::Opened {
+        if observe(Progress::Opened {
             pages: page_count,
             total,
-        });
+        })
+        .is_break()
+        {
+            return Err(PipelineError::Cancelled);
+        }
 
         let mut pages: Vec<PageText> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
@@ -276,11 +287,15 @@ fn parse_while_hashing(
                 }
                 Err(other) => return Err(PipelineError::Backend(other)),
             }
-            observe(Progress::Page {
+            if observe(Progress::Page {
                 page,
                 done: u32::try_from(pages.len()).unwrap_or(u32::MAX),
                 total,
-            });
+            })
+            .is_break()
+            {
+                return Err(PipelineError::Cancelled);
+            }
         }
         let info: BTreeMap<String, String> = session.info();
         Ok(Parsed {
@@ -324,14 +339,14 @@ fn parse_while_hashing(
 /// second thread while the backend parses; that work is reported as
 /// `hash_ms`, and any wait for it falls inside `parse_ms`.
 pub fn run_job(job: &Job) -> Result<ExtractionResult, PipelineError> {
-    run_job_observed(job, &mut |_| {})
+    run_job_observed(job, &mut |_| ControlFlow::Continue(()))
 }
 
 /// [`run_job`] reporting a [`Progress`] event when the document opens and
 /// after each page, on the calling thread.
 pub fn run_job_observed(
     job: &Job,
-    observe: &mut dyn FnMut(Progress),
+    observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<ExtractionResult, PipelineError> {
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
@@ -343,14 +358,14 @@ pub fn run_job_with(
     extractor: &dyn Extractor,
     job: &Job,
 ) -> Result<ExtractionResult, PipelineError> {
-    run_job_with_observed(extractor, job, &mut |_| {})
+    run_job_with_observed(extractor, job, &mut |_| ControlFlow::Continue(()))
 }
 
 /// [`run_job_with`] reporting [`Progress`] events like [`run_job_observed`].
 pub fn run_job_with_observed(
     extractor: &dyn Extractor,
     job: &Job,
-    observe: &mut dyn FnMut(Progress),
+    observe: &mut dyn FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<ExtractionResult, PipelineError> {
     let mut identity = extractor.identity();
 
@@ -469,6 +484,7 @@ pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkR
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
 
     use lopdf::content::{Content, Operation};
@@ -826,6 +842,7 @@ mod tests {
         let mut events = Vec::new();
         let result = run_job_observed(&lopdf_job(&path, Some((2, 3))), &mut |event| {
             events.push(event);
+            ControlFlow::Continue(())
         })
         .unwrap();
 
@@ -846,6 +863,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn an_observer_can_stop_a_run_at_a_page() {
+        let (_dir, path) = three_page_fixture();
+        let mut seen = Vec::new();
+        let result = run_job_observed(&lopdf_job(&path, None), &mut |event| {
+            seen.push(event);
+            if matches!(event, Progress::Page { done: 1, .. }) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert!(
+            matches!(result, Err(PipelineError::Cancelled)),
+            "{result:?}"
+        );
+        assert_eq!(
+            seen,
+            [
+                Progress::Opened { pages: 3, total: 3 },
+                Progress::Page {
+                    page: 1,
+                    done: 1,
+                    total: 3
+                },
+            ],
+            "no page is read after the stop"
+        );
+
+        // Stopping at the open is honoured too.
+        let result = run_job_observed(&lopdf_job(&path, None), &mut |_| ControlFlow::Break(()));
+        assert!(matches!(result, Err(PipelineError::Cancelled)));
     }
 
     #[test]

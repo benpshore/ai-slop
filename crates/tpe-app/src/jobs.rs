@@ -10,18 +10,21 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
+use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedSender;
 
 use tpe::acquire;
-use tpe::backend;
+use tpe::backend::{self, BackendError};
 use tpe::bibliography::{self, Record};
 use tpe::ledger::Ledger;
-use tpe::pipeline::{self, Progress};
+use tpe::pipeline::{self, PipelineError, Progress};
 use tpe::schema::{Job as EngineJob, Status};
 
 /// The extraction backend every job uses.
@@ -72,6 +75,50 @@ pub enum Phase {
     Running,
     Finished(Outcome),
     Failed(String),
+    /// Stopped by the person; nothing was written.
+    Cancelled,
+}
+
+/// Why a job produced nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunError {
+    /// The person stopped it (see [`run`]).
+    Cancelled,
+    /// The engine or the file system said no.
+    Failed(String),
+}
+
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<PipelineError> for RunError {
+    fn from(error: PipelineError) -> Self {
+        match error {
+            PipelineError::Cancelled => Self::Cancelled,
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
+impl From<BackendError> for RunError {
+    fn from(error: BackendError) -> Self {
+        match error {
+            BackendError::Cancelled => Self::Cancelled,
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 /// One row of the window.
@@ -84,6 +131,8 @@ pub struct JobRow {
     /// Pages processed so far and how many the run covers (`None` until opened).
     pub done: u32,
     pub total: Option<u32>,
+    /// A stop was requested and the engine has not reached it yet.
+    pub cancelling: bool,
 }
 
 impl JobRow {
@@ -110,6 +159,7 @@ impl JobRow {
     pub fn status_line(&self) -> String {
         let state = match &self.phase {
             Phase::Queued => "Waiting".to_string(),
+            Phase::Running if self.cancelling => "Cancelling".to_string(),
             Phase::Running => match self.total {
                 Some(total) => format!("Page {} of {total}", self.done),
                 None => "Opening".to_string(),
@@ -119,6 +169,7 @@ impl JobRow {
                 None => outcome.summary.clone(),
             },
             Phase::Failed(message) => format!("Failed: {message}"),
+            Phase::Cancelled => "Cancelled".to_string(),
         };
         format!("{} · {state}", self.action.noun())
     }
@@ -189,6 +240,7 @@ impl JobList {
                 phase: Phase::Queued,
                 done: 0,
                 total: None,
+                cancelling: false,
             });
             added += 1;
         }
@@ -231,12 +283,27 @@ impl JobList {
         }
     }
 
-    pub fn finish(&mut self, id: usize, result: Result<Outcome, String>) {
+    pub fn finish(&mut self, id: usize, result: Result<Outcome, RunError>) {
         if let Some(row) = self.row_mut(id) {
+            row.cancelling = false;
             row.phase = match result {
                 Ok(outcome) => Phase::Finished(outcome),
-                Err(message) => Phase::Failed(message),
+                Err(RunError::Cancelled) => Phase::Cancelled,
+                Err(RunError::Failed(message)) => Phase::Failed(message),
             };
+        }
+    }
+
+    /// Note that a stop was requested for running row `id`; `false` when it
+    /// is not running (a queued row is removed instead, a finished one has
+    /// nothing to stop).
+    pub fn mark_cancelling(&mut self, id: usize) -> bool {
+        match self.row_mut(id) {
+            Some(row) if row.phase == Phase::Running => {
+                row.cancelling = true;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -293,46 +360,131 @@ impl JobList {
     }
 }
 
-/// Where an output file goes: next to the source PDF, with the source's base
-/// name plus `suffix`, never overwriting an existing file. `paper.pdf` with
-/// suffix `.txt` becomes `paper.txt`, then `paper 2.txt`, `paper 3.txt`, …
-pub fn output_path(source: &Path, suffix: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
-    output_paths(source, &[suffix], exists).remove(0)
-}
-
-/// [`output_path`] for a set of files written together: they share one
-/// generation number, chosen so that none of them exists. With
-/// `paper.references.txt` present but `paper.references.json` gone, both
-/// become `paper 2.references.*` rather than a pair mixing two runs.
-pub fn output_paths(
-    source: &Path,
-    suffixes: &[&str],
-    exists: impl Fn(&Path) -> bool,
-) -> Vec<PathBuf> {
+/// The names one generation of outputs takes next to `source`: the source's
+/// base name plus each suffix, `paper.txt` for generation 1 and
+/// `paper 2.txt`, `paper 3.txt`, … after.
+fn generation_paths(source: &Path, suffixes: &[&str], generation: u64) -> Vec<PathBuf> {
     let directory = source.parent().unwrap_or_else(|| Path::new(""));
     let base = source
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let candidates = |n: u64| -> Vec<PathBuf> {
-        suffixes
-            .iter()
-            .map(|suffix| {
-                if n == 1 {
-                    directory.join(format!("{base}{suffix}"))
-                } else {
-                    directory.join(format!("{base} {n}{suffix}"))
-                }
-            })
-            .collect()
-    };
-    let mut n = 1u64;
-    let mut paths = candidates(n);
-    while paths.iter().any(|path| exists(path)) {
-        n += 1;
-        paths = candidates(n);
+    suffixes
+        .iter()
+        .map(|suffix| {
+            if generation == 1 {
+                directory.join(format!("{base}{suffix}"))
+            } else {
+                directory.join(format!("{base} {generation}{suffix}"))
+            }
+        })
+        .collect()
+}
+
+/// Temporary files removed when dropped, so a failure or a clash leaves none.
+struct Staged(Vec<PathBuf>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
     }
-    paths
+}
+
+/// Distinguishes the temporary names of concurrent publishers in one process.
+static STAGING: AtomicU64 = AtomicU64::new(0);
+
+/// Write `files` (suffix and bytes) next to `source` and return their paths.
+///
+/// Never overwrites: the files of one call share a generation number, and
+/// any existing name in the set moves the whole set on (`paper 2.*`), so a
+/// pair never mixes two runs. Each file is written completely to a hidden
+/// temporary name in the same directory and then given its final name with a
+/// hard link, which fails instead of replacing an existing file, so a reader
+/// or a force-quit sees either no file or a whole one, and two concurrent
+/// publishers cannot take the same name. Where the file system has no hard
+/// links, the final name is created exclusively and written in place (a
+/// force-quit mid-write can then leave a short file).
+///
+/// # Errors
+/// The file system's error, with nothing left behind that this call made.
+pub fn publish(source: &Path, files: &[(&str, Vec<u8>)]) -> std::io::Result<Vec<PathBuf>> {
+    let suffixes: Vec<&str> = files.iter().map(|(suffix, _)| *suffix).collect();
+    let mut use_links = true;
+    for generation in 1u64.. {
+        let finals = generation_paths(source, &suffixes, generation);
+        let placed = if use_links {
+            match place_by_link(source, &finals, files) {
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                    // No hard links here (FAT, some network shares): create
+                    // exclusively and write in place from now on.
+                    use_links = false;
+                    place_exclusively(&finals, files)
+                }
+                other => other,
+            }
+        } else {
+            place_exclusively(&finals, files)
+        };
+        match placed {
+            Ok(()) => return Ok(finals),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the generation counter does not run out")
+}
+
+/// Stage every file, then link each into place; on a clash undo the links.
+fn place_by_link(
+    source: &Path,
+    finals: &[PathBuf],
+    files: &[(&str, Vec<u8>)],
+) -> std::io::Result<()> {
+    let directory = source.parent().unwrap_or_else(|| Path::new(""));
+    let mut staged = Staged(Vec::new());
+    for (suffix, bytes) in files {
+        let unique = STAGING.fetch_add(1, Ordering::Relaxed);
+        let temporary = directory.join(format!(
+            ".pdftextract-{}-{unique}{suffix}.partial",
+            std::process::id()
+        ));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        staged.0.push(temporary);
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    let mut linked: Vec<&PathBuf> = Vec::new();
+    for (temporary, target) in staged.0.iter().zip(finals) {
+        if let Err(error) = fs::hard_link(temporary, target) {
+            for done in linked {
+                let _ = fs::remove_file(done);
+            }
+            return Err(error);
+        }
+        linked.push(target);
+    }
+    Ok(())
+}
+
+/// Create each final name exclusively and write it; on any failure remove
+/// what this attempt created.
+fn place_exclusively(finals: &[PathBuf], files: &[(&str, Vec<u8>)]) -> std::io::Result<()> {
+    let mut created = Staged(Vec::new());
+    for (target, (_, bytes)) in finals.iter().zip(files) {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)?;
+        created.0.push(target.clone());
+        file.write_all(bytes)?;
+    }
+    created.0.clear(); // success: keep them
+    Ok(())
 }
 
 /// Paths handed to the app from outside its window (Finder Services, files
@@ -440,17 +592,33 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// Run one job in this process. `observe` is called on this thread for the
-/// open and for each page. Outputs are written next to `source` only on
-/// success; a failed job (including an engine panic) writes nothing.
+/// open and for each page. Setting `cancel` stops the job at the next page
+/// (the post-processing of a finished parse cannot be interrupted, so a
+/// stop requested during it is honoured just before anything is written).
+/// Outputs are written next to `source` only on success; a failed or
+/// cancelled job (including an engine panic) writes nothing, not even to the
+/// ledger.
+///
+/// # Errors
+/// [`RunError::Cancelled`] when stopped, [`RunError::Failed`] otherwise.
 pub fn run(
     action: Action,
     source: &Path,
     ledger: &Path,
     observe: &mut dyn FnMut(Progress),
-) -> Result<Outcome, String> {
+    cancel: &AtomicBool,
+) -> Result<Outcome, RunError> {
+    let mut watch = |event: Progress| {
+        observe(event);
+        if cancel.load(Ordering::Relaxed) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
     match action {
-        Action::Text => run_text(source, ledger, observe),
-        Action::Bibliography => run_bibliography(source, observe),
+        Action::Text => run_text(source, ledger, &mut watch, cancel),
+        Action::Bibliography => run_bibliography(source, &mut watch, cancel),
     }
 }
 
@@ -459,8 +627,9 @@ pub fn run(
 fn run_text(
     source: &Path,
     ledger: &Path,
-    observe: &mut dyn FnMut(Progress),
-) -> Result<Outcome, String> {
+    watch: &mut dyn FnMut(Progress) -> ControlFlow<()>,
+    cancel: &AtomicBool,
+) -> Result<Outcome, RunError> {
     let job = EngineJob {
         path: source.to_string_lossy().into_owned(),
         backend: BACKEND.to_string(),
@@ -469,17 +638,20 @@ fn run_text(
         max_bytes: None,
         figures_dir: None,
     };
-    let mut result = panic::catch_unwind(AssertUnwindSafe(|| {
-        pipeline::run_job_observed(&job, observe)
-    }))
-    .unwrap_or_else(|payload| Err(panic_error(&*payload)))
-    .map_err(|err| err.to_string())?;
+    let mut result =
+        panic::catch_unwind(AssertUnwindSafe(|| pipeline::run_job_observed(&job, watch)))
+            .unwrap_or_else(|payload| Err(panic_error(&*payload)))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(RunError::Cancelled);
+    }
     if result.status == Status::Failed {
-        return Err(result
-            .warnings
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "extraction failed".to_string()));
+        return Err(RunError::Failed(
+            result
+                .warnings
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "extraction failed".to_string()),
+        ));
     }
     if let Some(parent) = ledger.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
@@ -495,9 +667,9 @@ fn run_text(
         .update_timings(run, &result.timings)
         .map_err(|e| format!("ledger: {e}"))?;
     let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    let target = output_path(source, ".txt", Path::exists);
-    fs::write(&target, texts.join("\u{c}"))
-        .map_err(|e| format!("writing {}: {e}", target.display()))?;
+    let target = publish(source, &[(".txt", texts.join("\u{c}").into_bytes())])
+        .map_err(|e| format!("writing next to {}: {e}", source.display()))?
+        .remove(0);
     let mut summary = String::new();
     if result.status != Status::Complete {
         let _ = write!(summary, "{}: ", result.status.as_str());
@@ -522,22 +694,24 @@ fn run_text(
 
 /// [`Action::Bibliography`]: the backward scan and, when a list is found,
 /// the CLI's JSON record plus its plain-text rendering next to the source.
-fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<Outcome, String> {
+fn run_bibliography(
+    source: &Path,
+    watch: &mut dyn FnMut(Progress) -> ControlFlow<()>,
+    cancel: &AtomicBool,
+) -> Result<Outcome, RunError> {
     let started = Instant::now();
-    let extractor = backend::by_name(BACKEND).ok_or("backend unavailable")?;
+    let extractor = backend::by_name(BACKEND).ok_or("backend unavailable".to_string())?;
     let path_text = source.to_string_lossy();
     let (sha256, scan) = panic::catch_unwind(AssertUnwindSafe(|| {
         let snapshot = acquire::snapshot(source, None).map_err(|e| e.to_string())?;
-        let scan = bibliography::scan_backward_observed(
-            extractor.as_ref(),
-            &snapshot.bytes,
-            None,
-            observe,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok::<_, String>((snapshot.hash.0, scan))
+        let scan =
+            bibliography::scan_backward_observed(extractor.as_ref(), &snapshot.bytes, None, watch)?;
+        Ok::<_, RunError>((snapshot.hash.0, scan))
     }))
-    .unwrap_or_else(|payload| Err(panic_error(&*payload).to_string()))?;
+    .unwrap_or_else(|payload| Err(panic_error(&*payload).into()))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(RunError::Cancelled);
+    }
     let record = Record::from_scan(
         &path_text,
         sha256,
@@ -552,18 +726,16 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
             warnings: record.warnings,
         });
     }
-    let mut pair = output_paths(
-        source,
-        &[".references.json", ".references.txt"],
-        Path::exists,
-    );
-    let text = pair.pop().expect("two paths");
-    let json = pair.pop().expect("two paths");
     let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     line.push('\n');
-    fs::write(&json, line).map_err(|e| format!("writing {}: {e}", json.display()))?;
-    fs::write(&text, record.plain_text())
-        .map_err(|e| format!("writing {}: {e}", text.display()))?;
+    let outputs = publish(
+        source,
+        &[
+            (".references.json", line.into_bytes()),
+            (".references.txt", record.plain_text().into_bytes()),
+        ],
+    )
+    .map_err(|e| format!("writing next to {}: {e}", source.display()))?;
     let scanned = record.pages_scanned.unwrap_or(0);
     let summary = format!(
         "{} from the last {}",
@@ -571,7 +743,7 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
         count(scanned as usize, "page")
     );
     Ok(Outcome {
-        outputs: vec![json, text],
+        outputs,
         summary,
         warnings: record.warnings,
     })
@@ -591,12 +763,17 @@ fn panic_error(payload: &(dyn std::any::Any + Send)) -> pipeline::PipelineError 
 mod tests {
     use std::path::Path;
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::{
-        Action, JobList, Mailbox, Outcome, Phase, Step, file_url_to_path, output_path,
-        output_paths, run,
+        Action, JobList, Mailbox, Outcome, Phase, RunError, Step, file_url_to_path,
+        generation_paths, publish, run,
     };
     use futures::{FutureExt, StreamExt};
     use tpe::pipeline::Progress;
+
+    /// A flag that is never set.
+    static NEVER: AtomicBool = AtomicBool::new(false);
 
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -625,7 +802,7 @@ mod tests {
     fn text_job_writes_sibling_text_with_progress() {
         let (dir, pdf, ledger) = scratch();
         let mut events = Vec::new();
-        let outcome = run(Action::Text, &pdf, &ledger, &mut |e| events.push(e)).unwrap();
+        let outcome = run(Action::Text, &pdf, &ledger, &mut |e| events.push(e), &NEVER).unwrap();
 
         assert_eq!(outcome.outputs, [dir.path().join("paper.txt")]);
         assert_eq!(outcome.summary, "2 pages, 3 references");
@@ -659,7 +836,7 @@ mod tests {
         assert!(stored.timings.write_ms > 0.0, "the ledger write was timed");
 
         // A second run never overwrites: it numbers the new file.
-        let again = run(Action::Text, &pdf, &ledger, &mut |_| {}).unwrap();
+        let again = run(Action::Text, &pdf, &ledger, &mut |_| {}, &NEVER).unwrap();
         assert_eq!(again.outputs, [dir.path().join("paper 2.txt")]);
     }
 
@@ -667,7 +844,14 @@ mod tests {
     fn bibliography_job_writes_json_and_text() {
         let (dir, pdf, ledger) = scratch();
         let mut events = Vec::new();
-        let outcome = run(Action::Bibliography, &pdf, &ledger, &mut |e| events.push(e)).unwrap();
+        let outcome = run(
+            Action::Bibliography,
+            &pdf,
+            &ledger,
+            &mut |e| events.push(e),
+            &NEVER,
+        )
+        .unwrap();
 
         assert_eq!(
             outcome.outputs,
@@ -703,7 +887,7 @@ mod tests {
 
         // With one file of the pair gone, the next run numbers both.
         std::fs::remove_file(&outcome.outputs[0]).unwrap();
-        let again = run(Action::Bibliography, &pdf, &ledger, &mut |_| {}).unwrap();
+        let again = run(Action::Bibliography, &pdf, &ledger, &mut |_| {}, &NEVER).unwrap();
         assert_eq!(
             again.outputs,
             [
@@ -736,8 +920,14 @@ mod tests {
         let (dir, _pdf, ledger) = scratch();
         let junk = dir.path().join("junk.pdf");
         std::fs::write(&junk, b"not a pdf").unwrap();
-        assert!(run(Action::Text, &junk, &ledger, &mut |_| {}).is_err());
-        assert!(run(Action::Bibliography, &junk, &ledger, &mut |_| {}).is_err());
+        assert!(matches!(
+            run(Action::Text, &junk, &ledger, &mut |_| {}, &NEVER),
+            Err(RunError::Failed(_))
+        ));
+        assert!(matches!(
+            run(Action::Bibliography, &junk, &ledger, &mut |_| {}, &NEVER),
+            Err(RunError::Failed(_))
+        ));
         assert_eq!(names(dir.path()), ["junk.pdf", "paper.pdf"]);
     }
 
@@ -814,7 +1004,7 @@ mod tests {
         list.enqueue([pdf], Action::Bibliography);
         let id = list.next_queued().unwrap();
         list.start(id);
-        list.finish(id, Err("boom".into()));
+        list.finish(id, Err(RunError::Failed("boom".into())));
         assert_eq!(list.rows()[0].status_line(), "bibliography · Failed: boom");
         assert_eq!(list.rows()[0].phase, Phase::Failed("boom".into()));
         assert_eq!(list.rows()[0].copyable(), None);
@@ -858,31 +1048,217 @@ mod tests {
     }
 
     #[test]
-    fn output_names_avoid_existing_files() {
+    fn generations_number_every_suffix_alike() {
         let source = Path::new("/docs/My Paper.v2.pdf");
-        let taken = ["/docs/My Paper.v2.txt", "/docs/My Paper.v2 2.txt"];
-        let exists = |p: &Path| taken.contains(&p.to_str().unwrap());
         assert_eq!(
-            output_path(source, ".txt", |_| false),
-            Path::new("/docs/My Paper.v2.txt")
+            generation_paths(source, &[".txt"], 1),
+            [Path::new("/docs/My Paper.v2.txt")]
         );
         assert_eq!(
-            output_path(source, ".txt", exists),
-            Path::new("/docs/My Paper.v2 3.txt")
-        );
-        assert_eq!(
-            output_path(source, ".references.json", |_| false),
-            Path::new("/docs/My Paper.v2.references.json")
-        );
-        // A set shares one generation: any member present moves them all on.
-        let only_txt = |p: &Path| p.to_str().unwrap() == "/docs/My Paper.v2.references.txt";
-        assert_eq!(
-            output_paths(source, &[".references.json", ".references.txt"], only_txt),
+            generation_paths(source, &[".references.json", ".references.txt"], 3),
             [
-                Path::new("/docs/My Paper.v2 2.references.json"),
-                Path::new("/docs/My Paper.v2 2.references.txt")
+                Path::new("/docs/My Paper.v2 3.references.json"),
+                Path::new("/docs/My Paper.v2 3.references.txt")
             ]
         );
+    }
+
+    /// Names in `dir`, sorted.
+    fn listing(dir: &Path) -> Vec<String> {
+        names(dir)
+    }
+
+    #[test]
+    fn publish_never_overwrites_and_leaves_no_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("paper.pdf");
+        std::fs::write(&source, b"pdf").unwrap();
+
+        let first = publish(&source, &[(".txt", b"one".to_vec())]).unwrap();
+        assert_eq!(first, [dir.path().join("paper.txt")]);
+        let second = publish(&source, &[(".txt", b"two".to_vec())]).unwrap();
+        assert_eq!(second, [dir.path().join("paper 2.txt")]);
+        assert_eq!(
+            std::fs::read(&first[0]).unwrap(),
+            b"one",
+            "the first file is untouched"
+        );
+        assert_eq!(std::fs::read(&second[0]).unwrap(), b"two");
+        assert_eq!(
+            listing(dir.path()),
+            ["paper 2.txt", "paper.pdf", "paper.txt"]
+        );
+    }
+
+    #[test]
+    fn publish_moves_a_pair_on_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("paper.pdf");
+        std::fs::write(&source, b"pdf").unwrap();
+        std::fs::write(dir.path().join("paper.references.txt"), b"old").unwrap();
+
+        let pair = publish(
+            &source,
+            &[
+                (".references.json", b"{}".to_vec()),
+                (".references.txt", b"new".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            pair,
+            [
+                dir.path().join("paper 2.references.json"),
+                dir.path().join("paper 2.references.txt")
+            ]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("paper.references.txt")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            listing(dir.path()),
+            [
+                "paper 2.references.json",
+                "paper 2.references.txt",
+                "paper.pdf",
+                "paper.references.txt"
+            ],
+            "nothing half-made is left: the failed first attempt was undone"
+        );
+    }
+
+    #[test]
+    fn concurrent_publishers_each_get_their_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("paper.pdf");
+        std::fs::write(&source, b"pdf").unwrap();
+        let written: Vec<(usize, std::path::PathBuf)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|n| {
+                    let source = &source;
+                    scope.spawn(move || {
+                        let paths =
+                            publish(source, &[(".txt", format!("writer {n}").into_bytes())])
+                                .unwrap();
+                        (n, paths.into_iter().next().unwrap())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let mut distinct: Vec<_> = written.iter().map(|(_, path)| path.clone()).collect();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 8, "no two publishers took the same name");
+        for (n, path) in &written {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                format!("writer {n}")
+            );
+        }
+        assert_eq!(
+            listing(dir.path()).len(),
+            9,
+            "the source and eight outputs, no temporaries"
+        );
+    }
+
+    #[test]
+    fn a_stop_requested_at_the_first_page_ends_a_text_job_with_nothing_written() {
+        let (dir, pdf, ledger) = scratch();
+        let cancel = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        let result = run(
+            Action::Text,
+            &pdf,
+            &ledger,
+            &mut |event| {
+                seen.push(event);
+                if matches!(event, Progress::Page { .. }) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+            &cancel,
+        );
+        assert_eq!(result, Err(RunError::Cancelled));
+        assert_eq!(
+            seen.len(),
+            2,
+            "the open and page 1 were reported; page 2 was never read: {seen:?}"
+        );
+        assert_eq!(
+            listing(dir.path()),
+            ["paper.pdf"],
+            "no output and no ledger directory"
+        );
+        assert!(!ledger.exists());
+    }
+
+    #[test]
+    fn a_stop_before_the_start_ends_either_job_kind_at_once() {
+        let (dir, pdf, ledger) = scratch();
+        let cancel = AtomicBool::new(true);
+        for action in [Action::Text, Action::Bibliography] {
+            let mut pages = 0;
+            let result = run(
+                action,
+                &pdf,
+                &ledger,
+                &mut |event| pages += usize::from(matches!(event, Progress::Page { .. })),
+                &cancel,
+            );
+            assert_eq!(result, Err(RunError::Cancelled), "{action:?}");
+            assert_eq!(pages, 0);
+        }
+        assert_eq!(listing(dir.path()), ["paper.pdf"]);
+    }
+
+    #[test]
+    fn a_stopped_bibliography_scan_writes_nothing() {
+        let (dir, pdf, ledger) = scratch();
+        let cancel = AtomicBool::new(false);
+        let result = run(
+            Action::Bibliography,
+            &pdf,
+            &ledger,
+            &mut |event| {
+                if matches!(event, Progress::Page { .. }) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+            &cancel,
+        );
+        assert_eq!(result, Err(RunError::Cancelled));
+        assert_eq!(listing(dir.path()), ["paper.pdf"]);
+    }
+
+    #[test]
+    fn cancelling_is_shown_then_settles_as_cancelled() {
+        let (_dir, pdf, _ledger) = scratch();
+        let mut list = JobList::default();
+        list.enqueue([pdf], Action::Text);
+        let id = list.next_queued().unwrap();
+        assert!(
+            !list.mark_cancelling(id),
+            "a queued row is removed, not marked"
+        );
+        list.start(id);
+        assert!(list.mark_cancelling(id));
+        assert_eq!(list.row(id).unwrap().status_line(), "text · Cancelling");
+        assert!(list.row(id).unwrap().is_active());
+        list.finish(id, Err(RunError::Cancelled));
+        let row = list.row(id).unwrap();
+        assert_eq!(row.phase, Phase::Cancelled);
+        assert_eq!(row.status_line(), "text · Cancelled");
+        assert!(
+            !row.is_active(),
+            "a cancelled row is done and can be cleared"
+        );
+        assert!(!list.mark_cancelling(id));
     }
 
     #[test]
