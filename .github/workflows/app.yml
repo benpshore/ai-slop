@@ -91,17 +91,22 @@ jobs:
           pgrep -x PDFTextract >/dev/null
           echo "the app is running and wrote paper.txt"
           sleep 2
-          cat > "$RUNNER_TEMP/windows.swift" <<'SWIFT'
-          import CoreGraphics
-          let all = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-          var found = 0
-          for w in all where (w[kCGWindowOwnerName as String] as? String) == "PDFTextract" {
-              found += 1
-              print("window:", w[kCGWindowName as String] ?? "(untitled)", w[kCGWindowBounds as String] ?? [:])
+          # Window list through the system's JavaScript-for-Automation bridge
+          # (no Swift anywhere in this app or its CI).
+          cat > "$RUNNER_TEMP/windows.js" <<'JXA'
+          ObjC.import('CoreGraphics');
+          const all = ObjC.deepUnwrap(ObjC.castRefToObject(
+            $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID))) || [];
+          let found = 0;
+          for (const w of all) {
+            if (w.kCGWindowOwnerName === 'PDFTextract') {
+              found += 1;
+              console.log('window: ' + (w.kCGWindowName || '(untitled)') + ' ' + JSON.stringify(w.kCGWindowBounds));
+            }
           }
-          print("on-screen PDFTextract windows:", found)
-          SWIFT
-          swift "$RUNNER_TEMP/windows.swift" | tee "$RUNNER_TEMP/windows.txt" || true
+          console.log('on-screen PDFTextract windows: ' + found);
+          JXA
+          osascript -l JavaScript "$RUNNER_TEMP/windows.js" 2>&1 | tee "$RUNNER_TEMP/windows.txt" || true
           screencapture -x "$RUNNER_TEMP/window.png" || echo "screencapture failed"
           ls -la "$RUNNER_TEMP/window.png" || true
           osascript -e 'tell application "PDFTextract" to quit' || true
