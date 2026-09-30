@@ -14,6 +14,7 @@
 //!   marker placement, text scale, pane cycling, the model context string).
 //! - [`tpe_ai`]: request builders, response parsers and the blocking `ask()`
 //!   call for the Anthropic Messages API and the `OpenAI` chat completions API.
+//! - [`probe`]: the opt-in responsiveness probe for the running app (docs/APP.md).
 //! - [`keys`]: the `KeyProvider` trait the GUI uses to obtain API keys, with an
 //!   environment-variable implementation. The credentials crate adapter is
 //!   wired by the integration owner once both crates are on `main`.
@@ -30,5 +31,6 @@
 pub mod jobs;
 pub mod keys;
 pub mod ledger;
+pub mod probe;
 pub mod tpe_ai;
 pub mod view;

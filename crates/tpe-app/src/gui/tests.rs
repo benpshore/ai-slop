@@ -1390,3 +1390,33 @@ fn tabbing_back_into_the_list_brings_the_selection_into_view(cx: &mut TestAppCon
         offset(cx)
     );
 }
+
+/// The probe's watchdog and its foreground receiver, wired the way the real
+/// app wires them, see a main thread that is blocked: the posts that queue
+/// while it sleeps each report how long they waited. (The test platform's
+/// executor stands in for the main queue here; the real numbers come from the
+/// macOS probe run, `probe.sh`.)
+#[gpui::test]
+fn the_probe_sees_a_blocked_main_thread(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    probe::init_at(dir.path().join("probe.json"));
+    let probe = probe::get().unwrap();
+    cx.executor().allow_parking();
+    cx.update(instrument::start);
+    // Block "the main thread" for a while: the watchdog keeps posting.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    cx.run_until_parked();
+    let report = probe.report();
+    let series = &report["series"][instrument::EVENT_LOOP];
+    assert!(series["n"].as_u64().unwrap() >= 10, "{series}");
+    assert!(
+        series["max"].as_f64().unwrap() > 80.0,
+        "a 150 ms block shows as a long wait for the earliest post: {series}"
+    );
+    assert!(
+        report["series"][instrument::WATCHDOG]["n"]
+            .as_u64()
+            .unwrap()
+            >= 10
+    );
+}
