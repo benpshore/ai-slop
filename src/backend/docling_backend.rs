@@ -87,6 +87,12 @@ pub struct DoclingBackend {
     pub tables: bool,
     /// Full mode: OCR every page even when it has a text layer.
     pub force_ocr: bool,
+    /// Keep the bytes of the pictures docling crops, for `take_figure_bytes`.
+    /// Off by default: a job without a figures directory never holds pixels.
+    pub keep_figures: bool,
+    /// Full mode: convert only pages `first..=last` (1-based, inclusive);
+    /// pages outside come back empty with the no-items warning.
+    pub window: Option<(u32, u32)>,
 }
 
 impl DoclingBackend {
@@ -97,6 +103,8 @@ impl DoclingBackend {
             ocr: false,
             tables: false,
             force_ocr: false,
+            keep_figures: false,
+            window: None,
         }
     }
 
@@ -107,7 +115,23 @@ impl DoclingBackend {
             ocr: true,
             tables: false,
             force_ocr: false,
+            keep_figures: false,
+            window: None,
         }
+    }
+
+    /// Convert only pages `first..=last` (full mode).
+    #[must_use]
+    pub fn with_window(mut self, first: u32, last: u32) -> Self {
+        self.window = Some((first.max(1), last.max(first.max(1))));
+        self
+    }
+
+    /// Keep (or drop) the picture bytes docling produces.
+    #[must_use]
+    pub fn with_figures(mut self, keep: bool) -> Self {
+        self.keep_figures = keep;
+        self
     }
 
     /// CLI name: `docling` in full mode, `docling-text` otherwise.
@@ -140,6 +164,9 @@ impl Extractor for DoclingBackend {
         config.insert("tables".to_string(), self.tables.to_string());
         config.insert("force_ocr".to_string(), self.force_ocr.to_string());
         config.insert("provider".to_string(), "cpu".to_string());
+        if let Some((first, last)) = self.window {
+            config.insert("window".to_string(), format!("{first}-{last}"));
+        }
         BackendIdentity {
             name: self.name().to_string(),
             version: DOCLING_VERSION.to_string(),
@@ -242,6 +269,7 @@ fn convert_full(
     bytes: &[u8],
     password: Option<&str>,
     key: PipelineKey,
+    window: Option<(u32, u32)>,
 ) -> Result<DoclingDocument, PdfError> {
     let registry = PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
     let mut pipelines = registry.lock().unwrap_or_else(PoisonError::into_inner);
@@ -260,7 +288,7 @@ fn convert_full(
             "docling pipeline registry lost its entry".to_string(),
         ));
     };
-    pipeline.set_pages(None);
+    pipeline.set_pages(window.map(|(first, last)| (first as usize, last as usize)));
     pipeline.convert(bytes, password, DOC_NAME)
 }
 
@@ -337,13 +365,18 @@ impl DoclingSession {
         }
         let password = self.password.as_deref();
         let result = if self.config.full {
-            convert_full(&self.bytes, password, self.config.pipeline_key())
+            convert_full(
+                &self.bytes,
+                password,
+                self.config.pipeline_key(),
+                self.config.window,
+            )
         } else {
             docling_pdf::convert_text_layer_pages(&self.bytes, DOC_NAME, None)
         };
         self.converted = Some(match result {
             Ok(doc) => {
-                let mut walker = Walker::new(self.page_count);
+                let mut walker = Walker::new(self.page_count, self.config.keep_figures);
                 for node in &doc.nodes {
                     walker.visit(node, None);
                 }
@@ -515,15 +548,18 @@ struct Walker {
     current: Option<u32>,
     pages: BTreeMap<u32, PageBuild>,
     figure_bytes: HashMap<(u32, u32), Vec<u8>>,
+    /// Retain picture bytes; otherwise only their digest and size are kept.
+    keep_figures: bool,
 }
 
 impl Walker {
-    fn new(page_count: u32) -> Self {
+    fn new(page_count: u32, keep_figures: bool) -> Self {
         Self {
             page_count,
             current: None,
             pages: BTreeMap::new(),
             figure_bytes: HashMap::new(),
+            keep_figures,
         }
     }
 
@@ -727,8 +763,10 @@ impl Walker {
             figure.width_px = Some(picture.width);
             figure.height_px = Some(picture.height);
             figure.sha256 = Some(sha256_hex(&picture.data));
-            self.figure_bytes
-                .insert((page_no, index), picture.data.clone());
+            if self.keep_figures {
+                self.figure_bytes
+                    .insert((page_no, index), picture.data.clone());
+            }
         }
         self.page().figures.push(figure);
         if let Some(caption) = caption {
@@ -1186,7 +1224,7 @@ mod tests {
                 text: "Page three".to_string(),
             },
         ];
-        let mut walker = Walker::new(3);
+        let mut walker = Walker::new(3, true);
         for node in &nodes {
             walker.visit(node, None);
         }
@@ -1279,7 +1317,7 @@ mod tests {
                 text: "second".to_string(),
             },
         ];
-        let mut walker = Walker::new(3);
+        let mut walker = Walker::new(3, true);
         for node in &nodes {
             walker.visit(node, None);
         }

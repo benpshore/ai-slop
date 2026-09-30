@@ -107,8 +107,8 @@ struct ExtractArgs {
     /// Path of the `SQLite` ledger; created when missing.
     #[arg(long, value_name = "FILE")]
     db: PathBuf,
-    /// Extraction backend name.
-    #[arg(long, default_value = "lopdf")]
+    /// Extraction backend name; `auto` routes `lopdf`, then `pdfium`, then docling.
+    #[arg(long, default_value = "auto")]
     backend: String,
     /// Directory that receives `<hash>.json` and `<hash>.txt` per document.
     #[arg(long, value_name = "DIR")]
@@ -141,8 +141,8 @@ struct BibliographyArgs {
     /// PDF files to process; one JSON record per file is printed to stdout.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
-    /// Extraction backend name.
-    #[arg(long, default_value = "lopdf")]
+    /// Extraction backend name; `auto` routes `lopdf`, then `pdfium`, then docling.
+    #[arg(long, default_value = "auto")]
     backend: String,
     /// Password for encrypted documents.
     #[arg(long)]
@@ -179,7 +179,7 @@ struct BenchArgs {
     /// PDF files to benchmark.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
-    /// Extraction backend name.
+    /// Extraction backend name (a single backend; `auto` is not benchmarked).
     #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Number of `run_job` executions per file.
@@ -217,7 +217,7 @@ struct EvalArgs {
     /// Directory that receives `report.json` and `report.md`.
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
-    /// Extraction backend name.
+    /// Extraction backend name (a single backend; evaluation measures one at a time).
     #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Which manifest split to evaluate.
@@ -325,7 +325,7 @@ fn open_ledger(db: &Path) -> anyhow::Result<Ledger> {
 /// Fail early when the backend name is unknown or not compiled into this build.
 fn check_backend(name: &str) -> anyhow::Result<()> {
     let available = backend::available();
-    if available.contains(&name) {
+    if name == pipeline::AUTO_BACKEND || available.contains(&name) {
         return Ok(());
     }
     let compiled = available.join(", ");
@@ -472,8 +472,23 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
 fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
     pipeline::warm_up();
-    let extractor = backend::by_name(&args.backend)
-        .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?;
+    // `auto` picks the backend per document (`bibliography::scan_backward_auto_observed`).
+    let extractor: Option<Box<dyn backend::Extractor>> = if args.backend == pipeline::AUTO_BACKEND {
+        None
+    } else {
+        Some(
+            backend::by_name(&args.backend)
+                .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?,
+        )
+    };
+    let fallback_identity = extractor.as_ref().map_or_else(
+        || {
+            backend::by_name("lopdf")
+                .map(|e| e.identity())
+                .expect("lopdf is always compiled in")
+        },
+        |e| e.identity(),
+    );
     let mut any_failed = false;
     for path in &args.paths {
         let started = Instant::now();
@@ -487,24 +502,34 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
             hash = Some(snapshot.hash.0);
-            let scan = bibliography::scan_backward_observed(
-                extractor.as_ref(),
-                &snapshot.bytes,
-                args.password.as_deref(),
-                &mut observe,
-            )?;
-            Ok::<_, anyhow::Error>(scan)
+            let routed = match &extractor {
+                Some(extractor) => bibliography::RoutedScan {
+                    scan: bibliography::scan_backward_observed(
+                        extractor.as_ref(),
+                        &snapshot.bytes,
+                        args.password.as_deref(),
+                        &mut observe,
+                    )?,
+                    backend: extractor.identity(),
+                },
+                None => bibliography::scan_backward_auto_observed(
+                    &snapshot.bytes,
+                    args.password.as_deref(),
+                    &mut observe,
+                )?,
+            };
+            Ok::<_, anyhow::Error>(routed)
         }));
         let elapsed = elapsed_ms(started);
-        let identity = extractor.identity();
+        let identity = fallback_identity.clone();
         let record = match result {
-            Ok(Ok(scan)) => {
-                any_failed |= !scan.found;
+            Ok(Ok(routed)) => {
+                any_failed |= !routed.scan.found;
                 bibliography::Record::from_scan(
                     &file,
                     hash.unwrap_or_default(),
-                    identity,
-                    scan,
+                    routed.backend,
+                    routed.scan,
                     elapsed,
                 )
             }

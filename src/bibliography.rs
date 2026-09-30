@@ -6,10 +6,15 @@
 use serde::Serialize;
 
 use crate::backend::{BackendError, Extractor};
-use crate::citations;
+use std::sync::OnceLock;
+
+use regex::Regex;
+
+use crate::citations::{self, ReferenceSection};
 use crate::pipeline::Progress;
 use crate::reading_order;
 use crate::regions;
+use crate::router::{self, Assessment, Route};
 use crate::schema::BackendIdentity;
 use crate::schema::{PageText, ReferenceEntry};
 use crate::text_cleanup;
@@ -25,6 +30,11 @@ pub struct BibliographyScan {
     pub heading: Option<String>,
     pub references: Vec<ReferenceEntry>,
     pub warnings: Vec<String>,
+    /// What the probe found on the pages that were read (`crate::router`).
+    pub assessment: Assessment,
+    /// Whether the found list accounts for the labels and years printed on
+    /// its pages; `true` when no list was found.
+    pub plausible: bool,
 }
 
 /// The JSON record `tpe bibliography` prints per input PDF (docs/BIBLIOGRAPHY.md),
@@ -44,6 +54,10 @@ pub struct Record {
     pub heading: Option<String>,
     pub references: Vec<ReferenceEntry>,
     pub warnings: Vec<String>,
+    /// What the probe found on the pages read (`crate::router`).
+    pub assessment: Assessment,
+    /// Whether the list accounts for the labels and years on its pages.
+    pub plausible: bool,
     pub elapsed_ms: f64,
     pub error: Option<String>,
 }
@@ -68,6 +82,8 @@ impl Record {
             heading: scan.heading,
             references: scan.references,
             warnings: scan.warnings,
+            assessment: scan.assessment,
+            plausible: scan.plausible,
             elapsed_ms,
             error: None,
         }
@@ -92,6 +108,8 @@ impl Record {
             heading: None,
             references: Vec::new(),
             warnings: vec![error.clone()],
+            assessment: Assessment::default(),
+            plausible: true,
             elapsed_ms,
             error: Some(error),
         }
@@ -146,6 +164,18 @@ pub fn scan_backward_observed(
     password: Option<&str>,
     observe: &mut dyn FnMut(Progress),
 ) -> Result<BibliographyScan, BackendError> {
+    scan_window(extractor, bytes, password, 1, observe)
+}
+
+/// [`scan_backward_observed`] that never reads below page `floor`: the
+/// window a fallback backend was asked to convert.
+fn scan_window(
+    extractor: &dyn Extractor,
+    bytes: &[u8],
+    password: Option<&str>,
+    floor: u32,
+    observe: &mut dyn FnMut(Progress),
+) -> Result<BibliographyScan, BackendError> {
     let mut session = extractor.open(bytes, password)?;
     let total_pages = session.page_count();
     let mut pages: Vec<PageText> = Vec::new();
@@ -154,7 +184,7 @@ pub fn scan_backward_observed(
         total: total_pages,
     });
 
-    for number in (1..=total_pages).rev() {
+    for number in (floor.max(1)..=total_pages).rev() {
         let mut page = session.page_text(number)?;
         if extractor.provides_reading_order() {
             reading_order::lines_in_backend_order(&mut page);
@@ -200,6 +230,8 @@ pub fn scan_backward_observed(
                     ));
                 }
             }
+            let assessment = router::assess(&pages);
+            let plausible = list_plausible(&checked, &section, references.len());
             return Ok(BibliographyScan {
                 total_pages,
                 pages_scanned: u32::try_from(pages.len()).unwrap_or(u32::MAX),
@@ -208,10 +240,13 @@ pub fn scan_backward_observed(
                 heading: (!section.heading.is_empty()).then_some(section.heading),
                 references,
                 warnings,
+                assessment,
+                plausible,
             });
         }
     }
 
+    let assessment = router::assess(&pages);
     Ok(BibliographyScan {
         total_pages,
         pages_scanned: u32::try_from(pages.len()).unwrap_or(u32::MAX),
@@ -220,7 +255,190 @@ pub fn scan_backward_observed(
         heading: None,
         references: Vec::new(),
         warnings: vec!["no bibliography boundary with at least three entries found".to_string()],
+        assessment,
+        plausible: true,
     })
+}
+
+/// Fewest trailing pages a fallback backend converts when the `lopdf` scan
+/// found no list.
+const FALLBACK_WINDOW: u32 = 12;
+
+/// A list is implausible when the tail pages carry evidence of more entries
+/// than were segmented: a printed numeric label higher than the entry count
+/// (labels that `lopdf` left detached from their entries), or many more
+/// four-digit years than entries (every entry prints at least one year; a
+/// merged or cut-off author-year list has far fewer entries than years).
+fn list_plausible(pages: &[PageText], section: &ReferenceSection, entries: usize) -> bool {
+    static LABEL: OnceLock<Regex> = OnceLock::new();
+    static YEAR: OnceLock<Regex> = OnceLock::new();
+    let label = LABEL.get_or_init(|| Regex::new(r"^\s*\[?(\d{1,3})[.)\]]").expect("valid regex"));
+    let year = YEAR.get_or_init(|| Regex::new(r"\b(?:19|20)\d\d\b").expect("valid regex"));
+    let mut max_label = 0usize;
+    let mut years = 0usize;
+    for page in pages.iter().filter(|p| p.page >= section.first_page) {
+        for (i, line) in page.lines.iter().enumerate() {
+            if page.page == section.first_page && i < section.first_line {
+                continue;
+            }
+            if line.role == "furniture" {
+                continue;
+            }
+            if let Some(found) = label.captures(&line.text)
+                && let Ok(n) = found[1].parse::<usize>()
+            {
+                max_label = max_label.max(n);
+            }
+            years += year.find_iter(&line.text).count();
+        }
+    }
+    max_label <= entries + 1 && years <= entries + entries / 2 + 3
+}
+
+/// A backward scan with the backend that finally produced it.
+#[derive(Debug)]
+pub struct RoutedScan {
+    pub scan: BibliographyScan,
+    pub backend: BackendIdentity,
+}
+
+/// Replace `best` by `candidate` when the candidate is the better list: a
+/// found list beats none, and among found lists the longer one wins (the
+/// second opinion is only asked for when the first looked cut short).
+fn keep_better(best: &mut RoutedScan, candidate: RoutedScan, note: String) {
+    let better = candidate.scan.found
+        && (!best.scan.found || candidate.scan.references.len() > best.scan.references.len());
+    if better || !best.scan.found {
+        *best = candidate;
+    }
+    best.scan.warnings.push(note);
+}
+
+/// [`scan_backward_observed`] with routing (`crate::router`): `lopdf` reads
+/// the tail; when it finds no list, or the pages it read had unmapped fonts
+/// or scans, `pdfium` re-reads the same tail, and docling (layout and OCR)
+/// converts the last `max(pages read, FALLBACK_WINDOW)` pages if `pdfium`
+/// did not settle it. A list that `lopdf` found but that looks cut short
+/// ([`list_plausible`]) goes to docling for the pages from its heading on,
+/// and the longer list is kept. A route whose backend is missing or fails
+/// is noted in the warnings and the best scan so far is returned.
+pub fn scan_backward_auto_observed(
+    bytes: &[u8],
+    password: Option<&str>,
+    observe: &mut dyn FnMut(Progress),
+) -> Result<RoutedScan, BackendError> {
+    let lopdf = router::extractor_for(Route::Lopdf)
+        .ok_or_else(|| BackendError::Unsupported("lopdf backend missing".to_string()))?;
+    let mut best = RoutedScan {
+        scan: scan_window(lopdf.as_ref(), bytes, password, 1, observe)?,
+        backend: lopdf.identity(),
+    };
+    let first = best.scan.assessment;
+    let mut route = first.route();
+    if best.scan.found && best.scan.plausible && route == Route::Lopdf {
+        return Ok(best);
+    }
+    let total = best.scan.total_pages;
+    let mut floor = total.saturating_sub(best.scan.pages_scanned.max(FALLBACK_WINDOW)) + 1;
+    if best.scan.found && !best.scan.plausible {
+        // The heading was found; only its pages need the second opinion.
+        floor = best.scan.section_page.unwrap_or(floor).max(1);
+        route = Route::Docling;
+    } else if route == Route::Lopdf {
+        route = Route::Pdfium;
+    }
+    if route == Route::Pdfium {
+        if let Some(pdfium) = router::extractor_for(Route::Pdfium) {
+            match scan_window(pdfium.as_ref(), bytes, password, floor, observe) {
+                Ok(scan) => {
+                    let again = scan.assessment;
+                    let note = format!(
+                        "routed: pdfium ({} of {} pages unmapped; lopdf {})",
+                        first.unmapped,
+                        first.pages,
+                        if best.scan.found {
+                            "found a list"
+                        } else {
+                            "found none"
+                        }
+                    );
+                    let plausible = scan.plausible;
+                    keep_better(
+                        &mut best,
+                        RoutedScan {
+                            scan,
+                            backend: pdfium.identity(),
+                        },
+                        note,
+                    );
+                    if best.scan.found && plausible && again.route_after_pdfium() != Route::Docling
+                    {
+                        return Ok(best);
+                    }
+                }
+                Err(err) => best
+                    .scan
+                    .warnings
+                    .push(format!("route not taken: pdfium failed: {err}")),
+            }
+        } else {
+            best.scan
+                .warnings
+                .push("route not taken: pdfium is not compiled into this build".to_string());
+        }
+        route = Route::Docling;
+    }
+    if route == Route::Docling {
+        if let Some(docling) = docling_for_window(floor, total) {
+            match scan_window(docling.as_ref(), bytes, password, floor, observe) {
+                Ok(scan) => {
+                    let note = format!(
+                        "routed: docling (pages {floor}-{total}; {} scanned, {} unmapped of {} pages; lopdf {})",
+                        first.scanned,
+                        first.unmapped,
+                        first.pages,
+                        if best.scan.found {
+                            "found a list"
+                        } else {
+                            "found none"
+                        }
+                    );
+                    keep_better(
+                        &mut best,
+                        RoutedScan {
+                            scan,
+                            backend: docling.identity(),
+                        },
+                        note,
+                    );
+                }
+                Err(err) => best
+                    .scan
+                    .warnings
+                    .push(format!("route not taken: docling failed: {err}")),
+            }
+        } else {
+            best.scan
+                .warnings
+                .push("route not taken: docling is not compiled into this build".to_string());
+        }
+    }
+    Ok(best)
+}
+
+/// The full docling backend limited to pages `first..=last`, without
+/// retaining picture bytes; `None` when docling is not compiled in.
+#[cfg(feature = "docling")]
+#[allow(clippy::unnecessary_wraps)] // `None` is the answer of the other cfg
+fn docling_for_window(first: u32, last: u32) -> Option<Box<dyn Extractor>> {
+    use crate::backend::docling_backend::DoclingBackend;
+    Some(Box::new(DoclingBackend::full().with_window(first, last)))
+}
+
+/// Docling is not compiled in.
+#[cfg(not(feature = "docling"))]
+fn docling_for_window(_first: u32, _last: u32) -> Option<Box<dyn Extractor>> {
+    None
 }
 
 #[cfg(test)]
