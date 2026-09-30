@@ -105,36 +105,38 @@ per-page progress cost on an M1 have not been recorded.
 
 ### Measured: interactions on Apple silicon (CI)
 
-`interaction_timings` (an ignored test the App workflow runs with
-`--release`) on a GitHub `macos-15-arm64` runner (run for `67f84a9`), medians.
-This is GPUI's
-test platform: view state, layout and scene building on the CPU, no GPU and
-no display, so it is the app's own cost per interaction and not
-click-to-pixel latency.
+`interaction_timings` (an ignored test the App workflow runs with `--release`)
+on a GitHub `macos-15-arm64` runner (run for `cdb896a`). This is GPUI's test
+platform: view state, layout and scene building on the CPU, no GPU and no
+display, so it is the app's own cost per interaction and not click-to-pixel
+latency. Every row shows the range and the tail, not just the middle: a
+median alone would hide the stalls a person actually notices.
 
-| interaction | median |
-| --- | ---: |
-| first frame, empty window (one cold draw, not a median) | 0.16 ms |
-| frame, empty window | 0.11 ms |
-| file arrives to its row drawn | 0.50 ms |
-| frame, 1 row | 0.60 ms |
-| frame, 100 rows | 0.78 ms |
-| frame, 5,000 rows | 0.66 ms |
-| Down key to selection drawn, rows 4,850-4,950 of 5,000 | 0.77 ms |
-| End / Home to the new rows drawn (two frames), 5,000 rows | 1.14 ms |
-| progress event to its frame, on the last of 5,000 rows | 0.66 ms |
-| Get text job, 2-page paper (engine, new ledger, file) | 10.9 ms |
-| Get bibliography job, 2-page paper (engine, files) | 4.7 ms |
+| interaction (ms) | n | min | median | p95 | max | max/median |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| first frame, empty window (one cold draw) | 1 | 0.28 | 0.28 | 0.28 | 0.28 | 1.0x |
+| frame, empty window | 50 | 0.11 | 0.13 | 0.19 | 0.19 | 1.5x |
+| file arrives to its row drawn | 30 | 0.42 | 0.48 | 0.82 | 0.86 | 1.8x |
+| frame, 1 row | 20 | 0.39 | 0.41 | 0.47 | 0.49 | 1.2x |
+| frame, 100 rows | 20 | 0.55 | 0.60 | 0.62 | 0.65 | 1.1x |
+| frame, 5,000 rows | 20 | 0.61 | 0.70 | 1.17 | 1.27 | 1.8x |
+| Down key to selection drawn, rows 4,850-4,950 of 5,000 | 100 | 0.56 | 0.59 | 0.88 | 2.00 | 3.4x |
+| End / Home to the new rows drawn (two frames), 5,000 rows | 20 | 0.96 | 1.01 | 2.01 | 2.15 | 2.1x |
+| progress event (model update, not the channel hop) to its frame, last of 5,000 rows | 100 | 0.65 | 0.70 | 2.02 | 2.56 | 3.7x |
+| Get text job, 2-page paper (engine, new ledger, file) | 20 | 5.90 | 8.65 | 14.08 | 54.86 | 6.3x |
+| Get bibliography job, 2-page paper (engine, files) | 20 | 2.13 | 2.87 | 3.26 | 3.27 | 1.1x |
 
-Every interaction is about 1 ms or less against a 16.7 ms frame at 60 Hz, and
-frame cost does not grow with the row count (100 rows and 5,000 cost the
-same). Each row is measured the way the app runs: one set of key bindings,
-arrival through `Shell::enqueue`, the key press and progress event late in a
-5,000-row list, and a fresh directory and ledger per engine sample. The
-progress row times the model update to a frame, not the channel hop a real
-job's events take. The two jobs are engine work on a tiny synthetic paper, not a real article.
-The runner's chip is a virtualised Apple-silicon part, so an M1 at home will
-differ. Not measured: launch time, GPU present, real PDFs.
+What the tails say. Every interaction stays at or under 2.6 ms even at its
+worst sample, against a 16.7 ms frame at 60 Hz, and frame cost does not grow
+with the row count. The spread is real, though: the slowest key press and
+progress event are 3-4x their median, and the one outlier that matters is the
+text job, whose slowest of 20 runs took 54.9 ms against a median of 8.7 ms
+(6.3x). That outlier has not been investigated: each sample gets a new
+directory and a new ledger, so a slow first-touch of the file system or the
+database is the first suspect, not a conclusion. The two jobs run on a tiny
+synthetic paper, not a real article. The runner's chip is a virtualised
+Apple-silicon part, so an M1 at home will differ. Not measured: launch time,
+GPU present, real PDFs.
 
 ## Layout
 

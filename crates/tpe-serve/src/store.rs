@@ -630,6 +630,14 @@ impl Serialize for ProgressView {
                 s.serialize_field("total", &total)?;
                 s.end()
             }
+            // Bytes of the source read so far, before the document opens.
+            Progress::Reading { done, total } => {
+                let mut s = serializer.serialize_struct("Progress", 3)?;
+                s.serialize_field("event", "reading")?;
+                s.serialize_field("done", &done)?;
+                s.serialize_field("total", &total)?;
+                s.end()
+            }
         }
     }
 }
