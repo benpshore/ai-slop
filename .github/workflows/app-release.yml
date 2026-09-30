@@ -1,0 +1,94 @@
+name: App release
+
+# Builds PDFTextract.app at a release tag on a macOS runner and attaches the
+# zipped, ad-hoc-signed app and its checksum to that release. Run by hand
+# (Actions > App release > Run workflow); nothing triggers it, so it adds no
+# macOS runs to merges or pull requests. The release itself is still made by
+# auto-release.yml; this only adds the app to it.
+#
+# The bundle is signed ad hoc and not notarized: after downloading, macOS
+# asks for confirmation on first launch (right-click > Open), or run
+# `xattr -dr com.apple.quarantine PDFTextract.app` once (docs/APP.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (default: the latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-release
+  cancel-in-progress: false
+
+jobs:
+  app-release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG_INPUT: ${{ inputs.tag }}
+    steps:
+      - name: Resolve the release tag
+        id: tag
+        run: |
+          set -eu
+          tag="${TAG_INPUT:-}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::not a release tag: $tag"; exit 1 ;;
+          esac
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag contains the app
+        run: |
+          test -f crates/tpe-app/bundle.sh || {
+            echo "::error::${{ steps.tag.outputs.tag }} has no crates/tpe-app/bundle.sh; build a release made after the app landed"
+            exit 1
+          }
+      - run: rustup component add clippy rustfmt
+      - run: rustc --version --verbose && uname -m
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-app-macos-15-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-app-macos-15-
+      - name: Build the bundle at the tag's version
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: sh crates/tpe-app/bundle.sh
+      - name: Package
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -eu
+          name="PDFTextract-${VERSION}-macos-arm64.zip"
+          ditto -c -k --keepParent target/release/PDFTextract.app "$name"
+          shasum -a 256 "$name" > "$name.sha256"
+          cat "$name.sha256"
+          echo "ZIP=$name" >> "$GITHUB_ENV"
+      - name: Attach to the release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          echo "Attached $ZIP to $TAG" >> "$GITHUB_STEP_SUMMARY"
