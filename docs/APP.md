@@ -103,6 +103,33 @@ debug build, 400 ms bound against roughly 3 s before). These are not M1
 numbers and not click-to-pixel latency; launch time, click-to-row latency and
 per-page progress cost on an M1 have not been recorded.
 
+### Measured: interactions on Apple silicon (CI)
+
+`interaction_timings` (an ignored test the App workflow runs with
+`--release`) on a GitHub `macos-15-arm64` runner, medians. This is GPUI's
+test platform: view state, layout and scene building on the CPU, no GPU and
+no display, so it is the app's own cost per interaction and not
+click-to-pixel latency.
+
+| interaction | median |
+| --- | ---: |
+| first frame, empty window | 0.20 ms |
+| frame, empty window | 0.12 ms |
+| file arrives to its row drawn | 0.45 ms |
+| frame, 100 rows | 0.57 ms |
+| frame, 5,000 rows | 0.52 ms |
+| Down key to selection drawn, 5,000 rows | 0.61 ms |
+| End / Home to the new rows drawn (two frames), 5,000 rows | 0.91 ms |
+| progress event to its frame, 5,000 rows | 0.62 ms |
+| Get text job, 2-page paper (engine, ledger, file) | 30.6 ms |
+| Get bibliography job, 2-page paper (engine, files) | 58.9 ms |
+
+Every interaction is under 1 ms against a 16.7 ms frame at 60 Hz, and frame
+cost does not grow with the row count (100 rows and 5,000 cost the same).
+The two jobs are engine work on a tiny synthetic paper, not a real article.
+The runner's chip is a virtualised Apple-silicon part, so an M1 at home will
+differ. Not measured: launch time, GPU present, real PDFs.
+
 ## Layout
 
 - `src/jobs.rs` (library, every platform, tested): `Action`, the `JobList`
