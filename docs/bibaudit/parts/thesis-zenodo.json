@@ -1,0 +1,101 @@
+{
+ "stratum": "thesis-zenodo",
+ "seed": "20260930:thesis-zenodo",
+ "query": "metadata.resource_type.id:publication-thesis",
+ "window": "first 10,000 by oldest",
+ "items": [
+  {
+   "id": "thesis-zenodo-01",
+   "stratum": "thesis-zenodo",
+   "field": "thesis (Zenodo)",
+   "layout_hint": "thesis, long list",
+   "source": "Zenodo",
+   "title": "Anpassungen der Sozialhilfe für Drittstaatenangehörige nach Ausländerund Integrationsgesetz: Eine berufsethische Betrachtung",
+   "doi": "10.5281/zenodo.7148187",
+   "license": "cc-by-nc-nd-4.0",
+   "url": "https://zenodo.org/records/7148187",
+   "pdf_url": "https://zenodo.org/records/7148187/files/2022_ba_Stauffacher%20Sabrina.pdf",
+   "pdf_bytes": 876459,
+   "pdf_sha256": "5ddba42d3d5233806ba623577826778bc93aa99390265f0510622ef43548e2a4",
+   "pages": 73,
+   "language": null,
+   "truth_kind": "manual",
+   "truth_n": null,
+   "rank": 6913
+  },
+  {
+   "id": "thesis-zenodo-02",
+   "stratum": "thesis-zenodo",
+   "field": "thesis (Zenodo)",
+   "layout_hint": "thesis, long list",
+   "source": "Zenodo",
+   "title": "A SOCIO-PHONOLOGICAL ANALYSIS OF HAUSA ENGLISH, IGBO ENGLISH AND YORUBA ENGLISH VARIETIES IN NIGERIA",
+   "doi": "10.5281/zenodo.4460677",
+   "license": "cc-by-4.0",
+   "url": "https://zenodo.org/records/4460677",
+   "pdf_url": "https://zenodo.org/records/4460677/files/SOGUNRO%20B.O.-compressed.pdf",
+   "pdf_bytes": 23429706,
+   "pdf_sha256": "4324bd39216258cc0bd0068a6c1fafc97edacc2f7870ddcb5ea8b72f374d1560",
+   "pages": 267,
+   "language": null,
+   "truth_kind": "manual",
+   "truth_n": null,
+   "rank": 3570
+  },
+  {
+   "id": "thesis-zenodo-03",
+   "stratum": "thesis-zenodo",
+   "field": "thesis (Zenodo)",
+   "layout_hint": "thesis, long list",
+   "source": "Zenodo",
+   "title": "Hunde im Dienste der Heilpädagogik Inwiefern beeinflusst und erhöht das Pädagogische Arbeiten mit Schulbegleithund Aspekte der Aufmerksamkeit ausgewählter Kinder mit speziellem Förderbedarf?",
+   "doi": "10.5281/zenodo.5544075",
+   "license": "cc-by-4.0",
+   "url": "https://zenodo.org/records/5544075",
+   "pdf_url": "https://zenodo.org/records/5544075/files/Dipl_2017_198.pdf",
+   "pdf_bytes": 1499631,
+   "pdf_sha256": "04545b9e99cfa0e1e6df1d89b67f9c5836fc93ccbc8892088eef85cfc4434a1a",
+   "pages": 79,
+   "language": "deu",
+   "truth_kind": "manual",
+   "truth_n": null,
+   "rank": 4758
+  },
+  {
+   "id": "thesis-zenodo-04",
+   "stratum": "thesis-zenodo",
+   "field": "thesis (Zenodo)",
+   "layout_hint": "thesis, long list",
+   "source": "Zenodo",
+   "title": "Ensayos sobre el bienestar en el trabajo / Essays on workplace well-being",
+   "doi": "10.5281/zenodo.8132388",
+   "license": "cc-by-4.0",
+   "url": "https://zenodo.org/records/8132388",
+   "pdf_url": "https://zenodo.org/records/8132388/files/8651_ZHU_SIYAO_PUBLICACION_TESIS.pdf",
+   "pdf_bytes": 1227246,
+   "pdf_sha256": "cbd38ddea48bf0a4ad232cfe4d5f8432f648627a62a3ca1e81aed83c0a5ca3cf",
+   "pages": 138,
+   "language": "eng",
+   "truth_kind": "manual",
+   "truth_n": null,
+   "rank": 8256
+  }
+ ],
+ "rejected_draws": [
+  {
+   "rank": 9076,
+   "zenodo_id": 10376152,
+   "title": "IN VITRO EVALUATION OF ANTI OXIDANT ACTIVITY OF LINUM USITATISSIMUM LEAF EXTRACT",
+   "language": null,
+   "why": "not-thesis-sized pages=11"
+  },
+  {
+   "rank": 2953,
+   "zenodo_id": 3830403,
+   "title": "Prevention of cardiovascular disasters at operators of control panels of nuclear power plants",
+   "language": "eng",
+   "why": "not-thesis-sized pages=12"
+  }
+ ],
+ "date": "2026-09-30"
+}

@@ -1,0 +1,103 @@
+{
+ "stratum": "book-oapen",
+ "seed": "20260930:book-oapen",
+ "items": [
+  {
+   "id": "book-oapen-01",
+   "stratum": "book-oapen",
+   "field": "book (OAPEN)",
+   "layout_hint": "book",
+   "source": "OAPEN",
+   "title": "The Transformation of Welfare States?",
+   "doi": "10.4324/9780203099490",
+   "license": "OAPEN open access (licence URL not in record)",
+   "url": "https://library.oapen.org/handle/20.500.12657/102630",
+   "pdf_bytes": 2598525,
+   "pdf_sha256": "13aca963fcef6ca4b14c410964bba201eddb02ebdaf046aa40253a1d2cdc9100",
+   "pages": 238,
+   "language": "English",
+   "publisher": "Taylor & Francis",
+   "truth_kind": "manual",
+   "truth_n": null
+  },
+  {
+   "id": "book-oapen-02",
+   "stratum": "book-oapen",
+   "field": "book (OAPEN)",
+   "layout_hint": "book",
+   "source": "OAPEN",
+   "title": "Abgehängt im Aufschwung",
+   "doi": "10.12907/978-3-593-44296-9",
+   "license": "OAPEN open access (licence URL not in record)",
+   "url": "https://library.oapen.org/handle/20.500.12657/86487",
+   "pdf_bytes": 4717163,
+   "pdf_sha256": "58979cc1ae0e6a307994b4cab5fb1653237267eb5195e9a54cf4e02b63a77250",
+   "pages": 187,
+   "language": "German",
+   "publisher": "Campus Verlag",
+   "truth_kind": "manual",
+   "truth_n": null
+  },
+  {
+   "id": "book-oapen-03",
+   "stratum": "book-oapen",
+   "field": "book (OAPEN)",
+   "layout_hint": "book",
+   "source": "OAPEN",
+   "title": "Medien des Sufismus",
+   "doi": "10.14361/9783839439326",
+   "license": "OAPEN open access (licence URL not in record)",
+   "url": "https://library.oapen.org/handle/20.500.12657/109811",
+   "pdf_bytes": 10684261,
+   "pdf_sha256": "4218030b1f722745e0ef7dfe60c9f28df4ce13ac332fe76e1a4cb400fffa8c86",
+   "pages": 410,
+   "language": "German",
+   "publisher": "transcript Verlag",
+   "truth_kind": "manual",
+   "truth_n": null
+  }
+ ],
+ "rejected_draws": [
+  {
+   "offset": 27475,
+   "title": "Medical Innovation",
+   "handle": "20.500.12657/46407",
+   "pages_meta": 213,
+   "language": "English",
+   "why": "no-pdf"
+  },
+  {
+   "offset": 1014,
+   "title": "Particle Physics Reference Library",
+   "handle": "20.500.12657/41753",
+   "pages_meta": 1078,
+   "language": "English",
+   "why": "pages 1078 outside [150,450]"
+  },
+  {
+   "offset": 16972,
+   "title": "Die Seele im Kosmos",
+   "handle": "20.500.12657/52209",
+   "pages_meta": 0,
+   "language": "German",
+   "why": "pages 0 outside [150,450]"
+  },
+  {
+   "offset": 24650,
+   "title": "Das linearbandkeramische Gräberfeld von Kleinhadersdorf",
+   "handle": "20.500.12657/33063",
+   "pages_meta": 406,
+   "language": "English",
+   "why": "pdf 284502224 bytes > 40 MB"
+  },
+  {
+   "offset": 20433,
+   "title": "The Chicanos",
+   "handle": "20.500.12657/92992",
+   "pages_meta": 239,
+   "language": "English",
+   "why": "no-pdf"
+  }
+ ],
+ "date": "2026-09-30"
+}

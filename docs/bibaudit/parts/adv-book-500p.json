@@ -1,0 +1,83 @@
+{
+ "stratum": "adv-book-500p",
+ "seed": "20260930:adv-book-500p",
+ "items": [
+  {
+   "id": "adv-book-500p-01",
+   "stratum": "adv-book-500p",
+   "field": "book (OAPEN)",
+   "layout_hint": "book",
+   "source": "OAPEN",
+   "title": "Unequal Lives",
+   "doi": "10.22459/UE.2020",
+   "license": "OAPEN open access (licence URL not in record)",
+   "url": "https://library.oapen.org/handle/20.500.12657/47328",
+   "pdf_bytes": 10351579,
+   "pdf_sha256": "569f1e0ddc9e69884eacc3b4f4ed7dfd3bdb0b2aa9c7923d709ea93c8db46499",
+   "pages": 580,
+   "language": "English",
+   "publisher": "ANU Press",
+   "truth_kind": "manual",
+   "truth_n": null
+  }
+ ],
+ "rejected_draws": [
+  {
+   "offset": 17807,
+   "title": "Raccomandazioni per lo sviluppo dell'Editoria Elettronica negli Atenei Italiani",
+   "handle": "20.500.12657/54781",
+   "pages_meta": 96,
+   "language": "Italian",
+   "why": "pages 96 outside [500,800]"
+  },
+  {
+   "offset": 7039,
+   "title": "American Girls in Red Russia",
+   "handle": "20.500.12657/63440",
+   "pages_meta": 432,
+   "language": "English",
+   "why": "pages 432 outside [500,800]"
+  },
+  {
+   "offset": 13212,
+   "title": "Peer-to-Peer Accommodation Networks",
+   "handle": "20.500.12657/30986",
+   "pages_meta": 284,
+   "language": "English",
+   "why": "pages 284 outside [500,800]"
+  },
+  {
+   "offset": 8412,
+   "title": "Proletarian Peasants",
+   "handle": "20.500.12657/62136",
+   "pages_meta": 208,
+   "language": "English",
+   "why": "pages 208 outside [500,800]"
+  },
+  {
+   "offset": 7584,
+   "title": "Der Erste Weltkrieg. Deutschland und Russland im europäischen Kontext",
+   "handle": "20.500.12657/63804",
+   "pages_meta": 358,
+   "language": "German",
+   "why": "pages 358 outside [500,800]"
+  },
+  {
+   "offset": 14437,
+   "title": "The Fabrication of the Autonomous Learner",
+   "handle": "20.500.12657/76531",
+   "pages_meta": 238,
+   "language": "English",
+   "why": "pages 238 outside [500,800]"
+  },
+  {
+   "offset": 14148,
+   "title": "Living Water",
+   "handle": "20.500.12657/86276",
+   "pages_meta": 180,
+   "language": "English",
+   "why": "pages 180 outside [500,800]"
+  }
+ ],
+ "date": "2026-09-30"
+}
