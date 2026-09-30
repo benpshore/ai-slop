@@ -716,3 +716,70 @@ fn enter_does_not_reveal_a_queued_or_running_row(cx: &mut TestAppContext) {
         "no result yet: nothing to show, and never the input PDF"
     );
 }
+
+#[gpui::test]
+fn at_the_smallest_window_a_whole_row_and_the_clear_button_fit(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let rows = finished_then_queued(&shell, cx, copies(&fixture, 3), 3);
+    let (width, height) = MIN_WINDOW;
+    let mut visual = VisualTestContext::from_window(window, cx);
+    visual.simulate_resize(size(px(width), px(height)));
+    for _ in 0..2 {
+        visual.draw(
+            gpui::point(px(0.0), px(0.0)),
+            size(px(width), px(height)),
+            |_, _| shell.clone(),
+        );
+    }
+    let first: &'static str = Box::leak(format!("job-{}", rows[0]).into_boxed_str());
+    let row = visual.debug_bounds(first).unwrap();
+    let clear = visual.debug_bounds("clear-done").unwrap();
+    let rem = 16.0;
+    assert!(
+        (f32::from(row.size.height) - (rem * ROW_HEIGHT_REMS - 8.0)).abs() < 1.0,
+        "the first row is whole (its cell less the 4 pt padding either side): {:?}",
+        row.size
+    );
+    assert!(
+        f32::from(clear.bottom()) <= height,
+        "the Clear button is inside the window: {clear:?}"
+    );
+    assert!(
+        f32::from(row.bottom()) <= f32::from(clear.top()),
+        "the row ends above the Clear button: {row:?} {clear:?}"
+    );
+}
+
+#[gpui::test]
+fn tabbing_back_into_the_list_brings_the_selection_into_view(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (shell, window) = fixture.open(cx);
+    let rows = finished_then_queued(&shell, cx, copies(&fixture, 200), 0);
+    keys(cx, window, "tab tab");
+    assert_eq!(
+        selected(&shell, cx),
+        Some(rows[0]),
+        "the first row is selected"
+    );
+    let offset = |cx: &TestAppContext| {
+        shell.read_with(cx, |shell, _| {
+            f32::from(shell.scroll.0.borrow().base_handle.offset().y)
+        })
+    };
+    let _ = bounds_of(cx, window, &shell, "job-1");
+    shell.update(cx, |shell, _| {
+        shell.scroll.scroll_to_item(150, ScrollStrategy::Top);
+    });
+    let _ = bounds_of(cx, window, &shell, "job-1");
+    assert!(offset(cx) < -1000.0, "scrolled away from the selection");
+
+    keys(cx, window, "shift-tab tab");
+    let _ = bounds_of(cx, window, &shell, "job-1");
+    assert_eq!(selected(&shell, cx), Some(rows[0]), "still the same row");
+    assert!(
+        offset(cx).abs() < 0.5,
+        "the selection is back in view: offset {}",
+        offset(cx)
+    );
+}

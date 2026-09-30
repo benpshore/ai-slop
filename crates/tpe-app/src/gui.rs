@@ -105,6 +105,10 @@ const CLEAR_TAB_INDEX: isize = 4;
 /// this tall, which is what lets the list draw only the ones on screen.
 const ROW_HEIGHT_REMS: f32 = 6.0;
 
+/// The smallest window (points): the action header, one whole row and the
+/// Clear finished button still fit at the default text size.
+const MIN_WINDOW: (f32, f32) = (480.0, 400.0);
+
 /// Shows a path in Finder.
 type Reveal = Rc<dyn Fn(&mut App, &Path)>;
 
@@ -444,11 +448,20 @@ impl Shell {
         self.select_first_if_landed_on_list(window, cx);
     }
 
-    /// Tabbing into the list with nothing selected selects the first row, so
-    /// the focus is never on an invisible selection.
+    /// Tabbing into the list selects the first row when nothing is selected,
+    /// and brings an existing selection into view (it may have been scrolled
+    /// away with the trackpad), so the focus is never on an invisible
+    /// selection.
     fn select_first_if_landed_on_list(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.list_focus.is_focused(window) && self.selected.is_none() {
-            self.step_selection(Step::First, window, cx);
+        if !self.list_focus.is_focused(window) {
+            return;
+        }
+        match self.selected.and_then(|id| self.jobs.index_of(id)) {
+            Some(index) => {
+                self.keep_visible(index, window);
+                cx.notify();
+            }
+            None => self.step_selection(Step::First, window, cx),
         }
     }
 
@@ -695,6 +708,7 @@ impl Render for Shell {
                             "Clear finished (⌘K)",
                             cx.listener(|this, _: &ClickEvent, _, cx| this.clear_done(cx)),
                         )
+                        .debug_selector(|| "clear-done".to_string())
                         .track_focus(&self.clear_focus)
                         .focus(|style| style.border_color(rgb(ACCENT))),
                     ),
@@ -735,7 +749,7 @@ fn open_main_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(640.0), px(480.0)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(480.0), px(320.0))),
+        window_min_size: Some(size(px(MIN_WINDOW.0), px(MIN_WINDOW.1))),
         titlebar: Some(TitlebarOptions {
             title: Some("PDFTextract".into()),
             ..TitlebarOptions::default()
