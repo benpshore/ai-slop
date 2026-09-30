@@ -198,7 +198,7 @@ enum ActionName {
 fn require_json(headers: &HeaderMap) -> Result<(), ApiError> {
     let mut values = headers.get_all(CONTENT_TYPE).iter();
     let is_json = match (values.next(), values.next()) {
-        (Some(value), None) => value.to_str().ok().is_some_and(|text| {
+        (Some(value), None) => value.to_str().is_ok_and(|text| {
             text.split(';')
                 .next()
                 .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
