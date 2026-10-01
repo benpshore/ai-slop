@@ -26,32 +26,27 @@
 //!   or panics, and other threads would block for as long as the caching
 //!   thread lived. So the binding is deliberately **not** cached: each
 //!   [`Extractor::open`] binds the library (`dlopen` plus `FPDF_InitLibrary`),
-//!   extracts everything, and drops the binding before returning. Nothing
-//!   `pdfium`-related outlives `open`, so sessions are plain data and any
+//!   reads the document metadata, and drops the binding before returning.
+//!   Requested pages are extracted with another short-lived binding. Nothing
+//!   `pdfium`-related outlives a call, so sessions are plain data and any
 //!   number of them may coexist on any threads. (Caching would only become
 //!   safe with the crate's `thread_safe` feature off and a gate of our own,
 //!   which is a `Cargo.toml` decision shared with `docling-pdf`.)
 //!
-//! # Document ownership and eager extraction
+//! # Document ownership and lazy extraction
 //!
 //! `PdfDocument<'a>` borrows both the `Pdfium` and the byte slice it was
 //! loaded from, so it cannot be stored next to its owners without a
-//! self-referential struct. Re-opening the document for every page (the
-//! previous design) made `pdfium` re-parse the xref, page tree and every
-//! font used by the page on each call, which measured at about 259 ms of
-//! parse time per document against 45 ms for `lopdf`. Instead `open` walks
-//! all pages once, while the document is alive, and the session keeps only
-//! the results: one [`PageText`] of spans per page plus the raw figure
-//! streams. [`DocumentSession::page_text`] clones from that cache.
+//! self-referential struct. `open` therefore reads only the page count and
+//! metadata. [`DocumentSession::page_text`] re-opens the document, extracts
+//! the requested page, and caches that result. This ensures a page range does
+//! not parse attacker-controlled objects or retain data from other pages.
 //!
 //! Distinct retained image streams are capped at 256 MiB and deduplicated
 //! as each image is visited, so a page does not accumulate copies before
 //! applying the cap. A single raw stream is still allocated before hashing;
-//! this cap is not a total-memory or peak-RSS bound. All page spans and
-//! figure metadata remain resident, and `pdfium` can allocate its own caches
-//! until the document is dropped at the end of `open`. Extraction of a page
-//! range still visits the whole document. Bounded page-window extraction
-//! remains a separate refinement.
+//! this cap is not a total-memory or peak-RSS bound. Only requested page spans
+//! and figure metadata remain resident.
 //!
 //! # Text granularity
 //!
@@ -135,12 +130,8 @@ impl Extractor for PdfiumBackend {
         false
     }
 
-    /// Bind the library, load the bytes, count pages, read `/Info` and
-    /// extract every page's spans and figures, then drop the document and
-    /// the binding before returning (see the module docs). A page whose
-    /// extraction fails is recorded and reported by `page_text` for that
-    /// page only. Blocks while another `Pdfium` is alive anywhere in the
-    /// process.
+    /// Bind the library, load the bytes, count pages and read `/Info`, then
+    /// drop the document and binding before returning (see the module docs).
     fn open(
         &self,
         bytes: &[u8],
@@ -159,21 +150,19 @@ impl PdfiumBackend {
         password: Option<&str>,
         figure_cap: usize,
     ) -> Result<PdfiumSession, BackendError> {
-        let pdfium = bind(self.library_dir.as_deref())?;
-        // `doc` borrows `pdfium` and `bytes`; locals drop in reverse order.
-        let doc = load(&pdfium, bytes, password)?;
-        let page_count = u32::from(doc.pages().len());
-        let info = read_info(&doc);
-        let mut pages = Vec::new();
-        let mut figures = FigureStore::new(figure_cap);
-        for page in 1..=page_count {
-            pages.push(extract_numbered(&doc, page, &mut figures));
-        }
+        let (page_count, info) = {
+            let pdfium = bind(self.library_dir.as_deref())?;
+            let doc = load(&pdfium, bytes, password)?;
+            (u32::from(doc.pages().len()), read_info(&doc))
+        };
         Ok(PdfiumSession {
+            library_dir: self.library_dir.clone(),
+            bytes: bytes.to_vec(),
+            password: password.map(str::to_owned),
             page_count,
             info,
-            pages,
-            figures,
+            pages: HashMap::new(),
+            figures: FigureStore::new(figure_cap),
         })
     }
 }
@@ -354,13 +343,15 @@ fn read_info(doc: &PdfDocument<'_>) -> BTreeMap<String, String> {
     info
 }
 
-/// Everything `open` extracted; holds no `pdfium` state (module docs).
+/// Document bytes and lazily extracted pages; holds no `pdfium` state.
 struct PdfiumSession {
+    library_dir: Option<String>,
+    bytes: Vec<u8>,
+    password: Option<String>,
     page_count: u32,
     info: BTreeMap<String, String>,
-    /// One entry per page in order: the spans and figures, or the message
-    /// of the failure that page hit.
-    pages: Vec<Result<PageText, String>>,
+    /// Requested pages only, including any extraction failure.
+    pages: HashMap<u32, Result<PageText, String>>,
     /// Shared image payloads, released after their final occurrence is taken.
     figures: FigureStore,
 }
@@ -370,15 +361,22 @@ impl DocumentSession for PdfiumSession {
         self.page_count
     }
 
-    /// A clone of the cached page; the same page may be asked for again.
+    /// Extract a page on first request, then return clones from the cache.
     fn page_text(&mut self, page: u32) -> Result<PageText, BackendError> {
         let count = self.page_count;
         if page == 0 || page > count {
             return Err(BackendError::PageRange { page, count });
         }
-        let entry = usize::try_from(page - 1)
-            .ok()
-            .and_then(|index| self.pages.get(index));
+        if !self.pages.contains_key(&page) {
+            let extracted = (|| {
+                let pdfium = bind(self.library_dir.as_deref()).map_err(|err| err.to_string())?;
+                let doc = load(&pdfium, &self.bytes, self.password.as_deref())
+                    .map_err(|err| format!("reopen: {err}"))?;
+                extract_numbered(&doc, page, &mut self.figures)
+            })();
+            self.pages.insert(page, extracted);
+        }
+        let entry = self.pages.get(&page);
         match entry {
             Some(Ok(text)) => Ok(text.clone()),
             Some(Err(message)) => Err(page_error(page, message.clone())),
@@ -1161,8 +1159,7 @@ mod tests {
         let mut session = PdfiumBackend::default()
             .open_session(&bytes, None, IMAGE_SAMPLES.len())
             .unwrap();
-        assert_eq!(session.figures.blobs.len(), 1);
-        assert_eq!(session.figures.retained, IMAGE_SAMPLES.len());
+        assert!(session.figures.blobs.is_empty());
         for page in 1..=2 {
             let extracted = session.page_text(page).unwrap();
             assert!(extracted.warnings.is_empty(), "{:?}", extracted.warnings);
