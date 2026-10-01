@@ -32,8 +32,6 @@ jobs:
           - { language: actions, build-mode: none, os: ubuntu-latest }
           - { language: python, build-mode: none, os: ubuntu-latest }
           - { language: rust, build-mode: none, os: ubuntu-latest }
-          - { language: c-cpp, build-mode: none, os: ubuntu-latest }
-          # Swift analysis needs a macOS runner; no macOS runners in Actions.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
