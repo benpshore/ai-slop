@@ -20,6 +20,7 @@ codegen-units = 1
 
 [package]
 name = "text-processing-engine"
+default-run = "tpe"
 version = "0.1.0"
 edition = "2024"
 description = "Native PDF text, metadata and citation extraction engine for academic corpora"
@@ -29,6 +30,11 @@ license-file = "LICENSE"
 name = "tpe"
 path = "src/main.rs"
 
+[[bin]]
+name = "tpe-pdfium-probe"
+path = "src/bin/pdfium_probe.rs"
+required-features = ["pdfium"]
+
 [lib]
 name = "tpe"
 path = "src/lib.rs"
@@ -36,7 +42,7 @@ path = "src/lib.rs"
 [features]
 default = []
 # Native PDFium backend (`--backend pdfium`); needs libpdfium at run time (docs/NATIVE.md).
-pdfium = ["dep:pdfium-render"]
+pdfium = ["dep:pdfium-render", "dep:tempfile", "dep:rustix"]
 # docling.rs backends (`docling-text`, `docling`); `docling` needs PDFium and the models.
 docling = ["dep:docling-pdf", "dep:docling-core", "pdfium"]
 
@@ -64,8 +70,12 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 tar = "0.4"
 thiserror = "2"
+tempfile = { version = "3", optional = true }
 unicode-normalization = "0.1"
 ureq = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", optional = true, features = ["process"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,10 +1,14 @@
 # Text Processing Engine
 
-A native Rust engine for high-throughput, faithful text mining of academic PDFs, primarily on Apple Silicon macOS and also on Linux aarch64. Native Poppler, PDFium, and **Docling Rust (`docling-project/docling.rs`)** are the foundations. MLX is the intended Apple Silicon acceleration route wherever a measured model implementation improves complete-pipeline performance without reducing accuracy.
+A native Rust engine for text mining of academic PDFs. The current implementation uses **lopdf** by default, with optional PDFium and docling.rs adapters. This describes today's code, not a permanent choice of PDF architecture.
 
-The eventual application is a compact, accessible, Zed-inspired Rust document workbench: corpus browser, PDF viewer, selectable extracted text, source highlighting, and job controls. The headless engine comes first and remains independently usable.
+The intended next architecture is a **Rust controller supervising PDFium workers**, starting with native text/geometry evidence that avoids our XObject mapping. The [PDFium evidence experiment](docs/PDFIUM_PROBE.md) defines that contract and demonstrates disposable-worker limits and termination on Linux. Optional docling.rs structure/OCR processing comes after this evidence is evaluated. Poppler remains an independent comparator; model acceleration needs measured benefit and parity.
 
-**Status: early engine, measured accuracy, nothing production-ready.** A pure-Rust extraction engine (`tpe`) and an evaluation harness exist. As of 2026-09-29 (Eval runs 36511221210 dev / 36511549138 holdout, backend `lopdf`, `ubuntu-24.04-arm`, after PRs #39, #40 and #41), reference recall/precision are 100%/100% on the 60-paper `dev` split and 100%/100% on the 10-paper `holdout` split; see "What exists today" below for the full table. Body-text alignment (0.950 dev / 0.940 holdout, body only; exact word LCS; math, digit and operator tokens dropped on both sides; appendices included) remains far from the error-free-chunk target below, and no chunk-level exact-match rate has been measured yet: these are reference/metadata/marker diagnostics, not the acceptance measurement. The eval timing (whole-document eval time on hosted arm64 runners, averaged over nominal 20-page chunks, without durable ledger writes) is a diagnostic and is not comparable with the M1 service-time target, though this diagnostic p50 is below 30 ms on these hosted arm64 runners (27.5 ms dev / 25.5 ms holdout); the M1 service-time target is not yet measured. The PDFium and docling backends build and pass their unit tests in the Native workflow; a pre-loop-10 three-backend comparison (Native run 36491886979) put the full `docling` pipeline at a routed exception of about 4.9 s per chunk, and `pdfium` at about 6x slower than `lopdf` on the reference-metrics path — see "What exists today" below for the full breakdown. The workbench crates are libraries with offline tests. A minimal macOS app (`crates/tpe-app`, GPUI over the engine in one process: text or bibliography per PDF, per-page progress, Finder Open With and Services) builds and passes its tests in the App workflow but has not yet been exercised by hand on a Mac ([App](docs/APP.md)); the Chromium embedding is design-only, and upstream synchronization and MLX acceleration are not implemented. The plan below is unchanged. Implementation notes are in the [Claude Code / Fable handoff](docs/CLAUDE_HANDOFF.md), the per-track status in [Tracks](docs/TRACKS.md), and technical sources and update policy in [Upstreams](docs/UPSTREAMS.md).
+**Status: early engine with explicit incomplete outcomes.** The integrated October 1, 2026 PMC baseline covers all 200 papers / 9,590 truth references: backward lists found 180/200 and exact reference counts 159/200; forward lists found 183/200 and exact counts 158/200. Backward strict title agreement is 6,116/7,880 before the separate Vancouver author/title repair (6,394/7,880 after it). These are field/count diagnostics, not exact transcription. Per-paper/per-entry reports retain code SHA, corpus/scorer hashes and backend identity. Registry precision/coverage and M1 performance are separate, unmeasured claims.
+
+Resource cutoffs now produce Partial outcomes through JSON, the ledger and headless jobs. The Native completeness check consequently exposes pre-existing limits on 5/60 lopdf dev papers and 1/60 PDFium dev papers; these failures remain visible. Component budgets do not guarantee whole-process memory. The detailed historical arXiv measurements below predate these diagnostics.
+
+The eventual application is a compact Rust document workbench. Existing app code is retained, while GUI archival is a separate task. The current work covers the headless engine, corpus tooling and the local PDFium experiment. Python evaluation, Swift and CMake scaffold archival is recorded below; Python is optional for production. No server or authentication broker is introduced.
 
 ## Install
 
@@ -116,7 +120,7 @@ These are diagnostics from two runs on shared CI hardware. They are not the acce
 
 Known gaps: body-text alignment (0.950 dev / 0.940 holdout, body only; exact word LCS; math, digit and operator tokens dropped on both sides; appendices included) is still short of the 99% error-free-chunk goal below, and body word precision is 91.8% dev / 89.2% holdout. Since the last refresh, loops 11 (math/footnote token dropping, lopdf figure boxes, geometry-based figure/table tagging, column overhangs) and 13 (caption continuations, figure labels, longtable pages, biography/front-matter roles, digit/listing handling) worked on body text, and loop 12 (marker residue, parser tail cases, hyphen pairs, INFORMS truth, NFKC title comparison) worked on references and markers; PR #42 has since merged; these measurements precede its figure-box change for paper 2509.04183 (0.711 body alignment in the reported run). Marker key recall is 99.6% dev / 99.3% holdout and reference title accuracy is 98.5% dev, leaving the remaining 1.5% of reference titles and 0.4% of cited keys on dev open. Perf loop (PR #35) took arm p50 from 35.4 ms to 18.7 ms, before loop 10's region tagging added about 4 ms back; the added tagging (loops 11 and 13) brought p50 to 27.5 ms dev / 25.5 ms holdout — still below 30 ms on these hosted runners but creeping toward it, so a second perf loop is due. The M1 service-time target, with durable writes, has not been measured natively. A pre-loop-10 comparison (Native run 36491886979) put the full `docling` pipeline at a routed exception of about 4.9 s per chunk, and `pdfium` at about 6x slower than `lopdf` on the reference-metrics path. See GitHub issue #15 for the running history and [docs/analysis/](docs/analysis/) for the per-loop taxonomies.
 
-Native workflow: with pinned PDFium and model assets, the `docling` and `pdfium` features build and their unit tests pass on `ubuntu-24.04-arm`. A pre-loop-10 three-backend comparison on the reference-metrics path (Native run 36491886979) found: `lopdf` (the default) at 99.6%/99.7% reference recall/precision, body alignment 0.738, p50 18.7 ms; `pdfium` at 97.3%/99.6%, body alignment 0.714, p50 109 ms (about 6x slower than `lopdf`); `docling-text` at 78.1%/94.7%; and the full `docling` layout+OCR pipeline at 96.9%/98.8%, body alignment 0.785, p50 4892 ms (about 4.9 s per chunk) — `lopdf` is the fast path and `docling` remains a routed exception. The docling OCR fixture result is not yet known.
+Native workflow: with pinned PDFium and model assets, the `docling` and `pdfium` features build and their unit tests pass on `ubuntu-24.04-arm`. A pre-loop-10 three-backend comparison on the reference-metrics path (Native run 36491886979) found: `lopdf` (the default) at 99.6%/99.7% reference recall/precision, body alignment 0.738, p50 18.7 ms; `pdfium` at 97.3%/99.6%, body alignment 0.714, p50 109 ms (about 6x slower than `lopdf`); `docling-text` at 78.1%/94.7%; and the full `docling` layout+OCR pipeline at 96.9%/98.8%, body alignment 0.785, p50 4892 ms (about 4.9 s per chunk) — these describe that historical comparison, not a permanent backend decision. The docling OCR fixture result is not yet known.
 
 Workbench crates under `crates/` (each is a library with offline tests; see [Tracks](docs/TRACKS.md)):
 
@@ -174,29 +178,31 @@ The acceptance numerator is the number of chunks with **zero errors** against in
 
 ## Architecture
 
+Today, `tpe` runs the lopdf interpreter and Rust ordering/cleanup/citation stages in process. The optional PDFium adapter currently walks page objects, and the optional docling.rs adapter has its own extraction path. None is a demonstrated final production architecture.
+
+The next experiment is narrower:
+
 ```mermaid
 flowchart TD
-    A["Completed input and immutable snapshot"] --> B["Rust coordinator and job ledger"]
-    B --> C["Native extraction workers"]
-    C --> D{"Page evidence and requested output"}
-    D -->|"Sufficient text evidence"| E["Evidence record and exports"]
-    D -->|"Layout, scan, or unresolved text"| F["Docling Rust and OCR workers"]
-    F --> E
-    E --> G["CLI and future document workbench"]
+    A["Completed local PDF"] --> B["Rust controller: snapshot, hash, limits"]
+    B --> C["Disposable PDFium text-page worker"]
+    C --> D["Versioned character and geometry evidence"]
+    B --> E["Deadline: terminate and reap worker"]
+    D -. "Later, after contract evaluation" .-> F["Optional docling.rs processing"]
+    F -.-> G["Rust controller validates staged results"]
 ```
 
-| Component | Planned role | Constraint |
+`tpe-pdfium-probe` implements the controller/worker evidence step behind the `pdfium` feature. It calls native text-page APIs without our recursive XObject mapping and preserves Unicode values, character indexes, origins, bounds, page dimensions and rotation. Linux kernel limits and a parent deadline contain the disposable process. [Contract and limitations](docs/PDFIUM_PROBE.md) distinguish unavailable geometry, explicit cutoffs and worker failures from complete collection. This is local process IPC; long-lived pools and subsequent stages remain future work.
+
+| Component | Current or intended role | Evidence still required |
 | --- | --- | --- |
-| Poppler | Native text/layout candidate and independent comparator. Benchmark `pdftotext` with coordinates; add a narrow C++ adapter if startup or missing metadata is material. | Layout is not universal ground truth; review GPL obligations before linking or bundling. |
-| PDFium | Text/glyph geometry, rendering, and a second extraction candidate through a pinned Rust binding. | `pdfium-render` serializes native calls within a process; concurrent documents need bounded worker processes. |
-| Docling Rust | Primary structured-document adapter for layout, reading order, OCR, tables, and difficult PDFs; included in the initial comparison. | Its current default text parser is Rust/lopdf; PDFium remains a renderer and text fallback. Test models, runtimes, and PDF conformance. |
-| MLX | Optional macOS model backend for demonstrated expensive layout/OCR/table stages. | Requires a concrete model implementation and parity tests; not an automatic replacement for ONNX Runtime or acceleration of PDF parsing. |
+| lopdf | Current default parser/interpreter and measured baseline | Remaining decoding, boundaries, splitting and resource paths |
+| PDFium | Intended Rust-supervised native text/geometry experiment | Same-input fidelity, geometry semantics and containment on each target |
+| docling.rs | Existing optional adapter; possible subsequent layout/OCR/table stage | Output contract, actual structure accuracy, model/runtime identity and bounded execution |
+| Poppler | Independent native comparator | Comparable output/scoring; packaging obligations before bundling |
+| MLX | Possible acceleration of demonstrated costly model stages | Concrete model, numerical parity and complete-pipeline benefit |
 
-These are roles, not a predetermined speed ranking. Compare all three extraction modes on identical inputs before selecting a default, with separate equal-output tracks for raw text, required structure/tables, and OCR. A backend that cannot produce the requested structure is unsupported on that track, not a faster equivalent. Keep an explicit full-Docling mode: a cheap text pass cannot establish that tables or columns were understood. Sample apparently successful native output for deeper comparison to measure missed failures.
-
-Route by page/region where supported by the pinned adapter. Keep the complete immutable PDF available because pages share fonts and objects; a 20-page scheduling chunk is not permission to split bytes or discard document context. If an adapter only processes whole documents, report that cost rather than claiming selective execution. Do not run all engines or rasterize all pages in the production fast path without evidence that this meets the goals.
-
-Retain a document session in its owning worker so chunking does not reopen and reconstruct a 15,000-page document 750 times. Stream page/chunk outputs, bound decoded-page/raster caches, and checkpoint committed chunks. Measure unavoidable whole-document parser/index memory; do not claim constant memory merely because output is streamed. Use fair queues and admission limits so huge files neither starve short PDFs nor consume all workers. Yield between chunks where the backend allows it; retain bounded resident sessions or reload explicitly with measured cost. Preserve cross-chunk reading order, continued tables, and page identity; bounded context overlap must not duplicate exported content. On recovery, rebuild necessary parser state and reuse committed chunk outputs rather than silently declaring an incomplete document finished.
+The Rust controller supervises stages and records their status and identity. A cheap text pass does not prove table or reading-order fidelity. Compare requested output on identical inputs, retain failed/partial documents in denominators, and measure any optional stage's cost. A scheduling chunk does not make pages independent: future resident sessions must preserve shared resources and page identity, and report whole-document parser/index memory and reload costs. Neither the current lopdf choice nor earlier backend timings settle that design.
 
 ### Safe input, concurrency, and recovery
 

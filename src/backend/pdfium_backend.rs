@@ -90,7 +90,7 @@ use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest
 const PDFIUM_BINARY_VERSION: &str = "chromium/8066";
 /// The `pdfium-render` release this backend is written against; a unit test
 /// ties it to `Cargo.lock`.
-const PDFIUM_RENDER_VERSION: &str = "0.8.37";
+pub(crate) const PDFIUM_RENDER_VERSION: &str = "0.8.37";
 /// Environment variable naming the library directory or file.
 const ENV_LIBRARY_PATH: &str = "PDFIUM_DYNAMIC_LIB_PATH";
 /// Bound on nested Form `XObject` traversal.
@@ -259,7 +259,7 @@ fn extract_numbered(
 /// location is accepted. Each call is one `dlopen` and one
 /// `FPDF_InitLibrary`, and it blocks until no other `Pdfium` exists in the
 /// process (module docs).
-fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
+pub(crate) fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = library_dir {
         candidates.push(configured_library_file(dir)?);
