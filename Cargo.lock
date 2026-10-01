@@ -7430,6 +7430,7 @@ dependencies = [
  "docling-pdf",
  "flate2",
  "hex",
+ "libc",
  "lopdf 0.45.0",
  "pdfium-render",
  "regex",

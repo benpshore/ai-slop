@@ -12,10 +12,12 @@
 //! it without a [`SCHEMA_VERSION`] change.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::schema::{
@@ -38,6 +40,60 @@ pub enum LedgerError {
     NotFound(String),
     #[error("ledger schema version {found} but this build expects {expected}")]
     SchemaMismatch { found: u32, expected: u32 },
+    #[error("ledger storage limit: {reason} (used {used_bytes} bytes, free {free_bytes} bytes)")]
+    StorageLimit {
+        reason: &'static str,
+        used_bytes: u64,
+        free_bytes: u64,
+    },
+}
+
+/// `SQLite`'s commit durability. `Normal` is the WAL-safe default; `Full` also
+/// synchronizes the WAL on every commit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DurabilityMode {
+    #[default]
+    Normal,
+    Full,
+}
+
+/// Storage and checkpoint policy for an on-disk ledger.
+///
+/// Defaults deliberately do not vary by filesystem: APFS and ext4 use the
+/// same conservative settings until measurements justify a distinction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerStoragePolicy {
+    pub wal_checkpoint_pages: u32,
+    pub journal_size_limit: u64,
+    pub max_ledger_bytes: u64,
+    pub min_free_space_bytes: u64,
+    pub checkpoint_every_publications: u32,
+    pub checkpoint_wal_bytes: u64,
+    pub durability: DurabilityMode,
+}
+
+impl Default for LedgerStoragePolicy {
+    fn default() -> Self {
+        Self {
+            wal_checkpoint_pages: 1_000,
+            journal_size_limit: 64 * 1024 * 1024,
+            max_ledger_bytes: 4 * 1024 * 1024 * 1024,
+            min_free_space_bytes: 1024 * 1024 * 1024,
+            checkpoint_every_publications: 64,
+            checkpoint_wal_bytes: 32 * 1024 * 1024,
+            durability: DurabilityMode::Normal,
+        }
+    }
+}
+
+/// Non-blocking checkpoint observations. Busy checkpoints are expected when
+/// readers hold snapshots and are telemetry, not publication failures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckpointTelemetry {
+    pub attempts: u64,
+    pub busy: u64,
+    pub wal_pages: u64,
+    pub checkpointed_pages: u64,
 }
 
 /// A stored run located by its identity key.
@@ -69,16 +125,15 @@ pub struct LedgerStats {
 #[derive(Debug)]
 pub struct Ledger {
     conn: Connection,
+    path: Option<PathBuf>,
+    policy: Option<LedgerStoragePolicy>,
+    publications_since_checkpoint: u32,
+    checkpoint_telemetry: CheckpointTelemetry,
 }
 
 /// Pragmas for an on-disk ledger: WAL so readers never block the writer, a
 /// bounded wait on a locked file, and enforced foreign keys (needed for the
 /// cascading delete that makes publication idempotent).
-const FILE_PRAGMAS: &str = "PRAGMA journal_mode = WAL; \
-    PRAGMA synchronous = NORMAL; \
-    PRAGMA busy_timeout = 5000; \
-    PRAGMA foreign_keys = ON;";
-
 const MEMORY_PRAGMAS: &str = "PRAGMA foreign_keys = ON;";
 
 /// The whole schema. Every table has an explicit primary key; every table
@@ -245,8 +300,8 @@ const SELECT_SOURCE_ID: &str = "SELECT id FROM sources \
 const INSERT_SOURCE: &str = "INSERT INTO sources \
     (hash, path, inode, device, mtime_unix, size, seen_at) \
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const DELETE_RUN: &str = "DELETE FROM runs WHERE hash = ?1 AND backend_name = ?2 \
-    AND backend_version = ?3 AND config_digest = ?4 AND schema_version = ?5";
+const UPDATE_RUN: &str = "UPDATE runs SET status = ?1, started_at = ?2, finished_at = ?3, \
+    timings_json = ?4, warnings_json = ?5 WHERE id = ?6";
 const INSERT_RUN: &str = "INSERT INTO runs (hash, backend_name, backend_version, config_digest, \
     schema_version, status, started_at, finished_at, timings_json, warnings_json) \
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
@@ -318,21 +373,39 @@ impl Ledger {
     /// version. Uses WAL journaling, `synchronous = NORMAL`, a 5 s busy
     /// timeout and enforced foreign keys.
     pub fn open(path: &Path) -> Result<Self, LedgerError> {
+        Self::open_with_policy(path, LedgerStoragePolicy::default())
+    }
+
+    /// Opens a ledger using an explicit storage policy.
+    pub fn open_with_policy(path: &Path, policy: LedgerStoragePolicy) -> Result<Self, LedgerError> {
         let conn = Connection::open(path)?;
-        conn.execute_batch(FILE_PRAGMAS)?;
-        Self::init(conn)
+        let synchronous = match policy.durability {
+            DurabilityMode::Normal => "NORMAL",
+            DurabilityMode::Full => "FULL",
+        };
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous={synchronous}; \
+             PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; \
+             PRAGMA wal_autocheckpoint={}; PRAGMA journal_size_limit={};",
+            policy.wal_checkpoint_pages, policy.journal_size_limit
+        ))?;
+        Self::init(conn, Some(path.to_path_buf()), Some(policy))
     }
 
     /// Opens a private in-memory ledger (tests and dry runs).
     pub fn open_in_memory() -> Result<Self, LedgerError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(MEMORY_PRAGMAS)?;
-        Self::init(conn)
+        Self::init(conn, None, None)
     }
 
     /// Creates the schema if missing (including the later `figures` table)
     /// and checks `schema_meta.version`.
-    fn init(conn: Connection) -> Result<Self, LedgerError> {
+    fn init(
+        conn: Connection,
+        path: Option<PathBuf>,
+        policy: Option<LedgerStoragePolicy>,
+    ) -> Result<Self, LedgerError> {
         conn.execute_batch(SCHEMA_SQL)?;
         conn.execute_batch(FIGURES_SQL)?;
         let found = optional_row(&conn, SELECT_VERSION, [], |row| row.get::<_, u32>(0))?;
@@ -356,7 +429,13 @@ impl Ledger {
                 });
             }
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            path,
+            policy,
+            publications_since_checkpoint: 0,
+            checkpoint_telemetry: CheckpointTelemetry::default(),
+        })
     }
 
     /// Records that the bytes hashing to `hash` were seen at `size` bytes
@@ -368,6 +447,7 @@ impl Ledger {
         size: u64,
         obs: &SourceObservation,
     ) -> Result<(), LedgerError> {
+        self.check_storage_limits()?;
         let now = now_unix();
         let tx = self.conn.transaction()?;
         tx.execute(UPSERT_DOCUMENT_SIZE, params![hash.0, to_i64(size), now])?;
@@ -376,10 +456,17 @@ impl Ledger {
         Ok(())
     }
 
-    /// Publishes `result` in one transaction. Any earlier run with the same
-    /// (hash, backend name, backend version, config digest, schema version)
-    /// is deleted first, so writing the same result twice leaves one run.
+    /// Publishes `result` in one transaction. An identical durable result is
+    /// a no-op; a changed result with the same identity keeps its run id and
+    /// replaces the dependent rows, so writing twice always leaves one run.
     pub fn write_result(&mut self, result: &ExtractionResult) -> Result<RunId, LedgerError> {
+        if let Some(existing) = self.find_run(&result.document.hash, &result.backend)? {
+            let stored = self.load_result(existing.id)?;
+            if result_digest(&stored)? == result_digest(result)? {
+                return Ok(existing.id);
+            }
+        }
+        self.check_storage_limits()?;
         let finished_at = now_unix();
         let started_at = finished_at - elapsed_seconds(&result.timings);
         let timings_json = serde_json::to_string(&result.timings)?;
@@ -399,32 +486,64 @@ impl Ledger {
         for obs in &document.sources {
             insert_source(&tx, &document.hash, obs, finished_at)?;
         }
-        tx.execute(
-            DELETE_RUN,
+        let existing_id = optional_row(
+            &tx,
+            SELECT_RUN_ID,
             params![
                 document.hash.0,
                 backend.name,
                 backend.version,
                 backend.config_digest,
-                result.schema_version,
+                result.schema_version
             ],
+            |row| row.get(0),
         )?;
-        tx.execute(
-            INSERT_RUN,
-            params![
-                document.hash.0,
-                backend.name,
-                backend.version,
-                backend.config_digest,
-                result.schema_version,
-                result.status.as_str(),
-                started_at,
-                finished_at,
-                timings_json,
-                warnings_json,
-            ],
-        )?;
-        let run_id = tx.last_insert_rowid();
+        let run_id = if let Some(run_id) = existing_id {
+            tx.execute(
+                UPDATE_RUN,
+                params![
+                    result.status.as_str(),
+                    started_at,
+                    finished_at,
+                    timings_json,
+                    warnings_json,
+                    run_id
+                ],
+            )?;
+            // Keep the stable run identity and update its dependent representation.
+            for table in [
+                "citations",
+                "\"references\"",
+                "authors",
+                "metadata",
+                "chunks",
+                "figures",
+                "pages",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE run_id = ?1"),
+                    params![run_id],
+                )?;
+            }
+            run_id
+        } else {
+            tx.execute(
+                INSERT_RUN,
+                params![
+                    document.hash.0,
+                    backend.name,
+                    backend.version,
+                    backend.config_digest,
+                    result.schema_version,
+                    result.status.as_str(),
+                    started_at,
+                    finished_at,
+                    timings_json,
+                    warnings_json
+                ],
+            )?;
+            tx.last_insert_rowid()
+        };
         insert_pages(&tx, run_id, &result.pages)?;
         insert_figures(&tx, run_id, &result.pages)?;
         insert_chunks(&tx, run_id, &result.chunks)?;
@@ -432,7 +551,76 @@ impl Ledger {
         insert_references(&tx, run_id, &result.references)?;
         insert_citations(&tx, run_id, &result.citations)?;
         tx.commit()?;
+        self.after_publication()?;
         Ok(run_id)
+    }
+
+    /// Returns accumulated passive-checkpoint telemetry.
+    pub const fn checkpoint_telemetry(&self) -> CheckpointTelemetry {
+        self.checkpoint_telemetry
+    }
+
+    /// Attempts a passive checkpoint without waiting for active readers.
+    pub fn checkpoint_passive(&mut self) -> Result<CheckpointTelemetry, LedgerError> {
+        self.conn.busy_timeout(std::time::Duration::ZERO)?;
+        let result = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                Ok((
+                    to_u64(row.get::<_, i64>(0)?),
+                    to_u64(row.get::<_, i64>(1)?),
+                    to_u64(row.get::<_, i64>(2)?),
+                ))
+            });
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let (busy, wal, done) = result?;
+        self.checkpoint_telemetry.attempts += 1;
+        self.checkpoint_telemetry.busy += busy.max(u64::from(done < wal));
+        self.checkpoint_telemetry.wal_pages = wal;
+        self.checkpoint_telemetry.checkpointed_pages = done;
+        Ok(self.checkpoint_telemetry)
+    }
+
+    fn after_publication(&mut self) -> Result<(), LedgerError> {
+        self.publications_since_checkpoint += 1;
+        let Some(policy) = &self.policy else {
+            return Ok(());
+        };
+        let wal_bytes = self
+            .path
+            .as_ref()
+            .map_or(0, |path| file_size(&sidecar(path, "-wal")));
+        if self.publications_since_checkpoint >= policy.checkpoint_every_publications
+            || wal_bytes >= policy.checkpoint_wal_bytes
+        {
+            self.checkpoint_passive()?;
+            self.publications_since_checkpoint = 0;
+        }
+        Ok(())
+    }
+
+    fn check_storage_limits(&self) -> Result<(), LedgerError> {
+        let (Some(path), Some(policy)) = (&self.path, &self.policy) else {
+            return Ok(());
+        };
+        let used =
+            file_size(path) + file_size(&sidecar(path, "-wal")) + file_size(&sidecar(path, "-shm"));
+        let free = available_space(path)?;
+        let reason = if used >= policy.max_ledger_bytes {
+            Some("maximum ledger bytes reached")
+        } else if free <= policy.min_free_space_bytes {
+            Some("minimum free-space reserve reached")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(LedgerError::StorageLimit {
+                reason,
+                used_bytes: used,
+                free_bytes: free,
+            });
+        }
+        Ok(())
     }
 
     /// Finds the most recently finished run whose document hash starts with
@@ -536,6 +724,51 @@ impl Ledger {
         })?;
         Ok(stats)
     }
+}
+
+impl Drop for Ledger {
+    fn drop(&mut self) {
+        if self.path.is_none() {
+            return;
+        }
+        // Shutdown must never wait behind a reader. If a reader owns a WAL
+        // snapshot SQLite reports busy and leaves the WAL for the next open.
+        let _ = self.conn.busy_timeout(std::time::Duration::ZERO);
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+}
+
+fn result_digest(result: &ExtractionResult) -> Result<[u8; 32], LedgerError> {
+    let bytes = serde_json::to_vec(result)?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{suffix}", path.as_os_str().to_string_lossy()))
+}
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
+}
+
+#[cfg(unix)]
+fn available_space(path: &Path) -> Result<u64, LedgerError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let path = CString::new(parent.as_os_str().as_bytes())
+        .map_err(|_| LedgerError::Sqlite(rusqlite::Error::InvalidPath(parent.to_path_buf())))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stats` points to writable storage.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(LedgerError::Sqlite(rusqlite::Error::InvalidPath(
+            parent.to_path_buf(),
+        )));
+    }
+    // SAFETY: successful `statvfs` initialized the structure.
+    let stats = unsafe { stats.assume_init() };
+    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
 /// The `runs` columns needed to rebuild a result.
@@ -1459,7 +1692,7 @@ mod tests {
         let first_run = ledger.write_result(&result).unwrap();
         let second_run = ledger.write_result(&result).unwrap();
         assert!(first_run > 0);
-        assert!(second_run > 0);
+        assert_eq!(second_run, first_run);
         let stats = ledger.stats().unwrap();
         assert_eq!(stats.documents, 1);
         assert_eq!(stats.runs, 1);
@@ -1471,6 +1704,12 @@ mod tests {
         assert_eq!(count_sources(&ledger), 1);
         assert_eq!(ledger.load_result(second_run).unwrap(), result);
 
+        let mut changed = result.clone();
+        changed.pages[0].text.push('!');
+        let changed_run = ledger.write_result(&changed).unwrap();
+        assert_eq!(changed_run, first_run);
+        assert_eq!(ledger.load_result(changed_run).unwrap(), changed);
+
         let mut upgraded = result.clone();
         upgraded.backend.version = "0.46".to_string();
         let third_run = ledger.write_result(&upgraded).unwrap();
@@ -1481,7 +1720,7 @@ mod tests {
         assert_eq!(stats.references, 6);
         assert_eq!(stats.figures, 4);
         assert_eq!(ledger.load_result(third_run).unwrap(), upgraded);
-        assert_eq!(ledger.load_result(second_run).unwrap(), result);
+        assert_eq!(ledger.load_result(second_run).unwrap(), changed);
     }
 
     #[test]
@@ -1553,5 +1792,77 @@ mod tests {
         ledger.record_source(&hash, 5, &unstamped).unwrap();
         assert_eq!(count_sources(&ledger), 3);
         assert_eq!(ledger.stats().unwrap().documents, 1);
+    }
+
+    fn test_policy() -> LedgerStoragePolicy {
+        LedgerStoragePolicy {
+            min_free_space_bytes: 0,
+            max_ledger_bytes: u64::MAX,
+            checkpoint_every_publications: u32::MAX,
+            checkpoint_wal_bytes: u64::MAX,
+            ..LedgerStoragePolicy::default()
+        }
+    }
+
+    #[test]
+    fn on_disk_policy_sets_checkpoint_pragmas() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.sqlite");
+        let policy = LedgerStoragePolicy {
+            wal_checkpoint_pages: 37,
+            journal_size_limit: 123_456,
+            durability: DurabilityMode::Full,
+            ..test_policy()
+        };
+        let ledger = Ledger::open_with_policy(&path, policy).unwrap();
+        let autocheckpoint: u32 = ledger
+            .conn
+            .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+            .unwrap();
+        let journal_limit: i64 = ledger
+            .conn
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(autocheckpoint, 37);
+        assert_eq!(journal_limit, 123_456);
+    }
+
+    #[test]
+    fn storage_limit_rejects_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.sqlite");
+        let policy = LedgerStoragePolicy {
+            max_ledger_bytes: 0,
+            min_free_space_bytes: 0,
+            ..test_policy()
+        };
+        let mut ledger = Ledger::open_with_policy(&path, policy).unwrap();
+        assert!(matches!(
+            ledger.write_result(&sample_result()),
+            Err(LedgerError::StorageLimit { .. })
+        ));
+        assert_eq!(ledger.stats().unwrap().runs, 0);
+    }
+
+    #[test]
+    fn passive_checkpoint_is_bounded_and_reports_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reader.sqlite");
+        let mut ledger = Ledger::open_with_policy(&path, test_policy()).unwrap();
+        let result = sample_result();
+        ledger.write_result(&result).unwrap();
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT * FROM runs;").unwrap();
+        let mut changed = result;
+        changed.pages[0].text.push('!');
+        ledger.write_result(&changed).unwrap();
+        let telemetry = ledger.checkpoint_passive().unwrap();
+        assert_eq!(telemetry.attempts, 1);
+        assert!(telemetry.busy > 0 || telemetry.checkpointed_pages == telemetry.wal_pages);
+        reader.execute_batch("ROLLBACK").unwrap();
+        let telemetry = ledger.checkpoint_passive().unwrap();
+        assert_eq!(telemetry.attempts, 2);
+        assert_eq!(telemetry.checkpointed_pages, telemetry.wal_pages);
     }
 }
