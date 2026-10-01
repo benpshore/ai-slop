@@ -45,6 +45,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Extract native PDF/text/Office/HTML structure as one JSON record per input.
+    Ingest(IngestArgs),
     /// Extract text, metadata and citations from PDF files into a ledger.
     Extract(ExtractArgs),
     /// Extract the final bibliography by reading PDF pages from the end.
@@ -69,6 +71,64 @@ enum Cmd {
     /// List every known backend, whether it is compiled in, and whether it
     /// opens a one-page probe PDF (native libraries found).
     Backends,
+}
+
+#[derive(Args)]
+struct IngestArgs {
+    #[arg(required = true, value_name = "PATH")]
+    paths: Vec<PathBuf>,
+    /// Read the PDF password from this environment variable (never from arguments).
+    #[arg(long, value_name = "NAME")]
+    password_env: Option<String>,
+    /// Maximum source bytes per input.
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    max_bytes: u64,
+    /// Maximum expanded Office package bytes per input.
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    max_expanded_bytes: u64,
+    /// Maximum ZIP members per Office package.
+    #[arg(long, default_value_t = 10_000)]
+    max_archive_entries: usize,
+    /// Maximum cells per CSV or workbook; distant Excel cells do not fill a dense grid.
+    #[arg(long, default_value_t = 250_000)]
+    max_cells: usize,
+    /// Maximum PDF pages per input.
+    #[arg(long, default_value_t = 10_000)]
+    max_pages: u32,
+}
+
+fn run_ingest(args: &IngestArgs) -> anyhow::Result<ExitCode> {
+    use std::io::Write;
+    let password = args
+        .password_env
+        .as_ref()
+        .map(|name| {
+            std::env::var(name).map_err(|_| {
+                anyhow!("PDF password environment variable is missing or not valid UTF-8")
+            })
+        })
+        .transpose()?;
+    let options = tpe::ingest::Options {
+        max_bytes: args.max_bytes,
+        max_expanded_bytes: args.max_expanded_bytes,
+        max_archive_entries: args.max_archive_entries,
+        max_cells: args.max_cells,
+        max_pages: args.max_pages,
+    };
+    let mut stdout = std::io::stdout().lock();
+    let mut success = true;
+    for path in &args.paths {
+        let record = tpe::ingest::run_with_password(path, &options, password.as_deref());
+        success &= record.outcome == tpe::ingest::Outcome::Extracted;
+        serde_json::to_writer(&mut stdout, &record)?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+    Ok(if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 #[derive(Subcommand)]
@@ -252,6 +312,7 @@ struct EvalArgs {
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
+        Cmd::Ingest(args) => run_ingest(&args),
         Cmd::Extract(args) => run_extract(&args),
         Cmd::Bibliography(args) => run_bibliography(&args),
         Cmd::Stats { db } => {

@@ -72,6 +72,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Declarative formats compile without PDFium, ONNX, OCR or ASR models.
+      - run: cargo clippy -p text-processing-engine --all-targets --features formats -- -D warnings
+      - run: cargo test -p text-processing-engine --features formats
 
   swift:
     runs-on: ubuntu-latest
