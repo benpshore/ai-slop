@@ -4074,6 +4074,59 @@ fn lncs_authors_end(text: &str) -> Option<usize> {
     text[..found.end()].rfind(':')
 }
 
+/// Vancouver lists closed by a colon, as printed in BMC references:
+/// `Schmader KE: Title` or `Smith A, Jones BC, et al.: Title`.
+/// Validate the entire prefix before trying the more general comma styles.
+/// A lone one-initial prefix is ambiguous with titles such as `Vitamin D:`.
+fn vancouver_colon_authors_end(text: &str) -> Option<usize> {
+    let colon = text.find(':')?;
+    if colon > 1200 || !text[colon + 1..].starts_with(' ') {
+        return None;
+    }
+    let mut count = 0;
+    let mut first_initials = 0;
+    let mut parts = text[..colon].split(',').peekable();
+    while let Some(part) = parts.next() {
+        let part = part.trim();
+        if matches!(part, "et al" | "et al.") {
+            if count == 0 || parts.peek().is_some() {
+                return None;
+            }
+            break;
+        }
+        let mut tokens: Vec<&str> = part.split_whitespace().collect();
+        if tokens
+            .last()
+            .is_some_and(|t| matches!(*t, "Jr" | "Jr." | "II" | "III" | "2nd" | "3rd"))
+        {
+            tokens.pop();
+        }
+        let initials = tokens.pop()?;
+        let n = initials.chars().count();
+        if !(1..=4).contains(&n)
+            || !initials
+                .chars()
+                .all(|c| c.is_alphabetic() && c.is_uppercase())
+            || tokens.is_empty()
+            || tokens.len() > 4
+            || !tokens.iter().any(|t| t.starts_with(char::is_uppercase))
+            || !tokens.iter().all(|t| {
+                is_surname_particle(t)
+                    || (t.starts_with(char::is_uppercase)
+                        && t.chars()
+                            .all(|c| c.is_alphabetic() || matches!(c, '-' | '\'' | '’')))
+            })
+        {
+            return None;
+        }
+        if count == 0 {
+            first_initials = n;
+        }
+        count += 1;
+    }
+    (count > 1 || (count == 1 && first_initials >= 2)).then_some(colon)
+}
+
 /// An LNCS author list of surnames only, closed by a colon before the
 /// title: `Galun, Sharon, Basri, Brandt: Texture segmentation …`.
 fn lncs_surnames_re() -> &'static Regex {
@@ -4451,6 +4504,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         entry.year = Some(*value);
     }
     let quoted = find_quoted(&masked);
+    let vancouver_colon = vancouver_colon_authors_end(&masked);
 
     // Where the author list ends and where the title starts.
     let mut authors_end: Option<usize> = None;
@@ -4474,8 +4528,8 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         // `Regulation (EU) 2017/745 on medical devices. Official Journal`:
         // no authors; the leading clause is the title.
         authors_end = Some(0);
-    } else if let Some(colon) = lncs_authors_end(&masked) {
-        // Springer LNCS: `Surname, I., Other, J.: Title. In: Venue (Year)`.
+    } else if let Some(colon) = lncs_authors_end(&masked).or(vancouver_colon) {
+        // Springer LNCS and Vancouver lists with a verified author colon.
         authors_end = Some(colon);
         let after = masked[colon + 1..].trim_start();
         title_start = masked.len() - after.len();
@@ -4568,7 +4622,17 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         return;
     };
     let author_segment = &body[..end];
-    if author_segment
+    if vancouver_colon == Some(end) {
+        // The predicate already validated every name, including particles and
+        // numeric suffixes. Preserve them instead of reapplying generic name
+        // heuristics, which would discard a valid `Sowder RC 2nd`.
+        entry.authors = author_segment
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !is_et_al(name))
+            .map(str::to_owned)
+            .collect();
+    } else if author_segment
         .chars()
         .next()
         .is_some_and(char::is_uppercase)
@@ -9980,6 +10044,91 @@ mod tests {
         assert_eq!(
             lncs_authors_end("D. Goldberg, D. Nichols, Title: subtitle"),
             None
+        );
+    }
+
+    #[test]
+    fn vancouver_author_colon_precedes_title_and_venue_colons() {
+        let raw = "8. Schmader KE: Epidemiology and impact on quality of life of postherpetic neuralgia and painful diabetic neuropathy. Clin J Pain 2002, 18(6):350–354.";
+        let entry = parsed(raw, Some("8."));
+        assert_eq!(entry.raw, raw);
+        assert_eq!(entry.authors, ["Schmader KE"]);
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Epidemiology and impact on quality of life of postherpetic neuralgia and painful diabetic neuropathy"
+            )
+        );
+        assert_eq!(entry.venue.as_deref(), Some("Clin J Pain"));
+        assert_eq!(entry.year, Some(2002));
+        let entry = parsed(
+            "Bess JW Jr, Sowder RC 2nd, et al: Proteomic analysis. J Virol 2006, 80:9039–9052.",
+            None,
+        );
+        assert_eq!(entry.authors, ["Bess JW Jr", "Sowder RC 2nd"]);
+
+        let entry = parsed(
+            "1. Wild S, Roglic G, Green A, Sicree R, King H: Global prevalence of diabetes: estimates for the year 2000 and projections for 2030. Diabetes Care 2004, 27(5):1047–1053.",
+            Some("1."),
+        );
+        assert_eq!(
+            entry.authors,
+            ["Wild S", "Roglic G", "Green A", "Sicree R", "King H"]
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Global prevalence of diabetes: estimates for the year 2000 and projections for 2030"
+            )
+        );
+
+        let entry = parsed(
+            "3. Singh AS, Mulder C, Twisk JWR, Van Mechelen W, Chinapaw MJM: Tracking of childhood overweight into adulthood: a systematic review of the literature. Obes Rev 2008, 9:474–488.",
+            Some("3."),
+        );
+        assert!(entry.authors.iter().any(|a| a == "Van Mechelen W"));
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Tracking of childhood overweight into adulthood: a systematic review of the literature"
+            )
+        );
+    }
+
+    #[test]
+    fn vancouver_colon_requires_the_whole_personal_author_list() {
+        for prefix in [
+            "Smith AB Jr, Jones C",
+            "Van den Hurk K, O’Neil AB",
+            "Smith AB, et al",
+            "Smith\u{a0}AB, Jones C, et al.",
+        ] {
+            assert_eq!(
+                super::vancouver_colon_authors_end(&format!("{prefix}: Title.")),
+                Some(prefix.len()),
+                "{prefix}"
+            );
+        }
+        for text in [
+            "Vitamin D: bone and muscle health.",
+            "Methods: a practical handbook.",
+            "WHO Expert Consultation: Appropriate body-mass index.",
+            "Smith AB. Molecular mechanisms: a systematic review.",
+            "Smith AB,, Jones CD: Title.",
+            "Smith AB, et al., Jones CD: Title.",
+            "Smith AB, not an author: Title.",
+            "Smith AB:Title.",
+            "https://doi.org/10.1000/example",
+        ] {
+            assert_eq!(super::vancouver_colon_authors_end(text), None, "{text}");
+        }
+        let entry = parsed(
+            "Smith AB. Molecular mechanisms: a systematic review. J Med 2020;12:34–40.",
+            None,
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Molecular mechanisms: a systematic review")
         );
     }
 
