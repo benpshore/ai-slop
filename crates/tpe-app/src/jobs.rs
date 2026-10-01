@@ -525,7 +525,11 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
     if !record.found() {
         return Ok(Outcome {
             outputs: Vec::new(),
-            summary: "No reference list found".to_string(),
+            summary: if record.extraction_status == Status::Partial {
+                "partial: No reference list found".to_string()
+            } else {
+                "No reference list found".to_string()
+            },
             warnings: record.warnings,
         });
     }
@@ -542,11 +546,14 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
     fs::write(&text, record.plain_text())
         .map_err(|e| format!("writing {}: {e}", text.display()))?;
     let scanned = record.pages_scanned.unwrap_or(0);
-    let summary = format!(
+    let mut summary = format!(
         "{} from the last {}",
         count(record.references.len(), "reference"),
         count(scanned as usize, "page")
     );
+    if record.extraction_status == Status::Partial {
+        summary.insert_str(0, "partial: ");
+    }
     Ok(Outcome {
         outputs: vec![json, text],
         summary,

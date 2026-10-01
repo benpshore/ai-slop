@@ -135,6 +135,20 @@ pub struct PageText {
 }
 
 impl PageText {
+    /// Whether extraction or a later processing stage reached a work limit.
+    /// Ordinary diagnostic warnings do not make a page partial.
+    pub fn extraction_status(&self) -> Status {
+        if self
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("failed:") || warning.starts_with("resource_limit:"))
+        {
+            Status::Partial
+        } else {
+            Status::Complete
+        }
+    }
+
     pub fn new(page: u32, width: f32, height: f32, rotation: i32) -> Self {
         Self {
             page,
