@@ -14,12 +14,11 @@
 //! The request builders and response parsers are pure and unit tested on
 //! recorded JSON; only [`ask`] performs I/O, and no test calls it with a key.
 
-use std::time::Duration;
-
 use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::keys::services;
+use crate::transport::{self, BoundCredential, ProviderPolicy, ValidatedEndpoint};
 
 /// Anthropic Messages endpoint.
 pub const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -33,12 +32,8 @@ pub const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
 pub const OPENAI_MODEL: &str = "gpt-5";
 /// Output token ceiling for a non-streaming answer in the panel.
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
-/// End-to-end timeout for one request.
-pub const TIMEOUT: Duration = Duration::from_secs(120);
 /// `User-Agent` sent with every request.
 pub const USER_AGENT: &str = "tpe-app/0.1 (+https://github.com/benpshore/text-processing-engine)";
-/// Longest error-body excerpt kept in an error message.
-const ERROR_EXCERPT_CHARS: usize = 300;
 
 /// Which model provider answers the question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +99,7 @@ pub enum AiError {
     /// Connection, TLS, timeout or body-read failure.
     #[error("transport: {0}")]
     Transport(String),
-    /// Non-2xx HTTP status; `message` is the provider's error text or a body excerpt.
+    /// Non-2xx HTTP status; the provider body is always redacted.
     #[error("HTTP {code}: {message}")]
     Status {
         /// HTTP status code.
@@ -131,9 +126,12 @@ pub enum AiError {
     NoText,
 }
 
-impl From<ureq::Error> for AiError {
-    fn from(error: ureq::Error) -> Self {
-        Self::Transport(error.to_string())
+impl From<Provider> for ProviderPolicy {
+    fn from(provider: Provider) -> Self {
+        match provider {
+            Provider::Anthropic => Self::Anthropic,
+            Provider::OpenAI => Self::OpenAi,
+        }
     }
 }
 
@@ -157,6 +155,7 @@ pub fn request_body(provider: Provider, system: &str, user: &str, max_tokens: u3
 }
 
 /// Request headers for `provider`, including the authentication header.
+#[cfg(test)]
 pub fn headers(provider: Provider, api_key: &str) -> Vec<(&'static str, String)> {
     let mut out = vec![("content-type", "application/json".to_owned())];
     match provider {
@@ -249,16 +248,10 @@ fn error_object(value: &Value) -> Option<(String, String)> {
     Some((kind, message))
 }
 
-/// Human-readable message for a non-2xx body: the provider's error message
-/// when the body is JSON, else a short excerpt.
+/// Human-readable message for a non-2xx body without exposing provider data.
 pub fn error_message(body: &str) -> String {
-    if let Ok(value) = serde_json::from_str::<Value>(body)
-        && let Some((kind, message)) = error_object(&value)
-    {
-        return format!("{kind}: {message}");
-    }
-    let excerpt: String = body.chars().take(ERROR_EXCERPT_CHARS).collect();
-    excerpt.trim().to_owned()
+    let _ = body;
+    "provider returned an error (response body redacted)".to_owned()
 }
 
 /// Sends one question and returns the answer text (blocking).
@@ -269,20 +262,12 @@ pub fn ask(provider: Provider, api_key: &str, system: &str, user: &str) -> Resul
     if user.trim().is_empty() {
         return Err(AiError::EmptyQuestion);
     }
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .http_status_as_error(false)
-        .user_agent(USER_AGENT)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
     let body = request_body(provider, system, user, DEFAULT_MAX_TOKENS).to_string();
-    let mut request = agent.post(provider.endpoint());
-    for (name, value) in headers(provider, api_key) {
-        request = request.header(name, value);
-    }
-    let mut response = request.send(body)?;
-    let code = response.status().as_u16();
-    let text = response.body_mut().read_to_string()?;
+    let endpoint = ValidatedEndpoint::parse(provider.into(), provider.endpoint())
+        .map_err(|error| AiError::Transport(error.to_string()))?;
+    let credential = BoundCredential::new(&endpoint, api_key);
+    let (code, text) =
+        transport::post_json(&endpoint, &credential, &body).map_err(AiError::Transport)?;
     if !(200..300).contains(&code) {
         return Err(AiError::Status {
             code,
@@ -417,11 +402,12 @@ mod tests {
         ));
         assert_eq!(
             error_message(OPENAI_ERROR),
-            "invalid_request_error: Incorrect API key provided"
+            "provider returned an error (response body redacted)"
         );
-        assert_eq!(error_message("  plain text  "), "plain text");
-        let long = "x".repeat(1000);
-        assert_eq!(error_message(&long).chars().count(), ERROR_EXCERPT_CHARS);
+        assert_eq!(
+            error_message("secret body"),
+            "provider returned an error (response body redacted)"
+        );
     }
 
     #[test]
