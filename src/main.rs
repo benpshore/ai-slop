@@ -591,7 +591,7 @@ fn csv_field(value: &str) -> String {
 const CSV_HEADER: &str = "sha256,path,status,paper_doi,idx,label,first_author,title,year,doi_printed,doi_link,resolved_doi,resolved_method,resolved_score,resolution,attempts,raw\n";
 
 /// Append every entry of `record` to `path` as CSV rows. `resolution` is
-/// `resolved`, `mismatch` (records came back but disagreed), `not_found`,
+/// `resolved`, `ambiguous`, `mismatch` (records came back but disagreed), `not_found`,
 /// `error` or `not_attempted`; `attempts` lists method:outcome pairs.
 fn append_csv(path: &Path, record: &bibliography::Record) -> anyhow::Result<()> {
     use std::io::Write;
@@ -610,6 +610,8 @@ fn append_csv(path: &Path, record: &bibliography::Record) -> anyhow::Result<()> 
             "resolved"
         } else if entry.attempts.is_empty() {
             "not_attempted"
+        } else if entry.attempts.iter().any(|a| a.outcome == "ambiguous") {
+            "ambiguous"
         } else if entry.attempts.iter().any(|a| a.outcome == "mismatch") {
             "mismatch"
         } else if entry.attempts.iter().any(|a| a.outcome == "error") {

@@ -76,3 +76,26 @@ the raw text and flags replacement characters, but does not repair the parser,
 check bibliographic services, or establish publication-grade accuracy. One
 paper also contains a separate earlier bibliography; this mode intentionally
 returns its **last** list only. Exactness and field fixes deserve separate PRs.
+
+## Resolution accuracy
+
+`--resolve` preserves balanced DOI suffix punctuation, including older SICI
+identifiers. Parser-repaired wrapped DOIs take precedence over raw prefixes;
+raw text is preferred only when it extends the same parsed identifier. A DOI
+response must carry the normalized requested DOI, including paper metadata
+lookups. Paper-title searches also reject distinct DOI candidates within the
+0.05 similarity margin. Ambiguity remains unresolved and is excluded from the
+metadata-rejection count. Bibliographic searches
+require title evidence as well as the existing author/year checks; records without
+enough title evidence remain unresolved. Distinct DOIs with ranking scores less
+than 0.05 apart are reported as `ambiguous`, not chosen by API response order.
+`attempts` distinguishes metadata-compatible `candidate` records from the single
+selected `verified` record; CSV reports `ambiguous` explicitly. This heuristic
+does not certify exact matches or guarantee that the right result is among the
+five query results.
+
+Offline regression tests cover balanced identifiers, missing title evidence,
+query-order independence, duplicate DOI hits, and venue-based version selection.
+`cargo test --lib resolve::tests::live_crossref_exact_identifier -- --ignored`
+checks the production resolver against one known live Crossref record. It is
+opt-in because registry availability must not determine ordinary test success.

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use regex::Regex;
 use tpe_biblio::util::with_query;
-use tpe_biblio::{BiblioError, Client, PaperRecord, crossref};
+use tpe_biblio::{BiblioError, Client, PaperRecord, crossref, normalize_doi};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::schema::{Attempt, Metadata, PageText, ReferenceEntry, Resolved};
@@ -51,7 +51,7 @@ const PAPER_TITLE_MIN: f32 = 0.85;
 /// sentence punctuation.
 fn doi_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b10\.\d{4,9}/[^\s\]\)>\x22\x27]+").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"(?i)\b10\.\d{4,9}/[^\s\x22\x27]+").expect("valid regex"))
 }
 
 /// The DOI in `text` (a URI or a printed string), lower-cased, without a
@@ -59,11 +59,22 @@ fn doi_re() -> &'static Regex {
 #[must_use]
 pub fn doi_in(text: &str) -> Option<String> {
     let found = doi_re().find(text)?;
-    let mut doi = found.as_str().to_ascii_lowercase();
-    while doi.ends_with(['.', ',', ';', ':']) {
-        doi.pop();
+    let mut doi = found.as_str();
+    // SICI identifiers contain balanced parentheses and angle brackets. Only
+    // remove citation delimiters with no opening partner inside the DOI.
+    loop {
+        let before = doi;
+        doi = doi.trim_end_matches(['.', ',', ';', ':']);
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}'), ('<', '>')] {
+            while doi.ends_with(close) && doi.matches(close).count() > doi.matches(open).count() {
+                doi = &doi[..doi.len() - close.len_utf8()];
+            }
+        }
+        if doi == before {
+            break;
+        }
     }
-    (doi.len() > 7).then_some(doi)
+    normalize_doi(doi)
 }
 
 /// Attach `doi.org` link annotations to the entries they sit on. An entry
@@ -400,6 +411,137 @@ fn venue_in_entry(venue: &str, raw_folded: &str) -> bool {
     needles.iter().any(|n| hay.iter().any(|h| h == n))
 }
 
+/// Minimum winning margin between distinct query candidates. Search order is
+/// not identity evidence; unresolved ambiguity is preferable to a false edge.
+const QUERY_MARGIN: f32 = 0.05;
+
+fn select_query_record(
+    entry: &mut ReferenceEntry,
+    records: impl IntoIterator<Item = PaperRecord>,
+) -> Option<Resolved> {
+    let raw = folded(&entry.raw);
+    let mut candidates: Vec<(f32, Resolved)> = Vec::new();
+    for record in records {
+        let Some(doi) = record.doi.as_deref().and_then(normalize_doi) else {
+            continue;
+        };
+        // Author/year alone cannot establish a search result's identity (e.g.
+        // two works by Smith in 2020). Exact-ID lookups have separate evidence.
+        let checked = if title_overlap(&record.title, &raw).is_none() {
+            Err("title: insufficient title evidence for a bibliographic query".to_string())
+        } else {
+            verify(&record, entry)
+        };
+        match checked {
+            Ok(score) => {
+                let venue_bonus = if record
+                    .venue
+                    .as_deref()
+                    .is_some_and(|v| venue_in_entry(v, &raw))
+                {
+                    0.5
+                } else {
+                    0.0
+                };
+                let total = score + venue_bonus;
+                entry.attempts.push(Attempt {
+                    method: "query".to_string(),
+                    doi: Some(doi.clone()),
+                    outcome: "candidate".to_string(),
+                    detail: Some(format!("metadata agrees, ranking score {total:.2}")),
+                });
+                candidates.push((total, resolved_from(&record, &doi, "query", score)));
+            }
+            Err(detail) => entry.attempts.push(Attempt {
+                method: "query".to_string(),
+                doi: Some(doi),
+                outcome: "mismatch".to_string(),
+                detail: Some(detail),
+            }),
+        }
+    }
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (score, best) = candidates.first()?;
+    if candidates
+        .iter()
+        .any(|(other, record)| record.doi != best.doi && score - other < QUERY_MARGIN)
+    {
+        entry.attempts.push(Attempt {
+            method: "query".to_string(),
+            doi: None,
+            outcome: "ambiguous".to_string(),
+            detail: Some("distinct DOIs have indistinguishable bibliographic evidence".to_string()),
+        });
+        return None;
+    }
+    let best = best.clone();
+    entry.attempts.push(Attempt {
+        method: "query".to_string(),
+        doi: Some(best.doi.clone()),
+        outcome: "verified".to_string(),
+        detail: None,
+    });
+    Some(best)
+}
+
+/// Prefer the parser's wrap repair, except when raw text extends that same DOI
+/// (the parser can trim balanced suffix punctuation).
+fn printed_doi(entry: &ReferenceEntry) -> Option<String> {
+    let parsed = entry.doi.as_deref().and_then(doi_in);
+    let raw = doi_in(&entry.raw);
+    match (parsed, raw) {
+        (Some(parsed), Some(raw)) if raw.starts_with(&parsed) => Some(raw),
+        (Some(parsed), _) => Some(parsed),
+        (None, raw) => raw,
+    }
+}
+
+fn exact_paper_record(title: &str, doi: &str, record: &PaperRecord) -> Option<Resolved> {
+    if record.doi.as_deref().and_then(normalize_doi) != normalize_doi(doi) {
+        return None;
+    }
+    let score = if title.is_empty() {
+        1.0
+    } else {
+        title_agreement(title, &record.title)
+    };
+    (score >= PAPER_TITLE_MIN).then(|| resolved_from(record, doi, "metadata", score))
+}
+
+fn select_paper_record(
+    title: &str,
+    records: impl IntoIterator<Item = PaperRecord>,
+) -> Option<Resolved> {
+    let mut candidates: Vec<(f32, Resolved)> = records
+        .into_iter()
+        .filter_map(|record| {
+            let doi = record.doi.as_deref().and_then(normalize_doi)?;
+            let score = title_agreement(title, &record.title);
+            (score >= PAPER_TITLE_MIN)
+                .then(|| (score, resolved_from(&record, &doi, "query", score)))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (score, best) = candidates.first()?;
+    if candidates
+        .iter()
+        .any(|(other, record)| record.doi != best.doi && score - other < QUERY_MARGIN)
+    {
+        return None;
+    }
+    Some(best.clone())
+}
+
+/// Count unresolved metadata disagreements, excluding candidates withheld only
+/// because identity evidence is ambiguous. Inspect only this resolution pass.
+fn count_rejection(attempts: &[Attempt], outcome: &mut Outcome) {
+    if attempts.iter().any(|a| a.outcome == "mismatch")
+        && !attempts.iter().any(|a| a.outcome == "ambiguous")
+    {
+        outcome.rejected += 1;
+    }
+}
+
 /// Run `request` again after a rate limit or transport failure, backing
 /// off `RETRY_BASE`, `2 x RETRY_BASE`, ... up to `RETRIES` times.
 fn with_retry<T>(mut request: impl FnMut() -> Result<T, BiblioError>) -> Result<T, BiblioError> {
@@ -465,11 +607,16 @@ impl Resolver {
             return Ok(None);
         };
         let record = found.record;
-        let doi = record.doi.clone().unwrap_or_else(|| doi.to_string());
+        if record.doi.as_deref().and_then(normalize_doi).as_deref() != Some(doi) {
+            attempt.outcome = "mismatch".to_string();
+            attempt.detail = Some("lookup returned a different or missing DOI".to_string());
+            entry.attempts.push(attempt);
+            return Ok(None);
+        }
         let outcome = match verify(&record, entry) {
             Ok(score) => {
                 attempt.outcome = "verified".to_string();
-                Some(resolved_from(&record, &doi, method, score))
+                Some(resolved_from(&record, doi, method, score))
             }
             Err(detail) => {
                 attempt.outcome = "mismatch".to_string();
@@ -487,28 +634,20 @@ impl Resolver {
         entry: &mut ReferenceEntry,
         outcome: &mut Outcome,
     ) -> Result<Option<&'static str>, BiblioError> {
+        let first_attempt = entry.attempts.len();
         let mut candidates: Vec<(String, &'static str)> = Vec::new();
         if let Some(doi) = entry.doi_link.as_deref().and_then(doi_in) {
             candidates.push((doi, "link"));
         }
-        if let Some(doi) = entry.doi.as_deref().and_then(doi_in)
+        if let Some(doi) = printed_doi(entry)
             && !candidates.iter().any(|(d, _)| *d == doi)
         {
             candidates.push((doi, "printed"));
         }
-        let mut saw_record = false;
         for (doi, method) in &candidates {
-            match self.try_doi(entry, doi, method)? {
-                Some(resolved) => {
-                    entry.resolved = Some(resolved);
-                    return Ok(Some(method));
-                }
-                None => {
-                    saw_record |= entry
-                        .attempts
-                        .last()
-                        .is_some_and(|a| a.outcome == "mismatch");
-                }
+            if let Some(resolved) = self.try_doi(entry, doi, method)? {
+                entry.resolved = Some(resolved);
+                return Ok(Some(method));
             }
         }
         let query: String = entry.raw.chars().take(QUERY_CHARS).collect();
@@ -532,57 +671,11 @@ impl Resolver {
                 detail: None,
             });
         }
-        // Several candidates can verify (a journal article and its preprint or
-        // poster share title, authors and year): keep the best score, where a
-        // venue named in the entry counts extra.
-        let raw = folded(&entry.raw);
-        let mut best: Option<(f32, Resolved)> = None;
-        for candidate in found {
-            let record = candidate.record;
-            let Some(doi) = record.doi.clone() else {
-                continue;
-            };
-            saw_record = true;
-            match verify(&record, entry) {
-                Ok(score) => {
-                    let venue_bonus = if record
-                        .venue
-                        .as_deref()
-                        .is_some_and(|v| venue_in_entry(v, &raw))
-                    {
-                        0.5
-                    } else {
-                        0.0
-                    };
-                    let total = score + venue_bonus;
-                    entry.attempts.push(Attempt {
-                        method: "query".to_string(),
-                        doi: Some(doi.clone()),
-                        outcome: "verified".to_string(),
-                        detail: record
-                            .venue
-                            .as_ref()
-                            .map(|v| format!("venue {v:?}, score {total:.2}")),
-                    });
-                    if best.as_ref().is_none_or(|(b, _)| total > *b) {
-                        best = Some((total, resolved_from(&record, &doi, "query", score)));
-                    }
-                }
-                Err(detail) => entry.attempts.push(Attempt {
-                    method: "query".to_string(),
-                    doi: Some(doi),
-                    outcome: "mismatch".to_string(),
-                    detail: Some(detail),
-                }),
-            }
-        }
-        if let Some((_, resolved)) = best {
+        if let Some(resolved) = select_query_record(entry, found.into_iter().map(|f| f.record)) {
             entry.resolved = Some(resolved);
             return Ok(Some("query"));
         }
-        if saw_record {
-            outcome.rejected += 1;
-        }
+        count_rejection(&entry.attempts[first_attempt..], outcome);
         Ok(None)
     }
 
@@ -621,33 +714,15 @@ impl Resolver {
         let title = meta.title.as_deref().unwrap_or("");
         if let Some(doi) = meta.doi.as_deref().and_then(doi_in)
             && let Ok(Some(found)) = with_retry(|| crossref::fetch_by_doi(&self.client, &doi))
+            && let Some(resolved) = exact_paper_record(title, &doi, &found.record)
         {
-            let record = found.record;
-            let score = if title.is_empty() {
-                1.0
-            } else {
-                title_agreement(title, &record.title)
-            };
-            if title.is_empty() || score >= PAPER_TITLE_MIN {
-                let doi = record.doi.clone().unwrap_or(doi);
-                return Some(resolved_from(&record, &doi, "metadata", score));
-            }
+            return Some(resolved);
         }
         if title.len() < 12 {
             return None;
         }
         let found = with_retry(|| bibliographic_search(&self.client, title, QUERY_ROWS)).ok()?;
-        for candidate in found {
-            let record = candidate.record;
-            let Some(doi) = record.doi.clone() else {
-                continue;
-            };
-            let score = title_agreement(title, &record.title);
-            if score >= PAPER_TITLE_MIN {
-                return Some(resolved_from(&record, &doi, "query", score));
-            }
-        }
-        None
+        select_paper_record(title, found.into_iter().map(|f| f.record))
     }
 }
 
@@ -667,6 +742,165 @@ mod tests {
             Some("10.1016/j.cell.2020.01.001".to_string())
         );
         assert_eq!(doi_in("no doi here"), None);
+    }
+
+    #[test]
+    fn doi_lookup_keeps_balanced_biomedical_suffixes() {
+        for doi in [
+            "10.1016/S0140-6736(20)30183-5",
+            "10.1002/(SICI)1097-0258(19980815)17:15<1741::AID-SIM868>3.0.CO;2-8",
+            "10.1000/example(abc)",
+        ] {
+            assert_eq!(
+                doi_in(&format!("doi: {doi}).")),
+                Some(doi.to_ascii_lowercase())
+            );
+        }
+        assert_eq!(
+            doi_in("[doi:10.1000/example]."),
+            Some("10.1000/example".to_string())
+        );
+    }
+
+    fn query_record(doi: &str) -> PaperRecord {
+        PaperRecord {
+            doi: Some(doi.to_string()),
+            title: "Molecular mechanisms of inflammation".to_string(),
+            authors: vec!["Jane Smith".to_string()],
+            year: Some(2020),
+            source: "crossref".to_string(),
+            ..PaperRecord::default()
+        }
+    }
+
+    fn query_entry() -> ReferenceEntry {
+        ReferenceEntry {
+            raw: "Smith J. Molecular mechanisms of inflammation. Immunology 2020; 1:2-3."
+                .to_string(),
+            ..ReferenceEntry::default()
+        }
+    }
+
+    #[test]
+    fn query_ambiguity_is_not_decided_by_response_order() {
+        let a = query_record("10.1000/a");
+        let b = query_record("10.1000/b");
+        for records in [[a.clone(), b.clone()], [b, a]] {
+            let mut entry = query_entry();
+            assert!(select_query_record(&mut entry, records).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+            assert!(!entry.attempts.iter().any(|a| a.outcome == "verified"));
+        }
+    }
+
+    #[test]
+    fn query_needs_title_evidence_and_deduplicates_identical_dois() {
+        let mut incomplete = query_record("10.1000/missing-title");
+        incomplete.title.clear();
+        let mut entry = query_entry();
+        assert!(select_query_record(&mut entry, [incomplete]).is_none());
+        let exact = query_record("10.1000/a");
+        let selected = select_query_record(&mut entry, [exact.clone(), exact]).unwrap();
+        assert_eq!(selected.doi, "10.1000/a");
+        assert_eq!(entry.attempts.last().unwrap().outcome, "verified");
+    }
+
+    #[test]
+    fn query_uses_venue_evidence_to_distinguish_versions() {
+        let preprint = query_record("10.1000/preprint");
+        let mut article = query_record("10.1000/article");
+        article.venue = Some("Immunology".to_string());
+        let selected = select_query_record(&mut query_entry(), [preprint, article]).unwrap();
+        assert_eq!(selected.doi, "10.1000/article");
+    }
+
+    #[test]
+    #[ignore = "requires live Crossref access"]
+    fn live_crossref_exact_identifier() {
+        let mut entries = [ReferenceEntry {
+            raw: "Piwowar H, Priem J, Larivière V, et al. The state of OA: a large-scale analysis of the prevalence and impact of Open Access articles. PeerJ 2018. doi:10.7717/peerj.4375".to_string(),
+            ..ReferenceEntry::default()
+        }];
+        let outcome = Resolver::new(None).resolve_entries(&mut entries);
+        assert_eq!(outcome.resolved, 1, "{:?}", entries[0].attempts);
+        assert_eq!(
+            entries[0].resolved.as_ref().unwrap().doi,
+            "10.7717/peerj.4375"
+        );
+        assert_eq!(entries[0].resolved.as_ref().unwrap().method, "printed");
+    }
+
+    #[test]
+    fn printed_doi_preserves_repairs_and_raw_extensions() {
+        let mut entry = ReferenceEntry {
+            raw: "doi: 10.1145/364399 1.3648400".to_string(),
+            doi: Some("10.1145/3643991.3648400".to_string()),
+            ..ReferenceEntry::default()
+        };
+        assert_eq!(
+            printed_doi(&entry).as_deref(),
+            Some("10.1145/3643991.3648400")
+        );
+        entry.raw = "doi: 10.1000/example(abc)".to_string();
+        entry.doi = Some("10.1000/example(abc".to_string());
+        assert_eq!(printed_doi(&entry).as_deref(), Some("10.1000/example(abc)"));
+        entry.doi = None;
+        assert_eq!(printed_doi(&entry), doi_in(&entry.raw));
+    }
+
+    #[test]
+    fn paper_exact_lookup_requires_normalized_requested_doi() {
+        let mut record = query_record("10.1000/other");
+        for title in ["", record.title.as_str()] {
+            assert!(exact_paper_record(title, "10.1000/requested", &record).is_none());
+        }
+        record.doi = None;
+        assert!(exact_paper_record("", "10.1000/requested", &record).is_none());
+        record.doi = Some("https://doi.org/10.1000/REQUESTED".to_string());
+        assert!(exact_paper_record(&record.title, "10.1000/requested", &record).is_some());
+    }
+
+    #[test]
+    fn paper_query_checks_near_ties_in_both_orders() {
+        let a = query_record("10.1000/a");
+        let mut b = query_record("10.1000/b");
+        b.title.push('s');
+        for records in [[a.clone(), b.clone()], [b.clone(), a.clone()]] {
+            assert!(select_paper_record(&a.title, records).is_none());
+        }
+        b.doi = Some("https://doi.org/10.1000/A".to_string());
+        assert!(select_paper_record(&a.title, [a.clone(), b.clone()]).is_some());
+        b.doi = Some("10.1000/b".to_string());
+        b.title = "Unrelated research findings".to_string();
+        assert_eq!(
+            select_paper_record(&a.title, [b, a.clone()]).unwrap().doi,
+            "10.1000/a"
+        );
+    }
+
+    #[test]
+    fn ambiguity_is_unresolved_without_metadata_rejection() {
+        let mut entry = query_entry();
+        let mut wrong = query_record("10.1000/wrong");
+        wrong.title = "Unrelated research findings".to_string();
+        assert!(
+            select_query_record(
+                &mut entry,
+                [
+                    wrong.clone(),
+                    query_record("10.1000/a"),
+                    query_record("10.1000/b")
+                ]
+            )
+            .is_none()
+        );
+        let mut outcome = Outcome::default();
+        count_rejection(&entry.attempts, &mut outcome);
+        assert_eq!(outcome.rejected, 0);
+        entry.attempts.clear();
+        assert!(select_query_record(&mut entry, [wrong]).is_none());
+        count_rejection(&entry.attempts, &mut outcome);
+        assert_eq!(outcome.rejected, 1);
     }
 
     #[test]
