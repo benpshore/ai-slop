@@ -125,6 +125,7 @@ jobs:
       - name: Score against the JATS reference lists
         run: |
           python3 scripts/pmc_bib_eval.py \
+            --code-sha "$(git rev-parse HEAD)" \
             --manifest "$MANIFEST" --cache "$CACHE_DIR" \
             --bibliography out/bibliography.jsonl --extract out/extract.jsonl \
             --bibliography-wall-s "$(cat out/bib_wall_s)" --extract-wall-s "$(cat out/extract_wall_s)" \
@@ -145,4 +146,5 @@ jobs:
           path: |
             out/report
             out/bibliography.jsonl
+            out/extract.jsonl
           if-no-files-found: ignore

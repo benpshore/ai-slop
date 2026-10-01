@@ -71,7 +71,23 @@ not part of the required `ci` check. It:
 4. runs the forward path, `tpe extract --db out/ledger.db --json -j 4`, over
    the same PDFs (`out/extract.jsonl`) for comparison;
 5. scores both with `scripts/pmc_bib_eval.py`, appends `report.md` to the job
-   summary and uploads `out/report` (report, JSON, failures) as an artifact.
+   summary and uploads `out/report` (report, JSON, failures, exact manifest),
+   plus both raw JSONL extraction files as an artifact.
+
+The scorer requires `--code-sha` identifying the extraction binary's checkout
+(the workflow uses `git rev-parse HEAD`, including GitHub's tested merge tree).
+`report.json.provenance` records that SHA, the manifest's SHA-256, scorer
+version and source SHA-256, and every backend identity returned by extraction.
+Each paper retains complete parsed entries, cutoff warnings and extraction
+status. `entry_results` records every truth/extracted pair and its field
+scores, plus all unmatched truth and extracted entries. Missing and failed
+papers remain present. Never substitute a freshly sampled corpus for a
+before/after comparison or silently drop acquisition/extraction failures.
+
+These runs do not request registry resolution. Their DOI agreement measures
+extracted identifiers against JATS, not resolver precision or registry
+coverage. Paper-level biomedical resolution and annotation-only identifiers
+remain separate follow-up measurements.
 
 Both `tpe` commands exit non-zero when any file is `not_found` or failed; the
 workflow keeps going and scores the JSON records.

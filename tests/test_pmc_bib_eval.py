@@ -1,5 +1,6 @@
 """Tests for scripts/pmc_bib_eval.py with inline JATS fragments and JSONL records."""
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -178,6 +179,9 @@ def test_report_numbers_end_to_end(tmp_path):
             "pages_scanned": 2,
             "section_page": 9,
             "heading": "References",
+            "backend": {"name": "lopdf", "version": "test", "config_digest": "bounded"},
+            "warnings": ["resource_limit: retained diagnostic"],
+            "extraction_status": "partial",
             "references": good_entries(),
             "elapsed_ms": 20.0,
             "error": None,
@@ -220,6 +224,8 @@ def test_report_numbers_end_to_end(tmp_path):
 
     rc = pmc.main(
         [
+            "--code-sha",
+            "a" * 40,
             "--manifest",
             str(tmp_path / "manifest.json"),
             "--cache",
@@ -235,7 +241,31 @@ def test_report_numbers_end_to_end(tmp_path):
         ]
     )
     assert rc == 0
-    summary = json.loads((out / "report.json").read_text(encoding="utf-8"))["summary"]
+    payload = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    provenance = payload["provenance"]
+    assert provenance["code_sha"] == "a" * 40
+    assert (
+        provenance["corpus_sha256"]
+        == hashlib.sha256((tmp_path / "manifest.json").read_bytes()).hexdigest()
+    )
+    assert provenance["scorer_sha256"] == hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    assert provenance["scorer_version"] == pmc.SCORER_VERSION
+    assert provenance["resolution"] == "not_measured"
+    assert provenance["backend_identities"]["backward"] == [
+        {"name": "lopdf", "version": "test", "config_digest": "bounded"}
+    ]
+    assert payload["papers"][0]["backward"]["extraction_status"] == "partial"
+    assert payload["papers"][0]["backward"]["warnings"] == ["resource_limit: retained diagnostic"]
+    assert (out / "manifest.json").read_bytes() == (tmp_path / "manifest.json").read_bytes()
+    # A failed/missing record still accounts for every truth entry.
+    missing = payload["papers"][2]["forward"]["entry_results"]
+    assert len(missing) == 3
+    assert all(entry["truth"] is not None and entry["extracted"] is None for entry in missing)
+    aligned = payload["papers"][0]["backward"]["entry_results"]
+    assert len(aligned) == 3
+    assert aligned[0]["fields"]["title_strict"] == {"correct": 1, "total": 1}
+    assert payload["papers"][0]["backward"]["entries"][0]["doi"] == "10.1000/abc.1"
+    summary = payload["summary"]
     back = summary["backward"]
     assert back["papers"] == 3
     assert back["status_counts"] == {"found": 2, "not_found": 1}
