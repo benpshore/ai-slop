@@ -93,6 +93,28 @@ The workbench library modules (`ledger`, `view`, `tpe_ai`, `keys`) are
 untouched; the three-pane workbench window they served was replaced by this
 one (it is in the history of `src/gui.rs`).
 
+## Getting the app
+
+Every pull request that touches the crate uploads the zipped app as a
+workflow artifact (App workflow). For a release, run **Actions > App
+release > Run workflow** (`.github/workflows/app-release.yml`): it builds the
+app at a release tag (the latest by default) on a macOS runner and attaches
+`PDFTextract-<version>-macos-arm64.zip` and its `.sha256` to that release.
+Nothing triggers it automatically, so merges and pull requests never queue a
+macOS build for it. It runs the App workflow's checks (fmt, clippy, tests,
+bundle smoke test) on the tagged source first, only accepts a tag of the form
+`vN.N.N`, and never replaces an asset (if the zip or its checksum is already
+attached it stops, and says which to delete). The build job, which runs the
+tag's code, has a read-only token; a second job on a fresh runner runs
+nothing from the tag, downloads the packaged zip, checks it, and is the only
+place the write token exists. It fails, with a message, on a tag
+from before the app landed.
+
+The bundle is ad-hoc signed and not notarized. After unzipping, either
+right-click the app and choose Open the first time, or run
+`xattr -dr com.apple.quarantine PDFTextract.app` once. Check the download
+with `shasum -a 256 -c PDFTextract-<version>-macos-arm64.zip.sha256`.
+
 ## Build and run
 
 ```sh
