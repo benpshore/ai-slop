@@ -325,6 +325,25 @@ def fetch_one(url: str, md5: str | None, target: Path) -> str:
     """Download `url` to `target` unless it is already there with the right MD5."""
     if target.exists() and (md5 is None or md5_of(target) == md5):
         return "cached"
+    # The version-1 object was replaced upstream after the verified 200-paper
+    # run. Recover exactly that run's bytes, not a new serialization/truth set.
+    seed = Path(__file__).resolve().parents[1] / "corpus/verified/PMC9866638.1.xml"
+    if (
+        url == BUCKET + "PMC9866638.1/PMC9866638.1.xml"
+        and md5 == "707148ab259c325c84acd030be5a5c8b"
+        and seed.is_file()
+    ):
+        data = seed.read_bytes()
+        if (
+            len(data) != 110342
+            or hashlib.md5(data, usedforsecurity=False).hexdigest() != md5
+            or hashlib.sha256(data).hexdigest()
+            != "4bc081237097ef294c09e1f50b5f0a6d383f270ded3fcedbe8eb811661e6630b"
+        ):
+            raise FetchError("verified PMC9866638 XML snapshot failed checksum verification")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return "verified snapshot"
     data = fetch_bytes(url)
     if data is None:
         raise FetchError(f"{url}: not found")

@@ -1,0 +1,28 @@
+{
+  "manifest_item": {
+    "pmcid": "PMC9866638",
+    "version": 1,
+    "doi": "10.3390/medicina59010096",
+    "pmid": 36676720,
+    "title": "Endovascular Treatment of Basilar Artery Occlusion: What Can We Learn from the Results?",
+    "journal": "Medicina",
+    "publisher": "Multidisciplinary Digital Publishing Institute (MDPI)",
+    "article_type": "research-article",
+    "license_code": "CC BY",
+    "is_manuscript": false,
+    "year": 2022,
+    "ref_count": 40,
+    "pdf_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC9866638.1/PMC9866638.1.pdf",
+    "pdf_md5": "4275d1a369c91bd65bbf44928b8a86bd",
+    "xml_url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC9866638.1/PMC9866638.1.xml",
+    "xml_md5": "707148ab259c325c84acd030be5a5c8b"
+  },
+  "xml_sha256": "4bc081237097ef294c09e1f50b5f0a6d383f270ded3fcedbe8eb811661e6630b",
+  "source_run": 36819388522,
+  "source_head": "0254da617f872ba862521012068cc2f6069d03b3",
+  "recovery_run": "36937217326",
+  "recovery_commit": "a05e711ca2e6ce8cb80b2add1f8f5d65d018eae8",
+  "recovery_artifact": 11198119892,
+  "recovery_archive_sha256": "7f4c58f7f96823dac9d0c0ce175b23392c3971068eee850d3bccb8232434b59d",
+  "size_bytes": 110342
+}
