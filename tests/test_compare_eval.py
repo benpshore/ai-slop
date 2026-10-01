@@ -1,8 +1,16 @@
+import importlib.util
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
-from text_processing_engine.compare_eval import compare
+SPEC = importlib.util.spec_from_file_location(
+    "compare_eval", Path(__file__).parents[1] / "scripts" / "compare_eval.py"
+)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+compare = MODULE.compare
 
 
 def paper(identity, elapsed=100):

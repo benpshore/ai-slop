@@ -247,15 +247,31 @@ GPUI is Apache-2.0 and pre-1.0; Zed application code has different licensing. Pi
 
 ## Development and checks
 
-Follow [AGENTS.md](AGENTS.md). Existing scaffold checks remain:
+Follow [AGENTS.md](AGENTS.md). The application and required CI are Rust:
 
 ```sh
-uv run ruff format && uv run ruff check && uv run pytest && uv audit --preview-features audit-command
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
-swift build && swift test
-cmake -S . -B build && cmake --build build && ctest --test-dir build
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
+
+Python is used only for corpus fetching, reference comparisons and accuracy evaluation.
+There is no Python application package or runtime requirement. When changing those tools:
+
+```sh
+uv sync --locked
+uv run ruff format && uv run ruff check && uv run pytest
+uv audit --locked --preview-features audit-command
+```
+
+These checks run through a reusable workflow when evaluator code, dependencies,
+or relevant workflows change. Their result feeds the `ci` aggregate; a failed,
+cancelled, or unexpectedly skipped evaluator check prevents it from passing.
+Rust-only changes skip the evaluator after successful path detection.
+The greeting-only Python package, Swift target and CMake targets are preserved on
+[`archive/python-swift-cmake-2026-10-01`](https://github.com/benpshore/pdftextract/tree/archive/python-swift-cmake-2026-10-01).
 
 `main` is protected: open a PR; the `ci` check must pass before merging (squash only). Never force-push `main`.
 
-Inherited merge-release automation currently publishes Python artifacts; it is not the intended ARM Rust distribution pipeline. Align packaging, tag-derived versions, and native CI in a focused implementation PR before declaring the engine releasable. The software is proprietary (see LICENSE); native-library and model licenses still apply to their components.
+Merge-release automation publishes native Rust binaries. The software is proprietary
+(see LICENSE); native-library and model licenses still apply to their components.

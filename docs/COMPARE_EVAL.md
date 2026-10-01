@@ -4,7 +4,7 @@ Use the standard-library comparator to recompute timing on the intersection
 of paper IDs. It never compares the stored corpus summaries directly:
 
 ```sh
-uv run python -m text_processing_engine.compare_eval before/report.json after/report.json
+uv run python scripts/compare_eval.py before/report.json after/report.json
 ```
 
 The JSON output lists added/removed IDs, failures and status changes, exclusions
@@ -37,7 +37,7 @@ labels do not establish equivalent hardware, load, build flags or warm-up.
 Optional provenance sidecars can be supplied explicitly:
 
 ```sh
-uv run python -m text_processing_engine.compare_eval before/report.json after/report.json \
+uv run python scripts/compare_eval.py before/report.json after/report.json \
   --before-provenance before/provenance.json --after-provenance after/provenance.json
 ```
 
