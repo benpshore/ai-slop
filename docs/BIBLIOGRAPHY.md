@@ -80,7 +80,12 @@ returns its **last** list only. Exactness and field fixes deserve separate PRs.
 ## Resolution accuracy
 
 `--resolve` preserves balanced DOI suffix punctuation, including older SICI
-identifiers. A DOI response must carry the requested DOI. Bibliographic searches
+identifiers. Parser-repaired wrapped DOIs take precedence over raw prefixes;
+raw text is preferred only when it extends the same parsed identifier. A DOI
+response must carry the normalized requested DOI, including paper metadata
+lookups. Paper-title searches also reject distinct DOI candidates within the
+0.05 similarity margin. Ambiguity remains unresolved and is excluded from the
+metadata-rejection count. Bibliographic searches
 require title evidence as well as the existing author/year checks; records without
 enough title evidence remain unresolved. Distinct DOIs with ranking scores less
 than 0.05 apart are reported as `ambiguous`, not chosen by API response order.
