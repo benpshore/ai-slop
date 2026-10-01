@@ -79,3 +79,65 @@ the raw text and flags replacement characters, but does not repair the parser,
 check bibliographic services, or establish publication-grade accuracy. One
 paper also contains a separate earlier bibliography; this mode intentionally
 returns its **last** list only. Exactness and field fixes deserve separate PRs.
+
+## Resolution accuracy
+
+`--resolve` preserves balanced DOI suffix punctuation, including older SICI
+identifiers. Parser-repaired wrapped DOIs take precedence over raw prefixes;
+raw text is preferred only when it extends the same parsed identifier. A DOI
+response must carry the normalized requested DOI, including paper metadata
+lookups. Paper-title searches also reject distinct DOI candidates within the
+0.05 similarity margin. Ambiguity remains unresolved and is excluded from the
+metadata-rejection count. Bibliographic searches
+require title evidence as well as the existing author/year checks; records without
+enough title evidence remain unresolved. Distinct DOIs with ranking scores less
+than 0.05 apart are reported as `ambiguous`, not chosen by API response order.
+`attempts` distinguishes metadata-compatible `candidate` records from the single
+selected `verified` record; CSV reports `ambiguous` explicitly. This heuristic
+does not certify exact matches or guarantee that the right result is among the
+five query results.
+
+Offline regression tests cover balanced identifiers, missing title evidence,
+query-order independence, duplicate DOI hits, and venue-based version selection.
+`cargo test --lib resolve::tests::live_crossref_exact_identifier -- --ignored`
+checks the production resolver against one known live Crossref record. It is
+opt-in because registry availability must not determine ordinary test success.
+
+## PubMed identifiers
+
+The resolver recognizes explicitly labeled `PMID:` values, PubMed URLs, and
+`PMC`-prefixed identifiers in reference text. Bare numbers are never assumed to
+be PMIDs. Exact lookups use Europe PMC core metadata (`EXT_ID:<id> AND SRC:MED`,
+`PMCID:<id>`, or a quoted DOI), then check both returned identity and agreement
+with the printed reference. Conflicting printed PMID/PMCID pairs and multiple
+distinct registry identities remain unresolved. Europe PMC author names are
+normalized to given-name-first for the shared verifier.
+
+Successful Crossref matches are enriched by exact DOI lookup for PMID/PMCID;
+a lookup failure retains the accepted Crossref result and records the error.
+A Crossref request failure no longer prevents the exact biomedical fallback.
+A verified PubMed record without a DOI has `resolved.doi: null`, with its PMID
+and optional PMCID retained. The source and method identify Europe PMC. This is
+not a claim that every reference can be found in PubMed: references without an
+explicit biomedical ID or a resolvable DOI still depend on Crossref text search.
+Annotation-only PMID links and the paper-level metadata resolver are not yet
+connected to this path.
+
+CSV appends `resolved_pmid` and `resolved_pmcid`. Appending to an older header
+is refused; use a new output path. Ledger schema 5 opens version 4 with a metadata
+version upgrade, retaining every old run and its version/provenance. New runs
+use version 5. Old DOI strings deserialize correctly; new DOI-less records use
+null, so older binaries must not write to the upgraded ledger. Other schema
+versions are still refused.
+
+`cargo test --lib resolve::tests::live_ -- --ignored --test-threads=1` checks the
+production resolver with Crossref and Europe PMC. The path-scoped/manual `Registry accuracy
+smoke` workflow runs that command on Ubuntu without making network availability
+an ordinary CI gate. Verification is sequential and adds an identifier lookup
+per accepted DOI; shared caching and batch APIs are future throughput work.
+
+Explicit printed PMID/PMCID identities must verify together. Conflicting IDs,
+metadata mismatches, missing registry records, ambiguity, or registry errors
+leave the entry unresolved and stop DOI/query fallback. Europe PMC metadata
+mismatches count as rejected when the entry remains unresolved; missing records
+and transport failures alone do not. Counts use only the current resolution pass.

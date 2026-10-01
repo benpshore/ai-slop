@@ -2,7 +2,7 @@
 name = "tpe-credentials"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Credential storage (macOS Keychain, encrypted file, cookie jar) for the text-processing-engine workbench"
 
 [dependencies]

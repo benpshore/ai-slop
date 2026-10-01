@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS "references" (
     arxiv_id TEXT,
     url TEXT,
     page INTEGER NOT NULL,
+    extra TEXT,
     PRIMARY KEY (run_id, idx)
 );
 CREATE INDEX IF NOT EXISTS references_doi ON "references"(doi);
@@ -262,8 +263,8 @@ const INSERT_METADATA: &str = "INSERT INTO metadata (run_id, title, doi, arxiv_i
 const INSERT_AUTHOR: &str = "INSERT INTO authors (run_id, seq, name, affiliation, orcid, email) \
     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 const INSERT_REFERENCE: &str = "INSERT INTO \"references\" (run_id, idx, label, raw, title, \
-    year, venue, volume, issue, pages, doi, arxiv_id, url, page) \
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+    year, venue, volume, issue, pages, doi, arxiv_id, url, page, extra) \
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 const INSERT_REFERENCE_AUTHOR: &str = "INSERT INTO reference_authors \
     (run_id, ref_idx, seq, name) VALUES (?1, ?2, ?3, ?4)";
 const INSERT_CITATION: &str = "INSERT INTO citations (run_id, page, \"offset\", text) \
@@ -292,7 +293,8 @@ const SELECT_METADATA: &str = "SELECT title, doi, arxiv_id, year, venue, abstrac
 const SELECT_AUTHORS: &str = "SELECT name, affiliation, orcid, email FROM authors \
     WHERE run_id = ?1 ORDER BY seq";
 const SELECT_REFERENCES: &str = "SELECT idx, label, raw, title, year, venue, volume, issue, \
-    pages, doi, arxiv_id, url, page FROM \"references\" WHERE run_id = ?1 ORDER BY idx";
+    pages, doi, arxiv_id, url, page, extra FROM \"references\" WHERE run_id = ?1 ORDER BY idx";
+const SELECT_REFERENCE_EXTRA: &str = "SELECT idx, extra FROM \"references\" WHERE run_id = ?1";
 const SELECT_REFERENCE_AUTHORS: &str = "SELECT ref_idx, name FROM reference_authors \
     WHERE run_id = ?1 ORDER BY ref_idx, seq";
 const SELECT_CITATIONS: &str = "SELECT id, page, \"offset\", text FROM citations \
@@ -339,6 +341,14 @@ impl Ledger {
                 conn.execute(INSERT_VERSION, params![SCHEMA_VERSION])?;
             }
             Some(SCHEMA_VERSION) => {}
+            // v5 adds optional biomedical IDs and permits a null resolved DOI.
+            // All v4 JSON remains readable; retain old run versions/provenance.
+            Some(4) if SCHEMA_VERSION == 5 => {
+                conn.execute(
+                    "UPDATE schema_meta SET version = ?1 WHERE version = 4",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
             Some(found) => {
                 return Err(LedgerError::SchemaMismatch {
                     found,
@@ -748,6 +758,7 @@ fn insert_references(
             entry.arxiv_id,
             entry.url,
             entry.page,
+            reference_extra(entry)?,
         ])?;
         for (seq, name) in (0_u32..).zip(&entry.authors) {
             author_stmt.execute(params![run_id, entry.index, seq, name])?;
@@ -852,6 +863,7 @@ fn load_pages(conn: &Connection, run: RunId) -> Result<Vec<PageText>, LedgerErro
             rotation: row.rotation,
             spans: serde_json::from_str(&row.spans_json)?,
             figures: figures_by_page.remove(&row.page).unwrap_or_default(),
+            links: Vec::new(),
             lines: serde_json::from_str(&row.lines_json)?,
             text: row.text,
             warnings: serde_json::from_str(&row.warnings_json)?,
@@ -963,6 +975,34 @@ fn load_metadata(conn: &Connection, run: RunId) -> Result<Metadata, LedgerError>
     })
 }
 
+/// The reference fields stored as one JSON column (`extra`): geometry and
+/// resolution state that the flat columns predate.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ReferenceExtra {
+    anchor: Option<crate::schema::BBox>,
+    doi_link: Option<String>,
+    attempts: Vec<crate::schema::Attempt>,
+    resolved: Option<crate::schema::Resolved>,
+}
+
+/// `extra` for `entry`: `None` when every such field is empty.
+fn reference_extra(entry: &ReferenceEntry) -> Result<Option<String>, LedgerError> {
+    if entry.anchor.is_none()
+        && entry.doi_link.is_none()
+        && entry.attempts.is_empty()
+        && entry.resolved.is_none()
+    {
+        return Ok(None);
+    }
+    let extra = ReferenceExtra {
+        anchor: entry.anchor,
+        doi_link: entry.doi_link.clone(),
+        attempts: entry.attempts.clone(),
+        resolved: entry.resolved.clone(),
+    };
+    Ok(Some(serde_json::to_string(&extra)?))
+}
+
 fn load_references(conn: &Connection, run: RunId) -> Result<Vec<ReferenceEntry>, LedgerError> {
     let mut stmt = conn.prepare(SELECT_REFERENCES)?;
     let rows = stmt.query_map(params![run], |row| {
@@ -981,9 +1021,32 @@ fn load_references(conn: &Connection, run: RunId) -> Result<Vec<ReferenceEntry>,
             arxiv_id: row.get(10)?,
             url: row.get(11)?,
             page: row.get(12)?,
+            anchor: None,
+            doi_link: None,
+            attempts: Vec::new(),
+            resolved: None,
         })
     })?;
     let mut entries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    {
+        let mut extra_stmt = conn.prepare(SELECT_REFERENCE_EXTRA)?;
+        let extras = extra_stmt.query_map(params![run], |row| {
+            let idx: u32 = row.get(0)?;
+            let extra: Option<String> = row.get(1)?;
+            Ok((idx, extra))
+        })?;
+        for pair in extras {
+            let (idx, extra) = pair?;
+            if let (Some(extra), Some(entry)) = (extra, entries.iter_mut().find(|e| e.index == idx))
+            {
+                let parsed: ReferenceExtra = serde_json::from_str(&extra)?;
+                entry.anchor = parsed.anchor;
+                entry.doi_link = parsed.doi_link;
+                entry.attempts = parsed.attempts;
+                entry.resolved = parsed.resolved;
+            }
+        }
+    }
     let mut author_stmt = conn.prepare(SELECT_REFERENCE_AUTHORS)?;
     let author_rows = author_stmt.query_map(params![run], |row| {
         let ref_idx: u32 = row.get(0)?;
@@ -1304,6 +1367,50 @@ mod tests {
             .query_row(sql, params![name], |row| row.get(0))
             .unwrap();
         count == 1
+    }
+
+    #[test]
+    fn version_four_upgrade_preserves_existing_runs_and_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let mut ledger = Ledger::open(&path).unwrap();
+        let mut result = sample_result();
+        result.schema_version = 4;
+        let run = ledger.write_result(&result).unwrap();
+        ledger
+            .conn
+            .execute("UPDATE schema_meta SET version = 4", [])
+            .unwrap();
+        let old = r#"{"anchor":null,"doi_link":null,"attempts":[],"resolved":{"doi":"10.1000/a","title":"A title","authors":[],"year":2020,"venue":null,"source":"crossref","method":"printed","score":1.0}}"#;
+        ledger
+            .conn
+            .execute(
+                "UPDATE \"references\" SET extra = ?1 WHERE run_id = ?2 AND idx = 1",
+                params![old, run],
+            )
+            .unwrap();
+        drop(ledger);
+        let mut ledger = Ledger::open(&path).unwrap();
+        let restored = ledger.load_result(run).unwrap();
+        assert_eq!(restored.schema_version, 4);
+        assert_eq!(
+            restored.references[0]
+                .resolved
+                .as_ref()
+                .unwrap()
+                .doi
+                .as_deref(),
+            Some("10.1000/a")
+        );
+        assert_eq!(restored.references[0].resolved.as_ref().unwrap().pmid, None);
+        let mut next = sample_result();
+        next.references[0].resolved = Some(crate::schema::Resolved {
+            pmid: Some("123456".to_string()),
+            ..crate::schema::Resolved::default()
+        });
+        let new_run = ledger.write_result(&next).unwrap();
+        assert_ne!(run, new_run);
+        assert_eq!(ledger.load_result(new_run).unwrap(), next);
     }
 
     #[test]

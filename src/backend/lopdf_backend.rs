@@ -65,7 +65,7 @@ use lopdf::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
-use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest};
+use crate::schema::{BBox, BackendIdentity, Figure, Link, PageText, Span, config_digest};
 
 /// The `lopdf` release this backend is built against. It is part of the
 /// [`BackendIdentity`], so a dependency bump must change it (a unit test
@@ -73,6 +73,82 @@ use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest
 const LOPDF_VERSION: &str = "0.45.0";
 /// Glyph width (in 1/1000 em) assumed when a font declares nothing usable.
 const DEFAULT_WIDTH: f32 = 500.0;
+/// Most link annotations read from one page; a hostile file gets no more.
+const MAX_LINKS: usize = 4096;
+
+/// The `/Annots` of `page` that are `/Link` annotations with a `/URI`
+/// action: their rectangle (normalised) and URI. Missing or malformed
+/// entries are skipped; nothing here is fatal for the page.
+fn link_annotations(doc: &Document, page: &Dictionary) -> Vec<Link> {
+    let mut links = Vec::new();
+    let Some(annots) = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| resolve_object(doc, a))
+        .and_then(|a| a.as_array().ok().cloned())
+    else {
+        return links;
+    };
+    for annot in annots.iter().take(MAX_LINKS) {
+        let Some(dict) = resolve_object(doc, annot).and_then(|a| a.as_dict().ok().cloned()) else {
+            continue;
+        };
+        let is_link = dict
+            .get(b"Subtype")
+            .ok()
+            .and_then(|s| s.as_name().ok())
+            .is_some_and(|name| name == b"Link");
+        if !is_link {
+            continue;
+        }
+        let Some(action) = dict
+            .get(b"A")
+            .ok()
+            .and_then(|a| resolve_object(doc, a))
+            .and_then(|a| a.as_dict().ok().cloned())
+        else {
+            continue;
+        };
+        let Some(uri) = action
+            .get(b"URI")
+            .ok()
+            .and_then(|u| resolve_object(doc, u))
+            .and_then(|u| {
+                u.as_str()
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+            })
+        else {
+            continue;
+        };
+        let bbox = dict
+            .get(b"Rect")
+            .ok()
+            .and_then(|r| resolve_object(doc, r))
+            .and_then(|r| r.as_array().ok().cloned())
+            .and_then(|r| {
+                let v: Vec<f32> = r.iter().filter_map(|o| o.as_float().ok()).collect();
+                (v.len() == 4).then(|| BBox {
+                    x0: v[0].min(v[2]),
+                    y0: v[1].min(v[3]),
+                    x1: v[0].max(v[2]),
+                    y1: v[1].max(v[3]),
+                })
+            });
+        links.push(Link { bbox, uri });
+    }
+    links
+}
+
+/// `object` itself, or the object it references (one level; a reference to
+/// a reference is not followed).
+fn resolve_object<'a>(doc: &'a Document, object: &'a Object) -> Option<&'a Object> {
+    match object {
+        Object::Reference(id) => doc.get_object(*id).ok(),
+        other => Some(other),
+    }
+}
+
 /// Glyph-space to text-space factor for every font type except Type3.
 const THOUSANDTH: f32 = 0.001;
 /// Descent estimate below the baseline, as a fraction of the font size.
@@ -2892,6 +2968,8 @@ fn extract_page(
         }
         Err(err) => page_text.warnings.push(format!("fonts: {err}")),
     }
+
+    page_text.links = link_annotations(doc, page_dict);
 
     let mut interpreter = Interpreter {
         doc,

@@ -1,0 +1,83 @@
+name: Build binaries
+
+# Reusable: build the `tpe` command-line binary for every supported target
+# and upload one artifact per target named `tpe-<target>` containing
+# `tpe-<target>.tar.gz` (a single file `tpe` inside). The archive name is
+# the contract `tpe update`, mise (`github:` backend) and the install
+# instructions in docs/CLI.md rely on. `version` is embedded through the
+# `TPE_VERSION` build-time environment variable (build.rs).
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release tag being built, e.g. v0.42.0
+        type: string
+        required: true
+  # Dry run on pull requests that touch this file: builds every target and
+  # uploads the archives as artifacts; nothing is released.
+  pull_request:
+    paths:
+      - .github/workflows/build-binaries.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      TPE_VERSION: ${{ inputs.version || 'v0.0.0-dryrun' }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustc --version --verbose && uname -m
+      - name: Runner architecture matches the target
+        run: |
+          case "$TARGET" in
+            aarch64-*) test "$(uname -m)" = arm64 || test "$(uname -m)" = aarch64 ;;
+            x86_64-*)  test "$(uname -m)" = x86_64 ;;
+          esac
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-bin-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-bin-${{ matrix.target }}-
+      - name: Build tpe
+        run: cargo build --release --locked -p text-processing-engine --bin tpe
+      - name: Smoke test
+        run: |
+          ./target/release/tpe --version
+          ./target/release/tpe backends
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p dist/stage
+          cp target/release/tpe dist/stage/tpe
+          chmod 0755 dist/stage/tpe
+          tar -C dist/stage -czf "dist/tpe-$TARGET.tar.gz" tpe
+          rm -r dist/stage
+          ls -l dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tpe-${{ matrix.target }}
+          path: dist/tpe-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7

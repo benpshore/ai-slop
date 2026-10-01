@@ -107,8 +107,8 @@ struct ExtractArgs {
     /// Path of the `SQLite` ledger; created when missing.
     #[arg(long, value_name = "FILE")]
     db: PathBuf,
-    /// Extraction backend name.
-    #[arg(long, default_value = "lopdf")]
+    /// Extraction backend name; `auto` routes `lopdf`, then `pdfium`, then docling.
+    #[arg(long, default_value = "auto")]
     backend: String,
     /// Directory that receives `<hash>.json` and `<hash>.txt` per document.
     #[arg(long, value_name = "DIR")]
@@ -141,8 +141,8 @@ struct BibliographyArgs {
     /// PDF files to process; one JSON record per file is printed to stdout.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
-    /// Extraction backend name.
-    #[arg(long, default_value = "lopdf")]
+    /// Extraction backend name; `auto` routes `lopdf`, then `pdfium`, then docling.
+    #[arg(long, default_value = "auto")]
     backend: String,
     /// Password for encrypted documents.
     #[arg(long)]
@@ -153,6 +153,17 @@ struct BibliographyArgs {
     /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page read.
     #[arg(long)]
     progress: bool,
+    /// Resolve entries through Crossref and Europe PMC, and the paper through
+    /// Crossref, verifying records against the printed text (needs the network).
+    #[arg(long)]
+    resolve: bool,
+    /// Contact address sent to Crossref (its polite pool); also `TPE_MAILTO`.
+    #[arg(long, value_name = "EMAIL")]
+    mailto: Option<String>,
+    /// Also append one CSV row per reference entry to this file (header
+    /// written when the file is new).
+    #[arg(long, value_name = "FILE")]
+    csv: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -179,7 +190,7 @@ struct BenchArgs {
     /// PDF files to benchmark.
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
-    /// Extraction backend name.
+    /// Extraction backend name (a single backend; `auto` is not benchmarked).
     #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Number of `run_job` executions per file.
@@ -217,7 +228,7 @@ struct EvalArgs {
     /// Directory that receives `report.json` and `report.md`.
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
-    /// Extraction backend name.
+    /// Extraction backend name (a single backend; evaluation measures one at a time).
     #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Which manifest split to evaluate.
@@ -325,7 +336,7 @@ fn open_ledger(db: &Path) -> anyhow::Result<Ledger> {
 /// Fail early when the backend name is unknown or not compiled into this build.
 fn check_backend(name: &str) -> anyhow::Result<()> {
     let available = backend::available();
-    if available.contains(&name) {
+    if name == pipeline::AUTO_BACKEND || available.contains(&name) {
         return Ok(());
     }
     let compiled = available.join(", ");
@@ -472,13 +483,36 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
 fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
     pipeline::warm_up();
-    let extractor = backend::by_name(&args.backend)
-        .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?;
+    // `auto` picks the backend per document (`bibliography::scan_backward_auto_observed`).
+    let extractor: Option<Box<dyn backend::Extractor>> = if args.backend == pipeline::AUTO_BACKEND {
+        None
+    } else {
+        Some(
+            backend::by_name(&args.backend)
+                .ok_or_else(|| anyhow!("backend `{}` is unavailable", args.backend))?,
+        )
+    };
+    let fallback_identity = extractor.as_ref().map_or_else(
+        || {
+            backend::by_name("lopdf")
+                .map(|e| e.identity())
+                .expect("lopdf is always compiled in")
+        },
+        |e| e.identity(),
+    );
+    let resolver = args.resolve.then(|| {
+        let mailto = args
+            .mailto
+            .clone()
+            .or_else(|| std::env::var("TPE_MAILTO").ok());
+        tpe::resolve::Resolver::new(mailto.as_deref())
+    });
     let mut any_failed = false;
     for path in &args.paths {
         let started = Instant::now();
         let file = path.to_string_lossy();
         let mut hash = None;
+        let mut bytes: Vec<u8> = Vec::new();
         let mut observe = |event: Progress| {
             if args.progress {
                 report_progress(&file, event);
@@ -487,26 +521,44 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let snapshot = tpe::acquire::snapshot(path, args.max_bytes)?;
             hash = Some(snapshot.hash.0);
-            let scan = bibliography::scan_backward_observed(
-                extractor.as_ref(),
-                &snapshot.bytes,
-                args.password.as_deref(),
-                &mut observe,
-            )?;
-            Ok::<_, anyhow::Error>(scan)
+            bytes.clone_from(&snapshot.bytes);
+            let routed = match &extractor {
+                Some(extractor) => bibliography::RoutedScan {
+                    scan: bibliography::scan_backward_observed(
+                        extractor.as_ref(),
+                        &snapshot.bytes,
+                        args.password.as_deref(),
+                        &mut observe,
+                    )?,
+                    backend: extractor.identity(),
+                },
+                None => bibliography::scan_backward_auto_observed(
+                    &snapshot.bytes,
+                    args.password.as_deref(),
+                    &mut observe,
+                )?,
+            };
+            Ok::<_, anyhow::Error>(routed)
         }));
         let elapsed = elapsed_ms(started);
-        let identity = extractor.identity();
+        let identity = fallback_identity.clone();
         let record = match result {
-            Ok(Ok(scan)) => {
-                any_failed |= !scan.found;
-                bibliography::Record::from_scan(
+            Ok(Ok(routed)) => {
+                any_failed |= !routed.scan.found;
+                let mut record = bibliography::Record::from_scan(
                     &file,
                     hash.unwrap_or_default(),
-                    identity,
-                    scan,
-                    elapsed,
-                )
+                    routed.backend,
+                    routed.scan,
+                    0.0,
+                );
+                if let Some(resolver) = &resolver {
+                    record.resolution = Some(resolver.resolve_entries(&mut record.references));
+                    record.paper = paper_metadata(&bytes, args.password.as_deref())
+                        .and_then(|meta| resolver.resolve_paper(&meta));
+                }
+                record.elapsed_ms = elapsed_ms(started);
+                record
             }
             Ok(Err(err)) => {
                 any_failed = true;
@@ -519,8 +571,125 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
             }
         };
         println!("{}", serde_json::to_string(&record)?);
+        if let Some(csv) = &args.csv {
+            append_csv(csv, &record).with_context(|| format!("writing {}", csv.display()))?;
+        }
     }
     Ok(exit_code(any_failed))
+}
+
+/// A CSV field: quoted when it holds a comma, quote or line break.
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// The CSV header: one row per reference entry of a record.
+const CSV_HEADER: &str = "sha256,path,status,paper_doi,idx,label,first_author,title,year,doi_printed,doi_link,resolved_doi,resolved_method,resolved_score,resolution,attempts,raw,resolved_pmid,resolved_pmcid\n";
+
+/// Append every entry of `record` to `path` as CSV rows. `resolution` is
+/// `resolved`, `ambiguous`, `mismatch` (records came back but disagreed), `not_found`,
+/// `error` or `not_attempted`; `attempts` lists method:outcome pairs.
+fn append_csv(path: &Path, record: &bibliography::Record) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)?;
+    if file.metadata()?.len() == 0 {
+        file.write_all(CSV_HEADER.as_bytes())?;
+    } else {
+        let mut header = vec![0; CSV_HEADER.len()];
+        anyhow::ensure!(
+            file.read_exact(&mut header).is_ok() && header == CSV_HEADER.as_bytes(),
+            "incompatible CSV header; choose a new output path"
+        );
+    }
+    let sha = record.sha256.clone().unwrap_or_default();
+    let paper_doi = record
+        .paper
+        .as_ref()
+        .and_then(|p| p.doi.as_deref())
+        .unwrap_or("");
+    for entry in &record.references {
+        let resolution = if entry.resolved.is_some() {
+            "resolved"
+        } else if entry.attempts.is_empty() {
+            "not_attempted"
+        } else if entry.attempts.iter().any(|a| a.outcome == "ambiguous") {
+            "ambiguous"
+        } else if entry.attempts.iter().any(|a| a.outcome == "mismatch") {
+            "mismatch"
+        } else if entry.attempts.iter().any(|a| a.outcome == "error") {
+            "error"
+        } else {
+            "not_found"
+        };
+        let attempts: Vec<String> = entry
+            .attempts
+            .iter()
+            .map(|a| format!("{}:{}", a.method, a.outcome))
+            .collect();
+        let fields = [
+            sha.clone(),
+            record.path.clone(),
+            record.status.to_string(),
+            paper_doi.to_string(),
+            entry.index.to_string(),
+            entry.label.clone().unwrap_or_default(),
+            entry.authors.first().cloned().unwrap_or_default(),
+            entry.title.clone().unwrap_or_default(),
+            entry.year.map(|y| y.to_string()).unwrap_or_default(),
+            entry.doi.clone().unwrap_or_default(),
+            entry.doi_link.clone().unwrap_or_default(),
+            entry
+                .resolved
+                .as_ref()
+                .and_then(|r| r.doi.clone())
+                .unwrap_or_default(),
+            entry
+                .resolved
+                .as_ref()
+                .map(|r| r.method.clone())
+                .unwrap_or_default(),
+            entry
+                .resolved
+                .as_ref()
+                .map(|r| format!("{:.2}", r.score))
+                .unwrap_or_default(),
+            resolution.to_string(),
+            attempts.join(" "),
+            entry.raw.clone(),
+            entry
+                .resolved
+                .as_ref()
+                .and_then(|r| r.pmid.clone())
+                .unwrap_or_default(),
+            entry
+                .resolved
+                .as_ref()
+                .and_then(|r| r.pmcid.clone())
+                .unwrap_or_default(),
+        ];
+        let row: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
+        file.write_all(row.join(",").as_bytes())?;
+        file.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+/// The paper's own metadata from its first page and `/Info`, read with
+/// `lopdf`; `None` when the file cannot be opened.
+fn paper_metadata(bytes: &[u8], password: Option<&str>) -> Option<Metadata> {
+    let extractor = backend::by_name("lopdf")?;
+    let mut session = extractor.open(bytes, password).ok()?;
+    let mut first = session.page_text(1).ok()?;
+    tpe::reading_order::order_page(&mut first);
+    Some(tpe::metadata::extract_metadata(&session.info(), &[first]))
 }
 
 /// Record one outcome in the ledger (main thread only), write the optional
@@ -1033,6 +1202,41 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csv_preserves_biomedical_ids_and_refuses_legacy_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refs.csv");
+        let mut record = tpe::bibliography::Record::failed(
+            "test.pdf",
+            None,
+            tpe::schema::BackendIdentity {
+                name: "test".to_string(),
+                version: String::new(),
+                config_digest: String::new(),
+            },
+            String::new(),
+            0.0,
+        );
+        record.references.push(tpe::schema::ReferenceEntry {
+            resolved: Some(tpe::schema::Resolved {
+                pmid: Some("123456".to_string()),
+                pmcid: Some("PMC7654321".to_string()),
+                ..tpe::schema::Resolved::default()
+            }),
+            ..tpe::schema::ReferenceEntry::default()
+        });
+        std::fs::write(&path, "").unwrap();
+        super::append_csv(&path, &record).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(super::CSV_HEADER));
+        assert!(text.contains(",123456,PMC7654321\n"));
+        super::append_csv(&path, &record).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+        std::fs::write(&path, "old,header\n").unwrap();
+        assert!(super::append_csv(&path, &record).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old,header\n");
+    }
+
     use super::{
         ManifestItem, Split, check_backend, parse_pages, percentile, probe_backend, short_hash,
     };

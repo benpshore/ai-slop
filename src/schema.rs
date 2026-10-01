@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Version of the record shapes and of the `SQLite` schema. Bumped to 3 when
+/// Version of the record shapes and of the `SQLite` schema. Bumped to 4 when
+/// `ReferenceEntry` gained `anchor`, `doi_link`, `attempts` and `resolved`
+/// (stored in the references table's `extra` column). Bumped to 3 when
 /// `StageTimings::hash_ms` was added (older rows read it as 0). Bumped to 2 when
 /// `Line::role` was added: older ledgers deserialise every line as `body`.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Pages per scheduling chunk (the "20-page chunk" of the product target).
 pub const CHUNK_PAGES: u32 = 20;
@@ -36,6 +38,15 @@ pub struct BBox {
     pub y0: f32,
     pub x1: f32,
     pub y1: f32,
+}
+
+/// A link annotation on a page: its rectangle and the URI it opens.
+/// Publishers embed reference DOIs as `doi.org` links; the string in the
+/// annotation is exact, unlike text that wrapped or hyphenated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Link {
+    pub bbox: Option<BBox>,
+    pub uri: String,
 }
 
 /// One positioned run of text as the backend produced it (evidence, not output).
@@ -127,6 +138,9 @@ pub struct PageText {
     /// Images and drawings found on the page; never inlined into `text`.
     #[serde(default)]
     pub figures: Vec<Figure>,
+    /// Link annotations on the page (`/Annots` of subtype `Link` with a URI).
+    #[serde(default)]
+    pub links: Vec<Link>,
     /// Filled by `reading_order`; empty until then.
     pub lines: Vec<Line>,
     /// Final ordered text for the page; lines joined by `\n`, paragraphs by `\n\n`.
@@ -157,6 +171,7 @@ impl PageText {
             rotation,
             spans: Vec::new(),
             figures: Vec::new(),
+            links: Vec::new(),
             lines: Vec::new(),
             text: String::new(),
             warnings: Vec::new(),
@@ -209,6 +224,62 @@ pub struct ReferenceEntry {
     pub url: Option<String>,
     /// Page on which the entry starts.
     pub page: u32,
+    /// Left edge, baseline and font size of the entry's first line
+    /// (`x0`, `y0`; `y1 - y0` is the size), used to attach link annotations.
+    #[serde(default)]
+    pub anchor: Option<BBox>,
+    /// The DOI of a `doi.org` link annotation placed on this entry: an exact
+    /// string from the PDF, independent of the printed text.
+    #[serde(default)]
+    pub doi_link: Option<String>,
+    /// What resolution tried for this entry and what came back, so a reader
+    /// can tell a citation that is wrong in the paper from a lookup that
+    /// failed. Empty until `--resolve` runs.
+    #[serde(default)]
+    pub attempts: Vec<Attempt>,
+    /// The record this entry resolved to, when `--resolve` ran and the
+    /// record was verified against the printed entry.
+    #[serde(default)]
+    pub resolved: Option<Resolved>,
+}
+
+/// One resolution attempt on an entry. `outcome` is `candidate` (metadata
+/// agrees but the query winner is not yet known), `ambiguous`, `verified`,
+/// `not_found` (the DOI or query returned nothing), `mismatch` (a record
+/// came back but disagreed with the printed entry; `detail` says which
+/// field and both values) or `error` (the request failed).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Attempt {
+    pub method: String,
+    pub doi: Option<String>,
+    pub outcome: String,
+    pub detail: Option<String>,
+}
+
+/// A bibliographic record an entry (or the paper) resolved to, verified
+/// against what is printed. `method` says how the DOI was obtained:
+/// `link` (a `doi.org` link annotation on the entry), `printed` (the DOI
+/// text of the entry), `query` (a bibliographic search on the entry text)
+/// or `metadata` (the paper's own DOI from its metadata).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Resolved {
+    /// None for `PubMed` records without a DOI; never invent a DOI from a PMID.
+    pub doi: Option<String>,
+    #[serde(default)]
+    pub pmid: Option<String>,
+    #[serde(default)]
+    pub pmcid: Option<String>,
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub year: Option<u16>,
+    pub venue: Option<String>,
+    /// `crossref`, `europepmc` or `openalex`.
+    pub source: String,
+    pub method: String,
+    /// Agreement between the record and the printed entry, 0 to 1: the
+    /// first-author similarity, or the title similarity for entries whose
+    /// first author could not be parsed.
+    pub score: f32,
 }
 
 /// An in-text citation marker such as `[3, 7]` or `(Smith et al., 2020)`.

@@ -8,11 +8,13 @@ name: Native
 
 on:
   workflow_dispatch:
+  # On pull requests only when the native backends or their pins can change;
+  # engine-only PRs are covered by `ci`, and every merge to main still runs
+  # the full native evaluation below.
   pull_request:
     paths:
       - native/**
-      - src/**
-      - tests/**
+      - src/backend/**
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/native.yml

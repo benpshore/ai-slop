@@ -3,7 +3,8 @@ name = "text-processing-engine"
 dynamic = ["version"]
 description = "text-processing-engine"
 readme = "README.md"
-license = "MIT"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
 authors = [{ name = "Ben Shore" }]
 requires-python = ">=3.14"
 dependencies = []

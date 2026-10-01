@@ -23,6 +23,7 @@ use crate::citations;
 use crate::metadata;
 use crate::reading_order;
 use crate::regions;
+use crate::router::{self, Route};
 use crate::schema::{
     BackendIdentity, CHUNK_PAGES, ChunkResult, ContentHash, Document, ExtractionResult, Job,
     PageText, SCHEMA_VERSION, StageTimings, Status, config_digest, sha256_hex,
@@ -333,9 +334,102 @@ pub fn run_job_observed(
     job: &Job,
     observe: &mut dyn FnMut(Progress),
 ) -> Result<ExtractionResult, PipelineError> {
+    if job.backend == AUTO_BACKEND {
+        return run_job_auto_observed(job, observe);
+    }
     let extractor = backend::by_name(&job.backend)
         .ok_or_else(|| PipelineError::UnknownBackend(job.backend.clone()))?;
     run_job_with_observed(extractor.as_ref(), job, observe)
+}
+
+/// Backend name that routes: `lopdf` first, then `pdfium` for pages whose
+/// fonts had no Unicode mapping, then docling (layout and OCR) for scans
+/// or text `pdfium` could not repair (`crate::router`).
+pub const AUTO_BACKEND: &str = "auto";
+
+/// Run `job` with a route chosen from what `lopdf` reports. Every page is
+/// read by `lopdf`; when the assessment asks for `pdfium` or docling and that
+/// backend is compiled in and works, its result replaces the `lopdf` one
+/// and a `routed: …` warning records why. A missing or failing backend
+/// keeps the `lopdf` result with a warning naming the route that was not
+/// taken. Progress events are reported for every pass.
+pub fn run_job_auto_observed(
+    job: &Job,
+    observe: &mut dyn FnMut(Progress),
+) -> Result<ExtractionResult, PipelineError> {
+    let lopdf = backend::by_name("lopdf")
+        .ok_or_else(|| PipelineError::UnknownBackend("lopdf".to_string()))?;
+    let mut result = run_job_with_observed(lopdf.as_ref(), job, observe)?;
+    let first = router::assess(&result.pages);
+    let mut route = first.route();
+    if route == Route::Pdfium {
+        match rerun(job, route, observe) {
+            Ok(Some(second)) => {
+                let again = router::assess(&second.pages);
+                result = second;
+                result.warnings.push(format!(
+                    "routed: pdfium ({} of {} pages had fonts lopdf could not map)",
+                    first.unmapped, first.pages
+                ));
+                route = again.route_after_pdfium();
+                if route != Route::Docling {
+                    return Ok(result);
+                }
+            }
+            Ok(None) => {
+                result
+                    .warnings
+                    .push("route not taken: pdfium is not compiled into this build".to_string());
+                return Ok(result);
+            }
+            Err(err) => {
+                result
+                    .warnings
+                    .push(format!("route not taken: pdfium failed: {err}"));
+                return Ok(result);
+            }
+        }
+    }
+    if route == Route::Docling {
+        match rerun(job, route, observe) {
+            Ok(Some(third)) => {
+                result = third;
+                result.warnings.push(format!(
+                    "routed: docling ({} scanned and {} unmapped of {} pages)",
+                    first.scanned, first.unmapped, first.pages
+                ));
+            }
+            Ok(None) => result
+                .warnings
+                .push("route not taken: docling is not compiled into this build".to_string()),
+            Err(err) => result
+                .warnings
+                .push(format!("route not taken: docling failed: {err}")),
+        }
+    }
+    Ok(result)
+}
+
+/// Run `job` again with the backend for `route`; `None` when that backend
+/// is not compiled in. Docling keeps figure bytes only for a job that
+/// exports them.
+fn rerun(
+    job: &Job,
+    route: Route,
+    observe: &mut dyn FnMut(Progress),
+) -> Result<Option<ExtractionResult>, PipelineError> {
+    let extractor: Box<dyn Extractor> = match route {
+        #[cfg(feature = "docling")]
+        Route::Docling => Box::new(
+            backend::docling_backend::DoclingBackend::full()
+                .with_figures(job.figures_dir.is_some()),
+        ),
+        _ => match router::extractor_for(route) {
+            Some(extractor) => extractor,
+            None => return Ok(None),
+        },
+    };
+    run_job_with_observed(extractor.as_ref(), job, observe).map(Some)
 }
 
 /// [`run_job`] with an already resolved backend; `job.backend` is ignored.

@@ -2,7 +2,7 @@
 name = "tpe-zotero"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Zotero Web API v3 client, local zotero.sqlite reader and PaperRecord mapping"
 
 [dependencies]
