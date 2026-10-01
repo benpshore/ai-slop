@@ -58,11 +58,29 @@ and queued once it does (`jobs::Mailbox`, test
 - Progress is one `Progress` event per page over an unbounded channel; the
   foreground task keeps only the newest event waiting at each frame, so a
   15,000-page document does not queue 15,000 re-renders.
-- Outputs are written by the background task and moved into place only when
-  complete; the ledger write is the engine's own (`Ledger::write_result`).
+- Outputs are written by the background task after the engine finishes and
+  a failed job writes nothing; the files are written in place (not yet
+  through a temporary file and rename), so a force-quit during the write
+  could leave a short file. The ledger write is the engine's own
+  (`Ledger::write_result`).
 
-Measured numbers are still owed: launch time, click-to-row latency and
-per-page progress cost on an M1 have not been recorded.
+### Measured: cost of drawing the job list
+
+GPUI's test platform, `--release`, x86-64 Linux, one full draw (layout,
+prepaint, paint) of the window with N queued rows and nothing running:
+
+| rows | draw time |
+| ---: | ---: |
+| 1 | 0.5 ms |
+| 100 | 8.5 ms |
+| 1,000 | 94 ms |
+| 5,000 | 553 ms |
+
+About 85 µs per row, linear. Every row is rebuilt on every redraw, and a
+running job redraws once per frame, so a drop of a few hundred PDFs will
+stutter: the list is not virtualized yet, and that is the next change. These
+are not M1 numbers and not click-to-pixel latency; launch time, click-to-row
+latency and per-page progress cost on an M1 have not been recorded.
 
 ## Layout
 
@@ -71,7 +89,11 @@ per-page progress cost on an M1 have not been recorded.
   files go, `file_url_to_path` for `on_open_urls`, and `run`, the in-process
   engine call behind each button.
 - `src/gui.rs` (binary, macOS): the window. Two buttons that are drop
-  targets, the job list with bars, keys, menus, the Finder hooks.
+  targets, the job list with bars, keys, menus, the Finder hooks. The
+  platform calls it makes (file chooser, Finder, quit) go through one small
+  `Host` so the tests can answer them.
+- `src/gui/tests.rs` (macOS): headless tests of the window under GPUI's test
+  platform; see below.
 - `src/services.rs` (binary, macOS): the `NSServices` provider.
 - `bundle/Info.plist`, `bundle.sh`: assemble `target/release/PDFTextract.app`
   with the release binary, ad-hoc signed. The tag-derived version goes into
@@ -103,22 +125,46 @@ cargo run -p tpe-app -- paper.pdf     # the window without a bundle (no Finder i
 The bundle is ad-hoc signed and not notarized: on first launch macOS asks for
 confirmation (right-click → Open). There is no app icon yet.
 
+## Headless window tests
+
+`src/gui/tests.rs` drives the real view, key bindings and engine (on the
+synthetic paper) under GPUI's test platform, with only the file chooser,
+Finder and `quit` replaced. They check, with keystrokes: focus starts on
+Get text; Enter, Space, Tab and Shift-Tab reach both actions; ⌘O, ⌘B and ⌘K
+work from anywhere; a cancelled chooser adds nothing; chosen files become a
+row at once and finish; files sent before the window exists (a cold launch
+from Finder) and while it is open are queued in order; Tab reaches each row's
+Copy, Show in Finder and Clear finished, and Enter runs them (Copy puts the
+text on the clipboard); closing the window keeps a running job and the app
+quits itself once idle; the Dock icon reopens the window on the same rows;
+a bad file fails its row and the queue moves on.
+
+They run in the macOS App workflow. They were also run on Linux, with GPUI
+built as an ordinary dependency and `libxkbcommon-x11-dev` and friends
+installed, through a local patch that is not part of the repository (GPUI
+stays macOS-only in `Cargo.toml` so the Linux `ci` legs need none of that).
+GPUI has no public way to build a file-drop event, so drops are covered
+through `Shell::enqueue`, which the drop listener calls, and not by an actual
+drop.
+
 ## Accessibility: verified vs reasoned
 
-Nothing below has been run on a Mac yet. Verified by CI: the crate builds
-with GPUI and passes clippy and its tests, the bundle declares its document
-type and Services and signs, the Services provider answers both messages.
-Reasoned from the code:
+Nothing below has been run by a person on a Mac yet. Verified by CI: the
+crate builds with GPUI and passes clippy and its tests, including the
+headless keyboard tests above; the bundle declares its document type and
+Services and signs; the Services provider answers both messages. Reasoned
+from the code:
 
 - **Screen readers and switch access: not supported by the framework.**
   GPUI 0.2.2 exposes no accessibility tree (see the accessibility note in
   the previous `src/gui.rs`), so VoiceOver, Voice Control and Switch Control
   cannot see these controls. This is the app's largest known gap and needs
   an upstream accessibility layer.
-- Keyboard: every action is on a key (⌘O, ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab through
-  the two big buttons, each row's Remove / Copy / Show in Finder and Clear
-  finished; Enter or Space on the focused one, which shows an accent
-  border). Nothing is timed, nothing expires.
+- Keyboard (verified headlessly, see above): every action is on a key (⌘O,
+  ⌘B, ⌘K, ⌘Q; Tab/Shift-Tab through the two big buttons, each row's Remove /
+  Copy / Show in Finder and Clear finished; Enter or Space on the focused
+  one). The accent border on the focused control is drawn, not tested.
+  Nothing is timed, nothing expires.
 - Targets: the two buttons are full-width and at least 132 pt tall; row
   buttons are padded. Drop is an alternative to the button, never the only
   path.

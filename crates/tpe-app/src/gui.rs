@@ -32,9 +32,10 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, StreamExt};
 use gpui::{
     App, Application, Bounds, ClickEvent, ClipboardItem, Context, DefiniteLength, Div, Entity,
@@ -100,10 +101,39 @@ struct RowFocus {
 const ROW_TAB_BASE: isize = 10;
 const CLEAR_TAB_INDEX: isize = isize::MAX / 2;
 
+/// Shows a path in Finder.
+type Reveal = Rc<dyn Fn(&mut App, &Path)>;
+
+/// Opens a file chooser and delivers the chosen paths (`None`: cancelled).
+type Picker = Rc<
+    dyn Fn(&mut App, PathPromptOptions) -> oneshot::Receiver<gpui::Result<Option<Vec<PathBuf>>>>,
+>;
+
+/// The platform calls the view makes, behind one seam so the headless tests
+/// can answer them (GPUI's test platform has no file chooser, no Finder, and
+/// a `quit` that does nothing observable).
+struct Host {
+    pick: Picker,
+    reveal: Reveal,
+    quit: Rc<dyn Fn(&mut App)>,
+}
+
+impl Host {
+    /// The system open panel, Finder, and quitting the application.
+    fn system() -> Self {
+        Self {
+            pick: Rc::new(|cx, options| cx.prompt_for_paths(options)),
+            reveal: Rc::new(|cx, path| cx.reveal_path(path)),
+            quit: Rc::new(|cx| cx.quit()),
+        }
+    }
+}
+
 /// The window's view.
 pub struct Shell {
     jobs: JobList,
     ledger: PathBuf,
+    host: Host,
     root_focus: FocusHandle,
     text_focus: FocusHandle,
     biblio_focus: FocusHandle,
@@ -112,7 +142,10 @@ pub struct Shell {
 }
 
 impl Shell {
-    fn new(cx: &mut Context<Self>) -> Self {
+    /// `intake` delivers paths from outside the view (Finder, the command
+    /// line), `ledger` is where Get text records its runs, `host` answers
+    /// the platform calls.
+    fn new(intake: &Mailbox<Intake>, ledger: PathBuf, host: Host, cx: &mut Context<Self>) -> Self {
         let text_focus = cx.focus_handle().tab_index(1).tab_stop(true);
         let biblio_focus = cx.focus_handle().tab_index(2).tab_stop(true);
         let clear_focus = cx.focus_handle().tab_index(CLEAR_TAB_INDEX).tab_stop(true);
@@ -120,7 +153,7 @@ impl Shell {
         // Paths from Finder or the command line arrive on this channel,
         // including any that arrived before this view existed.
         let (sender, mut receiver) = mpsc::unbounded::<Intake>();
-        INTAKE.install(sender);
+        intake.install(sender);
         cx.spawn(async move |this, cx| {
             while let Some((action, paths)) = receiver.next().await {
                 if this
@@ -135,7 +168,8 @@ impl Shell {
 
         Self {
             jobs: JobList::default(),
-            ledger: jobs::default_ledger_path(),
+            ledger,
+            host,
             root_focus: cx.focus_handle(),
             text_focus,
             biblio_focus,
@@ -165,7 +199,8 @@ impl Shell {
     /// Quit once nothing is queued or running and no window is open.
     fn quit_if_idle(&self, cx: &mut Context<Self>) {
         if cx.windows().is_empty() && !self.jobs.has_active() {
-            cx.quit();
+            let quit = self.host.quit.clone();
+            quit(cx);
         }
     }
 
@@ -178,13 +213,16 @@ impl Shell {
     }
 
     /// The system open panel, PDFs many at once.
-    fn choose(action: Action, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some(action.title().into()),
-        });
+    fn choose(&self, action: Action, cx: &mut Context<Self>) {
+        let receiver = (self.host.pick)(
+            cx,
+            PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some(action.title().into()),
+            },
+        );
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = receiver.await {
                 let _ = this.update(cx, |this, cx| this.enqueue(paths, action, cx));
@@ -254,8 +292,8 @@ impl Shell {
         let Some(row) = self.jobs.row(id) else {
             return;
         };
-        let path = row.outputs().first().unwrap_or(&row.source);
-        cx.reveal_path(path);
+        let path = row.outputs().first().unwrap_or(&row.source).clone();
+        (self.host.reveal)(cx, &path);
     }
 
     fn remove(&mut self, id: usize, cx: &mut Context<Self>) {
@@ -271,14 +309,12 @@ impl Shell {
         cx.notify();
     }
 
-    #[allow(clippy::unused_self)]
     fn on_get_text(&mut self, _: &GetText, _: &mut Window, cx: &mut Context<Self>) {
-        Self::choose(Action::Text, cx);
+        self.choose(Action::Text, cx);
     }
 
-    #[allow(clippy::unused_self)]
     fn on_get_bibliography(&mut self, _: &GetBibliography, _: &mut Window, cx: &mut Context<Self>) {
-        Self::choose(Action::Bibliography, cx);
+        self.choose(Action::Bibliography, cx);
     }
 
     fn on_clear_done(&mut self, _: &ClearDone, _: &mut Window, cx: &mut Context<Self>) {
@@ -288,9 +324,9 @@ impl Shell {
     /// Enter or Space on whichever button has focus.
     fn on_activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
         if self.text_focus.is_focused(window) {
-            Self::choose(Action::Text, cx);
+            self.choose(Action::Text, cx);
         } else if self.biblio_focus.is_focused(window) {
-            Self::choose(Action::Bibliography, cx);
+            self.choose(Action::Bibliography, cx);
         } else if self.clear_focus.is_focused(window) {
             self.clear_done(cx);
         } else if let Some((id, which)) = self.focused_row_button(window) {
@@ -341,6 +377,7 @@ impl Shell {
         let focused = focus.is_focused(window);
         div()
             .id(id)
+            .debug_selector(|| id.to_string())
             .track_focus(focus)
             .flex_1()
             .flex()
@@ -361,8 +398,8 @@ impl Shell {
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 this.enqueue(paths.paths().to_vec(), action, cx);
             }))
-            .on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
-                Self::choose(action, cx);
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.choose(action, cx);
             }))
             .child(
                 div()
@@ -559,7 +596,12 @@ fn small_button(
 
 /// Open the window on the shared view, focusing the first button.
 fn open_main_window(cx: &mut App) {
-    let shell = cx.global::<ShellHandle>().0.clone();
+    let Some(shell) = cx
+        .try_global::<ShellHandle>()
+        .map(|handle| handle.0.clone())
+    else {
+        return;
+    };
     let bounds = Bounds::centered(None, size(px(640.0), px(480.0)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -583,6 +625,66 @@ fn open_main_window(cx: &mut App) {
     }
 }
 
+/// Bind the keys and the application-wide behaviour: the shortcuts, Quit,
+/// and "closing the window is not quitting while work is queued or running"
+/// (the view lives on as a global and quits once idle). Shared by [`run`]
+/// and the headless tests.
+fn setup(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-o", GetText, Some("Shell")),
+        KeyBinding::new("cmd-b", GetBibliography, Some("Shell")),
+        KeyBinding::new("cmd-k", ClearDone, Some("Shell")),
+        KeyBinding::new("enter", Activate, Some("Shell")),
+        KeyBinding::new("space", Activate, Some("Shell")),
+        KeyBinding::new("tab", FocusNext, Some("Shell")),
+        KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
+    ]);
+    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    cx.on_window_closed(|cx| {
+        let Some(shell) = cx
+            .try_global::<ShellHandle>()
+            .map(|handle| handle.0.clone())
+        else {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+            return;
+        };
+        let (idle, quit) = {
+            let shell = shell.read(cx);
+            (!shell.jobs.has_active(), shell.host.quit.clone())
+        };
+        if cx.windows().is_empty() && idle {
+            quit(cx);
+        }
+    })
+    .detach();
+}
+
+/// The menu bar: the app menu with Services, and File.
+fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "PDFTextract".into(),
+            items: vec![
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit PDFTextract", Quit),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("Get Text…", GetText),
+                MenuItem::action("Get Bibliography…", GetBibliography),
+                MenuItem::separator(),
+                MenuItem::action("Clear Finished", ClearDone),
+            ],
+        },
+    ]);
+}
+
 /// Start the app: keys, menus, the Finder hooks, and the window. `paths`
 /// (from the command line) are queued for text extraction once it is open.
 pub fn run(paths: Vec<PathBuf>) {
@@ -604,51 +706,15 @@ pub fn run(paths: Vec<PathBuf>) {
         }
     });
     app.run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-o", GetText, Some("Shell")),
-            KeyBinding::new("cmd-b", GetBibliography, Some("Shell")),
-            KeyBinding::new("cmd-k", ClearDone, Some("Shell")),
-            KeyBinding::new("enter", Activate, Some("Shell")),
-            KeyBinding::new("space", Activate, Some("Shell")),
-            KeyBinding::new("tab", FocusNext, Some("Shell")),
-            KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
-        ]);
-        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-        cx.set_menus(vec![
-            Menu {
-                name: "PDFTextract".into(),
-                items: vec![
-                    MenuItem::os_submenu("Services", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit PDFTextract", Quit),
-                ],
-            },
-            Menu {
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("Get Text…", GetText),
-                    MenuItem::action("Get Bibliography…", GetBibliography),
-                    MenuItem::separator(),
-                    MenuItem::action("Clear Finished", ClearDone),
-                ],
-            },
-        ]);
-        // Closing the window is not quitting while work is queued or
-        // running: the view lives on as a global and quits once idle.
-        cx.on_window_closed(|cx| {
-            let idle = !cx.global::<ShellHandle>().0.read(cx).jobs.has_active();
-            if cx.windows().is_empty() && idle {
-                cx.quit();
-            }
-        })
-        .detach();
+        setup(cx);
+        set_menus(cx);
         // Compile the engine's regexes now, not inside the first job.
         cx.background_executor()
             .spawn(async { tpe::pipeline::warm_up() })
             .detach();
 
-        let shell = cx.new(Shell::new);
+        let shell =
+            cx.new(|cx| Shell::new(&INTAKE, jobs::default_ledger_path(), Host::system(), cx));
         cx.set_global(ShellHandle(shell));
         open_main_window(cx);
         crate::services::install();
@@ -657,3 +723,6 @@ pub fn run(paths: Vec<PathBuf>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests;
