@@ -42,6 +42,8 @@ pub mod eval;
 pub mod latex_refs;
 pub mod ledger;
 pub mod metadata;
+#[cfg(feature = "pdfium")]
+pub mod pdfium_probe;
 pub mod pipeline;
 pub mod reading_order;
 pub mod regions;
