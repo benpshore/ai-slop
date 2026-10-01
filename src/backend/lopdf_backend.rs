@@ -5,9 +5,9 @@
 //! Per-document work is cached inside the session: a font dictionary is
 //! resolved (encoding, widths, flags) once per `ObjectId` and shared by
 //! every page and Form `XObject` that references it, and a Form `XObject`'s
-//! content stream is decompressed and lexed once while the decoded programs
-//! fit [`MAX_FORM_CACHE_BYTES`]; beyond that budget a Form is decoded on
-//! every use. The caches hold only owned data, so they never borrow the
+//! content stream is reused through a byte- and entry-bounded FIFO cache.
+//! Decoding and execution have separate per-page budgets; exhaustion fails
+//! the page explicitly instead of publishing silently truncated text. The caches hold only owned data, so they never borrow the
 //! [`Document`] they were built from.
 //!
 //! Content streams are not parsed with `Content::decode`, which allocates
@@ -55,7 +55,7 @@
 //! glyph list. The policy is in the identity as `encodings=1`.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 
 use lopdf::{
@@ -164,8 +164,9 @@ const LIGATURE_POLICY: &str = "expand";
 /// identity so ledger runs from different policies are never confused:
 /// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
 /// stack per Form; 3 = painted paths and Image `XObject`s become figures;
-/// 4 = image placements are bounded per page.
-const CONTENT_POLICY: &str = "4";
+/// 4 = image placements are bounded per page; 5 = bounded Form decoding,
+/// caching and execution, with explicit page errors on resource exhaustion.
+const CONTENT_POLICY: &str = "5";
 
 /// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
 /// long is a `rule` figure.
@@ -179,10 +180,18 @@ const MIN_VECTOR_SIDE: f32 = 8.0;
 /// Most painted boxes or image placements retained on one page. Beyond this,
 /// painted boxes become one covering `vector` figure and images are ignored.
 const MAX_CLUSTER_BOXES: usize = 2000;
-/// Most decoded Form `XObject` program data kept per session. A document
-/// with many distinct, highly compressible Forms could otherwise grow the
-/// cache without bound; Forms beyond the budget are decoded on every use.
+/// Retained program allocation charge (not a process RSS limit).
 const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Also bound map buckets, allocator overhead and the eviction queue.
+const MAX_FORM_CACHE_ENTRIES: usize = 4096;
+const MIN_FORM_CHARGE: usize = 256;
+/// Limit both encoded and decoded bytes before lexing a Form.
+const MAX_FORM_DECODE_BYTES: usize = 8 * 1024 * 1024;
+/// Per-page limits also cover cache misses after eviction and direct Forms.
+const MAX_PAGE_FORM_DECODE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PAGE_FORM_WORK_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PAGE_FORM_CALLS: usize = 131_072;
+const MAX_FORM_FILTERS: usize = 8;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
@@ -279,28 +288,140 @@ struct SessionCache {
     /// Fonts written directly into a resources dictionary have no id and are
     /// resolved on every use.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
-    /// The text-relevant operators and painted paths of Form `XObject`
-    /// streams, keyed by stream id, up to [`MAX_FORM_CACHE_BYTES`] of
-    /// decoded program data. Streams that fail to lex are not cached, so
-    /// their warning recurs exactly as it would without the cache; streams
-    /// beyond the budget are decoded on every use.
-    forms: HashMap<ObjectId, Rc<TextProgram>>,
-    /// Estimated bytes held by `forms`.
+    /// FIFO eviction retains normal reuse without an unbounded miss cache.
+    forms: HashMap<ObjectId, (Rc<TextProgram>, usize)>,
+    form_order: VecDeque<ObjectId>,
     form_bytes: usize,
+    #[cfg(test)]
+    last_form_work: Option<FormWork>,
 }
 
 impl SessionCache {
-    /// Retain `program` for `id` when it fits the remaining budget; returns
-    /// whether it was retained.
     fn insert_form(&mut self, id: ObjectId, program: &Rc<TextProgram>) -> bool {
-        let bytes = program.estimated_bytes();
-        if self.form_bytes.saturating_add(bytes) > MAX_FORM_CACHE_BYTES {
+        let bytes = program.estimated_bytes().max(MIN_FORM_CHARGE);
+        if bytes > MAX_FORM_CACHE_BYTES {
             return false;
         }
+        // An existing immutable PDF object is already represented; do not
+        // double-charge it or add duplicate eviction records.
+        if self.forms.contains_key(&id) {
+            return true;
+        }
+        while self.forms.len() >= MAX_FORM_CACHE_ENTRIES
+            || self.form_bytes.saturating_add(bytes) > MAX_FORM_CACHE_BYTES
+        {
+            let Some(oldest) = self.form_order.pop_front() else {
+                return false;
+            };
+            if let Some((_, charge)) = self.forms.remove(&oldest) {
+                self.form_bytes -= charge;
+            }
+        }
         self.form_bytes += bytes;
-        self.forms.insert(id, Rc::clone(program));
+        self.forms.insert(id, (Rc::clone(program), bytes));
+        self.form_order.push_back(id);
         true
     }
+}
+
+/// Budgets reset for each page, so page order cannot exhaust a session-wide
+/// work allowance. These bound Form work, not document parsing or fonts.
+#[derive(Clone, Copy)]
+struct FormWork {
+    decode: usize,
+    execute: usize,
+    calls: usize,
+}
+
+impl Default for FormWork {
+    fn default() -> Self {
+        Self {
+            decode: MAX_PAGE_FORM_DECODE_BYTES,
+            execute: MAX_PAGE_FORM_WORK_BYTES,
+            calls: MAX_PAGE_FORM_CALLS,
+        }
+    }
+}
+
+fn charge(remaining: &mut usize, bytes: usize) -> bool {
+    if let Some(next) = remaining.checked_sub(bytes) {
+        *remaining = next;
+        true
+    } else {
+        false
+    }
+}
+
+struct FormDecodePolicy {
+    layers: usize,
+    uses_predictor: bool,
+}
+
+/// Check attacker-controlled filter metadata before entering lopdf's decoder.
+/// Predictor rows and their auxiliary color accumulators have separate bounds.
+fn form_decode_policy(stream: &Stream) -> Option<FormDecodePolicy> {
+    let layers = match stream.dict.get(b"Filter") {
+        Ok(Object::Array(filters)) => filters.len(),
+        Ok(_) => 1,
+        Err(_) => 0,
+    };
+    if layers > MAX_FORM_FILTERS {
+        return None;
+    }
+    // Match lopdf's decoder: only Flate/LZW use the dictionary-form
+    // parameters, and only TIFF 2 / PNG 10..15 apply prediction.
+    let predictor_filter = stream.filters().is_ok_and(|filters| {
+        filters
+            .iter()
+            .any(|filter| matches!(*filter, b"FlateDecode" | b"LZWDecode"))
+    });
+    let mut uses_predictor = false;
+    if predictor_filter
+        && let Ok(params) = stream.dict.get(b"DecodeParms").and_then(Object::as_dict)
+    {
+        let predictor = params
+            .get(b"Predictor")
+            .and_then(Object::as_i64)
+            .unwrap_or(1);
+        uses_predictor = predictor == 2 || (10..=15).contains(&predictor);
+        if !uses_predictor {
+            return Some(FormDecodePolicy {
+                layers: layers.max(1),
+                uses_predictor,
+            });
+        }
+        let dimension = |key: &[u8], default| {
+            usize::try_from(
+                params
+                    .get(key)
+                    .and_then(Object::as_i64)
+                    .unwrap_or(default)
+                    .max(1),
+            )
+            .ok()
+        };
+        let colors = dimension(b"Colors", 1)?;
+        let component_bits = dimension(b"BitsPerComponent", 8)?;
+        let bits = dimension(b"Columns", 1)?
+            .checked_mul(colors)?
+            .checked_mul(component_bits)?;
+        if bits > MAX_FORM_DECODE_BYTES.checked_mul(8)? {
+            return None;
+        }
+        // Packed rows do not bound the unpacked per-color accumulator in
+        // lopdf's reverse_tiff_predictor2_subbyte (Vec<u16>). Independently
+        // cap that auxiliary allocation before any decompression takes place.
+        if predictor == 2
+            && matches!(component_bits, 1 | 2 | 4)
+            && colors.checked_mul(size_of::<u16>())? > MAX_FORM_DECODE_BYTES
+        {
+            return None;
+        }
+    }
+    Some(FormDecodePolicy {
+        layers: layers.max(1),
+        uses_predictor,
+    })
 }
 
 struct LopdfSession {
@@ -1660,17 +1781,29 @@ impl TextProgram {
     fn estimated_bytes(&self) -> usize {
         fn heap_bytes(object: &Object) -> usize {
             match object {
-                Object::String(bytes, _) | Object::Name(bytes) => bytes.len(),
-                Object::Array(items) => items
-                    .iter()
-                    .map(|item| size_of::<Object>() + heap_bytes(item))
-                    .sum(),
+                Object::String(bytes, _) | Object::Name(bytes) => bytes.capacity(),
+                Object::Array(items) => {
+                    items.capacity() * size_of::<Object>()
+                        + items.iter().map(heap_bytes).sum::<usize>()
+                }
+                Object::Dictionary(dict) => {
+                    // IndexMap retains both entries and a hash index.
+                    dict.as_hashmap().capacity()
+                        * (size_of::<(Vec<u8>, Object)>() + 3 * size_of::<usize>())
+                        + dict
+                            .as_hashmap()
+                            .iter()
+                            .map(|(key, value)| key.capacity() + heap_bytes(value))
+                            .sum::<usize>()
+                }
                 _ => 0,
             }
         }
-        self.ops.len() * size_of::<TextOp>()
-            + self.operands.len() * size_of::<Object>()
-            + self.paths.len() * size_of::<[f32; 4]>()
+        size_of::<Self>()
+            + 2 * size_of::<usize>()
+            + self.ops.capacity() * size_of::<TextOp>()
+            + self.operands.capacity() * size_of::<Object>()
+            + self.paths.capacity() * size_of::<[f32; 4]>()
             + self.operands.iter().map(heap_bytes).sum::<usize>()
     }
 
@@ -2485,6 +2618,8 @@ struct Interpreter<'a> {
     /// Ligatures expanded so far on this page.
     ligatures: u32,
     graphics: Graphics,
+    form_work: FormWork,
+    resource_error: Option<&'static str>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -2510,6 +2645,9 @@ impl<'a> Interpreter<'a> {
 
     fn run(&mut self, program: &TextProgram, contexts: &mut Vec<Context<'a>>, depth: u32) {
         for &op in &program.ops {
+            if self.resource_error.is_some() {
+                break;
+            }
             let operands = program.operands(op);
             match op.kind {
                 OpKind::Save => self.stack.push(self.state.clone()),
@@ -2852,24 +2990,60 @@ impl<'a> Interpreter<'a> {
             ));
             return;
         }
-        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
-        let program = if let Some(program) = cached {
-            program
+        if !charge(&mut self.form_work.calls, 1) {
+            self.resource_error = Some("Form invocation budget exceeded");
+            return;
+        }
+        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).cloned());
+        let (program, work) = if let Some(cached) = cached {
+            cached
         } else {
-            let content_bytes = match stream.get_plain_content() {
-                Ok(bytes) => bytes,
-                Err(_) => stream.content.clone(),
+            let Some(policy) = form_decode_policy(stream) else {
+                self.resource_error = Some("Form filter/predictor limit exceeded");
+                return;
             };
+            // Reserve before decoding. For a single filter, refund unused
+            // bytes afterwards unless prediction needs scratch space. Chained
+            // filters can have large intermediate outputs, so keep their full
+            // worst-case charge. Non-predictor DecodeParms do not prevent refunds.
+            let layers = policy.layers;
+            let limit = MAX_FORM_DECODE_BYTES.min(self.form_work.decode / layers);
+            if limit == 0 || stream.content.len() > limit {
+                self.resource_error = Some("Form decode byte budget exceeded");
+                return;
+            }
+            self.form_work.decode -= limit * layers;
+            let content_bytes = match stream.get_plain_content_with_limit(limit) {
+                Ok(bytes) => bytes,
+                Err(LopdfError::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
+                    ..
+                })) => {
+                    self.resource_error = Some("Form decoded stream limit exceeded");
+                    return;
+                }
+                Err(_) => {
+                    self.warn(format!("XObject {label}: undecodable content stream"));
+                    return;
+                }
+            };
+            if layers == 1 && !policy.uses_predictor {
+                self.form_work.decode += limit - content_bytes.len().max(stream.content.len());
+            }
             let Ok(program) = lex_content(&content_bytes) else {
                 self.warn(format!("XObject {label}: undecodable content stream"));
                 return;
             };
+            let work = program.estimated_bytes().max(MIN_FORM_CHARGE);
             let program = Rc::new(program);
             if let Some(id) = stream_id {
                 self.cache.insert_form(id, &program);
             }
-            program
+            (program, work)
         };
+        if !charge(&mut self.form_work.execute, work) {
+            self.resource_error = Some("Form execution byte budget exceeded");
+            return;
+        }
         // Nothing in it shows text, paints or moves the text position, and
         // it cannot reach the caller's state, so running it would change
         // nothing.
@@ -2970,9 +3144,18 @@ fn extract_page(
         max_depth,
         ligatures: 0,
         graphics: Graphics::default(),
+        form_work: FormWork::default(),
+        resource_error: None,
     };
     let mut contexts = vec![page_context];
     interpreter.run(&program, &mut contexts, 0);
+    #[cfg(test)]
+    {
+        interpreter.cache.last_form_work = Some(interpreter.form_work);
+    }
+    if let Some(reason) = interpreter.resource_error {
+        return Err(page_error(page, format!("resource_limit: {reason}")));
+    }
     Ok(interpreter.finish())
 }
 
@@ -4888,7 +5071,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "4".to_string());
+        config.insert("content".to_string(), "5".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
@@ -4896,7 +5079,7 @@ mod tests {
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "3".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
-        config.insert("content".to_string(), "4".to_string());
+        config.insert("content".to_string(), "5".to_string());
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
@@ -5502,6 +5685,8 @@ mod tests {
             max_depth: 8,
             ligatures: 0,
             graphics: Graphics::default(),
+            form_work: FormWork::default(),
+            resource_error: None,
         };
         for &text in texts {
             interpreter.emit(text.to_string(), 1.0, None);
@@ -5602,7 +5787,8 @@ mod tests {
             paths: Vec::new(),
         });
         assert!(cache.insert_form((1, 0), &big));
-        assert!(!cache.insert_form((2, 0), &big), "over budget");
+        assert!(cache.insert_form((2, 0), &big), "evict the oldest entry");
+        assert!(!cache.forms.contains_key(&(1, 0)));
         assert_eq!(cache.forms.len(), 1);
         let small = Rc::new(TextProgram {
             ops: Vec::new(),
@@ -5611,6 +5797,313 @@ mod tests {
         });
         assert!(cache.insert_form((3, 0), &small));
         assert_eq!(cache.forms.len(), 2);
+    }
+
+    #[test]
+    fn tiny_forms_are_charged_and_cache_cardinality_is_bounded() {
+        let mut cache = SessionCache::default();
+        let empty = Rc::new(TextProgram::default());
+        for id in 1..=10_000 {
+            assert!(cache.insert_form((id, 0), &empty));
+            assert!(cache.forms.len() <= MAX_FORM_CACHE_ENTRIES);
+            assert_eq!(cache.form_order.len(), cache.forms.len());
+            assert_eq!(cache.form_bytes, cache.forms.len() * MIN_FORM_CHARGE);
+        }
+        let before = cache.form_bytes;
+        assert!(cache.insert_form((10_000, 0), &empty));
+        assert_eq!(
+            cache.form_bytes, before,
+            "duplicate insert is not charged twice"
+        );
+        assert!(cache.forms.contains_key(&(10_000, 0)));
+        assert!(!cache.forms.contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn form_charge_includes_spare_capacity_and_nested_dictionary_data() {
+        let program = TextProgram {
+            operands: vec![Object::Dictionary(dictionary! {
+                "Data" => Object::string_literal(Vec::<u8>::with_capacity(4096)),
+            })],
+            ops: Vec::with_capacity(100),
+            paths: Vec::new(),
+        };
+        assert!(program.estimated_bytes() >= 4096 + 100 * size_of::<TextOp>());
+    }
+
+    fn replace_test_form(session: &mut LopdfSession, mut content: Stream, direct: bool) {
+        let (id, original) = session
+            .doc
+            .objects
+            .iter()
+            .find_map(|(id, obj)| {
+                let stream = obj.as_stream().ok()?;
+                (stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+                    .then_some((*id, stream.clone()))
+            })
+            .unwrap();
+        content.dict.set("Subtype", "Form");
+        content.dict.set(
+            "Resources",
+            original.dict.get(b"Resources").unwrap().clone(),
+        );
+        session
+            .doc
+            .objects
+            .insert(id, Object::Stream(content.clone()));
+        if direct {
+            for obj in session.doc.objects.values_mut() {
+                if let Ok(dict) = obj.as_dict_mut()
+                    && let Ok(xobjects) = dict.get_mut(b"XObject").and_then(Object::as_dict_mut)
+                {
+                    xobjects.set("X1", Object::Stream(content.clone()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_compressed_form_is_rejected_before_lexing() {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        let mut session = open_session(&bytes);
+        let mut stream = Stream::new(dictionary! {}, vec![b' '; MAX_FORM_DECODE_BYTES + 1]);
+        stream.compress().unwrap();
+        assert!(stream.content.len() < MAX_FORM_DECODE_BYTES / 100);
+        replace_test_form(&mut session, stream, false);
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form decoded stream"),
+            "{error}"
+        );
+        assert!(
+            session.cache.forms.is_empty(),
+            "never lexed/cached the compressed bytes as fallback"
+        );
+    }
+
+    #[test]
+    fn repeated_uncached_forms_stop_at_the_page_decode_budget() {
+        let calls = vec![Operation::new("Do", vec!["X1".into()]); 9];
+        let bytes = build_pdf(vec![calls], Some(vec![]));
+        let mut session = open_session(&bytes);
+        let stream = Stream::new(dictionary! {}, vec![b' '; MAX_FORM_DECODE_BYTES]);
+        replace_test_form(&mut session, stream, true);
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form decode byte budget"),
+            "{error}"
+        );
+        assert!(
+            session.cache.forms.is_empty(),
+            "direct Forms cannot be cached by object id"
+        );
+    }
+
+    #[test]
+    fn cached_empty_forms_have_a_work_limit_and_page_budgets_reset() {
+        let many = vec![Operation::new("Do", vec!["X1".into()]); MAX_PAGE_FORM_CALLS + 1];
+        let once = vec![Operation::new("Do", vec!["X1".into()])];
+        let bytes = build_pdf(vec![many, once], Some(vec![]));
+        let mut session = open_session(&bytes);
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(error.contains("resource_limit: Form invocation"), "{error}");
+        assert_eq!(session.cache.forms.len(), 1);
+        assert!(session.page_text(2).is_ok());
+    }
+
+    #[test]
+    fn hostile_form_filter_metadata_is_rejected_before_decoding() {
+        let mut stream = Stream::new(
+            dictionary! {
+                "Filter" => vec![Object::Name(b"FlateDecode".to_vec()); MAX_FORM_FILTERS + 1],
+            },
+            vec![],
+        );
+        assert!(form_decode_policy(&stream).is_none());
+        stream.dict.set("Filter", "FlateDecode");
+        stream.dict.set(
+            "DecodeParms",
+            dictionary! {
+                "Predictor" => 12,
+                "Columns" => i64::MAX,
+                "Colors" => i64::MAX,
+            },
+        );
+        assert!(form_decode_policy(&stream).is_none());
+    }
+
+    #[test]
+    fn subbyte_tiff_accumulator_is_bounded_before_decoding() {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        for component_bits in [1, 2, 4] {
+            // Each packed row fits exactly, while Vec<u16> would allocate
+            // 128 / 64 / 32 MiB respectively, even for one decoded byte.
+            let colors = MAX_FORM_DECODE_BYTES * 8 / component_bits;
+            let mut stream = flate_test_form(&[0]);
+            stream.dict.set(
+                "DecodeParms",
+                dictionary! {
+                    "Predictor" => 2,
+                    "Columns" => 1,
+                    "Colors" => i64::try_from(colors).unwrap(),
+                    "BitsPerComponent" => i64::try_from(component_bits).unwrap(),
+                },
+            );
+            assert!(form_decode_policy(&stream).is_none());
+            let mut session = open_session(&bytes);
+            replace_test_form(&mut session, stream.clone(), false);
+            let error = session.page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: Form filter/predictor"),
+                "{error}"
+            );
+            assert!(session.cache.forms.is_empty());
+            assert_eq!(
+                session.cache.last_form_work.unwrap().decode,
+                MAX_PAGE_FORM_DECODE_BYTES
+            );
+
+            // Boundary check without actually allocating the accumulator.
+            let params = stream
+                .dict
+                .get_mut(b"DecodeParms")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            params.set(
+                "Colors",
+                i64::try_from(MAX_FORM_DECODE_BYTES / size_of::<u16>()).unwrap(),
+            );
+            assert!(form_decode_policy(&stream).is_some());
+            stream
+                .dict
+                .get_mut(b"DecodeParms")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Colors",
+                    i64::try_from(MAX_FORM_DECODE_BYTES / size_of::<u16>() + 1).unwrap(),
+                );
+            assert!(form_decode_policy(&stream).is_none());
+        }
+    }
+
+    /// Nine distinct indirect Forms force nine cache misses on one page.
+    fn distinct_parameterized_forms(stream: &Stream) -> LopdfSession {
+        let bytes = build_pdf(vec![vec![]], None);
+        let mut session = open_session(&bytes);
+        let mut xobjects = Dictionary::new();
+        let mut operations = Vec::new();
+        for index in 0..9 {
+            let name = format!("X{index}");
+            let mut form = stream.clone();
+            form.dict.set("Subtype", "Form");
+            let id = session.doc.add_object(form);
+            xobjects.set(name.as_bytes(), id);
+            operations.push(Operation::new("Do", vec![Object::Name(name.into_bytes())]));
+        }
+        let content = session.doc.add_object(Stream::new(
+            dictionary! {},
+            Content { operations }.encode().unwrap(),
+        ));
+        let page = session
+            .doc
+            .get_object_mut(session.pages[&1])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        page.set("Contents", content);
+        page.set("Resources", dictionary! { "XObject" => xobjects });
+        session
+    }
+
+    fn flate_test_form(plain: &[u8]) -> Stream {
+        use std::io::Write;
+        // Stream::compress skips compression when the encoding would grow;
+        // these tiny fixtures must still exercise the actual Flate decoder.
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plain).unwrap();
+        Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            encoder.finish().unwrap(),
+        )
+    }
+
+    #[test]
+    fn non_predictor_decode_parameters_refund_nine_distinct_forms() {
+        let plain = b"q Q ";
+        let mut flate = flate_test_form(plain);
+        flate
+            .dict
+            .set("DecodeParms", dictionary! { "Predictor" => 1 });
+        // MSB-first 9-bit LZW codes: clear, four literals, EOD. This tiny
+        // fixture stays below the code-width transition for either EarlyChange.
+        let codes = [256u16, 113, 32, 81, 32, 257];
+        let mut encoded = vec![0u8; (codes.len() * 9).div_ceil(8)];
+        for (index, code) in codes.into_iter().enumerate() {
+            for bit in 0..9 {
+                let offset = index * 9 + bit;
+                encoded[offset / 8] |= (((code >> (8 - bit)) & 1) as u8) << (7 - offset % 8);
+            }
+        }
+        let lzw = Stream::new(
+            dictionary! {
+                "Filter" => "LZWDecode",
+                "DecodeParms" => dictionary! { "EarlyChange" => 0 },
+            },
+            encoded,
+        );
+        for stream in [flate, lzw] {
+            assert_eq!(stream.get_plain_content_with_limit(1024).unwrap(), plain);
+            let mut session = distinct_parameterized_forms(&stream);
+            let page = session.page_text(1).unwrap();
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+            assert_eq!(session.cache.forms.len(), 9);
+            assert_eq!(
+                MAX_PAGE_FORM_DECODE_BYTES - session.cache.last_form_work.unwrap().decode,
+                9 * plain.len().max(stream.content.len()),
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_predictors_and_chains_keep_the_worst_case_reservation() {
+        let mut tiff = flate_test_form(b"q Q ");
+        tiff.dict.set(
+            "DecodeParms",
+            dictionary! {
+                "Predictor" => 2, "Columns" => 1, "Colors" => 1, "BitsPerComponent" => 8,
+            },
+        );
+        let mut png = flate_test_form(b"\0q Q ");
+        png.dict.set(
+            "DecodeParms",
+            dictionary! { "Predictor" => 12, "Columns" => 4 },
+        );
+        let chain = Stream::new(
+            dictionary! {
+                "Filter" => vec![Object::Name(b"ASCIIHexDecode".to_vec()), Object::Name(b"ASCIIHexDecode".to_vec())],
+            },
+            b"3731323035313230>".to_vec(),
+        );
+        for stream in [tiff, png, chain] {
+            assert_eq!(stream.get_plain_content_with_limit(1024).unwrap(), b"q Q ");
+            let mut session = distinct_parameterized_forms(&stream);
+            let error = session.page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: Form decode byte budget"),
+                "{error}"
+            );
+            assert_eq!(session.cache.last_form_work.unwrap().decode, 0);
+        }
     }
 
     #[test]
@@ -5682,6 +6175,185 @@ mod tests {
     }
 
     type OpList = Result<Vec<(String, Vec<Object>)>, String>;
+
+    #[test]
+    #[ignore = "requires TPE_CORPUS_CACHE containing the pinned public PDFs"]
+    fn measure_corpus_form_work() {
+        let root = std::env::var("TPE_CORPUS_CACHE").expect("set TPE_CORPUS_CACHE");
+        let mut peaks = [0usize; 3];
+        let mut peak_files = [String::new(), String::new(), String::new()];
+        let mut documents = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path().join("paper.pdf");
+            if !path.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let mut session = open_session(&bytes);
+            documents += 1;
+            for page in 1..=session.pages.len() as u32 {
+                session.page_text(page).unwrap();
+                let used = session.cache.last_form_work.unwrap();
+                for (index, value) in [
+                    MAX_PAGE_FORM_CALLS - used.calls,
+                    MAX_PAGE_FORM_DECODE_BYTES - used.decode,
+                    MAX_PAGE_FORM_WORK_BYTES - used.execute,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if value > peaks[index] {
+                        peaks[index] = value;
+                        peak_files[index] = format!("{} page {page}", path.display());
+                    }
+                }
+            }
+        }
+        assert_eq!(documents, 70);
+        eprintln!(
+            "corpus Form peaks: calls={}, decode_bytes={}, execution_charge={}; locations={peak_files:?}",
+            peaks[0], peaks[1], peaks[2]
+        );
+    }
+
+    /// Three Form levels: A calls B N times, B calls C N times, C saves/restores N times.
+    fn shallow_nested_forms_pdf(n: usize) -> Vec<u8> {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        let mut session = open_session(&bytes);
+        let form = |content, resources| {
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => resources,
+                },
+                content,
+            )
+        };
+        let c = session
+            .doc
+            .add_object(form(b"q Q\n".repeat(n), dictionary! {}));
+        let b = session.doc.add_object(form(
+            b"/C Do\n".repeat(n),
+            dictionary! {
+                "XObject" => dictionary! { "C" => c },
+            },
+        ));
+        let a = session
+            .doc
+            .objects
+            .values_mut()
+            .find_map(|obj| {
+                let stream = obj.as_stream_mut().ok()?;
+                (stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+                    .then_some(stream)
+            })
+            .unwrap();
+        a.set_content(b"/B Do\n".repeat(n));
+        a.dict.set(
+            "Resources",
+            dictionary! { "XObject" => dictionary! { "B" => b } },
+        );
+        let mut output = Vec::new();
+        session.doc.save_to(&mut output).unwrap();
+        output
+    }
+
+    #[test]
+    fn shallow_nested_forms_charge_each_repeated_execution_and_fail_explicitly() {
+        for n in [20, 40, 80] {
+            let bytes = shallow_nested_forms_pdf(n);
+            let mut session = open_session(&bytes);
+            let page = session.page_text(1).unwrap();
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+            assert!(page.spans.is_empty());
+            assert_eq!(session.cache.forms.len(), 3);
+            let used = session.cache.last_form_work.unwrap();
+            assert_eq!(MAX_PAGE_FORM_CALLS - used.calls, 1 + n + n * n);
+            let mut expected_charge = 0;
+            for (program, charge) in session.cache.forms.values() {
+                let repetitions = match program.ops[0].kind {
+                    OpKind::Save => n * n, // C: N^2 visits, N q/Q pairs each.
+                    OpKind::Invoke if program.operands[0].as_name().unwrap() == b"C" => n,
+                    OpKind::Invoke => 1,
+                    _ => panic!("unexpected nested Form program"),
+                };
+                expected_charge += charge * repetitions;
+            }
+            assert_eq!(MAX_PAGE_FORM_WORK_BYTES - used.execute, expected_charge);
+        }
+        let mut session = open_session(&shallow_nested_forms_pdf(160));
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form execution byte budget"),
+            "{error}"
+        );
+        assert_eq!(session.cache.forms.len(), 3);
+        assert!(
+            session.cache.last_form_work.unwrap().calls > 0,
+            "work cap fires before call cap"
+        );
+    }
+
+    /// Run each N in a separate process to measure RSS without prior test peaks.
+    #[test]
+    #[ignore = "manual nested-Forms timing/RSS diagnostic; set TPE_FORM_DIAGNOSTIC_N"]
+    fn measure_shallow_nested_forms() {
+        let n = std::env::var("TPE_FORM_DIAGNOSTIC_N")
+            .unwrap_or_else(|_| "80".into())
+            .parse::<usize>()
+            .unwrap();
+        let bytes = shallow_nested_forms_pdf(n);
+        let mut session = open_session(&bytes);
+        let start = std::time::Instant::now();
+        let result = session.page_text(1);
+        let elapsed = start.elapsed();
+        let used = session.cache.last_form_work.unwrap();
+        eprintln!(
+            "N={n}, PDF bytes={}, uncapped q/Q pairs={}, elapsed={elapsed:?}, calls={}, execution_charge={}, result={}",
+            bytes.len(),
+            n.pow(3),
+            MAX_PAGE_FORM_CALLS - used.calls,
+            MAX_PAGE_FORM_WORK_BYTES - used.execute,
+            result.map_or_else(|err| err.to_string(), |_| "ok".into())
+        );
+    }
+
+    /// Manual diagnostic; no flaky wall-clock threshold in the test suite.
+    #[test]
+    #[ignore = "run in release mode with --nocapture for a cache reuse diagnostic"]
+    fn measure_form_cache_reuse() {
+        let mut form = Vec::new();
+        for _ in 0..100 {
+            form.extend(text_ops(10, 50, 50, "Reusable Form text"));
+        }
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(form),
+        );
+        let mut cached = open_session(&bytes);
+        let mut cold = open_session(&bytes);
+        let expected = cached.page_text(1).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(cached.page_text(1).unwrap(), expected);
+        }
+        let retained = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            cold.cache.forms.clear();
+            cold.cache.form_order.clear();
+            cold.cache.form_bytes = 0;
+            assert_eq!(cold.page_text(1).unwrap(), expected);
+        }
+        eprintln!(
+            "1000 repeated pages, retained Form cache: {retained:?}; no persistent Form cache: {:?}",
+            start.elapsed()
+        );
+    }
 
     /// The kept operators and their operands, from the streaming lexer
     /// (painted paths left out).
@@ -5933,8 +6605,8 @@ mod tests {
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         assert_eq!(session.cache.forms.len(), 1);
         let cached = session.cache.forms.values().next().unwrap();
-        assert_eq!(cached.ops.len(), 200);
-        assert!(cached.ops.iter().all(|op| op.kind == OpKind::StrokePath));
+        assert_eq!(cached.0.ops.len(), 200);
+        assert!(cached.0.ops.iter().all(|op| op.kind == OpKind::StrokePath));
         // The form's boxes (0,2)-(204,20) moved by the page's `cm`.
         assert_eq!(result.figures.len(), 1, "{:?}", result.figures);
         assert_box(&result.figures[0], 200.0, 302.0, 404.0, 320.0);
