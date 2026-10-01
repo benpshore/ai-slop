@@ -276,10 +276,14 @@ fn charge(remaining: &mut usize, bytes: usize) -> bool {
     }
 }
 
+struct FormDecodePolicy {
+    layers: usize,
+    uses_predictor: bool,
+}
+
 /// Check attacker-controlled filter metadata before entering lopdf's decoder.
-/// In particular, predictor row dimensions must not overflow or cause an
-/// allocation larger than the stream allowance.
-fn form_filter_layers(stream: &Stream) -> Option<usize> {
+/// Predictor rows and their auxiliary color accumulators have separate bounds.
+fn form_decode_policy(stream: &Stream) -> Option<FormDecodePolicy> {
     let layers = match stream.dict.get(b"Filter") {
         Ok(Object::Array(filters)) => filters.len(),
         Ok(_) => 1,
@@ -288,7 +292,28 @@ fn form_filter_layers(stream: &Stream) -> Option<usize> {
     if layers > MAX_FORM_FILTERS {
         return None;
     }
-    if let Ok(params) = stream.dict.get(b"DecodeParms").and_then(Object::as_dict) {
+    // Match lopdf's decoder: only Flate/LZW use the dictionary-form
+    // parameters, and only TIFF 2 / PNG 10..15 apply prediction.
+    let predictor_filter = stream.filters().is_ok_and(|filters| {
+        filters
+            .iter()
+            .any(|filter| matches!(*filter, b"FlateDecode" | b"LZWDecode"))
+    });
+    let mut uses_predictor = false;
+    if predictor_filter
+        && let Ok(params) = stream.dict.get(b"DecodeParms").and_then(Object::as_dict)
+    {
+        let predictor = params
+            .get(b"Predictor")
+            .and_then(Object::as_i64)
+            .unwrap_or(1);
+        uses_predictor = predictor == 2 || (10..=15).contains(&predictor);
+        if !uses_predictor {
+            return Some(FormDecodePolicy {
+                layers: layers.max(1),
+                uses_predictor,
+            });
+        }
         let dimension = |key: &[u8], default| {
             usize::try_from(
                 params
@@ -299,14 +324,28 @@ fn form_filter_layers(stream: &Stream) -> Option<usize> {
             )
             .ok()
         };
+        let colors = dimension(b"Colors", 1)?;
+        let component_bits = dimension(b"BitsPerComponent", 8)?;
         let bits = dimension(b"Columns", 1)?
-            .checked_mul(dimension(b"Colors", 1)?)?
-            .checked_mul(dimension(b"BitsPerComponent", 8)?)?;
+            .checked_mul(colors)?
+            .checked_mul(component_bits)?;
         if bits > MAX_FORM_DECODE_BYTES.checked_mul(8)? {
             return None;
         }
+        // Packed rows do not bound the unpacked per-color accumulator in
+        // lopdf's reverse_tiff_predictor2_subbyte (Vec<u16>). Independently
+        // cap that auxiliary allocation before any decompression takes place.
+        if predictor == 2
+            && matches!(component_bits, 1 | 2 | 4)
+            && colors.checked_mul(size_of::<u16>())? > MAX_FORM_DECODE_BYTES
+        {
+            return None;
+        }
     }
-    Some(layers.max(1))
+    Some(FormDecodePolicy {
+        layers: layers.max(1),
+        uses_predictor,
+    })
 }
 
 struct LopdfSession {
@@ -2883,13 +2922,15 @@ impl<'a> Interpreter<'a> {
         let (program, work) = if let Some(cached) = cached {
             cached
         } else {
-            let Some(layers) = form_filter_layers(stream) else {
+            let Some(policy) = form_decode_policy(stream) else {
                 self.resource_error = Some("Form filter/predictor limit exceeded");
                 return;
             };
             // Reserve before decoding. For a single filter, refund unused
-            // bytes afterwards. Chained filters can have large intermediate
-            // outputs, so keep their full worst-case charge.
+            // bytes afterwards unless prediction needs scratch space. Chained
+            // filters can have large intermediate outputs, so keep their full
+            // worst-case charge. Non-predictor DecodeParms do not prevent refunds.
+            let layers = policy.layers;
             let limit = MAX_FORM_DECODE_BYTES.min(self.form_work.decode / layers);
             if limit == 0 || stream.content.len() > limit {
                 self.resource_error = Some("Form decode byte budget exceeded");
@@ -2909,7 +2950,7 @@ impl<'a> Interpreter<'a> {
                     return;
                 }
             };
-            if layers == 1 && stream.dict.get(b"DecodeParms").is_err() {
+            if layers == 1 && !policy.uses_predictor {
                 self.form_work.decode += limit - content_bytes.len().max(stream.content.len());
             }
             let Ok(program) = lex_content(&content_bytes) else {
@@ -5803,7 +5844,7 @@ mod tests {
             },
             vec![],
         );
-        assert!(form_filter_layers(&stream).is_none());
+        assert!(form_decode_policy(&stream).is_none());
         stream.dict.set("Filter", "FlateDecode");
         stream.dict.set(
             "DecodeParms",
@@ -5813,7 +5854,178 @@ mod tests {
                 "Colors" => i64::MAX,
             },
         );
-        assert!(form_filter_layers(&stream).is_none());
+        assert!(form_decode_policy(&stream).is_none());
+    }
+
+    #[test]
+    fn subbyte_tiff_accumulator_is_bounded_before_decoding() {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        for component_bits in [1, 2, 4] {
+            // Each packed row fits exactly, while Vec<u16> would allocate
+            // 128 / 64 / 32 MiB respectively, even for one decoded byte.
+            let colors = MAX_FORM_DECODE_BYTES * 8 / component_bits;
+            let mut stream = flate_test_form(&[0]);
+            stream.dict.set(
+                "DecodeParms",
+                dictionary! {
+                    "Predictor" => 2,
+                    "Columns" => 1,
+                    "Colors" => i64::try_from(colors).unwrap(),
+                    "BitsPerComponent" => i64::try_from(component_bits).unwrap(),
+                },
+            );
+            assert!(form_decode_policy(&stream).is_none());
+            let mut session = open_session(&bytes);
+            replace_test_form(&mut session, stream.clone(), false);
+            let error = session.page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: Form filter/predictor"),
+                "{error}"
+            );
+            assert!(session.cache.forms.is_empty());
+            assert_eq!(
+                session.cache.last_form_work.unwrap().decode,
+                MAX_PAGE_FORM_DECODE_BYTES
+            );
+
+            // Boundary check without actually allocating the accumulator.
+            let params = stream
+                .dict
+                .get_mut(b"DecodeParms")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            params.set(
+                "Colors",
+                i64::try_from(MAX_FORM_DECODE_BYTES / size_of::<u16>()).unwrap(),
+            );
+            assert!(form_decode_policy(&stream).is_some());
+            stream
+                .dict
+                .get_mut(b"DecodeParms")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Colors",
+                    i64::try_from(MAX_FORM_DECODE_BYTES / size_of::<u16>() + 1).unwrap(),
+                );
+            assert!(form_decode_policy(&stream).is_none());
+        }
+    }
+
+    /// Nine distinct indirect Forms force nine cache misses on one page.
+    fn distinct_parameterized_forms(stream: &Stream) -> LopdfSession {
+        let bytes = build_pdf(vec![vec![]], None);
+        let mut session = open_session(&bytes);
+        let mut xobjects = Dictionary::new();
+        let mut operations = Vec::new();
+        for index in 0..9 {
+            let name = format!("X{index}");
+            let mut form = stream.clone();
+            form.dict.set("Subtype", "Form");
+            let id = session.doc.add_object(form);
+            xobjects.set(name.as_bytes(), id);
+            operations.push(Operation::new("Do", vec![Object::Name(name.into_bytes())]));
+        }
+        let content = session.doc.add_object(Stream::new(
+            dictionary! {},
+            Content { operations }.encode().unwrap(),
+        ));
+        let page = session
+            .doc
+            .get_object_mut(session.pages[&1])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        page.set("Contents", content);
+        page.set("Resources", dictionary! { "XObject" => xobjects });
+        session
+    }
+
+    fn flate_test_form(plain: &[u8]) -> Stream {
+        use std::io::Write;
+        // Stream::compress skips compression when the encoding would grow;
+        // these tiny fixtures must still exercise the actual Flate decoder.
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plain).unwrap();
+        Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            encoder.finish().unwrap(),
+        )
+    }
+
+    #[test]
+    fn non_predictor_decode_parameters_refund_nine_distinct_forms() {
+        let plain = b"q Q ";
+        let mut flate = flate_test_form(plain);
+        flate
+            .dict
+            .set("DecodeParms", dictionary! { "Predictor" => 1 });
+        // MSB-first 9-bit LZW codes: clear, four literals, EOD. This tiny
+        // fixture stays below the code-width transition for either EarlyChange.
+        let codes = [256u16, 113, 32, 81, 32, 257];
+        let mut encoded = vec![0u8; (codes.len() * 9).div_ceil(8)];
+        for (index, code) in codes.into_iter().enumerate() {
+            for bit in 0..9 {
+                let offset = index * 9 + bit;
+                encoded[offset / 8] |= (((code >> (8 - bit)) & 1) as u8) << (7 - offset % 8);
+            }
+        }
+        let lzw = Stream::new(
+            dictionary! {
+                "Filter" => "LZWDecode",
+                "DecodeParms" => dictionary! { "EarlyChange" => 0 },
+            },
+            encoded,
+        );
+        for stream in [flate, lzw] {
+            assert_eq!(stream.get_plain_content_with_limit(1024).unwrap(), plain);
+            let mut session = distinct_parameterized_forms(&stream);
+            let page = session.page_text(1).unwrap();
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+            assert_eq!(session.cache.forms.len(), 9);
+            assert_eq!(
+                MAX_PAGE_FORM_DECODE_BYTES - session.cache.last_form_work.unwrap().decode,
+                9 * plain.len().max(stream.content.len()),
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_predictors_and_chains_keep_the_worst_case_reservation() {
+        let mut tiff = flate_test_form(b"q Q ");
+        tiff.dict.set(
+            "DecodeParms",
+            dictionary! {
+                "Predictor" => 2, "Columns" => 1, "Colors" => 1, "BitsPerComponent" => 8,
+            },
+        );
+        let mut png = flate_test_form(b"\0q Q ");
+        png.dict.set(
+            "DecodeParms",
+            dictionary! { "Predictor" => 12, "Columns" => 4 },
+        );
+        let chain = Stream::new(
+            dictionary! {
+                "Filter" => vec![Object::Name(b"ASCIIHexDecode".to_vec()), Object::Name(b"ASCIIHexDecode".to_vec())],
+            },
+            b"3731323035313230>".to_vec(),
+        );
+        for stream in [tiff, png, chain] {
+            assert_eq!(stream.get_plain_content_with_limit(1024).unwrap(), b"q Q ");
+            let mut session = distinct_parameterized_forms(&stream);
+            let error = session.page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: Form decode byte budget"),
+                "{error}"
+            );
+            assert_eq!(session.cache.last_form_work.unwrap().decode, 0);
+        }
     }
 
     #[test]
@@ -5923,6 +6135,112 @@ mod tests {
         eprintln!(
             "corpus Form peaks: calls={}, decode_bytes={}, execution_charge={}; locations={peak_files:?}",
             peaks[0], peaks[1], peaks[2]
+        );
+    }
+
+    /// Three Form levels: A calls B N times, B calls C N times, C saves/restores N times.
+    fn shallow_nested_forms_pdf(n: usize) -> Vec<u8> {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        let mut session = open_session(&bytes);
+        let form = |content, resources| {
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => resources,
+                },
+                content,
+            )
+        };
+        let c = session
+            .doc
+            .add_object(form(b"q Q\n".repeat(n), dictionary! {}));
+        let b = session.doc.add_object(form(
+            b"/C Do\n".repeat(n),
+            dictionary! {
+                "XObject" => dictionary! { "C" => c },
+            },
+        ));
+        let a = session
+            .doc
+            .objects
+            .values_mut()
+            .find_map(|obj| {
+                let stream = obj.as_stream_mut().ok()?;
+                (stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+                    .then_some(stream)
+            })
+            .unwrap();
+        a.set_content(b"/B Do\n".repeat(n));
+        a.dict.set(
+            "Resources",
+            dictionary! { "XObject" => dictionary! { "B" => b } },
+        );
+        let mut output = Vec::new();
+        session.doc.save_to(&mut output).unwrap();
+        output
+    }
+
+    #[test]
+    fn shallow_nested_forms_charge_each_repeated_execution_and_fail_explicitly() {
+        for n in [20, 40, 80] {
+            let bytes = shallow_nested_forms_pdf(n);
+            let mut session = open_session(&bytes);
+            let page = session.page_text(1).unwrap();
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+            assert!(page.spans.is_empty());
+            assert_eq!(session.cache.forms.len(), 3);
+            let used = session.cache.last_form_work.unwrap();
+            assert_eq!(MAX_PAGE_FORM_CALLS - used.calls, 1 + n + n * n);
+            let mut expected_charge = 0;
+            for (program, charge) in session.cache.forms.values() {
+                let repetitions = match program.ops[0].kind {
+                    OpKind::Save => n * n, // C: N^2 visits, N q/Q pairs each.
+                    OpKind::Invoke if program.operands[0].as_name().unwrap() == b"C" => n,
+                    OpKind::Invoke => 1,
+                    _ => panic!("unexpected nested Form program"),
+                };
+                expected_charge += charge * repetitions;
+            }
+            assert_eq!(MAX_PAGE_FORM_WORK_BYTES - used.execute, expected_charge);
+        }
+        let mut session = open_session(&shallow_nested_forms_pdf(160));
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form execution byte budget"),
+            "{error}"
+        );
+        assert_eq!(session.cache.forms.len(), 3);
+        assert!(
+            session.cache.last_form_work.unwrap().calls > 0,
+            "work cap fires before call cap"
+        );
+    }
+
+    /// Run each N in a separate process to measure RSS without prior test peaks.
+    #[test]
+    #[ignore = "manual nested-Forms timing/RSS diagnostic; set TPE_FORM_DIAGNOSTIC_N"]
+    fn measure_shallow_nested_forms() {
+        let n = std::env::var("TPE_FORM_DIAGNOSTIC_N")
+            .unwrap_or_else(|_| "80".into())
+            .parse::<usize>()
+            .unwrap();
+        let bytes = shallow_nested_forms_pdf(n);
+        let mut session = open_session(&bytes);
+        let start = std::time::Instant::now();
+        let result = session.page_text(1);
+        let elapsed = start.elapsed();
+        let used = session.cache.last_form_work.unwrap();
+        eprintln!(
+            "N={n}, PDF bytes={}, uncapped q/Q pairs={}, elapsed={elapsed:?}, calls={}, execution_charge={}, result={}",
+            bytes.len(),
+            n.pow(3),
+            MAX_PAGE_FORM_CALLS - used.calls,
+            MAX_PAGE_FORM_WORK_BYTES - used.execute,
+            result.map_or_else(|err| err.to_string(), |_| "ok".into())
         );
     }
 
