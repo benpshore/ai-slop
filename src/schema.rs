@@ -229,7 +229,8 @@ pub struct ReferenceEntry {
     pub resolved: Option<Resolved>,
 }
 
-/// One resolution attempt on an entry. `outcome` is `verified`,
+/// One resolution attempt on an entry. `outcome` is `candidate` (metadata
+/// agrees but the query winner is not yet known), `ambiguous`, `verified`,
 /// `not_found` (the DOI or query returned nothing), `mismatch` (a record
 /// came back but disagreed with the printed entry; `detail` says which
 /// field and both values) or `error` (the request failed).
