@@ -97,15 +97,32 @@ jobs:
         run: python3 scripts/pmc_sample.py --fetch --manifest "$MANIFEST" --cache "$CACHE_DIR"
       - name: Verify the historical PMC9866638 XML before preserving it
         id: pinned_xml
-        if: steps.fetch.outcome == 'success' && env.SAMPLE != 'true'
+        if: always() && env.SAMPLE != 'true'
         run: |
           printf '%s  %s\n' 707148ab259c325c84acd030be5a5c8b "$CACHE_DIR/PMC9866638.1.xml" | md5sum --check
-          sha256sum "$CACHE_DIR/PMC9866638.1.xml"
+          printf '%s  %s\n' 4bc081237097ef294c09e1f50b5f0a6d383f270ded3fcedbe8eb811661e6630b "$CACHE_DIR/PMC9866638.1.xml" | sha256sum --check
+          mkdir -p out/verified-pmc
+          cp "$CACHE_DIR/PMC9866638.1.xml" out/verified-pmc/
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          manifest = json.loads(Path("corpus/pmc-manifest.json").read_text())
+          item = next(item for item in manifest["items"] if item["pmcid"] == "PMC9866638")
+          provenance = {
+              "manifest_item": item,
+              "xml_sha256": "4bc081237097ef294c09e1f50b5f0a6d383f270ded3fcedbe8eb811661e6630b",
+              "source_run": 36819388522,
+              "source_head": "0254da617f872ba862521012068cc2f6069d03b3",
+              "recovery_run": os.environ["GITHUB_RUN_ID"],
+              "recovery_commit": os.environ["GITHUB_SHA"],
+          }
+          Path("out/verified-pmc/provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: steps.pinned_xml.outcome == 'success'
         with:
           name: verified-PMC9866638-xml
-          path: .corpus-cache/pmc/PMC9866638.1.xml
+          path: out/verified-pmc
           if-no-files-found: error
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: steps.corpus.outputs.cache-hit != 'true'
