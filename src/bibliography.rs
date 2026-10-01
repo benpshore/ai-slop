@@ -340,13 +340,38 @@ pub struct RoutedScan {
     pub backend: BackendIdentity,
 }
 
-/// Replace `best` by `candidate` when the candidate is the better list: a
-/// found list beats none, and among found lists the longer one wins (the
-/// second opinion is only asked for when the first looked cut short).
-fn keep_better(best: &mut RoutedScan, candidate: RoutedScan, note: String) {
+/// Rank found lists by the evidence that prompted routing: usable decoding,
+/// then list plausibility, then entry count. Count alone cannot distinguish
+/// repaired text from an equally long corrupted list or spurious extra entries.
+fn scan_quality(scan: &BibliographyScan) -> (bool, bool, usize) {
+    (
+        scan.assessment.scanned == 0 && scan.assessment.unmapped == 0,
+        scan.plausible,
+        scan.references.len(),
+    )
+}
+
+/// Whether the selected result needs no further fallback. This must be checked
+/// on the retained scan, not on a candidate that may have been rejected.
+fn scan_usable(scan: &BibliographyScan) -> bool {
+    scan.found && scan_quality(scan).0 && scan.plausible
+}
+
+/// Replace `best` only when a found candidate improves the available evidence.
+/// Keep the existing result on ties and preserve route history on replacement.
+fn keep_better(best: &mut RoutedScan, mut candidate: RoutedScan, note: String) {
     let better = candidate.scan.found
-        && (!best.scan.found || candidate.scan.references.len() > best.scan.references.len());
+        && (!best.scan.found || scan_quality(&candidate.scan) > scan_quality(&best.scan));
     if better || !best.scan.found {
+        // Page/content warnings describe the selected extraction; route history
+        // describes all attempted backends and survives a successful replacement.
+        let history = best
+            .scan
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("routed:") || w.starts_with("route not taken:"))
+            .cloned();
+        candidate.scan.warnings.extend(history);
         *best = candidate;
     }
     best.scan.warnings.push(note);
@@ -358,7 +383,8 @@ fn keep_better(best: &mut RoutedScan, candidate: RoutedScan, note: String) {
 /// converts the last `max(pages read, FALLBACK_WINDOW)` pages if `pdfium`
 /// did not settle it. A list that `lopdf` found but that looks cut short
 /// ([`list_plausible`]) goes to docling for the pages from its heading on,
-/// and the longer list is kept. A route whose backend is missing or fails
+/// and decoding quality and plausibility take priority over entry count.
+/// A route whose backend is missing or fails
 /// is noted in the warnings and the best scan so far is returned.
 pub fn scan_backward_auto_observed(
     bytes: &[u8],
@@ -373,7 +399,7 @@ pub fn scan_backward_auto_observed(
     };
     let first = best.scan.assessment;
     let mut route = first.route();
-    if best.scan.found && best.scan.plausible && route == Route::Lopdf {
+    if scan_usable(&best.scan) {
         return Ok(best);
     }
     let total = best.scan.total_pages;
@@ -389,7 +415,6 @@ pub fn scan_backward_auto_observed(
         if let Some(pdfium) = router::extractor_for(Route::Pdfium) {
             match scan_window(pdfium.as_ref(), bytes, password, floor, observe) {
                 Ok(scan) => {
-                    let again = scan.assessment;
                     let note = format!(
                         "routed: pdfium ({} of {} pages unmapped; lopdf {})",
                         first.unmapped,
@@ -400,7 +425,6 @@ pub fn scan_backward_auto_observed(
                             "found none"
                         }
                     );
-                    let plausible = scan.plausible;
                     keep_better(
                         &mut best,
                         RoutedScan {
@@ -409,8 +433,7 @@ pub fn scan_backward_auto_observed(
                         },
                         note,
                     );
-                    if best.scan.found && plausible && again.route_after_pdfium() != Route::Docling
-                    {
+                    if scan_usable(&best.scan) {
                         return Ok(best);
                     }
                 }
@@ -488,6 +511,93 @@ mod tests {
     use crate::backend::Extractor;
     use crate::backend::lopdf_backend::LopdfBackend;
     use crate::pipeline::Progress;
+
+    fn routed(name: &str, count: usize, unmapped: usize, plausible: bool) -> super::RoutedScan {
+        super::RoutedScan {
+            backend: crate::schema::BackendIdentity {
+                name: name.to_string(),
+                version: "test".to_string(),
+                config_digest: String::new(),
+            },
+            scan: super::BibliographyScan {
+                total_pages: 1,
+                pages_scanned: 1,
+                found: count > 0,
+                section_page: (count > 0).then_some(1),
+                heading: None,
+                references: vec![crate::schema::ReferenceEntry::default(); count],
+                warnings: Vec::new(),
+                assessment: crate::router::Assessment {
+                    pages: 1,
+                    unmapped,
+                    ..crate::router::Assessment::default()
+                },
+                plausible,
+            },
+        }
+    }
+
+    #[test]
+    fn fallback_keeps_repaired_text_even_with_equal_entry_count() {
+        let mut best = routed("lopdf", 3, 1, true);
+        let mut repaired = routed("pdfium", 3, 0, true);
+        repaired.scan.references[0].raw = "Repaired title".to_string();
+        super::keep_better(&mut best, repaired, "routed: pdfium".to_string());
+        assert_eq!(best.backend.name, "pdfium");
+        assert_eq!(best.scan.references[0].raw, "Repaired title");
+        assert!(super::scan_usable(&best.scan));
+    }
+
+    #[test]
+    fn fallback_prefers_plausible_lists_over_spurious_extra_entries() {
+        let mut best = routed("lopdf", 5, 0, false);
+        super::keep_better(
+            &mut best,
+            routed("docling", 3, 0, true),
+            "routed: docling".to_string(),
+        );
+        assert_eq!(best.backend.name, "docling");
+        super::keep_better(
+            &mut best,
+            routed("pdfium", 6, 1, true),
+            "routed: pdfium".to_string(),
+        );
+        assert_eq!(best.backend.name, "docling");
+        assert_eq!(best.scan.references.len(), 3);
+    }
+
+    #[test]
+    fn rejected_empty_fallback_does_not_certify_the_retained_scan() {
+        let mut best = routed("lopdf", 3, 1, true);
+        // A backend returning no list has no decoding warnings and is plausible
+        // by convention, but cannot certify the corrupted list we retained.
+        super::keep_better(
+            &mut best,
+            routed("pdfium", 0, 0, true),
+            "routed: pdfium".to_string(),
+        );
+        assert_eq!(best.backend.name, "lopdf");
+        assert!(!super::scan_usable(&best.scan));
+    }
+
+    #[test]
+    fn fallback_retains_ties_but_accepts_longer_equally_usable_lists() {
+        let mut best = routed("lopdf", 3, 0, true);
+        super::keep_better(
+            &mut best,
+            routed("pdfium", 3, 0, true),
+            "routed: pdfium".to_string(),
+        );
+        assert_eq!(best.backend.name, "lopdf");
+        super::keep_better(
+            &mut best,
+            routed("docling", 4, 0, true),
+            "routed: docling".to_string(),
+        );
+        assert_eq!(best.backend.name, "docling");
+        assert_eq!(best.scan.references.len(), 4);
+        assert_eq!(best.scan.warnings, ["routed: pdfium", "routed: docling"]);
+    }
 
     fn pdf(pages: &[&[&str]]) -> Vec<u8> {
         let mut document = Document::with_version("1.5");
