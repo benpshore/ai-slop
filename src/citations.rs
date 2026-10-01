@@ -2909,7 +2909,9 @@ fn title_end(text: &str) -> usize {
                 if period && let Some(marker) = part_marker_re().find(&text[pos + 1..]) {
                     return pos + marker.end();
                 }
-                return pos;
+                // Sentence-separating periods are omitted, but question and
+                // exclamation marks are part of the printed title.
+                return pos + usize::from(!period);
             }
         }
         search = pos + 1;
@@ -9205,7 +9207,7 @@ mod tests {
             );
             assert_eq!(
                 live.title.as_deref(),
-                Some("LiveDescribe: Can Amateur Describers Create High-Quality Audio Description")
+                Some("LiveDescribe: Can Amateur Describers Create High-Quality Audio Description?")
             );
 
             let goli = parsed(
@@ -9215,8 +9217,24 @@ mod tests {
             );
             assert_eq!(
                 goli.title.as_deref(),
-                Some("Frontiers: Can large language models capture human preferences")
+                Some("Frontiers: Can large language models capture human preferences?")
             );
+        }
+
+        #[test]
+        fn terminal_title_punctuation_survives_journal_boundary() {
+            for mark in ['?', '!'] {
+                let text = format!("Can widgets work{mark} Marketing Science 43(4):709–722.");
+                let expected = format!("Can widgets work{mark}");
+                assert_eq!(&text[..title_end(&text)], expected);
+                let raw = format!("Goli A, Singh A (2024) {text}");
+                let entry = parsed(&raw, None);
+                assert_eq!(entry.title.as_deref(), Some(expected.as_str()));
+                assert_eq!(entry.year, Some(2024));
+                assert_eq!(entry.raw, raw);
+            }
+            let text = "Widgets work. Marketing Science 43(4):709–722.";
+            assert_eq!(&text[..title_end(text)], "Widgets work");
         }
 
         /// A masked identifier after a clause is no evidence of a subtitle
@@ -9230,7 +9248,7 @@ mod tests {
                  Artificial Intelligence. https://example.org/papers/does-it-work",
                 Some("[16]"),
             );
-            assert_eq!(work.title.as_deref(), Some("Does It Work"));
+            assert_eq!(work.title.as_deref(), Some("Does It Work?"));
             assert_eq!(
                 work.venue.as_deref(),
                 Some("Journal of Artificial Intelligence")
