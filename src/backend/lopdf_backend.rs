@@ -165,8 +165,9 @@ const LIGATURE_POLICY: &str = "expand";
 /// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
 /// stack per Form; 3 = painted paths and Image `XObject`s become figures;
 /// 4 = image placements are bounded per page; 5 = bounded Form decoding,
-/// caching and execution, with explicit page errors on resource exhaustion.
-const CONTENT_POLICY: &str = "5";
+/// caching and execution, with explicit page errors on resource exhaustion;
+/// 6 = fold balanced empty save/restore pairs when compiling Form programs.
+const CONTENT_POLICY: &str = "6";
 
 /// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
 /// long is a `rule` figure.
@@ -294,6 +295,9 @@ struct SessionCache {
     form_bytes: usize,
     #[cfg(test)]
     last_form_work: Option<FormWork>,
+    /// Reference interpreter used only by equivalence tests and diagnostics.
+    #[cfg(test)]
+    disable_form_folding: bool,
 }
 
 impl SessionCache {
@@ -331,6 +335,10 @@ struct FormWork {
     decode: usize,
     execute: usize,
     calls: usize,
+    #[cfg(test)]
+    interpreted_ops: usize,
+    #[cfg(test)]
+    elided_ops: usize,
 }
 
 impl Default for FormWork {
@@ -339,6 +347,10 @@ impl Default for FormWork {
             decode: MAX_PAGE_FORM_DECODE_BYTES,
             execute: MAX_PAGE_FORM_WORK_BYTES,
             calls: MAX_PAGE_FORM_CALLS,
+            #[cfg(test)]
+            interpreted_ops: 0,
+            #[cfg(test)]
+            elided_ops: 0,
         }
     }
 }
@@ -1773,9 +1785,36 @@ struct TextProgram {
     operands: Vec<Object>,
     /// `[x0, y0, x1, y1]` of each painted path, in the stream's coordinates.
     paths: Vec<[f32; 4]>,
+    /// Balanced empty save/restore operations removed at Form compilation.
+    elided_ops: usize,
 }
 
 impl TextProgram {
+    /// Remove only adjacent empty q/Q pairs (including nested empty pairs).
+    /// Every other retained operator is a barrier. Text, paints, transforms,
+    /// invocations and unbalanced restores retain their order and multiplicity.
+    fn fold_empty_saves(&mut self) {
+        let mut written = 0;
+        for read in 0..self.ops.len() {
+            let op = self.ops[read];
+            if op.kind == OpKind::Restore
+                && written > 0
+                && self.ops[written - 1].kind == OpKind::Save
+            {
+                written -= 1;
+                self.elided_ops += 2;
+            } else {
+                self.ops[written] = op;
+                written += 1;
+            }
+        }
+        if written < self.ops.len() {
+            self.ops.truncate(written);
+            // Charge the compact program; untouched programs keep their capacity.
+            self.ops.shrink_to_fit();
+        }
+    }
+
     /// Rough size of the program in memory: the vectors' elements plus the
     /// heap bytes of string, name and array operands.
     fn estimated_bytes(&self) -> usize {
@@ -2661,6 +2700,10 @@ impl<'a> Interpreter<'a> {
             if self.resource_error.is_some() {
                 break;
             }
+            #[cfg(test)]
+            {
+                self.form_work.interpreted_ops += 1;
+            }
             let operands = program.operands(op);
             match op.kind {
                 OpKind::Save => self.stack.push(self.state.clone()),
@@ -3042,10 +3085,17 @@ impl<'a> Interpreter<'a> {
             if layers == 1 && !policy.uses_predictor {
                 self.form_work.decode += limit - content_bytes.len().max(stream.content.len());
             }
-            let Ok(program) = lex_content(&content_bytes) else {
+            let Ok(mut program) = lex_content(&content_bytes) else {
                 self.warn(format!("XObject {label}: undecodable content stream"));
                 return;
             };
+            #[cfg(test)]
+            let fold = !self.cache.disable_form_folding;
+            #[cfg(not(test))]
+            let fold = true;
+            if fold {
+                program.fold_empty_saves();
+            }
             let work = program.estimated_bytes().max(MIN_FORM_CHARGE);
             let program = Rc::new(program);
             if let Some(id) = stream_id {
@@ -3056,6 +3106,10 @@ impl<'a> Interpreter<'a> {
         if !charge(&mut self.form_work.execute, work) {
             self.resource_error = Some("Form execution byte budget exceeded");
             return;
+        }
+        #[cfg(test)]
+        {
+            self.form_work.elided_ops += program.elided_ops;
         }
         // Nothing in it shows text, paints or moves the text position, and
         // it cannot reach the caller's state, so running it would change
@@ -5084,7 +5138,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "5".to_string());
+        config.insert("content".to_string(), "6".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
@@ -5093,6 +5147,8 @@ mod tests {
         config.insert("content".to_string(), "3".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "5".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "6".to_string());
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
@@ -5803,6 +5859,7 @@ mod tests {
                 MAX_FORM_CACHE_BYTES / 2 + 1
             ])],
             paths: Vec::new(),
+            elided_ops: 0,
         });
         assert!(cache.insert_form((1, 0), &big));
         assert!(cache.insert_form((2, 0), &big), "evict the oldest entry");
@@ -5812,6 +5869,7 @@ mod tests {
             ops: Vec::new(),
             operands: Vec::new(),
             paths: Vec::new(),
+            elided_ops: 0,
         });
         assert!(cache.insert_form((3, 0), &small));
         assert_eq!(cache.forms.len(), 2);
@@ -5845,6 +5903,7 @@ mod tests {
             })],
             ops: Vec::with_capacity(100),
             paths: Vec::new(),
+            elided_ops: 0,
         };
         assert!(program.estimated_bytes() >= 4096 + 100 * size_of::<TextOp>());
     }
@@ -6235,7 +6294,7 @@ mod tests {
     }
 
     /// Three Form levels: A calls B N times, B calls C N times, C saves/restores N times.
-    fn shallow_nested_forms_pdf(n: usize) -> Vec<u8> {
+    fn shallow_nested_forms_pdf(n: usize, text: bool) -> Vec<u8> {
         let bytes = build_pdf(
             vec![vec![Operation::new("Do", vec!["X1".into()])]],
             Some(vec![]),
@@ -6251,9 +6310,12 @@ mod tests {
                 content,
             )
         };
-        let c = session
-            .doc
-            .add_object(form(b"q Q\n".repeat(n), dictionary! {}));
+        let leaf: &[u8] = if text {
+            b"q BT /F1 10 Tf 1 0 0 1 50 50 Tm (X) Tj ET Q\n"
+        } else {
+            b"q Q\n"
+        };
+        let c = session.doc.add_object(form(leaf.repeat(n), dictionary! {}));
         let b = session.doc.add_object(form(
             b"/C Do\n".repeat(n),
             dictionary! {
@@ -6282,8 +6344,8 @@ mod tests {
 
     #[test]
     fn shallow_nested_forms_charge_each_repeated_execution_and_fail_explicitly() {
-        for n in [20, 40, 80] {
-            let bytes = shallow_nested_forms_pdf(n);
+        for n in [20, 40, 80, 160] {
+            let bytes = shallow_nested_forms_pdf(n, false);
             let mut session = open_session(&bytes);
             let page = session.page_text(1).unwrap();
             assert!(page.warnings.is_empty(), "{:?}", page.warnings);
@@ -6291,28 +6353,193 @@ mod tests {
             assert_eq!(session.cache.forms.len(), 3);
             let used = session.cache.last_form_work.unwrap();
             assert_eq!(MAX_PAGE_FORM_CALLS - used.calls, 1 + n + n * n);
+            assert_eq!(used.interpreted_ops, 1 + n + n * n);
+            assert_eq!(used.elided_ops, 2 * n.pow(3));
             let mut expected_charge = 0;
             for (program, charge) in session.cache.forms.values() {
-                let repetitions = match program.ops[0].kind {
-                    OpKind::Save => n * n, // C: N^2 visits, N q/Q pairs each.
-                    OpKind::Invoke if program.operands[0].as_name().unwrap() == b"C" => n,
-                    OpKind::Invoke => 1,
+                let repetitions = match program.ops.first().map(|op| op.kind) {
+                    None => n * n, // C: N^2 visits, empty after folding q/Q.
+                    Some(OpKind::Invoke) if program.operands[0].as_name().unwrap() == b"C" => n,
+                    Some(OpKind::Invoke) => 1,
                     _ => panic!("unexpected nested Form program"),
                 };
                 expected_charge += charge * repetitions;
             }
             assert_eq!(MAX_PAGE_FORM_WORK_BYTES - used.execute, expected_charge);
         }
-        let mut session = open_session(&shallow_nested_forms_pdf(160));
+        let mut session = open_session(&shallow_nested_forms_pdf(400, false));
         let error = session.page_text(1).unwrap_err().to_string();
         assert!(
-            error.contains("resource_limit: Form execution byte budget"),
+            error.contains("resource_limit: Form invocation budget"),
             "{error}"
         );
         assert_eq!(session.cache.forms.len(), 3);
+        assert_eq!(session.cache.last_form_work.unwrap().calls, 0);
+        // The production folded path still rejects genuinely repeated output
+        // at the execution budget, before it runs out of invocation allowance.
+        let mut session = open_session(&shallow_nested_forms_pdf(64, true));
         assert!(
-            session.cache.last_form_work.unwrap().calls > 0,
-            "work cap fires before call cap"
+            session
+                .page_text(1)
+                .unwrap_err()
+                .to_string()
+                .contains("resource_limit: Form execution byte budget")
+        );
+        assert!(session.cache.last_form_work.unwrap().calls > 0);
+        // Nonempty programs still consume the execution budget.
+        let mut session = open_session(&shallow_nested_forms_pdf(160, false));
+        session.cache.disable_form_folding = true;
+        assert!(
+            session
+                .page_text(1)
+                .unwrap_err()
+                .to_string()
+                .contains("resource_limit: Form execution byte budget")
+        );
+    }
+
+    #[test]
+    fn form_folding_preserves_repeated_text_and_transforms() {
+        for n in [2usize, 4, 8] {
+            let bytes = shallow_nested_forms_pdf(n, true);
+            let mut folded = open_session(&bytes);
+            let mut reference = open_session(&bytes);
+            reference.cache.disable_form_folding = true;
+            let page = folded.page_text(1).unwrap();
+            assert_eq!(page, reference.page_text(1).unwrap());
+            assert_eq!(page.spans.len(), n.pow(3));
+            assert!(page.spans.iter().all(|s| s.text == "X"));
+        }
+        let form = [
+            vec![
+                Operation::new("q", vec![]),
+                Operation::new("q", vec![]),
+                Operation::new("Q", vec![]),
+                Operation::new("Q", vec![]),
+            ],
+            text_ops(10, 50, 50, "Positioned"),
+        ]
+        .concat();
+        let mut calls = Vec::new();
+        for x in [20, 80] {
+            calls.extend([
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![1.into(), 0.into(), 0.into(), 1.into(), x.into(), 30.into()],
+                ),
+                Operation::new("Do", vec!["X1".into()]),
+                Operation::new("Q", vec![]),
+            ]);
+        }
+        let bytes = build_pdf(vec![calls], Some(form));
+        let mut reference = open_session(&bytes);
+        reference.cache.disable_form_folding = true;
+        let page = open_session(&bytes).page_text(1).unwrap();
+        assert_eq!(page, reference.page_text(1).unwrap());
+        assert_eq!(page.spans.len(), 2);
+        assert_ne!(page.spans[0].bbox, page.spans[1].bbox);
+    }
+
+    #[test]
+    fn form_folding_keeps_state_and_paint_barriers_and_unbalanced_restores() {
+        let mut program = lex_content(b"Q q q Q Q q 1 0 0 1 7 9 cm Q q 0 0 3 4 re f Q q BT /F1 12 Tf (X) Tj ET Q q /X1 Do Q q").unwrap();
+        let original = program.ops.len();
+        program.fold_empty_saves();
+        assert_eq!(program.elided_ops, 4);
+        assert_eq!(program.ops.len(), original - 4);
+        assert_eq!(program.ops.first().unwrap().kind, OpKind::Restore);
+        assert_eq!(program.ops.last().unwrap().kind, OpKind::Save);
+        for kind in [
+            OpKind::Concat,
+            OpKind::FillPath,
+            OpKind::Show,
+            OpKind::Invoke,
+        ] {
+            assert!(program.ops.iter().any(|op| op.kind == kind));
+        }
+    }
+
+    /// This diagnostic documents an unresolved font path; it is not a limit.
+    #[test]
+    #[ignore = "manual font-cache/CMap expansion audit; run each case in a fresh process"]
+    fn measure_unused_font_cmap_expansion() {
+        let codes = std::env::var("TPE_FONT_DIAGNOSTIC_CODES")
+            .unwrap_or_else(|_| "65536".into())
+            .parse::<u32>()
+            .unwrap();
+        let fonts = std::env::var("TPE_FONT_DIAGNOSTIC_FONTS")
+            .unwrap_or_else(|_| "1".into())
+            .parse::<usize>()
+            .unwrap();
+        // Keep this audit fixture safe to run locally. These are test bounds,
+        // not enforced production policy: source ranges can reach u32::MAX.
+        assert!((1..=262_144).contains(&codes));
+        assert!((1..=4).contains(&fonts));
+        let cmap = format!(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /Audit def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<00000000> <FFFFFFFF>\nendcodespacerange\n\
+             1 beginbfrange\n<00000000> <{:08X}> <0020>\nendbfrange\n\
+             endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend",
+            codes - 1
+        );
+        let mut session = open_session(&build_pdf(vec![vec![]], None));
+        let cmap_id = session
+            .doc
+            .add_object(Stream::new(dictionary! {}, cmap.as_bytes().to_vec()));
+        let mut font_map = Dictionary::new();
+        for index in 0..fonts {
+            let id = session.doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Audit",
+                "Encoding" => "Identity-H", "ToUnicode" => cmap_id,
+            });
+            font_map.set(format!("F{index}"), id);
+        }
+        session
+            .doc
+            .get_object_mut(session.pages[&1])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", dictionary! { "Font" => font_map });
+        let start = std::time::Instant::now();
+        let page = session.page_text(1).unwrap();
+        let elapsed = start.elapsed();
+        assert!(page.spans.is_empty());
+        assert_eq!(session.cache.fonts.len(), fonts);
+        for font in session.cache.fonts.values() {
+            let Decode::UnicodeMap(Encoding::UnicodeMapEncoding(map)) = &font.decode else {
+                panic!("fixture must parse a ToUnicode map");
+            };
+            // The compact forward map has one range. The eagerly built reverse
+            // map retains every source code, even though no text used this font.
+            assert_eq!(map.bf_ranges[3].len(), 1);
+            assert_eq!(
+                map.get_source_codes_for_unicode(&[0x20]).unwrap().len(),
+                codes.div_ceil(65_536) as usize
+            );
+        }
+        let peak_rss_kib = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines().find_map(|line| {
+                    line.strip_prefix("VmHWM:")?
+                        .split_whitespace()
+                        .next()?
+                        .parse::<usize>()
+                        .ok()
+                })
+            });
+        eprintln!(
+            "FONT_DIAGNOSTIC {}",
+            serde_json::json!({
+                "codes_per_font": codes, "cmap_bytes": cmap.len(), "cached_fonts": session.cache.fonts.len(),
+                "expanded_reverse_entries": u64::from(codes) * fonts as u64,
+                "emitted_spans": page.spans.len(), "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                "peak_rss_kib": peak_rss_kib,
+            })
         );
     }
 
@@ -6324,19 +6551,38 @@ mod tests {
             .unwrap_or_else(|_| "80".into())
             .parse::<usize>()
             .unwrap();
-        let bytes = shallow_nested_forms_pdf(n);
+        let text = std::env::var_os("TPE_FORM_DIAGNOSTIC_TEXT").is_some();
+        let reference = std::env::var_os("TPE_FORM_DIAGNOSTIC_UNOPTIMIZED").is_some();
+        let bytes = shallow_nested_forms_pdf(n, text);
         let mut session = open_session(&bytes);
+        session.cache.disable_form_folding = reference;
         let start = std::time::Instant::now();
         let result = session.page_text(1);
         let elapsed = start.elapsed();
         let used = session.cache.last_form_work.unwrap();
+        let peak_rss_kib = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("VmHWM:")?
+                        .split_whitespace()
+                        .next()?
+                        .parse::<usize>()
+                        .ok()
+                })
+            });
         eprintln!(
-            "N={n}, PDF bytes={}, uncapped q/Q pairs={}, elapsed={elapsed:?}, calls={}, execution_charge={}, result={}",
-            bytes.len(),
-            n.pow(3),
-            MAX_PAGE_FORM_CALLS - used.calls,
-            MAX_PAGE_FORM_WORK_BYTES - used.execute,
-            result.map_or_else(|err| err.to_string(), |_| "ok".into())
+            "FORM_DIAGNOSTIC {}",
+            serde_json::json!({
+                "n": n, "text": text, "folded": !reference, "pdf_bytes": bytes.len(),
+                "elapsed_ms": elapsed.as_secs_f64() * 1000.0, "peak_rss_kib": peak_rss_kib,
+                "interpreted_ops": used.interpreted_ops, "elided_noop_ops": used.elided_ops,
+                "calls": MAX_PAGE_FORM_CALLS - used.calls,
+                "execution_charge": MAX_PAGE_FORM_WORK_BYTES - used.execute,
+                "emitted_spans": result.as_ref().ok().map(|p| p.spans.len()),
+                "emitted_text_bytes": result.as_ref().ok().map(|p| p.spans.iter().map(|s| s.text.len()).sum::<usize>()),
+                "result": result.map_or_else(|err| err.to_string(), |_| "ok".into()),
+            })
         );
     }
 
