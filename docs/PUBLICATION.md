@@ -3,7 +3,10 @@
 Applies to `tpe-app::jobs`, independently of the GPUI frontend.
 
 1. Extract and serialize all output bytes. Stage every file in the source
-   directory using exclusively created private temporary files. Flush each
+   directory using exclusively created temporary files. On Unix they request
+   mode `0666` at creation; the caller's umask narrows it (for example, `022`
+   produces `0644`, and `077` produces `0600`). Publication preserves this mode;
+   no code reads or changes the process-wide umask or widens permissions later. Flush each
    file with `sync_all`. A staging failure never starts a ledger replacement.
 2. For text jobs, prepare the full result and timings inside one SQLite
    transaction. Replacing an older result is still reversible at this point.

@@ -33,9 +33,17 @@ impl StagedOutputs {
             linked: Vec::new(),
         };
         for (suffix, bytes) in files {
-            let mut file = tempfile::Builder::new()
-                .prefix(".pdftextract-")
-                .tempfile_in(&staged.directory)?;
+            let mut builder = tempfile::Builder::new();
+            builder.prefix(".pdftextract-");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Applied by open(2), so the caller's umask can only narrow
+                // permissions. Hard-link publication retains this mode. Do
+                // not chmod afterwards or read/change the process-wide umask.
+                builder.permissions(fs::Permissions::from_mode(0o666));
+            }
+            let mut file = builder.tempfile_in(&staged.directory)?;
             file.write_all(bytes)?;
             file.as_file().sync_all()?;
             staged.files.push(((*suffix).to_owned(), file));
@@ -179,6 +187,70 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn published_outputs_respect_caller_umask() {
+        // Only each child shell changes its umask. Other tests and worker
+        // threads keep their inherited creation policy.
+        for (mask, expected) in [
+            ("000", "666"),
+            ("002", "664"),
+            ("022", "644"),
+            ("027", "640"),
+            ("077", "600"),
+            ("777", "000"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new("sh")
+                .args(["-c", "umask \"$1\"; exec \"$2\" --exact publication::tests::publication_permissions_child --nocapture", "publication-test", mask])
+                .arg(std::env::current_exe().unwrap())
+                .env("TPE_TEST_PUBLICATION_DIRECTORY", directory.path())
+                .env("TPE_TEST_PUBLICATION_MODE", expected)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "umask {mask}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn publication_permissions_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(directory) = std::env::var_os("TPE_TEST_PUBLICATION_DIRECTORY") else {
+            return;
+        };
+        let expected =
+            u32::from_str_radix(&std::env::var("TPE_TEST_PUBLICATION_MODE").unwrap(), 8).unwrap();
+        let source = Path::new(&directory).join("paper.pdf");
+        let mut outputs = StagedOutputs::stage(
+            &source,
+            &[
+                (".txt", b"full text".to_vec()),
+                (".references.txt", b"references".to_vec()),
+                (".references.json", b"[]".to_vec()),
+            ],
+        )
+        .unwrap();
+        for (_, staged) in &outputs.files {
+            assert_eq!(
+                staged.as_file().metadata().unwrap().permissions().mode() & 0o777,
+                expected
+            );
+        }
+        let published = outputs.publish_then(|| Ok(())).unwrap();
+        assert_eq!(published.len(), 3);
+        for path in published {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                expected
+            );
+        }
     }
 
     #[test]
