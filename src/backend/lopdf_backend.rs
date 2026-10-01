@@ -2999,7 +2999,7 @@ impl<'a> Interpreter<'a> {
         if depth >= self.max_depth {
             let limit = self.max_depth;
             self.warn(format!(
-                "XObject {label}: nesting deeper than {limit}; skipped"
+                "resource_limit: XObject {label}: nesting deeper than {limit}; skipped"
             ));
             return;
         }

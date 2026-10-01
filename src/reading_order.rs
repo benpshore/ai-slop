@@ -2066,12 +2066,16 @@ pub fn order_page(page: &mut PageText) {
     }
     if accent_skipped {
         let number = page.page;
-        let msg = format!("accent composition skipped at page {number}: work limit exceeded");
+        let msg = format!(
+            "resource_limit: accent composition skipped at page {number}: work limit exceeded"
+        );
         push_warning(page, msg);
     }
     if grouped.len() > MAX_LINES {
         let n = grouped.len();
-        let msg = format!("too many lines: {n} > {MAX_LINES}; the rest is appended unordered");
+        let msg = format!(
+            "resource_limit: too many lines: {n} > {MAX_LINES}; the rest is appended unordered"
+        );
         push_warning(page, msg);
     }
     if !margin.is_empty() {
@@ -2755,7 +2759,7 @@ mod tests {
         assert_eq!(page.text.matches('\u{302}').count(), 0);
         assert_eq!(
             page.warnings,
-            ["accent composition skipped at page 1: work limit exceeded"]
+            ["resource_limit: accent composition skipped at page 1: work limit exceeded"]
         );
     }
 
@@ -2775,7 +2779,7 @@ mod tests {
         assert!(page.lines.iter().all(|line| line.text == "^"));
         assert_eq!(
             page.warnings,
-            ["accent composition skipped at page 1: work limit exceeded"]
+            ["resource_limit: accent composition skipped at page 1: work limit exceeded"]
         );
     }
 
