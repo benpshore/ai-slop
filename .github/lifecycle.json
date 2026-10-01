@@ -1,0 +1,6 @@
+{
+  "min_age_days": 7,
+  "runner_latest": {
+    "ubuntu-latest": "Ubuntu 24.04"
+  }
+}

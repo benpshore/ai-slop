@@ -1,11 +1,17 @@
 version: 2
+# Cargo, uv and Actions versions. Everything is weekly, grouped, and held back
+# for a cooldown so a compromised release has time to be caught (security
+# updates are exempt from cooldown by GitHub's design). A human merges every PR.
+# Actions stay pinned by full SHA with a `# vX.Y.Z` comment; Dependabot keeps both.
+# PDFium binaries, model releases and runner images are not Dependabot's:
+# .github/workflows/lifecycle-watch.yml covers them (docs/LIFECYCLE.md).
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     cooldown:
-      default-days: 7
+      default-days: 7 # this ecosystem supports default-days only
     groups:
       github-actions:
         patterns: ["*"]
@@ -15,6 +21,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+      semver-major-days: 14
     groups:
       uv:
         patterns: ["*"]
@@ -24,9 +31,28 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+      semver-major-days: 14
+    # A dependency joins the first group it matches; anything matching none
+    # (for example a major bump of another crate) gets its own PR.
     groups:
+      # Moving one of these changes the extractor identity: the constants in
+      # src/backend/*.rs are tested against Cargo.lock, so the PR is red until
+      # they are edited. Kept apart so routine updates never wait on that, and
+      # so the exact-pinned docling crates move together.
+      extractors:
+        patterns: ["docling*", "pdfium-render", "lopdf"]
+      # Pre-1.0: any 0.x minor may break the app. Its own PR, checked by App.
+      gpui:
+        patterns: ["gpui"]
       cargo:
         patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # docling-pdf 1.69.2, 1.74.0 and 1.74.1 (the ones read from the crates.io
+      # index on 2026-09-30) require pdfium-render ^0.8; a 0.9 in the tree means
+      # two PDFium bindings. Remove when a docling-pdf release accepts 0.9.
+      - dependency-name: pdfium-render
+        versions: [">=0.9"]
   - package-ecosystem: swift
     directory: /
     schedule:

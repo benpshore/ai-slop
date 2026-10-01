@@ -41,6 +41,8 @@ Provision dependencies explicitly. Accepted artifacts must support offline proce
 
 ## Planned candidate-update workflow
 
+Status 2026-09-30: only the detection half of step 1 is active. `.github/workflows/lifecycle-watch.yml` checks the PDFium binary releases and the Docling model release track daily (and by manual trigger) against `native/manifest.json`, applies a 7-day cooldown, and opens one issue per candidate; that issue, open or closed, is the cursor. Docling crates, `pdfium-render` and GPUI are Dependabot's (grouped, with cooldown). Poppler and MLX are not adopted, so nothing watches them. Steps 2 to 6 remain planned. Policy, runbooks and cost: [LIFECYCLE.md](LIFECYCLE.md).
+
 1. Check releases and relevant heads on a daily schedule, plus manual trigger. Record a cursor; unchanged upstreams do not rebuild. Urgent candidates can be requested on demand.
 2. Build changed candidates outside the release lane. Keep one update PR per coupled dependency group rather than per upstream commit. Measure PDFium's Chromium-tooling disk/time requirements before assuming a small runner can rebuild it.
 3. Cache by full source/target/compiler/SDK/flags/recipe/dependency identity. Store accepted artifacts durably with provenance: disposable CI caches are not the release source of truth.
@@ -50,4 +52,4 @@ Provision dependencies explicitly. Accepted artifacts must support offline proce
 
 Prefer unmodified upstream releases. Keep required patches small, explicit, and covered by fixtures, with upstream issue/PR references. If a fork is needed, separate its tracking branch from accepted application pins. Do not continuously rebase whole upstream source trees into the application.
 
-These workflows are planned, not active yet. GitHub builds use public/synthetic fixtures. Bulk extraction runs on explicitly selected machines; do not make a personal Mac a public PR runner or upload private corpora as a side effect of implementation.
+Apart from the detection above, these workflows are planned, not active yet. GitHub builds use public/synthetic fixtures. Bulk extraction runs on explicitly selected machines; do not make a personal Mac a public PR runner or upload private corpora as a side effect of implementation.
