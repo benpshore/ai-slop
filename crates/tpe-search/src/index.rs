@@ -15,6 +15,7 @@ use crate::SearchError;
 use crate::chunker::{Chunk, Chunker};
 use crate::embed::Embedder;
 use crate::fusion::{RRF_K, reciprocal_rank_fusion};
+use crate::permissions::{private_dir, private_file};
 use crate::store::{FlatStore, VectorStore};
 #[cfg(feature = "usearch")]
 use crate::usearch_store::UsearchStore;
@@ -167,8 +168,12 @@ pub struct SearchIndex {
 impl SearchIndex {
     /// Open (creating if needed) the index in `dir`.
     pub fn open(dir: &Path) -> Result<Self, SearchError> {
-        fs::create_dir_all(dir)?;
-        let conn = Connection::open(dir.join(INDEX_DB))?;
+        private_dir(dir)?;
+        let db_path = dir.join(INDEX_DB);
+        // Pre-create (or tighten) the database before SQLite can write any
+        // extracted document content to it.
+        drop(private_file(&db_path, false)?);
+        let conn = Connection::open(db_path)?;
         if let Err(e) = conn.execute_batch(INDEX_SCHEMA) {
             let message = e.to_string();
             if message.contains("fts5") {
@@ -710,7 +715,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::embed::HashEmbedder;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     // Copied verbatim from `text-processing-engine/src/ledger.rs` (`SCHEMA_SQL`):
     // the four ledger tables the index reads.
@@ -825,6 +833,29 @@ CREATE TABLE IF NOT EXISTS metadata (
     const NEURAL: &str = "Neural networks learn representations with gradient descent. \
         Deep neural networks stack many layers of artificial neurons trained by \
         backpropagation.";
+
+    #[cfg(unix)]
+    #[test]
+    fn open_makes_index_paths_owner_only() {
+        let parent = tempfile::tempdir().unwrap();
+        let index_dir = parent.path().join("idx");
+        fs::create_dir(&index_dir).unwrap();
+        fs::set_permissions(&index_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let db_path = index_dir.join(INDEX_DB);
+        fs::write(&db_path, []).unwrap();
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let index = SearchIndex::open(&index_dir).unwrap();
+        assert_eq!(
+            fs::metadata(&index_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(index);
+    }
     const VOLCANO: &str = "Volcanoes erupt magma, ash and gas. Volcanic activity is \
         monitored with seismometers and satellite radar.";
 
