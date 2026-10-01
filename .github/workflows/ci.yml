@@ -14,6 +14,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      evaluator: ${{ steps.paths.outputs.evaluator }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Determine whether evaluator checks are required
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT" = workflow_dispatch ] || [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ]; then
+            required=true
+          else
+            if [ "$EVENT" = pull_request ]; then
+              git diff --name-only "$BASE...$HEAD" > "$RUNNER_TEMP/changed-paths"
+            else
+              git diff --name-only "$BASE" "$HEAD" > "$RUNNER_TEMP/changed-paths"
+            fi
+            required=$(sh .github/scripts/evaluator-paths.sh < "$RUNNER_TEMP/changed-paths")
+          fi
+          echo "evaluator=$required" >> "$GITHUB_OUTPUT"
+
   repo:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -25,6 +54,13 @@ jobs:
         run: |
           bad=$(git ls-files | grep -Ei '(^|/)(\.DS_Store|\.env(\..+)?|[^/]+\.(db|sqlite3?|duckdb|pem|key|p12|pfx))$' | grep -v '\.env\.example$' || true)
           if [ -n "$bad" ]; then echo "::error::remove from git: $bad"; exit 1; fi
+      - name: Verify required CI gating
+        run: sh .github/tests/ci-gate.sh
+
+  evaluation-tools:
+    needs: changes
+    if: needs.changes.outputs.evaluator == 'true'
+    uses: ./.github/workflows/evaluation-tools.yml
 
   rust:
     # x86-64 Linux plus native ARM64 Linux (aarch64-unknown-linux-gnu).
@@ -56,10 +92,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # The single required check in the branch ruleset. It passes only if every job above passed.
+  # Repository policy and release automation require this aggregate to pass.
   ci:
     if: always()
-    needs: [repo, rust]
+    needs: [changes, repo, rust, evaluation-tools]
     runs-on: ubuntu-latest
     steps:
-      - run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REPO_RESULT: ${{ needs.repo.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          EVALUATOR_REQUIRED: ${{ needs.changes.outputs.evaluator }}
+          EVALUATOR_RESULT: ${{ needs.evaluation-tools.result }}
+        run: sh .github/scripts/check-ci.sh "$CHANGES_RESULT" "$REPO_RESULT" "$RUST_RESULT" "$EVALUATOR_REQUIRED" "$EVALUATOR_RESULT"

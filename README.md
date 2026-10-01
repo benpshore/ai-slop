@@ -264,7 +264,10 @@ uv run ruff format && uv run ruff check && uv run pytest
 uv audit --locked --preview-features audit-command
 ```
 
-These checks have their own workflow, triggered only when evaluation tooling changes.
+These checks run through a reusable workflow when evaluator code, dependencies,
+or relevant workflows change. Their result feeds the `ci` aggregate; a failed,
+cancelled, or unexpectedly skipped evaluator check prevents it from passing.
+Rust-only changes skip the evaluator after successful path detection.
 The greeting-only Python package, Swift target and CMake targets are preserved on
 [`archive/python-swift-cmake-2026-10-01`](https://github.com/benpshore/pdftextract/tree/archive/python-swift-cmake-2026-10-01).
 

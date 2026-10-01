@@ -22,6 +22,8 @@ uv run ruff format && uv run ruff check && uv run pytest
 uv audit --locked --preview-features audit-command
 ```
 
-Evaluation-tool checks run only for relevant paths; routine CI checks the repository
-and Rust on x86-64 and ARM64 Linux. The removed Python package, Swift and CMake
+Evaluation-tool checks run only for relevant paths and feed the required `ci`
+aggregate; path-detection failures and failed/cancelled required evaluator jobs
+fail that aggregate. Routine Rust-only CI checks the repository and Rust on
+x86-64 and ARM64 Linux. The removed Python package, Swift and CMake
 scaffolds are preserved on `archive/python-swift-cmake-2026-10-01`.

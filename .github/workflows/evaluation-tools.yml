@@ -3,29 +3,11 @@ name: Evaluation tools
 # Python supports offline accuracy diagnostics only. Rust-only changes do not
 # install Python dependencies, build a wheel, or run this workflow.
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '**.py'
-      - pyproject.toml
-      - uv.lock
-      - .python-version
-      - .github/workflows/evaluation-tools.yml
-  pull_request:
-    paths:
-      - '**.py'
-      - pyproject.toml
-      - uv.lock
-      - .python-version
-      - .github/workflows/evaluation-tools.yml
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   evaluation-tools:
