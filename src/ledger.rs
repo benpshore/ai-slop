@@ -341,6 +341,14 @@ impl Ledger {
                 conn.execute(INSERT_VERSION, params![SCHEMA_VERSION])?;
             }
             Some(SCHEMA_VERSION) => {}
+            // v5 adds optional biomedical IDs and permits a null resolved DOI.
+            // All v4 JSON remains readable; retain old run versions/provenance.
+            Some(4) if SCHEMA_VERSION == 5 => {
+                conn.execute(
+                    "UPDATE schema_meta SET version = ?1 WHERE version = 4",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
             Some(found) => {
                 return Err(LedgerError::SchemaMismatch {
                     found,
@@ -1359,6 +1367,50 @@ mod tests {
             .query_row(sql, params![name], |row| row.get(0))
             .unwrap();
         count == 1
+    }
+
+    #[test]
+    fn version_four_upgrade_preserves_existing_runs_and_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.sqlite");
+        let mut ledger = Ledger::open(&path).unwrap();
+        let mut result = sample_result();
+        result.schema_version = 4;
+        let run = ledger.write_result(&result).unwrap();
+        ledger
+            .conn
+            .execute("UPDATE schema_meta SET version = 4", [])
+            .unwrap();
+        let old = r#"{"anchor":null,"doi_link":null,"attempts":[],"resolved":{"doi":"10.1000/a","title":"A title","authors":[],"year":2020,"venue":null,"source":"crossref","method":"printed","score":1.0}}"#;
+        ledger
+            .conn
+            .execute(
+                "UPDATE \"references\" SET extra = ?1 WHERE run_id = ?2 AND idx = 1",
+                params![old, run],
+            )
+            .unwrap();
+        drop(ledger);
+        let mut ledger = Ledger::open(&path).unwrap();
+        let restored = ledger.load_result(run).unwrap();
+        assert_eq!(restored.schema_version, 4);
+        assert_eq!(
+            restored.references[0]
+                .resolved
+                .as_ref()
+                .unwrap()
+                .doi
+                .as_deref(),
+            Some("10.1000/a")
+        );
+        assert_eq!(restored.references[0].resolved.as_ref().unwrap().pmid, None);
+        let mut next = sample_result();
+        next.references[0].resolved = Some(crate::schema::Resolved {
+            pmid: Some("123456".to_string()),
+            ..crate::schema::Resolved::default()
+        });
+        let new_run = ledger.write_result(&next).unwrap();
+        assert_ne!(run, new_run);
+        assert_eq!(ledger.load_result(new_run).unwrap(), next);
     }
 
     #[test]

@@ -153,8 +153,8 @@ struct BibliographyArgs {
     /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page read.
     #[arg(long)]
     progress: bool,
-    /// Resolve every entry, and the paper, to a Crossref record verified
-    /// against the printed text (needs the network).
+    /// Resolve entries through Crossref and Europe PMC, and the paper through
+    /// Crossref, verifying records against the printed text (needs the network).
     #[arg(long)]
     resolve: bool,
     /// Contact address sent to Crossref (its polite pool); also `TPE_MAILTO`.
@@ -588,23 +588,33 @@ fn csv_field(value: &str) -> String {
 }
 
 /// The CSV header: one row per reference entry of a record.
-const CSV_HEADER: &str = "sha256,path,status,paper_doi,idx,label,first_author,title,year,doi_printed,doi_link,resolved_doi,resolved_method,resolved_score,resolution,attempts,raw\n";
+const CSV_HEADER: &str = "sha256,path,status,paper_doi,idx,label,first_author,title,year,doi_printed,doi_link,resolved_doi,resolved_method,resolved_score,resolution,attempts,raw,resolved_pmid,resolved_pmcid\n";
 
 /// Append every entry of `record` to `path` as CSV rows. `resolution` is
 /// `resolved`, `ambiguous`, `mismatch` (records came back but disagreed), `not_found`,
 /// `error` or `not_attempted`; `attempts` lists method:outcome pairs.
 fn append_csv(path: &Path, record: &bibliography::Record) -> anyhow::Result<()> {
-    use std::io::Write;
-    let new = !path.exists();
+    use std::io::{Read, Write};
     let mut file = fs::OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .open(path)?;
-    if new {
+    if file.metadata()?.len() == 0 {
         file.write_all(CSV_HEADER.as_bytes())?;
+    } else {
+        let mut header = vec![0; CSV_HEADER.len()];
+        anyhow::ensure!(
+            file.read_exact(&mut header).is_ok() && header == CSV_HEADER.as_bytes(),
+            "incompatible CSV header; choose a new output path"
+        );
     }
     let sha = record.sha256.clone().unwrap_or_default();
-    let paper_doi = record.paper.as_ref().map_or("", |p| p.doi.as_str());
+    let paper_doi = record
+        .paper
+        .as_ref()
+        .and_then(|p| p.doi.as_deref())
+        .unwrap_or("");
     for entry in &record.references {
         let resolution = if entry.resolved.is_some() {
             "resolved"
@@ -639,7 +649,7 @@ fn append_csv(path: &Path, record: &bibliography::Record) -> anyhow::Result<()> 
             entry
                 .resolved
                 .as_ref()
-                .map(|r| r.doi.clone())
+                .and_then(|r| r.doi.clone())
                 .unwrap_or_default(),
             entry
                 .resolved
@@ -654,6 +664,16 @@ fn append_csv(path: &Path, record: &bibliography::Record) -> anyhow::Result<()> 
             resolution.to_string(),
             attempts.join(" "),
             entry.raw.clone(),
+            entry
+                .resolved
+                .as_ref()
+                .and_then(|r| r.pmid.clone())
+                .unwrap_or_default(),
+            entry
+                .resolved
+                .as_ref()
+                .and_then(|r| r.pmcid.clone())
+                .unwrap_or_default(),
         ];
         let row: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
         file.write_all(row.join(",").as_bytes())?;
@@ -1182,6 +1202,41 @@ fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csv_preserves_biomedical_ids_and_refuses_legacy_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refs.csv");
+        let mut record = tpe::bibliography::Record::failed(
+            "test.pdf",
+            None,
+            tpe::schema::BackendIdentity {
+                name: "test".to_string(),
+                version: String::new(),
+                config_digest: String::new(),
+            },
+            String::new(),
+            0.0,
+        );
+        record.references.push(tpe::schema::ReferenceEntry {
+            resolved: Some(tpe::schema::Resolved {
+                pmid: Some("123456".to_string()),
+                pmcid: Some("PMC7654321".to_string()),
+                ..tpe::schema::Resolved::default()
+            }),
+            ..tpe::schema::ReferenceEntry::default()
+        });
+        std::fs::write(&path, "").unwrap();
+        super::append_csv(&path, &record).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(super::CSV_HEADER));
+        assert!(text.contains(",123456,PMC7654321\n"));
+        super::append_csv(&path, &record).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+        std::fs::write(&path, "old,header\n").unwrap();
+        assert!(super::append_csv(&path, &record).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old,header\n");
+    }
+
     use super::{
         ManifestItem, Split, check_backend, parse_pages, percentile, probe_backend, short_hash,
     };

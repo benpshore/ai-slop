@@ -145,13 +145,39 @@ pub fn parse_pmc_esummary(json: &str) -> Result<Vec<PaperRecord>, BiblioError> {
     Ok(out)
 }
 
+// Prefer structured names: fullName is commonly `Family Initials`, unlike
+// Crossref's `Given Family` representation used by the resolver.
+fn europepmc_author(author: &Value) -> Option<String> {
+    if let Some(family) = str_field(author, "lastName") {
+        return Some(
+            str_field(author, "firstName")
+                .or_else(|| str_field(author, "initials"))
+                .map_or_else(|| family.clone(), |given| format!("{given} {family}")),
+        );
+    }
+    str_field(author, "collectiveName")
+        .or_else(|| str_field(author, "fullName").map(|name| medline_name(&name)))
+}
+
+fn medline_name(name: &str) -> String {
+    if let Some((family, initials)) = name.rsplit_once(' ')
+        && !initials.is_empty()
+        && initials.len() <= 5
+        && initials.chars().all(|c| c.is_ascii_uppercase() || c == '.')
+    {
+        format!("{initials} {family}")
+    } else {
+        name.to_string()
+    }
+}
+
 fn europepmc_authors(item: &Value) -> Vec<String> {
     let listed: Vec<String> = item
         .get("authorList")
         .map(|l| array(l, "author"))
         .unwrap_or_default()
         .iter()
-        .filter_map(|a| str_field(a, "fullName").or_else(|| str_field(a, "collectiveName")))
+        .filter_map(europepmc_author)
         .collect();
     if !listed.is_empty() {
         return listed;
@@ -161,6 +187,7 @@ fn europepmc_authors(item: &Value) -> Vec<String> {
             s.trim_end_matches('.')
                 .split(", ")
                 .filter_map(crate::util::non_empty)
+                .map(|name| medline_name(&name))
                 .collect()
         })
         .unwrap_or_default()
@@ -204,7 +231,13 @@ fn europepmc_item(item: &Value) -> Found {
         }),
         arxiv_id: doi.as_deref().and_then(arxiv_from_doi),
         doi,
-        pmid: str_field(item, "pmid").and_then(|p| normalize_pmid(&p)),
+        pmid: str_field(item, "pmid")
+            .and_then(|p| normalize_pmid(&p))
+            .or_else(|| {
+                (str_field(item, "source").as_deref() == Some("MED"))
+                    .then(|| str_field(item, "id").and_then(|p| normalize_pmid(&p)))
+                    .flatten()
+            }),
         pmcid: str_field(item, "pmcid").and_then(|p| normalize_pmcid(&p)),
         abstract_text: str_field(item, "abstractText")
             .map(|a| strip_tags(&a))
@@ -259,6 +292,60 @@ pub fn fetch_europepmc_search(
     page_size: u32,
 ) -> Result<Vec<Found>, BiblioError> {
     parse_europepmc_found(&client.get_text(&europepmc_url(query, page_size), &[])?)
+}
+
+/// An exact biomedical identifier; bare numeric PMC ids must never be
+/// confused with `PubMed` ids. Search responses are filtered by the same identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Identifier {
+    Pmid(String),
+    Pmcid(String),
+    Doi(String),
+}
+
+impl Identifier {
+    /// A typed exact search, including the source restriction for a PMID.
+    pub fn query(&self) -> Result<String, BiblioError> {
+        let invalid = || BiblioError::Shape("invalid biomedical identifier".to_string());
+        match self {
+            Self::Pmid(id) => Ok(format!(
+                "EXT_ID:{} AND SRC:MED",
+                normalize_pmid(id).ok_or_else(invalid)?
+            )),
+            Self::Pmcid(id) => Ok(format!(
+                "PMCID:{}",
+                normalize_pmcid(id).ok_or_else(invalid)?
+            )),
+            Self::Doi(id) => {
+                let doi = normalize_doi(id).ok_or_else(invalid)?;
+                let escaped = doi.replace('\\', "\\\\").replace('"', "\\\"");
+                Ok(format!("DOI:\"{escaped}\""))
+            }
+        }
+    }
+
+    /// Check the returned identifier, never trust search order or a fuzzy hit.
+    pub fn matches(&self, record: &PaperRecord) -> bool {
+        match self {
+            Self::Pmid(id) => {
+                normalize_pmid(id).is_some_and(|id| record.pmid.as_deref() == Some(&id))
+            }
+            Self::Pmcid(id) => {
+                normalize_pmcid(id).is_some_and(|id| record.pmcid.as_deref() == Some(&id))
+            }
+            Self::Doi(id) => normalize_doi(id).is_some_and(|id| record.doi.as_deref() == Some(&id)),
+        }
+    }
+}
+
+/// Fetch core metadata for an exact PMID, PMCID or DOI through Europe PMC.
+/// Multiple exact records are retained so callers can report ambiguity.
+pub fn fetch_identifier(client: &Client, id: &Identifier) -> Result<Vec<Found>, BiblioError> {
+    let query = id.query()?;
+    Ok(fetch_europepmc_search(client, &query, 10)?
+        .into_iter()
+        .filter(|found| id.matches(&found.record))
+        .collect())
 }
 
 #[cfg(test)]
@@ -319,6 +406,38 @@ mod tests {
     }"#;
 
     #[test]
+    fn exact_identifier_queries_and_returned_identity() {
+        assert_eq!(
+            Identifier::Pmid("29456894".into()).query().unwrap(),
+            "EXT_ID:29456894 AND SRC:MED"
+        );
+        assert_eq!(
+            Identifier::Pmcid("PMC5815332".into()).query().unwrap(),
+            "PMCID:PMC5815332"
+        );
+        assert_eq!(
+            Identifier::Doi("10.7717/PeerJ.4375".into())
+                .query()
+                .unwrap(),
+            "DOI:\"10.7717/peerj.4375\""
+        );
+        assert!(Identifier::Pmid("123 OR 456".into()).query().is_err());
+        let record = parse_europepmc(EUROPE).unwrap().remove(0);
+        assert!(Identifier::Pmid("29456894".into()).matches(&record));
+        assert!(!Identifier::Pmid("5815332".into()).matches(&record));
+        assert!(Identifier::Pmcid("PMC5815332".into()).matches(&record));
+    }
+
+    #[test]
+    fn med_source_ids_and_author_names_are_not_confused() {
+        let json = r#"{"resultList":{"result":[{"id":"123456","source":"MED","authorList":{"author":[{"fullName":"van der Kogel A"}]}},{"id":"123456","source":"AGR"}]}}"#;
+        let records = parse_europepmc(json).unwrap();
+        assert_eq!(records[0].pmid.as_deref(), Some("123456"));
+        assert_eq!(records[1].pmid, None);
+        assert_eq!(records[0].authors, ["A van der Kogel"]);
+    }
+
+    #[test]
     fn esearch_ids() {
         assert_eq!(
             parse_esearch_ids(ESEARCH).unwrap(),
@@ -351,7 +470,7 @@ mod tests {
         assert_eq!(found.len(), 2);
         let r = &found[0].record;
         assert_eq!(r.venue.as_deref(), Some("PeerJ"));
-        assert_eq!(r.authors, vec!["Piwowar H", "Priem J"]);
+        assert_eq!(r.authors, vec!["Heather Piwowar", "Jason Priem"]);
         assert_eq!(r.year, Some(2018));
         assert_eq!(r.pmcid.as_deref(), Some("PMC5815332"));
         assert_eq!(found[0].candidates.len(), 2);
@@ -360,7 +479,7 @@ mod tests {
         assert!(found[0].candidates[1].requires_session);
         // Second result: no authorList, no journal, no DOI.
         let p = &found[1].record;
-        assert_eq!(p.authors, vec!["Lee K", "Kim S"]);
+        assert_eq!(p.authors, vec!["K Lee", "S Kim"]);
         assert_eq!(p.venue, None);
         assert_eq!(p.doi, None);
         assert!(found[1].candidates.is_empty());
