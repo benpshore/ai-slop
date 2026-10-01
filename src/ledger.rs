@@ -71,11 +71,16 @@ pub struct Ledger {
     conn: Connection,
 }
 
-/// Pragmas for an on-disk ledger: WAL so readers never block the writer, a
-/// bounded wait on a locked file, and enforced foreign keys (needed for the
-/// cascading delete that makes publication idempotent).
+/// Pragmas for an on-disk ledger. Bound `SQLite`'s page cache, disable mapping
+/// of database pages into the process, checkpoint regularly, and limit the WAL
+/// retained after a successful checkpoint.
 const FILE_PRAGMAS: &str = "PRAGMA journal_mode = WAL; \
     PRAGMA synchronous = NORMAL; \
+    PRAGMA wal_autocheckpoint = 1000; \
+    PRAGMA journal_size_limit = 67108864; \
+    PRAGMA cache_size = -8192; \
+    PRAGMA mmap_size = 0; \
+    PRAGMA temp_store = FILE; \
     PRAGMA busy_timeout = 5000; \
     PRAGMA foreign_keys = ON;";
 
@@ -315,8 +320,8 @@ const SELECT_STATS: &str = "SELECT \
 
 impl Ledger {
     /// Opens or creates the ledger file at `path` and verifies its schema
-    /// version. Uses WAL journaling, `synchronous = NORMAL`, a 5 s busy
-    /// timeout and enforced foreign keys.
+    /// version. Uses guarded WAL journaling, `synchronous = NORMAL`, a 5 s
+    /// busy timeout and enforced foreign keys.
     pub fn open(path: &Path) -> Result<Self, LedgerError> {
         let conn = Connection::open(path)?;
         conn.execute_batch(FILE_PRAGMAS)?;
@@ -1145,6 +1150,31 @@ mod tests {
     use super::*;
 
     use crate::schema::{Line, Span, config_digest, sha256_hex};
+
+    #[test]
+    fn file_ledger_applies_wal_memory_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("guarded.sqlite")).unwrap();
+
+        let mode: String = ledger
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        for (pragma, expected) in [
+            ("wal_autocheckpoint", 1000),
+            ("journal_size_limit", 67_108_864),
+            ("cache_size", -8192),
+            ("mmap_size", 0),
+            ("temp_store", 1),
+        ] {
+            let actual: i64 = ledger
+                .conn
+                .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(actual, expected, "unexpected PRAGMA {pragma}");
+        }
+    }
 
     fn at(x0: f32, y0: f32, x1: f32, y1: f32) -> BBox {
         BBox { x0, y0, x1, y1 }
