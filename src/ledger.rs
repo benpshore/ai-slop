@@ -12,6 +12,10 @@
 //! it without a [`SCHEMA_VERSION`] change.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::fs;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +34,8 @@ pub type RunId = i64;
 /// Errors raised by the ledger.
 #[derive(Debug, Error)]
 pub enum LedgerError {
+    #[error("filesystem: {0}")]
+    Io(#[from] std::io::Error),
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("json: {0}")]
@@ -318,8 +324,16 @@ impl Ledger {
     /// version. Uses WAL journaling, `synchronous = NORMAL`, a 5 s busy
     /// timeout and enforced foreign keys.
     pub fn open(path: &Path) -> Result<Self, LedgerError> {
+        secure_ledger_files(path)?;
+        secure_existing_file(&sidecar_path(path, "-wal"))?;
+        secure_existing_file(&sidecar_path(path, "-shm"))?;
         let conn = Connection::open(path)?;
         conn.execute_batch(FILE_PRAGMAS)?;
+        // SQLite creates these beside the database when WAL mode is enabled.
+        // It derives their mode from the database, while this second pass also
+        // hardens sidecars left by an older version of the application.
+        secure_existing_file(&sidecar_path(path, "-wal"))?;
+        secure_existing_file(&sidecar_path(path, "-shm"))?;
         Self::init(conn)
     }
 
@@ -536,6 +550,53 @@ impl Ledger {
         })?;
         Ok(stats)
     }
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut value: OsString = path.as_os_str().to_owned();
+    value.push(suffix);
+    value.into()
+}
+
+#[cfg(unix)]
+fn secure_ledger_files(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn secure_ledger_files(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map(|_| ())
+}
+
+#[cfg(unix)]
+fn secure_existing_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file.set_permissions(fs::Permissions::from_mode(0o600)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn secure_existing_file(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The `runs` columns needed to rebuild a result.
@@ -1520,6 +1581,34 @@ mod tests {
         let summary = summary.expect("run should persist across reopen");
         assert_eq!(ledger.load_result(summary.id).unwrap(), result);
         assert_eq!(ledger.stats().unwrap().runs, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_ledger_and_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger");
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+
+        let mut ledger = Ledger::open(&path).unwrap();
+        ledger.write_result(&sample_result()).unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = sidecar_path(&path, suffix);
+            if sidecar.exists() {
+                assert_eq!(
+                    fs::metadata(sidecar).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
     }
 
     #[test]

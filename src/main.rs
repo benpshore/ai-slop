@@ -9,7 +9,8 @@
 )]
 
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -757,12 +758,35 @@ fn write_outputs(dir: &Path, result: &ExtractionResult) -> anyhow::Result<()> {
     let hash = result.document.hash.0.as_str();
     let json_path = dir.join(format!("{hash}.json"));
     let json = serde_json::to_string_pretty(result)?;
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
+    write_private_file(&json_path, json.as_bytes())?;
     let text_path = dir.join(format!("{hash}.txt"));
     let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    fs::write(&text_path, texts.join("\u{c}"))
-        .with_context(|| format!("writing {}", text_path.display()))?;
+    write_private_file(&text_path, texts.join("\u{c}").as_bytes())?;
     Ok(())
+}
+
+/// Create or replace a sensitive export with owner-only permissions on Unix.
+fn write_private_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening {} for writing", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing {}", path.display()))?;
+    }
+    file.set_len(0)
+        .with_context(|| format!("truncating {}", path.display()))?;
+    file.write_all(contents)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn run_stats(db: &Path) -> anyhow::Result<()> {
@@ -1239,7 +1263,9 @@ mod tests {
 
     use super::{
         ManifestItem, Split, check_backend, parse_pages, percentile, probe_backend, short_hash,
+        write_private_file,
     };
+    use std::fs;
     use tpe::backend;
 
     /// A manifest item in the given split; the other fields do not matter here.
@@ -1273,6 +1299,25 @@ mod tests {
         assert_eq!(short_hash("0123456789abcdef"), "0123456789ab");
         assert_eq!(short_hash("abc"), "abc");
         assert_eq!(short_hash(""), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_writer_hardens_existing_exports() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.json");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+
+        write_private_file(&path, b"secret").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"secret");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
