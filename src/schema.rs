@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// (stored in the references table's `extra` column). Bumped to 3 when
 /// `StageTimings::hash_ms` was added (older rows read it as 0). Bumped to 2 when
 /// `Line::role` was added: older ledgers deserialise every line as `body`.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Pages per scheduling chunk (the "20-page chunk" of the product target).
 pub const CHUNK_PAGES: u32 = 20;
@@ -249,12 +249,17 @@ pub struct Attempt {
 /// or `metadata` (the paper's own DOI from its metadata).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Resolved {
-    pub doi: String,
+    /// None for `PubMed` records without a DOI; never invent a DOI from a PMID.
+    pub doi: Option<String>,
+    #[serde(default)]
+    pub pmid: Option<String>,
+    #[serde(default)]
+    pub pmcid: Option<String>,
     pub title: Option<String>,
     pub authors: Vec<String>,
     pub year: Option<u16>,
     pub venue: Option<String>,
-    /// `crossref` or `openalex`.
+    /// `crossref`, `europepmc` or `openalex`.
     pub source: String,
     pub method: String,
     /// Agreement between the record and the printed entry, 0 to 1: the

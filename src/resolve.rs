@@ -16,13 +16,13 @@
 //! printed title), and its year is within one of the printed year. Anything
 //! else stays unresolved and the entry keeps only its printed fields.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
 use tpe_biblio::util::with_query;
-use tpe_biblio::{BiblioError, Client, PaperRecord, crossref, normalize_doi};
+use tpe_biblio::{BiblioError, Client, PaperRecord, crossref, normalize_doi, pmc};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::schema::{Attempt, Metadata, PageText, ReferenceEntry, Resolved};
@@ -358,7 +358,9 @@ fn verify(record: &PaperRecord, entry: &ReferenceEntry) -> Result<f32, String> {
 /// The accepted record as stored on the entry.
 fn resolved_from(record: &PaperRecord, doi: &str, method: &str, score: f32) -> Resolved {
     Resolved {
-        doi: doi.to_string(),
+        doi: (!doi.is_empty()).then(|| doi.to_string()),
+        pmid: record.pmid.clone(),
+        pmcid: record.pmcid.clone(),
         title: (!record.title.is_empty()).then(|| record.title.clone()),
         authors: record.authors.clone(),
         year: record.year,
@@ -377,7 +379,8 @@ pub struct Outcome {
     /// A record was found but disagreed with the printed entry.
     pub rejected: usize,
     pub unresolved: usize,
-    /// Requests that failed (network, rate limit); those entries are unresolved.
+    /// Entries with at least one failed registry request, including enrichment.
+    /// An error can coexist with a successful resolution through another source.
     pub errors: usize,
     pub by_method: BTreeMap<String, usize>,
 }
@@ -477,7 +480,7 @@ fn select_query_record(
     let best = best.clone();
     entry.attempts.push(Attempt {
         method: "query".to_string(),
-        doi: Some(best.doi.clone()),
+        doi: best.doi.clone(),
         outcome: "verified".to_string(),
         detail: None,
     });
@@ -562,6 +565,124 @@ fn with_retry<T>(mut request: impl FnMut() -> Result<T, BiblioError>) -> Result<
     }
 }
 
+/// Explicit identifiers in the reference text. Bare numbers are not PMIDs.
+fn biomedical_ids(text: &str) -> Vec<pmc::Identifier> {
+    static PMID: OnceLock<Regex> = OnceLock::new();
+    static PMCID: OnceLock<Regex> = OnceLock::new();
+    let pubmed_pattern = PMID.get_or_init(|| Regex::new(
+        r"(?i)\b(?:PMID\s*:\s*|pubmed\.ncbi\.nlm\.nih\.gov/|ncbi\.nlm\.nih\.gov/pubmed/)([1-9]\d{0,11})\b"
+    ).expect("valid regex"));
+    let central_pattern =
+        PMCID.get_or_init(|| Regex::new(r"(?i)\bPMC([1-9]\d{0,11})\b").expect("valid regex"));
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for found in pubmed_pattern.captures_iter(text) {
+        let id = pmc::Identifier::Pmid(found[1].to_string());
+        if seen.insert(id.clone()) {
+            ids.push(id);
+        }
+    }
+    for found in central_pattern.captures_iter(text) {
+        let id = pmc::Identifier::Pmcid(format!("PMC{}", &found[1]));
+        if seen.insert(id.clone()) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// Accept one exact registry identity only if its metadata agrees with the
+/// printed reference. Distinct matching biomedical records remain ambiguous.
+fn select_biomedical_record(
+    entry: &mut ReferenceEntry,
+    id: &pmc::Identifier,
+    records: impl IntoIterator<Item = PaperRecord>,
+) -> Option<Resolved> {
+    let mut accepted: Vec<Resolved> = Vec::new();
+    for record in records {
+        if !id.matches(&record) {
+            entry.attempts.push(Attempt {
+                method: "europepmc".to_string(),
+                doi: record.doi.clone(),
+                outcome: "mismatch".to_string(),
+                detail: Some(
+                    "lookup returned a different or missing biomedical identifier".to_string(),
+                ),
+            });
+            continue;
+        }
+        if biomedical_ids(&entry.raw)
+            .iter()
+            .any(|printed| !printed.matches(&record))
+        {
+            entry.attempts.push(Attempt {
+                method: "europepmc".to_string(),
+                doi: record.doi.clone(),
+                outcome: "mismatch".to_string(),
+                detail: Some("printed PMID and PMCID do not identify the same record".to_string()),
+            });
+            continue;
+        }
+        match verify(&record, entry) {
+            Ok(score) => {
+                let resolved = resolved_from(
+                    &record,
+                    record.doi.as_deref().unwrap_or(""),
+                    "europepmc",
+                    score,
+                );
+                if !accepted.iter().any(|r| {
+                    r.doi == resolved.doi && r.pmid == resolved.pmid && r.pmcid == resolved.pmcid
+                }) {
+                    accepted.push(resolved);
+                }
+            }
+            Err(detail) => entry.attempts.push(Attempt {
+                method: "europepmc".to_string(),
+                doi: record.doi.clone(),
+                outcome: "mismatch".to_string(),
+                detail: Some(detail),
+            }),
+        }
+    }
+    let outcome = match accepted.len() {
+        0 => "not_found",
+        1 => "verified",
+        _ => "ambiguous",
+    };
+    entry.attempts.push(Attempt {
+        method: "europepmc".to_string(),
+        doi: accepted.first().and_then(|r| r.doi.clone()),
+        outcome: outcome.to_string(),
+        detail: Some(format!("exact lookup {id:?}")),
+    });
+    if accepted.len() == 1 {
+        accepted.pop()
+    } else {
+        None
+    }
+}
+
+/// Explicit biomedical IDs are authoritative. If none can verify all printed
+/// IDs, leave the entry unresolved rather than accepting a DOI/query fallback.
+/// Returns whether explicit IDs were present (and therefore handled).
+fn resolve_explicit_biomedical(
+    entry: &mut ReferenceEntry,
+    mut lookup: impl FnMut(&mut ReferenceEntry, &pmc::Identifier) -> Option<Resolved>,
+) -> bool {
+    let ids = biomedical_ids(&entry.raw);
+    if ids.is_empty() {
+        return false;
+    }
+    for id in ids {
+        if let Some(resolved) = lookup(entry, &id) {
+            entry.resolved = Some(resolved);
+            break;
+        }
+    }
+    true
+}
+
 /// A Crossref resolver with the polite-pool rate limit.
 pub struct Resolver {
     client: Client,
@@ -577,6 +698,41 @@ impl Resolver {
             client = client.with_mailto(mailto);
         }
         Self { client }
+    }
+
+    fn try_biomedical(&self, entry: &mut ReferenceEntry, id: &pmc::Identifier) -> Option<Resolved> {
+        match with_retry(|| pmc::fetch_identifier(&self.client, id)) {
+            Ok(found) => select_biomedical_record(entry, id, found.into_iter().map(|f| f.record)),
+            Err(err) => {
+                entry.attempts.push(Attempt {
+                    method: "europepmc".to_string(),
+                    doi: None,
+                    outcome: "error".to_string(),
+                    detail: Some(format!("{id:?}: {err}")),
+                });
+                None
+            }
+        }
+    }
+
+    /// Enrich an already verified DOI with exact biomedical cross-identifiers.
+    /// Failure leaves the accepted Crossref record intact and logs the attempt.
+    fn enrich_identifiers(&self, entry: &mut ReferenceEntry) {
+        let Some(resolved) = &entry.resolved else {
+            return;
+        };
+        if resolved.pmid.is_some() || resolved.pmcid.is_some() {
+            return;
+        }
+        let Some(doi) = resolved.doi.clone() else {
+            return;
+        };
+        if let Some(extra) = self.try_biomedical(entry, &pmc::Identifier::Doi(doi))
+            && let Some(resolved) = &mut entry.resolved
+        {
+            resolved.pmid = extra.pmid;
+            resolved.pmcid = extra.pmcid;
+        }
     }
 
     /// Fetch and verify one DOI for `entry`, logging the attempt.
@@ -632,9 +788,10 @@ impl Resolver {
     fn resolve_entry(
         &self,
         entry: &mut ReferenceEntry,
-        outcome: &mut Outcome,
     ) -> Result<Option<&'static str>, BiblioError> {
-        let first_attempt = entry.attempts.len();
+        if resolve_explicit_biomedical(entry, |entry, id| self.try_biomedical(entry, id)) {
+            return Ok(entry.resolved.as_ref().map(|_| "europepmc"));
+        }
         let mut candidates: Vec<(String, &'static str)> = Vec::new();
         if let Some(doi) = entry.doi_link.as_deref().and_then(doi_in) {
             candidates.push((doi, "link"));
@@ -645,9 +802,16 @@ impl Resolver {
             candidates.push((doi, "printed"));
         }
         for (doi, method) in &candidates {
-            if let Some(resolved) = self.try_doi(entry, doi, method)? {
+            // Keep logged errors; another registry may still resolve it.
+            if let Ok(Some(resolved)) = self.try_doi(entry, doi, method) {
                 entry.resolved = Some(resolved);
                 return Ok(Some(method));
+            }
+        }
+        for (doi, _) in &candidates {
+            if let Some(resolved) = self.try_biomedical(entry, &pmc::Identifier::Doi(doi.clone())) {
+                entry.resolved = Some(resolved);
+                return Ok(Some("europepmc"));
             }
         }
         let query: String = entry.raw.chars().take(QUERY_CHARS).collect();
@@ -675,7 +839,6 @@ impl Resolver {
             entry.resolved = Some(resolved);
             return Ok(Some("query"));
         }
-        count_rejection(&entry.attempts[first_attempt..], outcome);
         Ok(None)
     }
 
@@ -687,20 +850,31 @@ impl Resolver {
             ..Outcome::default()
         };
         for entry in entries.iter_mut() {
+            let first_attempt = entry.attempts.len();
             if entry.resolved.is_some() {
+                self.enrich_identifiers(entry);
                 outcome.resolved += 1;
-                continue;
+            } else {
+                match self.resolve_entry(entry) {
+                    Ok(Some(method)) => {
+                        self.enrich_identifiers(entry);
+                        outcome.resolved += 1;
+                        *outcome.by_method.entry(method.to_string()).or_insert(0) += 1;
+                    }
+                    Ok(None) => outcome.unresolved += 1,
+                    Err(_) => {
+                        outcome.unresolved += 1;
+                    }
+                }
             }
-            match self.resolve_entry(entry, &mut outcome) {
-                Ok(Some(method)) => {
-                    outcome.resolved += 1;
-                    *outcome.by_method.entry(method.to_string()).or_insert(0) += 1;
-                }
-                Ok(None) => outcome.unresolved += 1,
-                Err(_) => {
-                    outcome.errors += 1;
-                    outcome.unresolved += 1;
-                }
+            if entry.resolved.is_none() {
+                count_rejection(&entry.attempts[first_attempt..], &mut outcome);
+            }
+            if entry.attempts[first_attempt..]
+                .iter()
+                .any(|a| a.outcome == "error")
+            {
+                outcome.errors += 1;
             }
         }
         outcome
@@ -801,7 +975,7 @@ mod tests {
         assert!(select_query_record(&mut entry, [incomplete]).is_none());
         let exact = query_record("10.1000/a");
         let selected = select_query_record(&mut entry, [exact.clone(), exact]).unwrap();
-        assert_eq!(selected.doi, "10.1000/a");
+        assert_eq!(selected.doi.as_deref(), Some("10.1000/a"));
         assert_eq!(entry.attempts.last().unwrap().outcome, "verified");
     }
 
@@ -811,7 +985,7 @@ mod tests {
         let mut article = query_record("10.1000/article");
         article.venue = Some("Immunology".to_string());
         let selected = select_query_record(&mut query_entry(), [preprint, article]).unwrap();
-        assert_eq!(selected.doi, "10.1000/article");
+        assert_eq!(selected.doi.as_deref(), Some("10.1000/article"));
     }
 
     #[test]
@@ -824,8 +998,8 @@ mod tests {
         let outcome = Resolver::new(None).resolve_entries(&mut entries);
         assert_eq!(outcome.resolved, 1, "{:?}", entries[0].attempts);
         assert_eq!(
-            entries[0].resolved.as_ref().unwrap().doi,
-            "10.7717/peerj.4375"
+            entries[0].resolved.as_ref().unwrap().doi.as_deref(),
+            Some("10.7717/peerj.4375")
         );
         assert_eq!(entries[0].resolved.as_ref().unwrap().method, "printed");
     }
@@ -873,8 +1047,11 @@ mod tests {
         b.doi = Some("10.1000/b".to_string());
         b.title = "Unrelated research findings".to_string();
         assert_eq!(
-            select_paper_record(&a.title, [b, a.clone()]).unwrap().doi,
-            "10.1000/a"
+            select_paper_record(&a.title, [b, a.clone()])
+                .unwrap()
+                .doi
+                .as_deref(),
+            Some("10.1000/a")
         );
     }
 
@@ -901,6 +1078,210 @@ mod tests {
         assert!(select_query_record(&mut entry, [wrong]).is_none());
         count_rejection(&entry.attempts, &mut outcome);
         assert_eq!(outcome.rejected, 1);
+    }
+
+    #[test]
+    fn explicit_biomedical_ids_are_typed_and_deduplicated() {
+        assert_eq!(
+            biomedical_ids(
+                "PMID: 123456 PMID:123456 https://pubmed.ncbi.nlm.nih.gov/123456/ PMCID:PMC7654321"
+            ),
+            vec![
+                pmc::Identifier::Pmid("123456".to_string()),
+                pmc::Identifier::Pmcid("PMC7654321".to_string())
+            ]
+        );
+        assert!(biomedical_ids("2020; 123456:7654321").is_empty());
+    }
+
+    fn biomedical_record() -> PaperRecord {
+        PaperRecord {
+            pmid: Some("123456".to_string()),
+            pmcid: Some("PMC7654321".to_string()),
+            doi: None,
+            source: "europepmc".to_string(),
+            ..query_record("unused")
+        }
+    }
+
+    #[test]
+    fn pubmed_record_without_doi_resolves_without_inventing_one() {
+        let mut entry = query_entry();
+        entry.raw.push_str(" PMID:123456");
+        let resolved = select_biomedical_record(
+            &mut entry,
+            &pmc::Identifier::Pmid("123456".to_string()),
+            [biomedical_record()],
+        )
+        .unwrap();
+        assert_eq!(resolved.doi, None);
+        assert_eq!(resolved.pmid.as_deref(), Some("123456"));
+        assert_eq!(resolved.pmcid.as_deref(), Some("PMC7654321"));
+        assert_eq!(resolved.source, "europepmc");
+        let json = serde_json::to_value(&resolved).unwrap();
+        assert!(json["doi"].is_null());
+        assert_eq!(serde_json::from_value::<Resolved>(json).unwrap(), resolved);
+    }
+
+    #[test]
+    fn biomedical_lookup_rejects_wrong_ids_metadata_and_conflicts() {
+        let id = pmc::Identifier::Pmid("123456".to_string());
+        let mut wrong = biomedical_record();
+        wrong.pmid = Some("999999".to_string());
+        assert!(select_biomedical_record(&mut query_entry(), &id, [wrong]).is_none());
+        let mut wrong = biomedical_record();
+        wrong.title = "An unrelated clinical investigation".to_string();
+        assert!(select_biomedical_record(&mut query_entry(), &id, [wrong]).is_none());
+        let mut entry = query_entry();
+        entry.raw.push_str(" PMID:123456 PMCID:PMC111111");
+        assert!(select_biomedical_record(&mut entry, &id, [biomedical_record()]).is_none());
+        assert!(entry.attempts.iter().any(|a| a.outcome == "mismatch"));
+    }
+
+    #[test]
+    fn biomedical_lookup_does_not_pick_distinct_records_by_order() {
+        let mut second = biomedical_record();
+        second.pmcid = Some("PMC111111".to_string());
+        let mut entry = query_entry();
+        assert!(
+            select_biomedical_record(
+                &mut entry,
+                &pmc::Identifier::Pmid("123456".to_string()),
+                [biomedical_record(), second]
+            )
+            .is_none()
+        );
+        assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+    }
+
+    #[test]
+    fn explicit_ids_block_fallback_for_conflicts_missing_records_and_bad_metadata() {
+        for suffix in [
+            "PMID:999999",
+            "PMCID:PMC999999",
+            "PMID:123456 PMCID:PMC111111",
+            "PMID:123456 PMID:999999",
+        ] {
+            let mut entry = query_entry();
+            entry.raw.push(' ');
+            entry.raw.push_str(suffix);
+            entry.raw.push_str(" doi:10.1000/a");
+            assert!(resolve_explicit_biomedical(&mut entry, |entry, id| {
+                select_biomedical_record(entry, id, [biomedical_record()])
+            }));
+            assert!(entry.resolved.is_none());
+            let mut outcome = Outcome::default();
+            count_rejection(&entry.attempts, &mut outcome);
+            assert_eq!(outcome.rejected, 1);
+        }
+        let mut entry = query_entry();
+        entry.raw.push_str(" PMID:123456 doi:10.1000/a");
+        assert!(resolve_explicit_biomedical(&mut entry, |entry, id| {
+            select_biomedical_record(entry, id, [])
+        }));
+        assert!(entry.resolved.is_none());
+        let mut outcome = Outcome::default();
+        count_rejection(&entry.attempts, &mut outcome);
+        assert_eq!(outcome.rejected, 0);
+        let mut wrong = biomedical_record();
+        wrong.title = "An unrelated clinical investigation".to_string();
+        assert!(resolve_explicit_biomedical(&mut entry, |entry, id| {
+            select_biomedical_record(entry, id, [wrong.clone()])
+        }));
+        count_rejection(&entry.attempts, &mut outcome);
+        assert_eq!(outcome.rejected, 1);
+        assert!(entry.resolved.is_none());
+    }
+
+    #[test]
+    fn explicit_ids_accept_only_verified_joint_identity() {
+        let mut entry = query_entry();
+        assert!(!resolve_explicit_biomedical(&mut entry, |_, _| panic!(
+            "no explicit IDs"
+        )));
+        entry.raw.push_str(" PMID:123456 PMCID:PMC7654321");
+        assert!(resolve_explicit_biomedical(&mut entry, |entry, id| {
+            select_biomedical_record(entry, id, [biomedical_record()])
+        }));
+        assert!(entry.resolved.is_some());
+    }
+
+    #[test]
+    fn europepmc_mismatch_counts_even_after_not_found_or_transport_error() {
+        for id in [
+            pmc::Identifier::Pmid("123456".to_string()),
+            pmc::Identifier::Doi("10.1000/a".to_string()),
+        ] {
+            let mut entry = query_entry();
+            let mut wrong = biomedical_record();
+            wrong.doi = Some("10.1000/a".to_string());
+            wrong.title = "An unrelated clinical investigation".to_string();
+            assert!(select_biomedical_record(&mut entry, &id, [wrong]).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "not_found");
+            entry.attempts.push(Attempt {
+                method: "query".to_string(),
+                doi: None,
+                outcome: "error".to_string(),
+                detail: None,
+            });
+            let mut outcome = Outcome::default();
+            count_rejection(&entry.attempts, &mut outcome);
+            assert_eq!(outcome.rejected, 1);
+            // A previous pass's mismatch must not contaminate a retry.
+            count_rejection(&entry.attempts[entry.attempts.len()..], &mut outcome);
+            assert_eq!(outcome.rejected, 1);
+        }
+    }
+
+    #[test]
+    fn old_resolved_json_remains_readable() {
+        let old = r#"{"doi":"10.1000/a","title":"A title","authors":[],"year":2020,"venue":null,"source":"crossref","method":"printed","score":1.0}"#;
+        let record: Resolved = serde_json::from_str(old).unwrap();
+        assert_eq!(record.doi.as_deref(), Some("10.1000/a"));
+        assert_eq!(record.pmid, None);
+        assert_eq!(record.pmcid, None);
+    }
+
+    #[test]
+    fn failed_registry_requests_are_visible_in_summary() {
+        let resolver = Resolver {
+            client: Client::new("test").with_offline(true),
+        };
+        let mut entries = [query_entry()];
+        entries[0].raw.push_str(" PMID:123456 doi:10.1000/a");
+        let outcome = resolver.resolve_entries(&mut entries);
+        assert_eq!(outcome.errors, 1);
+        assert_eq!(outcome.unresolved, 1);
+        assert!(entries[0].attempts.iter().any(|a| a.method == "europepmc"));
+        assert!(
+            !entries[0]
+                .attempts
+                .iter()
+                .any(|a| a.method == "printed" || a.method == "query")
+        );
+        assert_eq!(outcome.rejected, 0);
+    }
+
+    #[test]
+    #[ignore = "requires live Europe PMC and Crossref access"]
+    fn live_biomedical_exact_identifiers() {
+        let raw = "Piwowar H, Priem J, Larivière V, et al. The state of OA: a large-scale analysis of the prevalence and impact of Open Access articles. PeerJ 2018.";
+        for suffix in [
+            "PMID:29456894",
+            "PMCID:PMC5815332",
+            "doi:10.7717/peerj.4375",
+        ] {
+            let mut entries = [ReferenceEntry {
+                raw: format!("{raw} {suffix}"),
+                ..ReferenceEntry::default()
+            }];
+            let outcome = Resolver::new(None).resolve_entries(&mut entries);
+            assert_eq!(outcome.resolved, 1, "{:?}", entries[0].attempts);
+            let record = entries[0].resolved.as_ref().unwrap();
+            assert_eq!(record.doi.as_deref(), Some("10.7717/peerj.4375"));
+            assert_eq!(record.pmid.as_deref(), Some("29456894"));
+            assert_eq!(record.pmcid.as_deref(), Some("PMC5815332"));
+        }
     }
 
     #[test]
