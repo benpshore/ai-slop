@@ -30,5 +30,6 @@
 pub mod jobs;
 pub mod keys;
 pub mod ledger;
+mod publication;
 pub mod tpe_ai;
 pub mod view;
