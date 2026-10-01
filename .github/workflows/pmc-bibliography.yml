@@ -93,7 +93,20 @@ jobs:
           key: pmc-corpus-${{ env.SAMPLE == 'true' && github.run_id || hashFiles('corpus/pmc-manifest.json') }}
           restore-keys: pmc-corpus-
       - name: Fetch the pinned PDFs and JATS XML (cached files are verified and reused)
+        id: fetch
         run: python3 scripts/pmc_sample.py --fetch --manifest "$MANIFEST" --cache "$CACHE_DIR"
+      - name: Verify the historical PMC9866638 XML before preserving it
+        id: pinned_xml
+        if: steps.fetch.outcome == 'success' && env.SAMPLE != 'true'
+        run: |
+          printf '%s  %s\n' 707148ab259c325c84acd030be5a5c8b "$CACHE_DIR/PMC9866638.1.xml" | md5sum --check
+          sha256sum "$CACHE_DIR/PMC9866638.1.xml"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.pinned_xml.outcome == 'success'
+        with:
+          name: verified-PMC9866638-xml
+          path: .corpus-cache/pmc/PMC9866638.1.xml
+          if-no-files-found: error
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: steps.corpus.outputs.cache-hit != 'true'
         with:
