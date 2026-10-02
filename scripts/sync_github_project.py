@@ -56,6 +56,9 @@ class GitHub:
     def command(self, arguments, payload=None):
         env = os.environ.copy()
         env.pop("GH_DEBUG", None)
+        # Keep secret/variable commands on the same host as the explicit API
+        # calls, even when the caller normally uses a GitHub Enterprise host.
+        env["GH_HOST"] = "github.com"
         # gh receives structured JSON and secrets through stdin/environment, never
         # a shell or command-line token. Suppress interactive credential prompts.
         env["GH_PROMPT_DISABLED"] = "1"

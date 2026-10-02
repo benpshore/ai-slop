@@ -326,6 +326,27 @@ def test_token_only_sent_to_secret_stdin(manifest, monkeypatch, capsys):
     assert payload not in capsys.readouterr().out
 
 
+def test_automation_uses_github_com_with_enterprise_cli_defaults(monkeypatch):
+    monkeypatch.setenv("GH_HOST", "enterprise.example")
+    monkeypatch.setenv("GH_DEBUG", "api")
+    monkeypatch.setattr(sync.shutil, "which", lambda _: "/usr/bin/gh")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sync.subprocess, "run", run)
+    gh = sync.GitHub()
+    gh.command(["secret", "set", "PROJECTS_TOKEN", "--repo", "benpshore/pdftextract"], "token")
+    gh.command(["variable", "set", "PROJECT_NUMBER", "--repo", "benpshore/pdftextract"])
+    assert all(options["env"]["GH_HOST"] == "github.com" for _, options in calls)
+    assert all("GH_DEBUG" not in options["env"] for _, options in calls)
+    assert calls[0][1]["input"] == "token"
+    assert "token" not in calls[0][0]
+    assert sync.os.environ["GH_HOST"] == "enterprise.example"
+
+
 def test_existing_incompatible_field_or_view_is_not_replaced(manifest):
     gh = FakeGitHub()
     sync.sync(gh, arguments(), manifest)
