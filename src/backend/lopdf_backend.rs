@@ -6615,6 +6615,66 @@ mod tests {
         dictionary! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H", "ToUnicode" => id }
     }
 
+    /// Capture only bounded font metadata from the one pinned regression PDF,
+    /// never the PDF itself. The ignored diagnostic is for CI artifact recovery
+    /// when the local executor cannot fetch the public corpus.
+    #[test]
+    #[ignore = "requires the pinned arxiv:2510.26824v2 PDF and a diagnostic output directory"]
+    fn inspect_pinned_font_preflight() {
+        use sha2::{Digest, Sha256};
+        let path = std::env::var("TPE_FONT_DIAGNOSTIC_PDF").unwrap();
+        let output = std::path::PathBuf::from(std::env::var("TPE_FONT_DIAGNOSTIC_OUT").unwrap());
+        let bytes = std::fs::read(path).unwrap();
+        let pdf_hash = hex::encode(Sha256::digest(&bytes));
+        assert_eq!(
+            pdf_hash,
+            "b0447c8f5e0ba689db050619f1bdb600bd021a4ac4be220101de74d9ea7b52b7"
+        );
+        let doc = load_document(&bytes, None).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let mut failures = Vec::new();
+        let mut inspected = 0;
+        for (&id, object) in &doc.objects {
+            let Ok(font) = object.as_dict() else { continue };
+            if !font.has_type(b"Font") {
+                continue;
+            }
+            inspected += 1;
+            assert!(inspected <= 512, "diagnostic font count exceeded");
+            let Err(reason) = font_resources::preflight(&doc, font, &mut FontWork::default())
+            else {
+                continue;
+            };
+            assert!(failures.len() < 16, "diagnostic failure count exceeded");
+            let mut row = serde_json::json!({
+                "object": [id.0, u32::from(id.1)], "reason": reason,
+                "base_font": font.get(b"BaseFont").and_then(Object::as_name).map(lossy).ok(),
+            });
+            if let Ok(Object::Stream(stream)) = font.get_deref(b"ToUnicode", &doc)
+                && form_decode_policy(stream).is_some()
+                && let Ok(cmap) = stream.get_plain_content_with_limit(64 * 1024)
+            {
+                let name = format!("font-{}-{}.cmap", id.0, id.1);
+                std::fs::write(output.join(&name), &cmap).unwrap();
+                row["cmap"] = serde_json::json!({
+                    "file": name, "bytes": cmap.len(), "sha256": hex::encode(Sha256::digest(&cmap)),
+                });
+            }
+            failures.push(row);
+        }
+        let report = serde_json::json!({
+            "pdf_sha256": pdf_hash, "source_sha": std::env::var("GITHUB_SHA").ok(),
+            "inspected_fonts": inspected, "failures": failures,
+            "scope": "bounded ToUnicode metadata from pinned arxiv:2510.26824v2; no PDF bytes",
+        });
+        std::fs::write(
+            output.join("report.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        eprintln!("FONT_PREFLIGHT_DIAGNOSTIC {report}");
+    }
+
     #[test]
     fn unused_four_byte_cmap_is_not_expanded_and_used_cmap_fails_explicitly() {
         let bytes = build_pdf_with_font(vec![vec![], text_ops(12, 50, 50, "x")], None, |doc| {

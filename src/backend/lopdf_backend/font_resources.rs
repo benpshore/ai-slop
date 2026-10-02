@@ -11,6 +11,10 @@ pub(super) const MAX_FONT_CACHE_ENTRIES: usize = 512;
 pub(super) const MIN_FONT_CHARGE: usize = 16 * 1024;
 pub(super) const MAX_FONT_STREAM: usize = 8 * 1024 * 1024;
 const MAX_FONT_ITEMS: usize = 65_536;
+// Cover width/encoding construction, including the upcoming CID interval sweep:
+// two endpoints, one heap entry, and up to two output runs per source run can
+// coexist with the parsed input. Charge before constructing those allocations.
+const FONT_ITEM_CHARGE: usize = 128;
 const MAX_NAME: usize = 1024;
 const MAX_CMAP_CODES: u64 = 65_536;
 const MAX_CMAP_CHARGE: u64 = 32 * 1024 * 1024;
@@ -73,7 +77,7 @@ fn array_charge(doc: &Document, array: &[Object], work: &mut FontWork) -> Result
     if array.len() > MAX_FONT_ITEMS {
         return Err("font widths/encoding item limit exceeded");
     }
-    work.reserve(array.len() * 64)?;
+    work.reserve(array.len() * FONT_ITEM_CHARGE)?;
     let mut entries = array.len();
     for item in array {
         let Ok((_, item)) = doc.dereference(item) else {
@@ -85,7 +89,7 @@ fn array_charge(doc: &Document, array: &[Object], work: &mut FontWork) -> Result
                 if entries > MAX_FONT_ITEMS {
                     return Err("font widths/encoding item limit exceeded");
                 }
-                work.reserve(list.len() * 64)?;
+                work.reserve(list.len() * FONT_ITEM_CHARGE)?;
             }
             Object::Name(name) if name.len() > MAX_NAME => {
                 return Err("font name byte limit exceeded");
@@ -423,6 +427,30 @@ mod tests {
     use std::fmt::Write;
 
     use super::*;
+
+    #[test]
+    fn width_and_differences_items_reserve_construction_space() {
+        let mut doc = Document::with_version("1.5");
+        let nested = doc.add_object(Object::Array(vec![500.into(), 600.into(), 700.into()]));
+        let widths = vec![0.into(), nested.into(), 10.into(), 20.into(), 800.into()];
+        let differences = vec![65.into(), Object::Name(b"Aacute".to_vec())];
+        for (array, expected) in [(&widths, 8 * 128), (&differences, 2 * 128 + 6)] {
+            let mut exact = FontWork {
+                bytes: expected,
+                loads: 1,
+            };
+            array_charge(&doc, array, &mut exact).unwrap();
+            assert_eq!(exact.bytes, 0);
+            let mut short = FontWork {
+                bytes: expected - 1,
+                loads: 1,
+            };
+            assert_eq!(
+                array_charge(&doc, array, &mut short),
+                Err("font allocation/work budget exceeded")
+            );
+        }
+    }
 
     #[test]
     fn source_ranges_are_counted_before_expansion_even_with_false_counts() {
