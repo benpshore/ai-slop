@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "native" / "pmc_validate.py"
@@ -127,3 +128,20 @@ def test_missing_pdf_keeps_truth_entries_and_missing_truth_fails_comparison(tmp_
     assert report["papers"][0]["backward"]["entry_results"][0]["truth"]["raw"] == "One reference"
     assert report["papers"][0]["backward"]["entry_results"][0]["extracted"] is None
     assert report["papers"][1]["truth_error"]
+
+
+def test_total_budget_keeps_every_queued_paper_as_failed(tmp_path):
+    pdf = tmp_path / "PMC123.1.pdf"
+    pdf.write_bytes(b"verified input")
+    item = {
+        "pmcid": "PMC123",
+        "version": 1,
+        "pdf_md5": hashlib.md5(pdf.read_bytes(), usedforsecurity=False).hexdigest(),
+        "xml_md5": "00000000000000000000000000000000",
+    }
+    args = Namespace(cache=tmp_path, binary=Path("does-not-run"), backend="lopdf", deadline=0)
+    row = runner.run_paper(item, args, tmp_path)
+    assert row["pdf"]["verified"]
+    for name in ("backward", "forward"):
+        assert row["paths"][name]["record"]["status"] == "failed"
+        assert row["paths"][name]["execution"]["outcome"] == "budget_exhausted"

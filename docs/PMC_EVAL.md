@@ -150,7 +150,10 @@ The existing 60-paper Native evaluation remains a development regression.
 Each paper runs both explicit `bibliography --backend` and
 `extract --backend --json` paths, with a separate disposable ledger and no
 resolver flag. Two inputs run concurrently; each path has a 180-second wall
-cutoff, and each matrix job has a 150-minute cap. Cold native builds and full
+cutoff and a 90-minute total evaluation budget. Any queued inputs after that
+budget receive failed records, preserving all denominators. Each matrix job
+has a 150-minute cap, leaving time for builds, acquisition and report uploads.
+Cold native builds and full
 layout/OCR can be expensive. Cargo/ORT, pinned assets and pinned PMC downloads
 are cached; PDFium/model files and every PDF/JATS file are reverified on hits.
 The workflow records the toolchain, executable hash, actual source SHA,

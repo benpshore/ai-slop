@@ -104,10 +104,15 @@ def run_paper(item: dict, args: argparse.Namespace, scratch: Path) -> dict:
         command += [str(pdf), "--backend", args.backend]
         if name == "forward":
             command += ["--json", "--db", str(scratch / f"{stem}.db")]
-        if row["pdf"]["verified"]:
+        remaining = args.deadline - time.monotonic()
+        if remaining <= 0:
+            error = "runner: total evaluation wall budget exhausted"
+            record = {"path": str(pdf), "status": "failed", "error": error, "warnings": [error]}
+            execution = {"outcome": "budget_exhausted", "error": error, "argv": command}
+        elif row["pdf"]["verified"]:
             try:
                 record, execution = invoke(
-                    command, pdf, args.out / "raw" / f"{stem}-{name}", args.timeout
+                    command, pdf, args.out / "raw" / f"{stem}-{name}", min(args.timeout, remaining)
                 )
             except OSError as err:
                 record = {"path": str(pdf), "status": "failed", "error": f"runner: {err}"}
@@ -168,9 +173,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--code-sha", required=True)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--budget", type=float, default=5400, help="total evaluation wall seconds")
     args = parser.parse_args(argv)
-    if args.workers < 1 or args.timeout <= 0:
-        parser.error("workers and timeout must be positive")
+    if args.workers < 1 or args.timeout <= 0 or args.budget <= 0:
+        parser.error("workers, timeout and budget must be positive")
     if hashlib.sha256(args.manifest.read_bytes()).hexdigest() != MANIFEST_SHA256:
         parser.error("manifest differs from the reviewed 200-paper cohort")
     manifest = json.loads(args.manifest.read_bytes())
@@ -183,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     args.cache = args.cache.resolve()
     (args.out / "raw").mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    args.deadline = started + args.budget
     with tempfile.TemporaryDirectory(prefix="pmc-native-") as temporary:
         scratch = Path(temporary)
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -234,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         "resolution": "not_measured",
         "workers": args.workers,
         "per_path_timeout_s": args.timeout,
+        "evaluation_budget_s": args.budget,
         "total_wall_s": time.monotonic() - started,
         "comparable_cohort": comparable,
         "coverage": coverage,

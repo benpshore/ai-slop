@@ -25,6 +25,7 @@ if sh "$check" success success cancelled false skipped; then exit 1; fi
 for path in scripts/pmc_bib_eval.py native/validate_eval.py tests/test_smoke.py \
   pyproject.toml uv.lock .python-version .github/workflows/ci.yml \
   .github/workflows/evaluation-tools.yml .github/workflows/pmc-bibliography.yml \
+  .github/workflows/native-pmc200.yml \
   .github/scripts/check-ci.sh; do
   test "$(printf '%s\n' "$path" | sh "$paths")" = true
 done
