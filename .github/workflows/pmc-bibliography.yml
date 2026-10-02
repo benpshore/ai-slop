@@ -28,6 +28,7 @@ on:
       - src/text_cleanup.rs
       - src/regions.rs
       - src/backend/lopdf_backend.rs
+      - src/backend/lopdf_backend/**
       - scripts/pmc_*.py
       - corpus/pmc-manifest.json
       - .github/workflows/pmc-bibliography.yml
