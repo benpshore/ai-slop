@@ -57,6 +57,7 @@
 //! Read the implementation by responsibility: `content` turns bytes into an
 //! owned program without consulting the document; this module resolves page
 //! resources and executes that program; `graphics` groups page-space boxes.
+//! `widths` owns font advance lookup after PDF arrays have been resolved.
 //! Parsing never owns execution state, and geometry never resolves PDF objects.
 //! The tests below exercise those boundaries together, including malformed
 //! content, Form reuse, coordinate transforms, and resource-limit reporting.
@@ -75,9 +76,11 @@ use crate::schema::{BBox, BackendIdentity, Link, PageText, Span, config_digest};
 
 mod content;
 mod graphics;
+mod widths;
 
 use content::{OpKind, TextProgram, is_pdf_space, lex_content};
 use graphics::{Graphics, MAX_CLUSTER_BOXES, MAX_CLUSTER_COMPARISONS, Raster, box_of};
+use widths::{CompositeWidths, SimpleWidths, Widths};
 
 /// The `lopdf` release this backend is built against. It is part of the
 /// [`BackendIdentity`], so a dependency bump must change it (a unit test
@@ -639,125 +642,6 @@ fn to_code(value: f32) -> Option<u32> {
         Some(value as u32)
     } else {
         None
-    }
-}
-
-/// Glyph widths of a simple (single-byte) font.
-struct SimpleWidths {
-    first_char: u32,
-    /// `/Widths`, in glyph space.
-    widths: Vec<f32>,
-    /// `/MissingWidth`, in glyph space.
-    missing: Option<f32>,
-    /// Glyph space to text space: 1/1000 for `Type1`/`TrueType`, the horizontal
-    /// scale of `/FontMatrix` for Type3.
-    glyph_scale: f32,
-}
-
-impl SimpleWidths {
-    fn unknown() -> Self {
-        Self {
-            first_char: 0,
-            widths: Vec::new(),
-            missing: None,
-            glyph_scale: THOUSANDTH,
-        }
-    }
-
-    /// Advance of `code` in text space (1.0 = the font size).
-    fn width(&self, code: u32) -> f32 {
-        let fallback = match self.missing {
-            Some(missing) => missing * self.glyph_scale,
-            None => DEFAULT_WIDTH * THOUSANDTH,
-        };
-        let Some(offset) = code.checked_sub(self.first_char) else {
-            return fallback;
-        };
-        let Ok(index) = usize::try_from(offset) else {
-            return fallback;
-        };
-        match self.widths.get(index) {
-            Some(glyph_width) => glyph_width * self.glyph_scale,
-            None => fallback,
-        }
-    }
-}
-
-/// Glyph widths of a composite (Type0) font, keyed by CID.
-struct CompositeWidths {
-    /// `(first, last, width)` runs from the `/W` array: sorted by `first`
-    /// when `disjoint`, otherwise in `/W` order.
-    ranges: Vec<(u32, u32, f32)>,
-    /// No two runs overlap, so at most one contains a CID and a binary
-    /// search finds it. Otherwise the first run in `/W` order that contains
-    /// the CID wins, found by a linear scan.
-    disjoint: bool,
-    default_width: f32,
-}
-
-impl CompositeWidths {
-    /// Index the `/W` runs for lookup. Empty runs (`first > last`) contain
-    /// no CID and are dropped from the sorted index.
-    fn new(ranges: Vec<(u32, u32, f32)>, default_width: f32) -> Self {
-        let mut sorted: Vec<(u32, u32, f32)> = ranges
-            .iter()
-            .copied()
-            .filter(|&(first, last, _)| first <= last)
-            .collect();
-        sorted.sort_by_key(|&(first, _, _)| first);
-        let disjoint = sorted.windows(2).all(|pair| match pair {
-            [left, right] => left.1 < right.0,
-            _ => true,
-        });
-        if disjoint {
-            Self {
-                ranges: sorted,
-                disjoint,
-                default_width,
-            }
-        } else {
-            Self {
-                ranges,
-                disjoint,
-                default_width,
-            }
-        }
-    }
-
-    /// Advance of `cid` in text space (1.0 = the font size).
-    fn width(&self, cid: u32) -> f32 {
-        if self.disjoint {
-            let after = self.ranges.partition_point(|&(first, _, _)| first <= cid);
-            if let Some(&(_, last, glyph_width)) = after
-                .checked_sub(1)
-                .and_then(|index| self.ranges.get(index))
-                && cid <= last
-            {
-                return glyph_width * THOUSANDTH;
-            }
-        } else {
-            for &(first, last, glyph_width) in &self.ranges {
-                if (first..=last).contains(&cid) {
-                    return glyph_width * THOUSANDTH;
-                }
-            }
-        }
-        self.default_width * THOUSANDTH
-    }
-}
-
-enum Widths {
-    Simple(SimpleWidths),
-    Composite(CompositeWidths),
-}
-
-impl Widths {
-    /// Advance of `code` in text space (1.0 = the font size).
-    fn text_width(&self, code: u32) -> f32 {
-        match self {
-            Self::Simple(simple) => simple.width(code),
-            Self::Composite(composite) => composite.width(code),
-        }
     }
 }
 
@@ -1445,7 +1329,7 @@ fn composite_widths(doc: &Document, dict: &Dictionary) -> CompositeWidths {
             ranges = parse_w_array(doc, array);
         }
     }
-    CompositeWidths::new(ranges, default_width)
+    CompositeWidths::new(&ranges, default_width)
 }
 
 /// Parse a CID font `/W` array, which mixes `c [w1 w2 ...]` and
@@ -6240,29 +6124,5 @@ mod tests {
         let figures = page.figures;
         assert_eq!(figures.len(), MAX_CLUSTER_BOXES);
         assert!(figures.iter().all(|figure| figure.kind == "raster"));
-    }
-
-    #[test]
-    fn composite_widths_lookup_matches_first_match_scan() {
-        let ranges = vec![
-            (10, 10, 300.0),
-            (1, 3, 100.0),
-            (20, 25, 700.0),
-            (5, 4, 999.0),
-        ];
-        let widths = CompositeWidths::new(ranges, 1000.0);
-        assert!(widths.disjoint);
-        assert!(close(widths.width(2), 0.1));
-        assert!(close(widths.width(10), 0.3));
-        assert!(close(widths.width(25), 0.7));
-        assert!(close(widths.width(0), 1.0));
-        assert!(close(widths.width(4), 1.0));
-        assert!(close(widths.width(11), 1.0));
-        assert!(close(widths.width(26), 1.0));
-
-        let overlapping = CompositeWidths::new(vec![(1, 10, 100.0), (5, 5, 900.0)], 500.0);
-        assert!(!overlapping.disjoint);
-        assert!(close(overlapping.width(5), 0.1));
-        assert!(close(overlapping.width(11), 0.5));
     }
 }
