@@ -22,6 +22,17 @@ versions and registry checksums. Do not hand-edit package versions: release
 versions come from git tags. Change dependencies deliberately and validate
 the resulting lockfile with the pinned compiler before publishing.
 
+`build.rs` embeds `TPE_VERSION` when supplied by the release workflow; the
+conventional leading `v` is removed in `tpe --version`. An ordinary checkout
+uses `git describe --tags --match 'v[0-9]*' --always --dirty`, so commits after
+a tag and tracked local edits remain visible. A checkout without a matching
+tag reports `git-<commit>`, and an archive without repository metadata reports
+`source-archive`. Package manifest versions are not used as release identity.
+Cargo watches the supplied environment value, git HEAD/index/refs (including
+worktree metadata), and tracked source content so a reused build cannot retain
+a stale tag or clean-tree identity. Release CI checks the actual executable's
+version against its supplied tag.
+
 ```sh
 rustup show active-toolchain
 rustc -Vv

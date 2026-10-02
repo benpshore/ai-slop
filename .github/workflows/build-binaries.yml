@@ -5,7 +5,8 @@ name: Build binaries
 # `tpe-<target>.tar.gz` (a single file `tpe` inside). The archive name is
 # the contract `tpe update`, mise (`github:` backend) and the install
 # instructions in docs/CLI.md rely on. `version` is embedded through the
-# `TPE_VERSION` build-time environment variable (build.rs).
+# `TPE_VERSION` build-time environment variable (build.rs); the conventional
+# leading v is removed for `tpe --version`.
 
 on:
   workflow_call:
@@ -20,6 +21,7 @@ on:
     paths:
       - .github/workflows/build-binaries.yml
       - rust-toolchain.toml
+      - build.rs
 
 permissions:
   contents: read
@@ -66,7 +68,11 @@ jobs:
         run: cargo build --release --locked -p text-processing-engine --bin tpe
       - name: Smoke test
         run: |
-          ./target/release/tpe --version
+          set -eu
+          expected=${TPE_VERSION#v}
+          actual=$(./target/release/tpe --version)
+          test "$actual" = "tpe $expected"
+          printf '%s\n' "$actual"
           ./target/release/tpe backends
       - name: Package
         run: |
