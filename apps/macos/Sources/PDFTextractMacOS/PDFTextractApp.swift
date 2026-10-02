@@ -35,9 +35,10 @@ struct PDFTextractApp: App {
     @MainActor private func captureSmokeSnapshotIfRequested() async {
         guard let path = ProcessInfo.processInfo.environment["PDFTEXTRACT_UI_SMOKE_SNAPSHOT"] else { return }
         do {
+            NSApplication.shared.activate()
             try await Task.sleep(for: .seconds(2))
             guard let window = NSApplication.shared.windows.first(where: { $0.isVisible }),
-                let view = window.contentView,
+                let view = window.contentView?.superview,
                 let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
             else { throw CocoaError(.coderValueNotFound) }
             view.cacheDisplay(in: view.bounds, to: bitmap)

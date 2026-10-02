@@ -6,6 +6,7 @@ destination=${1:-"$package_root/build"}
 app="$destination/PDFTextract Preview.app"
 snapshot="$destination/workspace.png"
 mkdir -p "$destination"
+rm -f "$snapshot"
 # A custom defaults suite is unnecessary: CI is disposable, and the smoke path
 # only opens built-in samples. No file access, network access or extraction.
 PDFTEXTRACT_UI_SMOKE_SNAPSHOT="$snapshot" "$app/Contents/MacOS/PDFTextractPreview" &

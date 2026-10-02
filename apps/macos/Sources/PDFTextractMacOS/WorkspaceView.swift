@@ -160,6 +160,7 @@ struct WorkspaceView: View {
                 .listStyle(.inset)
             }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .searchable(text: $model.search, placement: .automatic, prompt: "Find a document")
     }
 }

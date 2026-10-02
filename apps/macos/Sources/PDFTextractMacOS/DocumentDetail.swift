@@ -235,14 +235,30 @@ struct DocumentDetail: View {
 private struct SourcePDFView: NSViewRepresentable {
     let url: URL
 
-    func makeNSView(context: Context) -> PDFView {
+    func makeNSView(context: Context) -> NSView {
+        guard let document = PDFDocument(url: url), !document.isLocked else {
+            let container = NSView()
+            let label = NSTextField(wrappingLabelWithString:
+                "This PDF could not be displayed or is password protected. The source file has not been modified.")
+            label.textColor = .secondaryLabelColor
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                label.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
+                label.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
+            ])
+            return container
+        }
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
-        view.document = PDFDocument(url: url)
+        view.document = document
         return view
     }
 
-    func updateNSView(_ view: PDFView, context: Context) {}
+    func updateNSView(_ view: NSView, context: Context) {}
 }
