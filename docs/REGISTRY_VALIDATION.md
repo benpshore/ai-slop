@@ -49,9 +49,13 @@ is downloaded or reused only after the corpus MD5 check; an additional SHA-256 a
 the exact citation XML are retained. Structured `pub-id` fields supply DOI/PMID/PMCID
 labels. The generator never guesses PMID/PMCID boundaries from concatenated text,
 queries the tested registries for labels, or replaces source papers after a failed
-fetch. Each available source adds a PMID case, a PMCID case and an explicitly
-contradictory PMID/PMCID pair. Missing JATS labels or acquisition errors remain in
-the report and fail the evidence check. The planned maximum is **402 cases**.
+fetch. Each eligible source adds a PMID case, a PMCID case and an explicitly
+contradictory PMID/PMCID pair. All 24 source XMLs verified in the initial run;
+18 supplied usable reference triples and six had no eligible structured reference.
+Those six remain named eligibility exclusions. The resulting frozen inputs have
+**384 cases**. Acquisition errors, unaccounted sources or fewer than ten independent
+labeled biomedical source papers fail the evidence check; known label ineligibility
+does not become a failed network request. No source is replaced based on its result.
 
 Source extraction report:
 

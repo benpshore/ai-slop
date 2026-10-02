@@ -11,6 +11,7 @@ from pathlib import Path
 import pmc_sample
 
 VERSION = "1"
+SCORER_VERSION = "2"  # Separate verified label eligibility from acquisition failure.
 DOI_RE = re.compile(r"(?:https?://(?:dx\.)?doi\.org/)?10\.\d{4,9}/[^\s\"']+", re.I)
 
 
@@ -283,7 +284,7 @@ def biomedical_truth(data: bytes) -> list[dict]:
 
 def prepare(selection: dict, cache: Path) -> dict:
     cases = copy.deepcopy(selection["natural_cases"] + selection["controlled_cases"])
-    biomedical, acquisition = [], []
+    biomedical, acquisition, label_exclusions = [], [], []
     for item in selection["biomedical_sources"]:
         path = pmc_sample.cache_paths(item, cache)[1]
         record = {"pmcid": item["pmcid"], "xml_url": item["xml_url"], "xml_md5": item["xml_md5"]}
@@ -304,6 +305,23 @@ def prepare(selection: dict, cache: Path) -> dict:
                             "xml_provenance": record.copy(),
                         }
                     )
+                else:
+                    label_exclusions.append(
+                        {
+                            "pmcid": item["pmcid"],
+                            "reason": "duplicate labeled target",
+                            "xml_sha256": record["xml_sha256"],
+                        }
+                    )
+            else:
+                label_exclusions.append(
+                    {
+                        "pmcid": item["pmcid"],
+                        "reason": "verified XML has no usable reference with DOI, PMID, PMCID, "
+                        "surname, title and year",
+                        "xml_sha256": record["xml_sha256"],
+                    }
+                )
             record["eligible_references"] = len(candidates)
         except (pmc_sample.FetchError, OSError, ValueError) as error:
             record["error"] = str(error)
@@ -353,6 +371,7 @@ def prepare(selection: dict, cache: Path) -> dict:
         "acquisition": acquisition,
         "biomedical_source_goal": len(selection["biomedical_sources"]),
         "biomedical_source_count": len(selected),
+        "biomedical_label_exclusions": label_exclusions,
         "cases": cases,
     }
 
@@ -475,7 +494,7 @@ def score(cohort: dict, records: list[dict], errors: list[str]) -> dict:
         }
 
     return {
-        "scorer_version": VERSION,
+        "scorer_version": SCORER_VERSION,
         "scorer_sha256": digest(Path(__file__).read_bytes()),
         "run_metadata": metadata,
         "source": cohort["source"],
@@ -483,6 +502,7 @@ def score(cohort: dict, records: list[dict], errors: list[str]) -> dict:
         "acquisition": cohort["acquisition"],
         "biomedical_source_goal": cohort["biomedical_source_goal"],
         "biomedical_source_count": cohort["biomedical_source_count"],
+        "biomedical_label_exclusions": cohort.get("biomedical_label_exclusions", []),
         "input_errors": errors,
         "unexpected_case_ids": unexpected,
         "planned": len(rows),
@@ -505,8 +525,15 @@ def evidence_failures(report: dict) -> list[str]:
         failures.append("unexpected case identities in result journal")
     if report["planned"] != report["attempted"]:
         failures.append("not every planned resolver case ran")
-    if report["biomedical_source_count"] != report["biomedical_source_goal"]:
+    if (
+        report["biomedical_source_count"] + len(report.get("biomedical_label_exclusions", []))
+        != report["biomedical_source_goal"]
+    ):
         failures.append("some planned biomedical JATS labels are unavailable")
+    if report["biomedical_source_count"] < 10:
+        failures.append("fewer than ten independent biomedical source papers have usable labels")
+    if any(item.get("error") for item in report["acquisition"]):
+        failures.append("publisher XML acquisition or verification failed")
     for group, counts in report["groups"].items():
         for field in (
             "wrong_identifier",

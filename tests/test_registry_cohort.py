@@ -136,6 +136,18 @@ def test_independent_identifier_field_coverage_includes_missing_and_wrong_values
     }
 
 
+def test_verified_label_ineligibility_is_distinct_from_failed_acquisition():
+    report = cohort.score(small_cohort(), [], [])
+    report["biomedical_source_goal"] = 24
+    report["biomedical_source_count"] = 18
+    report["biomedical_label_exclusions"] = [{"pmcid": str(index)} for index in range(6)]
+    assert "some planned biomedical JATS labels are unavailable" not in cohort.evidence_failures(
+        report
+    )
+    report["acquisition"] = [{"pmcid": "PMC123", "error": "checksum mismatch"}]
+    assert "publisher XML acquisition or verification failed" in cohort.evidence_failures(report)
+
+
 def test_biomedical_labels_come_from_structured_jats_not_concatenated_numbers():
     xml = b"""<article><back><ref-list><ref><element-citation>
     <name><surname>Smith</surname></name><article-title>Independent study</article-title>
