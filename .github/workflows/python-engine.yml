@@ -1,0 +1,94 @@
+name: Python engine
+
+on:
+  pull_request:
+    paths:
+      - 'python-engine/**'
+      - '.github/workflows/python-engine.yml'
+      - '.github/workflows/python-release.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'python-engine/**'
+      - '.github/workflows/python-engine.yml'
+      - '.github/workflows/python-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.19'
+          python-version: '3.14.7'
+          enable-cache: true
+      - name: Install Poppler and record host tools
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y poppler-utils
+          else
+            brew install poppler
+          fi
+          pdftotext -v
+          curl --version
+          uv --version
+          uname -a
+      - name: Locked Python 3.14 checks against real Poppler
+        run: |
+          uv sync --locked --directory python-engine --python 3.14.7 --group dev
+          uv run --locked --directory python-engine ruff format --check
+          uv run --locked --directory python-engine ruff check
+          uv run --locked --directory python-engine pytest
+      - name: Build and exercise the installed tpe tool on PDF and HTTPS inputs
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/python-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/python-tools-bin
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          uv build --directory python-engine --python 3.14.7 --no-sources --out-dir "$RUNNER_TEMP/python-dist"
+          uv tool install --python 3.14.7 "$RUNNER_TEMP"/python-dist/*.whl
+          expected=$(uv version --directory python-engine --short)
+          test "$("$UV_TOOL_BIN_DIR/tpe" --version)" = "$expected"
+          pdftotext -layout -enc UTF-8 python-engine/tests/fixtures/layout.pdf "$RUNNER_TEMP/reference.txt"
+          "$UV_TOOL_BIN_DIR/tpe" python-engine/tests/fixtures/layout.pdf -o "$RUNNER_TEMP/installed-text"
+          cmp "$RUNNER_TEMP/reference.txt" "$RUNNER_TEMP/installed-text/layout.txt"
+          "$UV_TOOL_BIN_DIR/tpe" "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$SOURCE_SHA/python-engine/tests/fixtures/layout.pdf" -o "$RUNNER_TEMP/url-text"
+          cmp "$RUNNER_TEMP/reference.txt" "$RUNNER_TEMP/url-text/layout.txt"
+      - name: Retain exact source and repair diagnostics on failure
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/python-diagnostics"
+          cp -R python-engine "$RUNNER_TEMP/python-diagnostics/source"
+          uv lock --directory python-engine --python 3.14.7 > "$RUNNER_TEMP/python-diagnostics/lock.log" 2>&1 || true
+          uv run --frozen --directory python-engine ruff format > "$RUNNER_TEMP/python-diagnostics/format.log" 2>&1 || true
+          git diff -- python-engine > "$RUNNER_TEMP/python-diagnostics/repair.patch"
+          cp python-engine/uv.lock "$RUNNER_TEMP/python-diagnostics/uv.lock"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: python-engine-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/python-dist
+            ${{ runner.temp }}/python-diagnostics
+          if-no-files-found: warn
