@@ -249,7 +249,7 @@ fn retain_unresolved_text(result: &mut ExtractionResult) {
             || page.text.contains('\u{fffd}')
             || page.warnings.iter().any(|w| w.contains("unmapped "))
         {
-            Some("native text contains unmapped characters; retained text needs recovery")
+            Some("native character mapping is unverified; text retained for review")
         } else if router::looks_scanned(page) {
             Some("little or no text over a page-sized image; inspect for missing image text")
         } else if page.warnings.iter().any(|w| {
