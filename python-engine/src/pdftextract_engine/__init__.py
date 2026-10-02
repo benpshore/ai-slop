@@ -47,8 +47,8 @@ def convert_url(url, output_dir=Path("."), *, overwrite=False):
     with tempfile.TemporaryDirectory(prefix="tpe-download-") as folder:
         pdf = Path(folder) / "input.pdf"
         command = (
-            "curl --disable --fail --silent --show-error --location --proto =https "
-            "--proto-redir =https --max-time 110 --max-filesize 104857600"
+            "curl --disable --globoff --fail --silent --show-error --location "
+            "--proto =https --proto-redir =https --max-time 110 --max-filesize 104857600"
         ).split()
         _run([*command, "--output", str(pdf), "--", url])
         return convert_pdf(pdf, destination, overwrite=overwrite)
@@ -62,7 +62,7 @@ def main(argv=None):
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
-    remote = urlsplit(args.target).scheme in {"https", "http"}
+    remote = args.target.lower().startswith(("https://", "http://"))
     source = Path(args.target)
     base = source if source.is_dir() else source.parent
     pattern = "**/*" if args.recursive else "*"
@@ -74,6 +74,7 @@ def main(argv=None):
     if not files:
         parser.error(f"No PDFs found: {source}")
     failed = 0
+    destinations = set()
     for pdf in files:
         try:
             if remote:
@@ -83,6 +84,9 @@ def main(argv=None):
             else:
                 target = args.output_dir / pdf.relative_to(base) if args.output_dir else pdf
                 target = target.with_suffix(".txt")
+                if target.resolve() in destinations:
+                    raise ValueError(f"Inputs map to the same output: {target}")
+                destinations.add(target.resolve())
                 convert_pdf(pdf, target, overwrite=args.overwrite)
             print(target)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:

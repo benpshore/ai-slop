@@ -41,13 +41,16 @@ jobs:
           version: '0.12.19'
           python-version: '3.14.7'
           enable-cache: true
+          cache-dependency-glob: python-engine/uv.lock
       - name: Install Poppler and record host tools
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -qq
             sudo apt-get install -y poppler-utils
+            nproc
           else
             brew install poppler
+            sysctl hw.physicalcpu hw.logicalcpu
           fi
           pdftotext -v
           curl --version
@@ -79,10 +82,12 @@ jobs:
         if: failure()
         run: |
           mkdir -p "$RUNNER_TEMP/python-diagnostics"
-          cp -R python-engine "$RUNNER_TEMP/python-diagnostics/source"
+          mkdir -p "$RUNNER_TEMP/python-diagnostics/source"
+          cp -R python-engine/src python-engine/tests python-engine/pyproject.toml "$RUNNER_TEMP/python-diagnostics/source/"
           uv lock --directory python-engine --python 3.14.7 > "$RUNNER_TEMP/python-diagnostics/lock.log" 2>&1 || true
           uv run --frozen --directory python-engine ruff format > "$RUNNER_TEMP/python-diagnostics/format.log" 2>&1 || true
           git diff -- python-engine > "$RUNNER_TEMP/python-diagnostics/repair.patch"
+          cat "$RUNNER_TEMP/python-diagnostics/repair.patch"
           cp python-engine/uv.lock "$RUNNER_TEMP/python-diagnostics/uv.lock"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

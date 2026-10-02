@@ -96,6 +96,7 @@ def test_url_uses_https_curl_and_real_poppler(monkeypatch, tmp_path):
     def download(command, timeout=120):
         if command[0] == "curl":
             assert command[1] == "--disable"
+            assert "--globoff" in command
             assert command[command.index("--proto") + 1] == "=https"
             assert command[command.index("--proto-redir") + 1] == "=https"
             assert command[command.index("--max-filesize") + 1] == "104857600"
@@ -105,7 +106,7 @@ def test_url_uses_https_curl_and_real_poppler(monkeypatch, tmp_path):
             run(command, timeout)
 
     monkeypatch.setattr(engine, "_run", download)
-    url = "https://example.org/a%20paper.pdf?download=1"
+    url = "https://example.org/a%20paper.pdf?part=[1-2]"
     assert engine.main([url, "-o", str(tmp_path)]) == 0
     assert "Left column" in (tmp_path / "a paper.txt").read_text()
 
@@ -148,3 +149,26 @@ def test_publication_respects_umask_in_child_only(tmp_path, mask, mode):
         umask=mask,
     )
     assert source.with_suffix(".txt").stat().st_mode & 0o777 == mode
+
+
+def test_invalid_url_reports_error_without_traceback(capsys):
+    assert engine.main(["https://["]) == 1
+    assert "Invalid IPv6 URL" in capsys.readouterr().err
+
+
+def test_only_tpe_is_installed():
+    from importlib.metadata import distribution
+
+    scripts = distribution("pdftextract-engine").entry_points
+    assert [entry.name for entry in scripts if entry.group == "console_scripts"] == ["tpe"]
+
+
+def test_folder_output_collision_is_not_overwritten(tmp_path, capsys):
+    upper = paper(tmp_path / "paper.PDF")
+    lower = paper(tmp_path / "paper.pdf")
+    if upper.samefile(lower):
+        pytest.skip("Case-insensitive filesystem cannot represent this pair")
+    lower.write_bytes(lower.read_bytes().replace(b"Left column", b"Second copy"))
+    assert engine.main([str(tmp_path), "--overwrite"]) == 1
+    assert "same output" in capsys.readouterr().err
+    assert "Left column" in (tmp_path / "paper.txt").read_text()
