@@ -17,6 +17,8 @@ use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedSender;
 
+use crate::publication::StagedOutputs;
+
 use tpe::acquire;
 use tpe::backend;
 use tpe::bibliography::{self, Record};
@@ -402,7 +404,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// Run one job in this process. `observe` is called on this thread for the
 /// open and for each page. Outputs are written next to `source` only on
-/// success; a failed job (including an engine panic) writes nothing.
+/// success. Outputs are staged before touching the ledger; handled failures
+/// roll back the result transaction and remove outputs created by this job.
+/// Cleanup errors name retained paths. See docs/PUBLICATION.md for crash semantics.
 pub fn run(
     action: Action,
     source: &Path,
@@ -442,23 +446,29 @@ fn run_text(
             .cloned()
             .unwrap_or_else(|| "extraction failed".to_string()));
     }
+    let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
+    let mut outputs = StagedOutputs::stage(source, &[(".txt", texts.join("\u{c}").into_bytes())])
+        .map_err(|e| format!("staging output: {e}"))?;
     if let Some(parent) = ledger.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let mut store = Ledger::open(ledger).map_err(|e| format!("ledger: {e}"))?;
-    // As `tpe extract` does: the write is timed and recorded on the run.
     let write_start = Instant::now();
-    let run = store
-        .write_result(&result)
+    let pending = store
+        .prepare_result(&result)
         .map_err(|e| format!("ledger: {e}"))?;
     result.timings.write_ms = write_start.elapsed().as_secs_f64() * 1000.0;
-    store
-        .update_timings(run, &result.timings)
+    pending
+        .update_timings(&result.timings)
         .map_err(|e| format!("ledger: {e}"))?;
-    let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    let target = output_path(source, ".txt", Path::exists);
-    fs::write(&target, texts.join("\u{c}"))
-        .map_err(|e| format!("writing {}: {e}", target.display()))?;
+    // On a publication failure `pending` drops and restores the prior run.
+    // On a commit failure the helper removes its own published links.
+    let paths = outputs.publish_then(|| {
+        pending
+            .commit()
+            .map(|_| ())
+            .map_err(|e| format!("ledger commit: {e}"))
+    })?;
     let mut summary = String::new();
     if result.status != Status::Complete {
         let _ = write!(summary, "{}: ", result.status.as_str());
@@ -475,7 +485,7 @@ fn run_text(
         result.warnings
     };
     Ok(Outcome {
-        outputs: vec![target],
+        outputs: paths,
         summary,
         warnings,
     })
@@ -513,18 +523,17 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
             warnings: record.warnings,
         });
     }
-    let mut pair = output_paths(
-        source,
-        &[".references.json", ".references.txt"],
-        Path::exists,
-    );
-    let text = pair.pop().expect("two paths");
-    let json = pair.pop().expect("two paths");
     let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     line.push('\n');
-    fs::write(&json, line).map_err(|e| format!("writing {}: {e}", json.display()))?;
-    fs::write(&text, record.plain_text())
-        .map_err(|e| format!("writing {}: {e}", text.display()))?;
+    let mut staged = StagedOutputs::stage(
+        source,
+        &[
+            (".references.json", line.into_bytes()),
+            (".references.txt", record.plain_text().into_bytes()),
+        ],
+    )
+    .map_err(|e| format!("staging bibliography: {e}"))?;
+    let outputs = staged.publish_then(|| Ok(()))?;
     let scanned = record.pages_scanned.unwrap_or(0);
     let summary = format!(
         "{} from the last {}",
@@ -532,7 +541,7 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
         count(scanned as usize, "page")
     );
     Ok(Outcome {
-        outputs: vec![json, text],
+        outputs,
         summary,
         warnings: record.warnings,
     })
@@ -621,6 +630,20 @@ mod tests {
         // A second run never overwrites: it numbers the new file.
         let again = run(Action::Text, &pdf, &ledger, &mut |_| {}).unwrap();
         assert_eq!(again.outputs, [dir.path().join("paper 2.txt")]);
+    }
+
+    #[test]
+    fn ledger_open_failure_leaves_no_final_or_staged_output() {
+        let (dir, pdf, ledger) = scratch();
+        std::fs::create_dir_all(&ledger).unwrap(); // a directory cannot be a SQLite file
+        let error = run(Action::Text, &pdf, &ledger, &mut |_| {}).unwrap_err();
+        assert!(error.contains("ledger:"), "{error}");
+        assert!(!dir.path().join("paper.txt").exists());
+        assert!(
+            !names(dir.path())
+                .iter()
+                .any(|name| name.starts_with(".pdftextract-"))
+        );
     }
 
     #[test]
