@@ -166,8 +166,9 @@ const LIGATURE_POLICY: &str = "expand";
 /// stack per Form; 3 = painted paths and Image `XObject`s become figures;
 /// 4 = image placements are bounded per page; 5 = bounded Form decoding,
 /// caching and execution, with explicit page errors on resource exhaustion;
-/// 6 = fold balanced empty save/restore pairs when compiling Form programs.
-const CONTENT_POLICY: &str = "6";
+/// 6 = fold balanced empty save/restore pairs when compiling Form programs;
+/// 7 = incrementally cluster painted boxes, with bounded comparisons/regions.
+const CONTENT_POLICY: &str = "7";
 
 /// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
 /// long is a `rule` figure.
@@ -178,9 +179,12 @@ const RULE_LENGTH: f32 = 30.0;
 const CLUSTER_GAP: f32 = 6.0;
 /// A `vector` cluster that fits in a square this wide (points) is dropped.
 const MIN_VECTOR_SIDE: f32 = 8.0;
-/// Most painted boxes or image placements retained on one page. Beyond this,
-/// painted boxes become one covering `vector` figure and images are ignored.
+/// Most distinct vector clusters or image placements retained on one page.
+/// Repeated/nearby paths merge before this bound is checked.
 const MAX_CLUSTER_BOXES: usize = 2000;
+/// Bound repeated fixed-point scans independently of the number of paths.
+/// On exhaustion the covering extent is retained with a partial outcome.
+const MAX_CLUSTER_COMPARISONS: usize = 4_000_000;
 /// Retained program allocation charge (not a process RSS limit).
 const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Also bound map buckets, allocator overhead and the eviction queue.
@@ -2520,6 +2524,7 @@ fn near(a: BBox, b: BBox, gap: f32) -> bool {
 /// [`CLUSTER_GAP`]. Each new box absorbs every cluster near it, rescanning
 /// after each merge, so no two clusters left are near each other (a fixed
 /// point). Clusters come top to bottom, then left to right.
+#[cfg(test)]
 fn cluster(boxes: &[BBox]) -> Vec<BBox> {
     let mut clusters: Vec<BBox> = Vec::new();
     for &bbox in boxes {
@@ -2552,12 +2557,14 @@ struct Raster {
 struct Graphics {
     /// Thin painted boxes (see [`RULE_THICKNESS`]).
     rules: Vec<BBox>,
-    /// The other painted boxes, at most [`MAX_CLUSTER_BOXES`].
+    /// Fixed-point clusters in insertion order, at most [`MAX_CLUSTER_BOXES`].
     shapes: Vec<BBox>,
     /// Union of every box that is not a rule.
     extent: Option<BBox>,
-    /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
+    /// Too many distinct clusters, or their comparison budget was exhausted.
     overflow: bool,
+    comparisons: usize,
+    work_limited: bool,
     /// Image placements, at most [`MAX_CLUSTER_BOXES`].
     rasters: Vec<Raster>,
     raster_overflow: bool,
@@ -2577,10 +2584,31 @@ impl Graphics {
             Some(so_far) => enclose(so_far, bbox),
             None => bbox,
         });
-        if self.shapes.len() < MAX_CLUSTER_BOXES {
-            self.shapes.push(bbox);
-        } else {
+        if self.overflow {
+            return;
+        }
+        // This is the same insertion/fixed-point order as `cluster`, but a
+        // dense figure keeps only its clusters instead of every painted path.
+        let mut grown = bbox;
+        let mut at = 0;
+        while at < self.shapes.len() {
+            if self.comparisons == MAX_CLUSTER_COMPARISONS {
+                self.overflow = true;
+                self.work_limited = true;
+                return;
+            }
+            self.comparisons += 1;
+            if near(self.shapes[at], grown, CLUSTER_GAP) {
+                grown = enclose(grown, self.shapes.swap_remove(at));
+                at = 0;
+            } else {
+                at += 1;
+            }
+        }
+        if self.shapes.len() == MAX_CLUSTER_BOXES {
             self.overflow = true;
+        } else {
+            self.shapes.push(grown);
         }
     }
 
@@ -2599,11 +2627,12 @@ impl Graphics {
         for bbox in self.rules {
             push_figure(&mut figures, "rule", bbox, None, None);
         }
-        let clusters: Vec<BBox> = if self.overflow {
+        let mut clusters: Vec<BBox> = if self.overflow {
             self.extent.into_iter().collect()
         } else {
-            cluster(&self.shapes)
+            self.shapes
         };
+        clusters.sort_by(|a, b| b.y1.total_cmp(&a.y1).then(a.x0.total_cmp(&b.x0)));
         for bbox in clusters {
             if bbox.x1 - bbox.x0 >= MIN_VECTOR_SIDE || bbox.y1 - bbox.y0 >= MIN_VECTOR_SIDE {
                 push_figure(&mut figures, "vector", bbox, None, None);
@@ -2680,9 +2709,13 @@ impl<'a> Interpreter<'a> {
                 "resource_limit: raster placements truncated (limit={MAX_CLUSTER_BOXES})"
             ));
         }
-        if graphics.overflow {
+        if graphics.work_limited {
             self.warn(format!(
-                "resource_limit: vector regions coalesced (limit={MAX_CLUSTER_BOXES})"
+                "resource_limit: vector clustering budget exhausted (comparisons={MAX_CLUSTER_COMPARISONS})"
+            ));
+        } else if graphics.overflow {
+            self.warn(format!(
+                "resource_limit: vector regions coalesced (cluster limit={MAX_CLUSTER_BOXES})"
             ));
         }
         self.page.figures = graphics.into_figures();
@@ -5138,7 +5171,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "6".to_string());
+        config.insert("content".to_string(), "7".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
@@ -7130,10 +7163,77 @@ mod tests {
             let x = (step * 20) as f32;
             graphics.add_path(boxed(x, 0.0, x + 10.0, 10.0));
         }
-        let figures = graphics.into_figures();
+        let page = emit_all_with_graphics(&[], graphics);
+        assert_eq!(
+            page.warnings,
+            ["resource_limit: vector regions coalesced (cluster limit=2000)"]
+        );
+        let figures = page.figures;
         assert_eq!(figures.len(), 1);
         assert_eq!(figures[0].kind, "vector");
         assert_box(&figures[0], 0.0, 0.0, 40_010.0, 10.0);
+    }
+
+    #[test]
+    fn dense_paths_keep_separate_vector_clusters_and_match_full_clustering() {
+        let mut graphics = Graphics::default();
+        let mut boxes = Vec::new();
+        for i in 0..6000 {
+            let x = if i % 2 == 0 { 0.0 } else { 100.0 };
+            let bbox = BBox {
+                x0: x,
+                y0: 0.0,
+                x1: x + 10.0,
+                y1: 10.0,
+            };
+            boxes.push(bbox);
+            graphics.add_path(bbox);
+        }
+        assert_eq!(graphics.shapes.len(), 2);
+        assert!(graphics.comparisons < 3 * boxes.len());
+        let page = emit_all_with_graphics(&[], graphics);
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+        let actual: Vec<_> = page
+            .figures
+            .iter()
+            .map(|figure| figure.bbox.unwrap())
+            .collect();
+        assert_eq!(actual, cluster(&boxes));
+        assert_eq!(actual.len(), 2);
+    }
+
+    #[test]
+    fn incremental_clusters_preserve_bridges_and_report_comparison_exhaustion() {
+        let mut graphics = Graphics::default();
+        let mut boxes = Vec::new();
+        for x in [0.0, 30.0, 14.0, 100.0, 80.0, 60.0, 45.0] {
+            let bbox = BBox {
+                x0: x,
+                y0: 0.0,
+                x1: x + 12.0,
+                y1: 10.0,
+            };
+            boxes.push(bbox);
+            graphics.add_path(bbox);
+            let mut actual = graphics.shapes.clone();
+            actual.sort_by(|a, b| b.y1.total_cmp(&a.y1).then(a.x0.total_cmp(&b.x0)));
+            assert_eq!(actual, cluster(&boxes));
+        }
+        graphics.comparisons = MAX_CLUSTER_COMPARISONS;
+        graphics.add_path(BBox {
+            x0: 200.0,
+            y0: 0.0,
+            x1: 210.0,
+            y1: 10.0,
+        });
+        assert!(graphics.work_limited);
+        let page = emit_all_with_graphics(&[], graphics);
+        assert_eq!(
+            page.warnings,
+            ["resource_limit: vector clustering budget exhausted (comparisons=4000000)"]
+        );
+        assert_eq!(page.figures.len(), 1);
+        assert_box(&page.figures[0], 0.0, 0.0, 210.0, 10.0);
     }
 
     #[test]
