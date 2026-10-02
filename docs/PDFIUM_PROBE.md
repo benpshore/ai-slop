@@ -91,6 +91,65 @@ macOS/Windows currently report `unavailable` rather than claiming equivalent
 enforcement. Apple Silicon performance and production worker/session pooling
 remain unmeasured and unimplemented.
 
+## C binding review and upstream compilation
+
+The worker's native handles borrow the bindings and input buffer. Text pages
+close before pages, pages before documents, and documents before library
+destruction. Error returns use the same scoped cleanup. One worker initializes
+one PDFium instance and calls it on one thread. The locked pdfium-render 0.8.37
+`thread_safe` wrapper holds a process-wide mutex from initialization through
+destruction; the controller never initializes PDFium. Native signed page and
+character counts are checked before conversion or allocation. Character box
+and origin calls receive pointers to live `double` locals, and retained results
+copy their values into Rust-owned data.
+
+The controller snapshots the explicit trusted library into its private temporary
+directory before starting the worker. The worker loads and hashes that same
+private copy, so replacing the configured deployment path cannot make the
+report identify another library. This copy has a 64 MiB bound and occurs before
+the worker's output file limit is applied. A trusted library with additional
+shared-library dependencies must have those dependencies provisioned by the
+system loader; this experiment's verified artifact is a single PDFium library.
+
+The Linux x86-64 and ARM64 platforms use LP64. In this binding's dynamic API,
+`FPDF_LoadMemDocument64` uses `c_ulong` for upstream `size_t`; those have matching
+widths on these platforms. That declaration needs separate review on Windows
+LLP64. Windows and macOS worker containment remain unavailable. Symbol loading
+at bind time checks API availability, not ABI correctness or native parser
+memory safety. Resource limits and process disposal bound crash/resource
+effects; they do not turn the C++ parser into a memory-safe implementation.
+
+[PDFium upstream source probe](../.github/workflows/pdfium-source.yml) compiles
+the explicit commit in [pdfium-source.json](../native/pdfium-source.json) on
+Linux x86-64. The immutable source `DEPS` pins the full depot_tools SHA; the
+recipe extracts that literal before running tools, fetches exactly that commit,
+disables its updates, and verifies both bootstrap and DEPS checkouts. GN, Clang,
+sysroot and other dependencies are supplied by that revision's dependency
+hooks. The artifact records DEPS, dependency revisions, GN arguments, source
+changes, compiler version/hash, library hash, code/Rust identity and build log.
+The Ubuntu runner image and apt packages are recorded by Actions and remain
+host dependencies; this is reproducible source selection and build provenance,
+not a promise of byte-identical binaries across runner image updates.
+
+The small shared-library/public-export patch comes from
+[bblanchon/pdfium-binaries at f2e9a1c](https://github.com/bblanchon/pdfium-binaries/blob/f2e9a1c45bb17b85b540abf1af30146ef65416ac/patches/shared_library.patch),
+whose reviewed release build uses the same deployment shape. The experiment
+commit is listed in the 8066 release notes; it is not claimed to reconstruct the
+production prebuilt artifact's exact source checkout. V8 and XFA stay disabled.
+The source-built library runs the existing real worker evidence/containment
+tests and a public C header signature/runtime sentinel. This covers the APIs
+used by the experiment; it is not PDFium's complete upstream test suite.
+
+The source compile runs manually or when a PR changes its pin/recipe/workflow.
+It is excluded from ordinary Rust PRs and capped at 40 minutes with two compile
+jobs. The reference 8066 Linux x64 upstream build compiled approximately 1,195
+objects in 4.5 minutes after checkout/setup; cold dependency downloads and
+runner resources can cost more. No schedule runs until that cost is reviewed.
+Source ARM64, macOS and Windows compilation are separate work; existing
+verified-prebuilt CI still exercises Linux ARM64. Updating the source pin
+requires reviewing the same evidence in a PR. Passing it never updates
+`native/manifest.json`, installs the artifact in production, or merges a PR.
+
 ## Evidence and checks
 
 `tests/pdfium_probe.rs` runs the actual controller and native library against

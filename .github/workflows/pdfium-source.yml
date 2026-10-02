@@ -1,0 +1,59 @@
+name: PDFium upstream source probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - native/pdfium-source.json
+      - native/pdfium-source-shared.patch
+      - native/pdfium-abi.c
+      - .github/scripts/pdfium-source-build.sh
+      - .github/workflows/pdfium-source.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      TPE_PDFIUM_PROBE_EVIDENCE_DIR: ${{ github.workspace }}/out/pdfium-source
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select an isolated build directory
+        run: |
+          echo "PDFIUM_SOURCE_BUILD_ROOT=$RUNNER_TEMP/pdfium-source" >> "$GITHUB_ENV"
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$RUNNER_TEMP/pdfium-source/pdfium/out/Release/libpdfium.so" >> "$GITHUB_ENV"
+      - name: Compile the reviewed upstream revision and its pinned tools
+        run: bash .github/scripts/pdfium-source-build.sh 2>&1 | tee pdfium-source-build.log
+      - name: Check the Rust binding against the source-built library
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+          rustc +1.98.1 --version --verbose > out/pdfium-source/rust-toolchain.txt
+          cargo +1.98.1 clippy --locked --all-targets --features pdfium -- -D warnings
+          cargo +1.98.1 test --locked --features pdfium --lib pdfium_probe::tests -- --nocapture
+          cargo +1.98.1 test --locked --features pdfium --test pdfium_probe -- --nocapture
+      - name: Compile and run the public C ABI sentinel against the same library
+        run: |
+          pdfium_source="$PDFIUM_SOURCE_BUILD_ROOT/pdfium"
+          clang="$pdfium_source/third_party/llvm-build/Release+Asserts/bin/clang"
+          "$clang" -std=c11 -Wall -Wextra -Werror -I "$pdfium_source/public" \
+            native/pdfium-abi.c -L "$pdfium_source/out/Release" \
+            -Wl,-rpath,"$pdfium_source/out/Release" -lpdfium -lm -o "$RUNNER_TEMP/pdfium-abi"
+          "$RUNNER_TEMP/pdfium-abi" out/pdfium-source/nested-forms.pdf | tee out/pdfium-source/c-abi.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: pdfium-source-linux-x64
+          path: |
+            out/pdfium-source
+            pdfium-source-build.log
+          if-no-files-found: error
