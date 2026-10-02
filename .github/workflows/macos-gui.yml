@@ -1,0 +1,54 @@
+name: macOS GUI preview
+
+on:
+  pull_request:
+    paths:
+      - 'apps/macos/**'
+      - '.github/workflows/macos-gui.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/macos/**'
+      - '.github/workflows/macos-gui.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-gui:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record toolchain and source
+        run: |
+          mkdir -p apps/macos/build
+          swift --version | tee apps/macos/build/toolchain.txt
+          xcodebuild -version | tee -a apps/macos/build/toolchain.txt
+          git rev-parse HEAD > apps/macos/build/code-sha.txt
+      - name: Build and test the offline UI contract
+        run: swift test --package-path apps/macos -Xswiftc -warnings-as-errors
+      - name: Build the native app bundle
+        run: bash apps/macos/scripts/bundle.sh
+      - name: Launch and capture the workspace
+        run: bash apps/macos/scripts/smoke.sh
+      - name: Archive preview app
+        run: ditto -c -k --sequesterRsrc --keepParent 'apps/macos/build/PDFTextract Preview.app' apps/macos/build/PDFTextract-Preview.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: macos-gui-preview
+          path: |
+            apps/macos/build/PDFTextract-Preview.zip
+            apps/macos/build/workspace.png
+            apps/macos/build/toolchain.txt
+            apps/macos/build/code-sha.txt
+          if-no-files-found: warn
