@@ -107,19 +107,6 @@ jobs:
       - name: Fetch the corpus (cached items are reused)
         if: ${{ !cancelled() }}
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split dev
-      - name: Capture bounded font metadata for the pinned preflight regression
-        if: ${{ !cancelled() }}
-        env:
-          TPE_FONT_DIAGNOSTIC_PDF: .corpus-cache/arxiv_2510.26824/paper.pdf
-          TPE_FONT_DIAGNOSTIC_OUT: eval-native/font-diagnostic
-        run: cargo test --features docling,pdfium --lib inspect_pinned_font_preflight -- --ignored --nocapture
-      - name: Preserve the bounded preflight diagnostic before corpus evaluation
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: font-preflight-diagnostic
-          path: eval-native/font-diagnostic
-          if-no-files-found: warn
       - name: Evaluate the lopdf baseline on the same runner and corpus
         if: ${{ !cancelled() }}
         run: uv run python native/measure_eval.py --backend lopdf --out eval-native/lopdf

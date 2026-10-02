@@ -11,7 +11,7 @@ pub(super) const MAX_FONT_CACHE_ENTRIES: usize = 512;
 pub(super) const MIN_FONT_CHARGE: usize = 16 * 1024;
 pub(super) const MAX_FONT_STREAM: usize = 8 * 1024 * 1024;
 const MAX_FONT_ITEMS: usize = 65_536;
-// Cover width/encoding construction, including the upcoming CID interval sweep:
+// Cover width/encoding construction, including CID interval sweep scratch:
 // two endpoints, one heap entry, and up to two output runs per source run can
 // coexist with the parsed input. Charge before constructing those allocations.
 const FONT_ITEM_CHARGE: usize = 128;
@@ -260,6 +260,8 @@ fn cmap_charge(bytes: &[u8]) -> Result<usize, &'static str> {
                 account(&mut codes, &mut charge, count, max_target)?;
                 arrays.insert(first, last, first_len, array_bytes, &mut charge)?;
             }
+        } else if scan.epilogue() {
+            break;
         } else {
             match lex_object(bytes, scan.pos, 16, false, false) {
                 Ok((end, _)) => scan.pos = end,
@@ -389,6 +391,27 @@ impl CmapScan<'_> {
             false
         }
     }
+    /// lopdf's `CMap` parser returns after this complete outer epilogue and does
+    /// not consume a trailer. Some real font streams have binary padding there.
+    /// Only recognize this at token boundaries outside strings/dictionaries and
+    /// mapping sections: every mapping the decoder can reach was charged first.
+    /// An incomplete epilogue is not permission to discard unscanned input.
+    fn epilogue(&self) -> bool {
+        let mut tail = Self {
+            bytes: self.bytes,
+            pos: self.pos,
+        };
+        tail.word(b"endcmap")
+            && tail.word(b"CMapName")
+            && tail.word(b"currentdict")
+            && tail.take(b'/')
+            && tail.word(b"CMap")
+            && tail.word(b"defineresource")
+            && tail.word(b"pop")
+            && tail.word(b"end")
+            && tail.word(b"end")
+    }
+
     /// Returns the source value (when <=4 bytes) and byte length. No target
     /// payload is allocated; long strings are rejected while scanning.
     fn hex(&mut self, max: usize) -> Result<(u32, usize), &'static str> {
@@ -477,6 +500,39 @@ mod tests {
         assert!(cmap_charge(cmap).is_ok());
         assert!(cmap_charge(b"1 beginbfrange <01><02>[<0041> [<0042>]] endbfrange").is_err());
         assert!(cmap_charge(b"1 beginbfchar <0000000000><0020> endbfchar").is_err());
+    }
+
+    #[test]
+    fn only_complete_outer_epilogue_ends_mapping_accounting() {
+        let epilogue = "endcmap CMapName currentdict /CMap defineresource pop end end";
+        let mapping = "1 beginbfchar <61><0041> endbfchar";
+        let base = format!("{mapping} {epilogue}");
+        let trailer = b"\r]|a\x0689W\xb1\x8f\xf2f";
+        let mut padded = base.as_bytes().to_vec();
+        padded.extend_from_slice(trailer);
+        assert_eq!(
+            cmap_charge(&padded).unwrap(),
+            cmap_charge(base.as_bytes()).unwrap() + trailer.len() * 32
+        );
+        assert!(
+            cmap_charge(
+                format!("{mapping} endcmap CMapName currentdict /CMap defineresource pop end ]")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        let huge = "1 beginbfrange <00000000><FFFFFFFF><0020> endbfrange";
+        for input in [
+            format!("{huge} {epilogue}"),
+            format!("({epilogue}) {huge}"),
+            format!("<< /Note ({epilogue}) >> {huge}"),
+            format!("[({epilogue})] {huge}"),
+            format!("% {epilogue}\n{huge}"),
+            format!("1 beginbfrange <01><02>[{epilogue}] endbfrange"),
+            format!("1 beginbfchar {epilogue}"),
+        ] {
+            assert!(cmap_charge(input.as_bytes()).is_err(), "{input}");
+        }
     }
 
     #[test]

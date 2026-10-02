@@ -24,6 +24,8 @@ only for a single non-predictor layer. Embedded Type1 streams retain their
 Only the routes which consume a font program inspect it: an irrelevant program
 cannot block a named encoding, known Differences base, usable ToUnicode map or
 complete built-in TeX table. Width arrays are checked before copying/flattening.
+Width and Differences entries reserve 128 bytes each, including transient
+interval-sweep events, heap entries and output runs for width normalization.
 
 The CMap preflight scans without allocating target strings. It counts actual
 mapping rows rather than trusting declared section counts, skips names/strings/
@@ -34,6 +36,25 @@ inserts. Those copies and equality checks are charged before construction, and
 the preflight's own interval work is bounded. Limits abort the page with a
 `resource_limit:` error; they cannot silently substitute a fallback encoding.
 JSON, chunk/job status and the ledger retain the incomplete outcome.
+
+The scan stops only at the complete outer CMap epilogue (`endcmap CMapName
+currentdict /CMap defineresource pop end end`), matching lopdf's parse boundary.
+Bytes after that boundary still incur the decoded-input charge but cannot add
+mappings in lopdf. Strings, comments, arrays and dictionaries cannot masquerade
+as this boundary; mapping sections must finish first. An earlier bare epilogue
+in the mandatory prolog/metadata makes lopdf use its existing malformed-font
+fallback before constructing mappings.
+
+Native run [36947313254](https://github.com/benpshore/pdftextract/actions/runs/36947313254)
+exposed this compatibility case in pinned `arxiv:2510.26824v2`: font objects
+80 and 81 contain small CMaps followed by 11 binary bytes. The previous scan
+rejected that suffix and lost pages 1–12 (91/181 references instead of 181/181).
+The bounded diagnostic in run
+[36950255239](https://github.com/benpshore/pdftextract/actions/runs/36950255239),
+artifact `11204540361`, records the PDF/CMap hashes and source SHA. Both CMaps
+also lack `begincmap`; regression tests cover that existing fallback as well
+as valid mapped fonts with the same binary suffixes. The temporary corpus
+capture was removed after diagnosis; no PDF bytes were committed.
 
 These are conservative component charges, not measured heap usage or a
 whole-process memory guarantee. Cache eviction does not free a decoder still

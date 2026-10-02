@@ -6615,66 +6615,6 @@ mod tests {
         dictionary! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H", "ToUnicode" => id }
     }
 
-    /// Capture only bounded font metadata from the one pinned regression PDF,
-    /// never the PDF itself. The ignored diagnostic is for CI artifact recovery
-    /// when the local executor cannot fetch the public corpus.
-    #[test]
-    #[ignore = "requires the pinned arxiv:2510.26824v2 PDF and a diagnostic output directory"]
-    fn inspect_pinned_font_preflight() {
-        use sha2::{Digest, Sha256};
-        let path = std::env::var("TPE_FONT_DIAGNOSTIC_PDF").unwrap();
-        let output = std::path::PathBuf::from(std::env::var("TPE_FONT_DIAGNOSTIC_OUT").unwrap());
-        let bytes = std::fs::read(path).unwrap();
-        let pdf_hash = hex::encode(Sha256::digest(&bytes));
-        assert_eq!(
-            pdf_hash,
-            "b0447c8f5e0ba689db050619f1bdb600bd021a4ac4be220101de74d9ea7b52b7"
-        );
-        let doc = load_document(&bytes, None).unwrap();
-        std::fs::create_dir_all(&output).unwrap();
-        let mut failures = Vec::new();
-        let mut inspected = 0;
-        for (&id, object) in &doc.objects {
-            let Ok(font) = object.as_dict() else { continue };
-            if !font.has_type(b"Font") {
-                continue;
-            }
-            inspected += 1;
-            assert!(inspected <= 512, "diagnostic font count exceeded");
-            let Err(reason) = font_resources::preflight(&doc, font, &mut FontWork::default())
-            else {
-                continue;
-            };
-            assert!(failures.len() < 16, "diagnostic failure count exceeded");
-            let mut row = serde_json::json!({
-                "object": [id.0, u32::from(id.1)], "reason": reason,
-                "base_font": font.get(b"BaseFont").and_then(Object::as_name).map(lossy).ok(),
-            });
-            if let Ok(Object::Stream(stream)) = font.get_deref(b"ToUnicode", &doc)
-                && form_decode_policy(stream).is_some()
-                && let Ok(cmap) = stream.get_plain_content_with_limit(64 * 1024)
-            {
-                let name = format!("font-{}-{}.cmap", id.0, id.1);
-                std::fs::write(output.join(&name), &cmap).unwrap();
-                row["cmap"] = serde_json::json!({
-                    "file": name, "bytes": cmap.len(), "sha256": hex::encode(Sha256::digest(&cmap)),
-                });
-            }
-            failures.push(row);
-        }
-        let report = serde_json::json!({
-            "pdf_sha256": pdf_hash, "source_sha": std::env::var("GITHUB_SHA").ok(),
-            "inspected_fonts": inspected, "failures": failures,
-            "scope": "bounded ToUnicode metadata from pinned arxiv:2510.26824v2; no PDF bytes",
-        });
-        std::fs::write(
-            output.join("report.json"),
-            serde_json::to_vec_pretty(&report).unwrap(),
-        )
-        .unwrap();
-        eprintln!("FONT_PREFLIGHT_DIAGNOSTIC {report}");
-    }
-
     #[test]
     fn unused_four_byte_cmap_is_not_expanded_and_used_cmap_fails_explicitly() {
         let bytes = build_pdf_with_font(vec![vec![], text_ops(12, 50, 50, "x")], None, |doc| {
@@ -6750,6 +6690,78 @@ mod tests {
             span_texts(&open_session(&bytes).page_text(1).unwrap()),
             ["abc"]
         );
+    }
+
+    #[test]
+    fn cmap_binary_trailer_preserves_decoding_and_malformed_font_fallback() {
+        // Exact trailer of object80 from pinned arxiv:2510.26824v2. The font
+        // metadata diagnostic found two small CMaps with bytes after end/end.
+        for malformed in [false, true] {
+            let extract = |trailer: &[u8]| {
+                let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                    let font = font_with_cmap(
+                        doc,
+                        "1 beginbfrange\n<61><63>[<0041> <0042> <0043>]\nendbfrange",
+                    );
+                    let id = font.get(b"ToUnicode").unwrap().as_reference().unwrap();
+                    let stream = doc.get_object_mut(id).unwrap().as_stream_mut().unwrap();
+                    if malformed {
+                        // Both captured CMaps omit begincmap, so lopdf rejects
+                        // them before mappings and retains its font fallback.
+                        let text = std::str::from_utf8(&stream.content).unwrap();
+                        stream.content = text.replace("begincmap\n", "").into_bytes();
+                    }
+                    stream.content.extend_from_slice(trailer);
+                    font
+                });
+                span_texts(&open_session(&bytes).page_text(1).unwrap())
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            let plain = extract(b"");
+            if !malformed {
+                assert_eq!(plain, ["ABC"]);
+            }
+            for trailer in [
+                b"\r]|a\x0689W\xb1\x8f\xf2f".as_slice(),
+                b"\rs\xf5\x0e\x9f?(W\xb1\x9e\x83f",
+            ] {
+                assert_eq!(extract(trailer), plain);
+            }
+        }
+    }
+
+    #[test]
+    fn premature_outer_cmap_epilogue_is_rejected_by_upstream_grammar() {
+        let epilogue = "endcmap CMapName currentdict /CMap defineresource pop end end\n";
+        for boundary in [
+            "/CIDInit",
+            "12 dict",
+            "begincmap",
+            "/CIDSystemInfo",
+            "1 begincodespacerange",
+        ] {
+            let mut doc = Document::with_version("1.5");
+            let font = font_with_cmap(&mut doc, "1 beginbfchar\n<61><0041>\nendbfchar");
+            let id = font.get(b"ToUnicode").unwrap().as_reference().unwrap();
+            let stream = doc.get_object_mut(id).unwrap().as_stream_mut().unwrap();
+            let text = std::str::from_utf8(&stream.content).unwrap();
+            stream.content = text
+                .replacen(boundary, &format!("{epilogue}{boundary}"), 1)
+                .into_bytes();
+            // The preflight may stop here, but the mandatory upstream prolog,
+            // metadata and first section reject the misplaced epilogue before
+            // constructing any mapping, including mappings later in the file.
+            assert!(font_resources::preflight(&doc, &font, &mut FontWork::default()).is_ok());
+            assert!(
+                matches!(
+                    font.get_font_encoding(&doc).unwrap(),
+                    Encoding::OneByteEncoding(_)
+                ),
+                "{boundary}"
+            );
+        }
     }
 
     #[test]
