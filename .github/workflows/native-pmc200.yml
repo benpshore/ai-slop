@@ -1,0 +1,102 @@
+name: Native PMC 200
+
+# Independent publisher JATS evidence for each retained backend. The 60-paper
+# Native workflow remains a development regression; no resolver calls are made.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/native-pmc200.yml
+      - native/pmc_validate.py
+      - tests/test_native_pmc.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  pmc:
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [lopdf, pdfium, docling-text, docling]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    env:
+      PDFIUM_DYNAMIC_LIB_PATH: ${{ github.workspace }}/.pdfium/lib
+      DOCLING_RS_MODELS_DIR: ${{ github.workspace }}/.models
+      BACKEND: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/ort.pyke.io
+            target
+          key: cargo-native-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-native-ubuntu-24.04-arm-
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            .models
+            .pdfium
+          key: native-assets-ubuntu-24.04-arm-${{ hashFiles('native/manifest.json') }}
+      - name: Reverify pinned PDFium and model bytes, including cache hits
+        run: |
+          mkdir -p out/pmc/provenance
+          sh native/fetch.sh | tee out/pmc/provenance/native-fetch.txt
+      - run: cargo build --locked --release --features docling,pdfium
+      - name: Record the actual executable, source, native pins and runner
+        run: |
+          git rev-parse HEAD > out/pmc/provenance/code-sha.txt
+          rustc --version --verbose > out/pmc/provenance/rustc.txt
+          uname -a > out/pmc/provenance/host.txt
+          ldd target/release/tpe > out/pmc/provenance/linked-libraries.txt
+          ./target/release/tpe --version > out/pmc/provenance/version.txt
+          ./target/release/tpe backends > out/pmc/provenance/backends.txt
+          cp Cargo.lock rust-toolchain.toml native/manifest.json out/pmc/provenance/
+          sha256sum target/release/tpe native/pmc_validate.py scripts/pmc_bib_eval.py corpus/pmc-manifest.json > out/pmc/provenance/sha256.txt
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .corpus-cache/pmc
+          key: pmc-corpus-${{ hashFiles('corpus/pmc-manifest.json') }}
+          restore-keys: pmc-corpus-
+      - name: Fetch the reviewed cohort; retain acquisition errors for scoring
+        run: |
+          set +e
+          python3 scripts/pmc_sample.py --fetch --manifest corpus/pmc-manifest.json --cache .corpus-cache/pmc > out/pmc/provenance/acquisition.txt 2>&1
+          acquisition_status=$?
+          echo "$acquisition_status" > out/pmc/provenance/acquisition-exit.txt
+          cat out/pmc/provenance/acquisition.txt
+          exit 0
+      - name: Score all 200 papers with explicit backend on backward and forward paths
+        run: |
+          python3 native/pmc_validate.py --binary target/release/tpe --backend "$BACKEND" --out out/pmc --code-sha "$(git rev-parse HEAD)" --workers 2 --timeout 180
+      - name: Publish fixed cohort coverage and scorer v2 metrics
+        if: ${{ !cancelled() }}
+        run: |
+          for report in coverage.md report.md; do
+            if [ -f "out/pmc/$report" ]; then
+              cat "out/pmc/$report" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: native-pmc200-${{ matrix.backend }}-ubuntu-24.04-arm
+          path: out/pmc
+          if-no-files-found: error
+          retention-days: 14

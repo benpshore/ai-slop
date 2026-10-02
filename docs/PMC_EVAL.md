@@ -137,3 +137,38 @@ contain article data only.
 `tests/test_pmc_bib_eval.py` exercises the truth parser on both citation
 element types, the surname shapes and strictness, the alignment order, and
 the report's key numbers with inline JATS and JSONL fixtures.
+
+## Native backend cohort verification
+
+The separate **Native PMC 200** workflow runs `lopdf`, `pdfium`, `docling-text`
+and full `docling` against the same reviewed manifest (SHA-256
+`9465c36c416fbee0a17757ba9af41a13e89aced02cb6aad5883a49c1cf1a922e`):
+200 papers and 9,590 publisher references. Trigger it manually after changes
+to retained backends; its PR trigger covers only the workflow and runner tests.
+The existing 60-paper Native evaluation remains a development regression.
+
+Each paper runs both explicit `bibliography --backend` and
+`extract --backend --json` paths, with a separate disposable ledger and no
+resolver flag. Two inputs run concurrently; each path has a 180-second wall
+cutoff and a 90-minute total evaluation budget. Any queued inputs after that
+budget receive failed records, preserving all denominators. Each matrix job
+has a 150-minute cap, leaving time for builds, acquisition and report uploads.
+Cold native builds and full
+layout/OCR can be expensive. Cargo/ORT, pinned assets and pinned PMC downloads
+are cached; PDFium/model files and every PDF/JATS file are reverified on hits.
+The workflow records the toolchain, executable hash, actual source SHA,
+backend identities, native manifest and dependency lock. ONNX Runtime remains
+the build dependency described in NATIVE.md, rather than a separately pinned
+artifact in the native manifest.
+
+Artifacts retain all 200 raw records per path, stderr/stdout, acquisition and
+execution outcomes, scorer v2 paper/entry results, cutoffs and provenance.
+`coverage.md`/`execution.json` always use 200 papers and 9,590 truth entries as
+the cohort denominators, alongside the scorer's conditional field denominators.
+Crash, acquisition failure and timeout become failed records; emitted partial
+records retain their entries and warnings. Only verified JATS bytes enter the
+scorer. Missing truth keeps the paper row and makes `comparable_cohort=false`;
+the job fails after writing the diagnostic artifacts. Native extraction errors
+remain measured outcomes and do not select a smaller cohort. These metrics
+measure extraction on this cohort, not resolver accuracy or independent holdout
+performance. See [#147](https://github.com/benpshore/pdftextract/issues/147).
