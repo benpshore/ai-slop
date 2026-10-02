@@ -6,6 +6,7 @@ with a stable `resource_limit:` prefix when:
 - lopdf discards raster placements beyond 2,000 on a page;
 - lopdf coalesces excess vector regions into a covering box;
 - vertical grouping runs out of comparisons and leaves spans separate;
+- horizontal grouping exhausts its indexed-line or work allowance and leaves spans separate;
 - superscript search truncates its 256-entry baseline window;
 - script cleanup runs out of its per-page work budget.
 - Form nesting reaches the configured depth limit;

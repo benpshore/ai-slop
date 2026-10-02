@@ -25,6 +25,7 @@ on:
       - src/bibliography.rs
       - src/citations.rs
       - src/reading_order.rs
+      - src/reading_order/**
       - src/text_cleanup.rs
       - src/regions.rs
       - src/backend/lopdf_backend.rs
