@@ -371,6 +371,20 @@ pub fn run_job_auto_observed(
                     "routed: pdfium ({} of {} pages had fonts lopdf could not map)",
                     first.unmapped, first.pages
                 ));
+                // The full Docling adapter does not prove that it repaired these
+                // source-character mappings. Do not erase the evidence/Partial
+                // status with another plausible text layer; keep native output.
+                if result.pages.iter().any(|page| {
+                    page.warnings
+                        .iter()
+                        .any(|w| w.starts_with("unicode_mapping:"))
+                }) {
+                    result.warnings.push(
+                        "unresolved: pdfium Unicode mapping; native text retained because automatic OCR recovery is unverified"
+                            .to_string(),
+                    );
+                    return Ok(result);
+                }
                 route = again.route_after_pdfium();
                 if route != Route::Docling {
                     return Ok(result);
@@ -480,16 +494,16 @@ pub fn run_job_with_observed(
     regions::tag_regions(&mut pages);
     timings.order_ms = elapsed_ms(order_start);
 
-    // Limits can be reached during decoding, ordering, or cleanup. Keep the
-    // retained text, but never publish a limited result as complete. Promote
-    // page-local cutoff diagnostics so JSON consumers and the ledger's run
+    // Limits or Unicode mapping failures can leave usable but incomplete text.
+    // Keep that text, but never publish it as complete. Promote
+    // page-local diagnostics so JSON consumers and the ledger's run
     // record do not have to infer completeness from nested warning strings.
     for page in &pages {
         if page.extraction_status() == Status::Partial {
             status = Status::Partial;
         }
         for warning in &page.warnings {
-            if warning.starts_with("resource_limit:") {
+            if warning.starts_with("resource_limit:") || warning.starts_with("unicode_mapping:") {
                 warnings.push(format!("page {}: {warning}", page.page));
             }
         }
@@ -534,7 +548,7 @@ pub fn run_job_with_observed(
 /// when only a sub-range was extracted. `parse_plus_order_ms` is apportioned
 /// to chunks by page count. The chunk text hash covers the page texts joined
 /// by `"\n\x0C\n"`. A chunk is `Partial` when any of its pages carries a
-/// warning starting with `failed:` or `resource_limit:`.
+/// warning starting with `failed:`, `resource_limit:`, or `unicode_mapping:`.
 pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkResult> {
     if pages.is_empty() {
         return Vec::new();

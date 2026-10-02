@@ -35,7 +35,8 @@ Work budgets reset per page, including when pages are requested backwards.
 Exhaustion returns a page error with the stable `resource_limit:` prefix;
 it does not return a successful page containing silently truncated spans.
 The pipeline's existing failed-page handling records this error. Content
-policy identity changes from 4 to 5 so prior ledger results are not confused
+policy identity changed from 4 to 5 for these limits; revision 6 below folds
+empty save/restore pairs so prior ledger results are not confused
 with this extraction policy. Limits are conservative initial policy choices,
 not general accuracy guarantees or a wall-clock timeout. The 70-paper pinned
 corpus was used to reject and correct an overly restrictive initial invocation
@@ -66,7 +67,7 @@ performance. Reproduce with:
 
 `cargo test --release --lib measure_form_cache_reuse -- --ignored --nocapture`
 
-## Shallow nested Forms: bounded work, unchanged expansion
+## Revision 5: bounded work, unchanged expansion
 
 The three-level case reported with PR #133 is reproduced: the page invokes A
 once, A invokes B N times, B invokes C N times, and C contains N `q Q` pairs.
@@ -107,7 +108,63 @@ manual patched diagnostic, one N per process, with:
 
 `TPE_FORM_DIAGNOSTIC_N=80 cargo test --lib measure_shallow_nested_forms -- --ignored --nocapture`
 
-## Adjacent font audit
+## Revision 6: remove redundant empty saves, preserve repeated output
+
+Form compilation now removes adjacent balanced `q Q` pairs, including nested
+empty pairs. Every retained text, paint, transform and Form invocation remains
+a barrier; unbalanced saves/restores remain. Operands keep their original
+indexes and order. Only changed programs shrink their operation allocation.
+No rendered output or interpreter result is memoized. Cached programs still
+consume invocation and execution budgets on every visit, including empty ones.
+
+The extended diagnostic counts actually interpreted operations, elided empty
+operations, Form calls, allocation-based execution charge and emitted spans/
+text bytes, alongside page-text time and process peak RSS. A second fixture
+puts one `X` inside each leaf save/restore pair: its N-cubed output is necessary
+and is preserved exactly. Tests compare complete `PageText` values with folding
+disabled, including repeated placements, transforms, ordering, paint barriers
+and unbalanced restores. Both an invocation exhaustion and a retained-text
+execution exhaustion are tested on the production folded path.
+
+Measurements below use Rust 1.98.1, debug x86-64 Linux, median of three fresh
+processes per case on a shared executor. Loading is outside the time interval;
+RSS is `/proc/self/status` VmHWM for the whole diagnostic process. The reference
+uses the same instrumented binary with folding disabled. Raw trials and source
+identity are in [form-execution-measurements.json](analysis/form-execution-measurements.json).
+
+| Empty fixture N | PDF bytes | Reference operations | Folded operations | Output spans (both) | Reference ms | Folded ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 | 1,316 | 16,421 | 421 | 0 | 2.58 | 1.03 |
+| 40 | 1,637 | 129,641 | 1,641 | 0 | 12.21 | 4.18 |
+| 80 | 2,277 | 1,030,481 | 6,481 | 0 | 65.43 | 12.32 |
+| 160 | 3,557 | 6,825,237 (limited) | 25,761 | reference fails; folded 0 | 468.51 | 49.75 |
+
+Reference N=160 stops at the explicit execution limit after 21,397 calls; it
+does not finish. Folding completes 25,761 calls, eliding 8,192,000 empty
+operations. Empty-fixture RSS across these runs is 15,568–16,064 KiB. The
+remaining Form invocation work is quadratic in this fixture; this is not a
+general elimination of nested expansion. N=400 still reaches the invocation
+limit rather than silently succeeding.
+
+| Text fixture N | Operations (both) | Emitted spans / text bytes (both) | Reference ms | Folded ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 405 | 64 / 64 | 1.15 | 0.47 |
+| 8 | 3,145 | 512 / 512 | 1.53 | 1.85 |
+| 16 | 24,849 | 4,096 / 4,096 | 8.35 | 9.29 |
+| 32 | 197,665 | 32,768 / 32,768 | 64.91 | 64.25 |
+
+The text fixture elides zero operations and retains the same execution charge.
+RSS grows from 15,980–16,132 KiB at N=4 to 20,768–20,864 KiB at N=32 as output
+grows. Timing noise is visible; no text-work speedup or M1 claim is supported.
+N=64 reaches the execution limit with calls still available. All resource
+outcomes remain explicit.
+
+Reproduce with the ignored `measure_shallow_nested_forms` test, setting
+`TPE_FORM_DIAGNOSTIC_N`; add `TPE_FORM_DIAGNOSTIC_TEXT=1` for retained output
+and `TPE_FORM_DIAGNOSTIC_UNOPTIMIZED=1` for the reference. Run each case in a
+fresh process. The test's elapsed interval excludes fixture construction.
+
+## Separate font audit
 
 `SessionCache::fonts` still has no entry/byte limit. `resolve_font` eagerly
 loads every font in resource dictionaries. `get_font_encoding` is used in
@@ -119,3 +176,5 @@ The Form repair does not establish a whole-document memory bound or resolve
 these font paths. A follow-up needs bounded CMap decoding, cardinality and
 allocation accounting (including composite widths), and failure semantics
 that preserve warning visibility rather than silently substituting encodings.
+The controlled reproducer and upstream range-expansion evidence are recorded
+in [FONT_RESOURCES.md](FONT_RESOURCES.md).

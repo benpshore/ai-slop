@@ -7,7 +7,13 @@ on:
       - src/pdfium_probe.rs
       - src/bin/pdfium_probe.rs
       - src/backend/pdfium_backend.rs
+      - src/backend/pdfium_backend/**
+      - src/pipeline.rs
+      - src/router.rs
+      - src/schema.rs
       - tests/pdfium_probe.rs
+      - tests/pdfium_unicode.rs
+      - tests/fixtures/pdfium-unicode/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -62,6 +68,8 @@ jobs:
       - run: cargo clippy --locked --all-targets --features pdfium -- -D warnings
       - run: cargo test --locked --features pdfium --lib pdfium_probe::tests -- --nocapture
       - run: cargo test --locked --features pdfium --test pdfium_probe -- --nocapture
+      - run: cargo test --locked --features pdfium --lib backend::pdfium_backend::unicode_mapping::tests -- --nocapture
+      - run: cargo test --locked --features pdfium --test pdfium_unicode -- --nocapture
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

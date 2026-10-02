@@ -292,10 +292,6 @@ const SUPERSCRIPT_REACH: f32 = 0.5;
 /// set after the final punctuation of a line, where nothing to its right
 /// competes for it.
 const SUPERSCRIPT_REACH_AFTER: f32 = 1.0;
-/// Most baseline-index entries inspected for one detached superscript. This
-/// bounds cleanup work for hostile pages with thousands of tiny or non-body
-/// lines packed into the same baseline window.
-const SUPERSCRIPT_SCAN_LIMIT: usize = 256;
 /// Unicode superscript and subscript digits, indexed by value.
 const SUPERSCRIPT_DIGITS: [char; 10] = [
     '\u{2070}', '\u{00B9}', '\u{00B2}', '\u{00B3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}',
@@ -1154,7 +1150,6 @@ impl LineGeom {
 struct PageGeom {
     lines: Vec<LineGeom>,
     by_baseline: Vec<(f32, usize)>,
-    window_limited: std::cell::Cell<bool>,
     work_limited: std::cell::Cell<bool>,
     max_size: f32,
 }
@@ -1169,7 +1164,6 @@ impl PageGeom {
         let mut geom = Self {
             lines,
             by_baseline: Vec::new(),
-            window_limited: std::cell::Cell::new(false),
             work_limited: std::cell::Cell::new(false),
             max_size: 0.0,
         };
@@ -1204,13 +1198,10 @@ impl PageGeom {
         }
     }
 
-    /// Body-line candidates among the first [`SUPERSCRIPT_SCAN_LIMIT`] index
-    /// entries with a baseline in `low..=high`, returned in line-index order
-    /// through `out`. Counting every entry inspected (including non-body lines)
-    /// keeps the work bounded even when the window contains much furniture,
-    /// and the entries inspected are charged to the page's `work_left`; when
-    /// that budget cannot cover them nothing is collected and `false` is
-    /// returned.
+    /// All body-line candidates with a baseline in `low..=high`, in line-index
+    /// order. Charge the complete indexed window to the shared page budget,
+    /// including non-body entries. When it cannot cover the search, return no
+    /// candidates: choosing from an arbitrary prefix can miss the best base.
     fn window(
         &self,
         low: f32,
@@ -1224,17 +1215,14 @@ impl PageGeom {
         let start = self.by_baseline.partition_point(|(b, _)| *b < low);
         let end =
             start + self.by_baseline[start..].partition_point(|(baseline, _)| *baseline <= high);
-        let inspected = (end - start).min(SUPERSCRIPT_SCAN_LIMIT);
-        if end - start > inspected {
-            self.window_limited.set(true);
-        }
+        let inspected = end - start;
         if inspected > *work_left {
             self.work_limited.set(true);
             *work_left = 0;
             return false;
         }
         *work_left -= inspected;
-        for &(_, j) in &self.by_baseline[start..start + inspected] {
+        for &(_, j) in &self.by_baseline[start..end] {
             if j != index && w.is_body(j) {
                 out.push(j);
             }
@@ -1482,19 +1470,9 @@ fn merge_scripts(page: &mut PageText, w: &mut PageWork) -> (usize, usize) {
             previous_body = Some(k);
         }
     }
-    for (limited, message) in [
-        (
-            geom.window_limited.get(),
-            "resource_limit: superscript candidate window truncated (limit=256)",
-        ),
-        (
-            geom.work_limited.get(),
-            "resource_limit: script cleanup budget exhausted; fragments kept separate",
-        ),
-    ] {
-        if limited && !page.warnings.iter().any(|w| w == message) {
-            page.warnings.push(message.to_string());
-        }
+    let message = "resource_limit: script cleanup budget exhausted; fragments kept separate";
+    if geom.work_limited.get() && !page.warnings.iter().any(|w| w == message) {
+        page.warnings.push(message.to_string());
     }
     (merged, superscripts)
 }
@@ -4954,8 +4932,8 @@ mod tests {
     }
 
     #[test]
-    fn superscript_search_bounds_a_crowded_baseline_window() {
-        let spans: Vec<Span> = (0..(SUPERSCRIPT_SCAN_LIMIT + 100))
+    fn superscript_search_charges_the_complete_baseline_window() {
+        let spans: Vec<Span> = (0..356)
             .map(|i| span_at("a", i as f32, 401.0, 10.0, i as u32))
             .collect();
         let members: Vec<Vec<u32>> = (0..spans.len() as u32).map(|i| vec![i]).collect();
@@ -4970,21 +4948,27 @@ mod tests {
             superscript_target(&page, &w, &geom, 0, &mut window, &mut work_left),
             None
         );
-        assert!(geom.window_limited.get());
-        assert_eq!(window.len(), SUPERSCRIPT_SCAN_LIMIT - 1);
-        assert_eq!(work_left, usize::MAX - SUPERSCRIPT_SCAN_LIMIT);
+        assert!(!geom.work_limited.get());
+        assert_eq!(window.len(), 355);
+        assert_eq!(work_left, usize::MAX - 356);
+        // Insufficient work must not select from a misleading prefix.
+        work_left = 355;
+        assert!(!geom.window(390.0, 410.0, 0, &w, &mut window, &mut work_left));
+        assert!(geom.work_limited.get());
+        assert!(window.is_empty());
+        assert_eq!(work_left, 0);
     }
 
     #[test]
-    fn superscript_search_counts_furniture_toward_scan_limit() {
-        let spans: Vec<Span> = (0..(SUPERSCRIPT_SCAN_LIMIT + 100))
+    fn superscript_search_counts_furniture_without_hiding_later_body_lines() {
+        let spans: Vec<Span> = (0..356)
             .map(|i| span_at("a", i as f32, 401.0, 10.0, i as u32))
             .collect();
         let members: Vec<Vec<u32>> = (0..spans.len() as u32).map(|i| vec![i]).collect();
         let lines: Vec<&[u32]> = members.iter().map(Vec::as_slice).collect();
         let page = page_with(spans, &lines);
         let mut w = prepare(&page);
-        for state in &mut w.state[..SUPERSCRIPT_SCAN_LIMIT] {
+        for state in &mut w.state[..256] {
             *state = State::Furniture;
         }
         let geom = PageGeom::new(&page);
@@ -5000,7 +4984,28 @@ mod tests {
             &mut work_left
         ));
 
-        assert!(window.is_empty());
+        assert_eq!(window, (256..355).collect::<Vec<_>>());
+        assert_eq!(work_left, usize::MAX - 356);
+        assert!(!geom.work_limited.get());
+    }
+
+    #[test]
+    fn superscript_best_base_after_256_candidates_matches_full_search() {
+        let mut spans = vec![span_at("5", 85.0, 401.0, 6.0, 0)];
+        for i in 1..=350 {
+            spans.push(span_at("distant body", 1000.0 + i as f32, 397.0, 10.0, i));
+        }
+        spans.push(span_at("the literature.", 50.0, 398.0, 10.0, 351));
+        let members: Vec<Vec<u32>> = (0..spans.len() as u32).map(|i| vec![i]).collect();
+        let lines: Vec<&[u32]> = members.iter().map(Vec::as_slice).collect();
+        let page = page_with(spans, &lines);
+        assert_matches_naive(&page);
+        let mut w = prepare(&page);
+        let mut cleaned = page;
+        let (_, superscripts) = merge_scripts(&mut cleaned, &mut w);
+        assert_eq!(superscripts, 1);
+        assert!(cleaned.lines[351].text.contains('⁵'));
+        assert!(cleaned.warnings.is_empty(), "{:?}", cleaned.warnings);
     }
 
     #[test]
