@@ -179,8 +179,9 @@ const LIGATURE_POLICY: &str = "expand";
 /// 4 = image placements are bounded per page; 5 = bounded Form decoding,
 /// caching and execution, with explicit page errors on resource exhaustion;
 /// 6 = fold balanced empty save/restore pairs when compiling Form programs;
-/// 7 = incrementally cluster painted boxes, with bounded comparisons/regions.
-const CONTENT_POLICY: &str = "7";
+/// 7 = incrementally cluster painted boxes, with bounded comparisons/regions;
+/// 8 = skip proven redundant vector scans; charge containment probes too.
+const CONTENT_POLICY: &str = "8";
 
 /// Retained program allocation charge (not a process RSS limit).
 const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -4151,7 +4152,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "7".to_string());
+        config.insert("content".to_string(), "8".to_string());
         config.insert("encodings".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
@@ -4162,6 +4163,9 @@ mod tests {
         config.insert("content".to_string(), "5".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "6".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "7".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
