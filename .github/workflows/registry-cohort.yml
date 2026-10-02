@@ -1,0 +1,87 @@
+name: Registry cohort evidence
+
+# A public, live, independently labeled validation, not part of the offline ci gate.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - src/resolve.rs
+      - crates/tpe-biblio/src/**
+      - examples/registry_validation.rs
+      - scripts/registry_cohort.py
+      - corpus/registry-selection.json
+      - .github/workflows/registry-cohort.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cohort:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Record exact source and compiler
+        run: |
+          mkdir -p out/registry
+          git rev-parse HEAD > out/registry/code-sha.txt
+          rustup show active-toolchain > out/registry/toolchain.txt
+          rustc --version --verbose >> out/registry/toolchain.txt
+          uname -m >> out/registry/toolchain.txt
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-release-ubuntu-24.04-arm-
+      - name: Build the real Resolver harness in release mode
+        env:
+          REGISTRY_VALIDATION_CODE_SHA: ${{ github.sha }}
+        run: cargo build --release --locked --example registry_validation
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .corpus-cache/pmc
+          key: pmc-corpus-${{ hashFiles('corpus/pmc-manifest.json') }}
+          restore-keys: pmc-corpus-
+      - name: Prepare independent biomedical labels from verified publisher XML
+        run: uv run --no-project python scripts/registry_cohort.py prepare --out out/registry/cohort.json
+      - name: Resolve every case with normal production rate limits and retries
+        env:
+          CROSSREF_MAILTO: ${{ vars.CROSSREF_MAILTO }}
+          CODE_SHA: ${{ github.sha }}
+        run: |
+          args=()
+          if [ -n "$CROSSREF_MAILTO" ]; then args+=(--mailto "$CROSSREF_MAILTO"); fi
+          target/release/examples/registry_validation \
+            --cohort out/registry/cohort.json --out out/registry/results.jsonl \
+            --code-sha "$CODE_SHA" --time-budget-seconds 1200 "${args[@]}"
+      - name: Score all planned cases, retaining errors and unrun entries
+        if: always()
+        run: |
+          if [ -f out/registry/cohort.json ]; then
+            touch out/registry/results.jsonl
+            uv run --no-project python scripts/registry_cohort.py score \
+              --cohort out/registry/cohort.json --results out/registry/results.jsonl \
+              --out out/registry/report.json
+          fi
+      - name: Reject incomplete evidence, false accepts and registry request failures
+        if: always()
+        run: uv run --no-project python scripts/registry_cohort.py check --report out/registry/report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: registry-cohort-evidence
+          path: out/registry/
+          if-no-files-found: error
