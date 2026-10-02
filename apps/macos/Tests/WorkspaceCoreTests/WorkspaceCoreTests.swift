@@ -2,6 +2,16 @@ import Foundation
 import Testing
 @testable import WorkspaceCore
 
+private func enqueue(_ scenario: PreviewScenario = .complete, into queue: inout WorkspaceQueue) throws -> UUID {
+    let candidate = queue.add(source: DocumentSource(sample: scenario), options: ExtractionOptions())
+    return try #require(candidate)
+}
+
+private func start(_ id: UUID, in queue: inout WorkspaceQueue) throws -> ExtractionRequest {
+    let candidate = queue.start(id: id)
+    return try #require(candidate)
+}
+
 @Test func intakeRejectsRemoteAndNonPDFItemsAndDeduplicatesPaths() {
     var queue = WorkspaceQueue()
     let summary = queue.add(files: [
@@ -27,8 +37,8 @@ import Testing
 
 @Test func cancelledJobsIgnoreLateProgressCompletionAndFailure() throws {
     var queue = WorkspaceQueue()
-    let id = try #require(queue.add(source: DocumentSource(sample: .complete), options: ExtractionOptions()))
-    let request = try #require(queue.start(id: id))
+    let id = try enqueue(into: &queue)
+    let request = try start(id, in: &queue)
     queue.cancel(id: id)
     queue.update(id: id, progress: JobProgress(completedPages: 4, totalPages: 4, message: "Late"))
     queue.finish(id: id, result: PreviewEngineClient.result(for: request))
@@ -38,7 +48,7 @@ import Testing
 
 @Test func queuedJobsCannotAcceptCompletionWithoutStarting() throws {
     var queue = WorkspaceQueue()
-    let id = try #require(queue.add(source: DocumentSource(sample: .complete), options: ExtractionOptions()))
+    let id = try enqueue(into: &queue)
     let request = try #require(queue.jobs.first).request
     queue.finish(id: id, result: PreviewEngineClient.result(for: request))
     #expect(queue.jobs.first?.phase == .queued)
@@ -46,12 +56,13 @@ import Testing
 
 @Test func retriesUseNewIdentityAndIgnorePredecessorEvents() throws {
     var queue = WorkspaceQueue()
-    let oldID = try #require(queue.add(source: DocumentSource(sample: .complete), options: ExtractionOptions()))
-    let oldRequest = try #require(queue.start(id: oldID))
+    let oldID = try enqueue(into: &queue)
+    let oldRequest = try start(oldID, in: &queue)
     queue.cancel(id: oldID)
-    let newID = try #require(queue.retry(id: oldID, options: ExtractionOptions(mode: .text)))
+    let retried = queue.retry(id: oldID, options: ExtractionOptions(mode: .text))
+    let newID = try #require(retried)
     #expect(newID != oldID)
-    #expect(queue.start(id: newID) != nil)
+    _ = try start(newID, in: &queue)
     queue.finish(id: oldID, result: PreviewEngineClient.result(for: oldRequest))
     #expect(queue.jobs.first?.id == newID)
     #expect(queue.jobs.first?.phase.isActive == true)
@@ -60,9 +71,10 @@ import Testing
 
 @Test func activeJobsCannotBeRemovedOrRetried() throws {
     var queue = WorkspaceQueue()
-    let id = try #require(queue.add(source: DocumentSource(sample: .complete), options: ExtractionOptions()))
+    let id = try enqueue(into: &queue)
     queue.remove(id: id)
-    #expect(queue.retry(id: id, options: ExtractionOptions()) == nil)
+    let retried = queue.retry(id: id, options: ExtractionOptions())
+    #expect(retried == nil)
     queue.clearFinished()
     #expect(queue.jobs.count == 1)
     queue.cancel(id: id)
@@ -72,8 +84,8 @@ import Testing
 
 @Test func progressIsClampedAndDoesNotMoveBackwards() throws {
     var queue = WorkspaceQueue()
-    let id = try #require(queue.add(source: DocumentSource(sample: .complete), options: ExtractionOptions()))
-    #expect(queue.start(id: id) != nil)
+    let id = try enqueue(into: &queue)
+    _ = try start(id, in: &queue)
     queue.update(id: id, progress: JobProgress(completedPages: 3, totalPages: 4, message: "Current"))
     queue.update(id: id, progress: JobProgress(completedPages: 2, totalPages: 4, message: "Stale"))
     let phase = try #require(queue.jobs.first).phase
