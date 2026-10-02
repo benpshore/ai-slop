@@ -7,7 +7,9 @@
       "key": "unsafe",
       "title": "Maintain pinned unsafe Rust and FFI inventory for production builds",
       "status": "In review",
-      "prs": []
+      "prs": [
+        162
+      ]
     },
     {
       "issue": 146,
