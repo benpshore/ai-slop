@@ -51,3 +51,6 @@ pub mod resolve;
 pub mod router;
 pub mod schema;
 pub mod text_cleanup;
+
+/// Complete-file publication shared by the CLI and application jobs.
+pub mod publication;

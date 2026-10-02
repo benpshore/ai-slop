@@ -22,6 +22,9 @@ on:
       - .github/workflows/build-binaries.yml
       - rust-toolchain.toml
       - build.rs
+  # Isolated alpha artifacts; this does not publish a release or merge the stack.
+  push:
+    branches: [codex/cli-alpha-bounded-extraction]
 
 permissions:
   contents: read
@@ -29,7 +32,7 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - os: macos-15
@@ -41,7 +44,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      TPE_VERSION: ${{ inputs.version || 'v0.0.0-dryrun' }}
+      TPE_VERSION: ${{ inputs.version || format('v0.0.0-alpha-{0}', github.sha) }}
+      ALPHA_CANDIDATE: ${{ !inputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,6 +78,33 @@ jobs:
           test "$actual" = "tpe $expected"
           printf '%s\n' "$actual"
           ./target/release/tpe backends
+      - name: Test the release CLI on the native runner
+        run: cargo test --release --locked -p text-processing-engine --test cli_alpha --test end_to_end -- --test-threads=2
+      - name: Record source and native execution evidence
+        run: |
+          set -eu
+          mkdir -p dist
+          {
+            git rev-parse HEAD
+            git rev-parse HEAD^{tree}
+            rustc --version --verbose
+            uname -a
+            file target/release/tpe
+            shasum -a 256 target/release/tpe Cargo.lock rust-toolchain.toml
+            ./target/release/tpe --version
+            ./target/release/tpe backends
+          } > "dist/BUILD-INFO-$TARGET.txt"
+          if [ "$RUNNER_OS" = macOS ]; then
+            sw_vers >> "dist/BUILD-INFO-$TARGET.txt"
+            otool -L target/release/tpe >> "dist/BUILD-INFO-$TARGET.txt"
+            codesign -d --verbose=4 target/release/tpe >> "dist/BUILD-INFO-$TARGET.txt" 2>&1 || true
+          fi
+          ./target/release/tpe extract tests/fixtures/pdfium-unicode/existing-ocr.pdf --backend lopdf --db "$RUNNER_TEMP/alpha-smoke.sqlite" --out "$RUNNER_TEMP/alpha-smoke-output" --json > "dist/extraction-smoke-$TARGET.json"
+          if [ "$ALPHA_CANDIDATE" = true ]; then
+            cp docs/CLI_ALPHA.md dist/README.md
+            cp docs/PUBLICATION.md dist/PUBLICATION.md
+            cp LICENSE dist/LICENSE
+          fi
       - name: Package
         run: |
           set -eu
@@ -82,10 +113,11 @@ jobs:
           chmod 0755 dist/stage/tpe
           tar -C dist/stage -czf "dist/tpe-$TARGET.tar.gz" tpe
           rm -r dist/stage
+          (cd dist && shasum -a 256 "tpe-$TARGET.tar.gz" > "SHA256SUMS-$TARGET")
           ls -l dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tpe-${{ matrix.target }}
-          path: dist/tpe-${{ matrix.target }}.tar.gz
+          path: dist/*
           if-no-files-found: error
           retention-days: 7

@@ -186,7 +186,7 @@ const LIGATURE_POLICY: &str = "expand";
 /// 6 = fold balanced empty save/restore pairs when compiling Form programs;
 /// 7 = incrementally cluster painted boxes, with bounded comparisons/regions;
 /// 8 = skip proven redundant vector scans; charge containment probes too.
-const CONTENT_POLICY: &str = "8";
+const CONTENT_POLICY: &str = "9";
 
 /// Retained program allocation charge (not a process RSS limit).
 const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -2099,6 +2099,13 @@ fn extract_page(
         page_text.warnings.push(message);
     }
 
+    // lopdf's convenience reader silently skips absent/non-stream objects.
+    // Keep any recoverable streams, but do not certify a damaged page as blank.
+    if let Some(reason) = missing_page_content(doc, page_dict) {
+        page_text
+            .warnings
+            .push(format!("unresolved_text: page Contents: {reason}"));
+    }
     let content_bytes = doc.get_page_content(page_id);
     let program = match lex_content(&content_bytes) {
         Ok(program) => program,
@@ -2154,6 +2161,30 @@ fn extract_page(
         return Err(page_error(page, format!("resource_limit: {reason}")));
     }
     Ok(interpreter.finish())
+}
+
+fn missing_page_content(doc: &Document, page: &Dictionary) -> Option<String> {
+    let contents = page.get(b"Contents").ok()?;
+    let contents = match doc.dereference(contents) {
+        Ok((_, contents)) => contents,
+        Err(error) => return Some(error.to_string()),
+    };
+    match contents {
+        // Absent/null Contents is a valid blank page. A stream or array of
+        // stream references is the other supported form of this PDF entry.
+        Object::Null | Object::Stream(_) => None,
+        Object::Array(items) => {
+            items
+                .iter()
+                .enumerate()
+                .find_map(|(index, item)| match doc.dereference(item) {
+                    Ok((_, Object::Stream(_))) => None,
+                    Ok(_) => Some(format!("entry {index} is not a stream")),
+                    Err(error) => Some(format!("entry {index}: {error}")),
+                })
+        }
+        _ => Some("entry is neither a stream nor a stream array".to_string()),
+    }
 }
 
 /// Glyph names and the characters they stand for, sorted by name (bytes)
@@ -4071,7 +4102,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "8".to_string());
+        config.insert("content".to_string(), "9".to_string());
         config.insert("encodings".to_string(), "2".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
@@ -4084,6 +4115,8 @@ mod tests {
         config.insert("content".to_string(), "6".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "7".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "8".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");

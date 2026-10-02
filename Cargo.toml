@@ -42,7 +42,7 @@ path = "src/lib.rs"
 [features]
 default = []
 # Native PDFium backend (`--backend pdfium`); needs libpdfium at run time (docs/NATIVE.md).
-pdfium = ["dep:pdfium-render", "dep:tempfile", "dep:rustix"]
+pdfium = ["dep:pdfium-render", "dep:rustix"]
 # docling.rs backends (`docling-text`, `docling`); `docling` needs PDFium and the models.
 docling = ["dep:docling-pdf", "dep:docling-core", "pdfium"]
 
@@ -70,7 +70,7 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 tar = "0.4"
 thiserror = "2"
-tempfile = { version = "3", optional = true }
+tempfile = "3"
 unicode-normalization = "0.1"
 ureq = "3"
 

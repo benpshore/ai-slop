@@ -503,7 +503,10 @@ pub fn run_job_with_observed(
             status = Status::Partial;
         }
         for warning in &page.warnings {
-            if warning.starts_with("resource_limit:") || warning.starts_with("unicode_mapping:") {
+            if warning.starts_with("resource_limit:")
+                || warning.starts_with("unicode_mapping:")
+                || warning.starts_with("unresolved_text:")
+            {
                 warnings.push(format!("page {}: {warning}", page.page));
             }
         }

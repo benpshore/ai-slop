@@ -1,0 +1,54 @@
+name: Public Unicode audit inputs
+
+# Isolated evaluation transport: these six CC-BY PDFs already belong to the
+# pinned public corpus. No extraction result or private document is uploaded.
+on:
+  push:
+    branches: [codex/cli-alpha-bounded-extraction]
+    paths:
+      - .github/workflows/unicode-audit-fixtures.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inputs:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .corpus-cache
+          key: corpus-${{ hashFiles('corpus/manifest.json') }}
+          restore-keys: corpus-
+      - name: Copy or fetch only the six public PDFs and verify every hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-inputs
+          selected='["arxiv:2305.13843","arxiv:2406.19204","arxiv:2505.01811","arxiv:2507.14211","arxiv:2511.15503","arxiv:2601.13206"]'
+          jq --argjson ids "$selected" '[.items[] | select(.id as $id | $ids | index($id)) | {id,pdf_url,pdf_sha256,license}]' corpus/manifest.json > audit-inputs/manifest.json
+          test "$(jq length audit-inputs/manifest.json)" = 6
+          jq -r '.[] | [.id,.pdf_url,.pdf_sha256] | @tsv' audit-inputs/manifest.json |
+          while IFS=$'\t' read -r id url sha; do
+            name=${id/:/_}
+            dest="audit-inputs/$name.pdf"
+            cached=".corpus-cache/$name/paper.pdf"
+            if [ -f "$cached" ]; then
+              cp "$cached" "$dest"
+            else
+              curl --fail --location --connect-timeout 15 --max-time 60 --max-filesize 67108864 "$url" -o "$dest"
+            fi
+            printf '%s  %s\n' "$sha" "$dest" | sha256sum --check
+          done
+          git rev-parse HEAD > audit-inputs/source-commit.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: public-unicode-audit-inputs
+          path: audit-inputs
+          if-no-files-found: error
+          retention-days: 7

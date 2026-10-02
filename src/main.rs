@@ -20,6 +20,8 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+mod cli_worker;
+
 use tpe::backend;
 use tpe::bibliography;
 use tpe::corpus::{self, Manifest, ManifestItem};
@@ -47,6 +49,8 @@ struct Cli {
 enum Cmd {
     /// Extract text, metadata and citations from PDF files into a ledger.
     Extract(ExtractArgs),
+    #[command(hide = true)]
+    ExtractWorker { request: PathBuf },
     /// Extract the final bibliography by reading PDF pages from the end.
     Bibliography(BibliographyArgs),
     /// Print ledger statistics as `key: value` lines.
@@ -101,16 +105,16 @@ impl Split {
 
 #[derive(Args)]
 struct ExtractArgs {
-    /// PDF files to process.
+    /// PDF files or folders to process (folders are nonrecursive).
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
     /// Path of the `SQLite` ledger; created when missing.
     #[arg(long, value_name = "FILE")]
     db: PathBuf,
-    /// Extraction backend name; `auto` routes `lopdf`, then `pdfium`, then docling.
-    #[arg(long, default_value = "auto")]
+    /// Native backend: `lopdf` (default), `pdfium` when compiled, or native-only `auto`.
+    #[arg(long, default_value = "lopdf")]
     backend: String,
-    /// Directory that receives `<hash>.json` and `<hash>.txt` per document.
+    /// Export JSON/text pairs; collisions get numbered names reported in the output.
     #[arg(long, value_name = "DIR")]
     out: Option<PathBuf>,
     /// Print one JSON object per file instead of a tab-separated line.
@@ -122,16 +126,25 @@ struct ExtractArgs {
     /// Inclusive 1-based page range such as `3-7`; a single number selects one page.
     #[arg(long, value_name = "A-B", value_parser = parse_pages)]
     pages: Option<(u32, u32)>,
-    /// Number of worker threads.
+    /// Number of supervised worker processes (at most four).
     #[arg(long, short, default_value_t = 1, value_name = "N")]
     jobs: usize,
-    /// Reject inputs larger than this many bytes.
+    /// Reject inputs larger than this many bytes (default 67108864).
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Per-document wall-clock deadline, including worker startup (1..=300000 ms).
+    #[arg(long, default_value_t = 60000)]
+    timeout_ms: u64,
+    /// Maximum captured worker result/diagnostic bytes per document.
+    #[arg(long, default_value_t = 67108864)]
+    max_output_bytes: u64,
+    /// Maximum input files in one command (1..=10000); excess input fails explicitly.
+    #[arg(long, default_value_t = 256)]
+    max_files: usize,
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
-    /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page.
+    /// Emit worker progress as JSON lines on stderr after each document finishes.
     #[arg(long)]
     progress: bool,
 }
@@ -253,6 +266,7 @@ fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Extract(args) => run_extract(&args),
+        Cmd::ExtractWorker { request } => cli_worker::run_worker(&request),
         Cmd::Bibliography(args) => run_bibliography(&args),
         Cmd::Stats { db } => {
             run_stats(&db)?;
@@ -405,49 +419,20 @@ fn next_path(queue: &Mutex<VecDeque<PathBuf>>) -> Option<PathBuf> {
     guard.pop_front()
 }
 
-/// Run the pipeline for one path on a worker thread.
-fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
-    let job = Job {
-        path: path.to_string_lossy().into_owned(),
-        backend: args.backend.clone(),
-        pages: args.pages,
-        password: args.password.clone(),
-        max_bytes: args.max_bytes,
-        figures_dir: figures_dir_field(args.figures_dir.as_deref()),
-    };
-    let start = Instant::now();
-    let mut observe = |event: Progress| {
-        if args.progress {
-            report_progress(&job.path, event);
-        }
-    };
-    // A panic inside a backend must fail this file only, not the whole batch.
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        pipeline::run_job_observed(&job, &mut observe)
-    }))
-    .map_or_else(
-        |payload| Err(format!("panic: {}", panic_message(&*payload))),
-        |outcome| outcome.map_err(|err| err.to_string()),
-    );
-    Outcome {
-        path,
-        wall_ms: elapsed_ms(start),
-        result,
-    }
-}
-
 fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
-    pipeline::warm_up();
+    let paths = cli_worker::input_paths(args)?;
     let mut ledger = open_ledger(&args.db)?;
     if let Some(dir) = &args.out {
         fs::create_dir_all(dir)
             .with_context(|| format!("creating output directory {}", dir.display()))?;
     }
 
-    let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
-    let workers = args.jobs.clamp(1, args.paths.len().max(1));
-    let (sender, receiver) = mpsc::channel::<Outcome>();
+    let workers = args.jobs.clamp(1, 4).min(paths.len());
+    let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(paths.into());
+    // Backpressure keeps completed documents in the bounded worker set while
+    // the controller publishes one result. No unbounded result queue.
+    let (sender, receiver) = mpsc::sync_channel::<Outcome>(0);
 
     let any_failed = thread::scope(|scope| -> anyhow::Result<bool> {
         for _ in 0..workers {
@@ -455,7 +440,7 @@ fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
             let queue = &queue;
             scope.spawn(move || {
                 while let Some(path) = next_path(queue) {
-                    let outcome = extract_one(args, path);
+                    let outcome = cli_worker::extract_one(args, path);
                     if sender.send(outcome).is_err() {
                         break;
                     }
@@ -703,21 +688,43 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
     let path_display = path.display().to_string();
     match result {
         Ok(mut result) => {
-            let write_start = Instant::now();
-            let run = store_result(ledger, &result, &path_display)?;
-            result.timings.write_ms = elapsed_ms(write_start);
-            ledger
-                .update_timings(run, &result.timings)
-                .with_context(|| format!("recording write time for {path_display}"))?;
-            if let Some(dir) = &args.out {
-                write_outputs(dir, &result)?;
-            }
+            let output_paths = match publish_result(ledger, args, &mut result, &path_display) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    return publish(
+                        ledger,
+                        args,
+                        Outcome {
+                            path,
+                            wall_ms,
+                            result: Err(format!("publishing extraction: {error:#}")),
+                        },
+                    );
+                }
+            };
             if args.json {
-                println!("{}", serde_json::to_string(&result)?);
+                #[derive(serde::Serialize)]
+                struct Record<'a> {
+                    #[serde(flatten)]
+                    extraction: &'a ExtractionResult,
+                    outputs: &'a [PathBuf],
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string(&Record {
+                        extraction: &result,
+                        outputs: &output_paths,
+                    })?
+                );
             } else {
-                println!("{}", summary_line(&result, &path_display));
+                let outputs = output_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\t");
+                println!("{}\t{}", summary_line(&result, &path_display), outputs);
             }
-            Ok(result.status == Status::Failed)
+            Ok(result.status != Status::Complete)
         }
         Err(err) => {
             eprintln!("{path_display}: {err}");
@@ -737,6 +744,42 @@ fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow:
     }
 }
 
+fn publish_result(
+    ledger: &mut Ledger,
+    args: &ExtractArgs,
+    result: &mut ExtractionResult,
+    path_display: &str,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let write_start = Instant::now();
+    let pending = ledger
+        .prepare_result(result)
+        .with_context(|| format!("preparing result for {path_display}"))?;
+    result.timings.write_ms = elapsed_ms(write_start);
+    pending.update_timings(&result.timings)?;
+    let output_paths = if let Some(dir) = &args.out {
+        let hash = result.document.hash.0.as_str();
+        let json = serde_json::to_vec_pretty(&result)?;
+        let text = result
+            .pages
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\u{c}")
+            .into_bytes();
+        let mut outputs = tpe::publication::StagedOutputs::stage(
+            &dir.join(format!("{hash}.pdf")),
+            &[(".json", json), (".txt", text)],
+        )?;
+        outputs
+            .publish_then(|| pending.commit().map(|_| ()).map_err(|e| e.to_string()))
+            .map_err(anyhow::Error::msg)?
+    } else {
+        pending.commit()?;
+        Vec::new()
+    };
+    Ok(output_paths)
+}
+
 /// The tab-separated line printed per document.
 fn summary_line(result: &ExtractionResult, path: &str) -> String {
     let short = short_hash(&result.document.hash.0);
@@ -750,19 +793,6 @@ fn summary_line(result: &ExtractionResult, path: &str) -> String {
         result.references.len(),
         result.citations.len(),
     )
-}
-
-/// Write `<hash>.json` and `<hash>.txt` for one result into `dir`.
-fn write_outputs(dir: &Path, result: &ExtractionResult) -> anyhow::Result<()> {
-    let hash = result.document.hash.0.as_str();
-    let json_path = dir.join(format!("{hash}.json"));
-    let json = serde_json::to_string_pretty(result)?;
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
-    let text_path = dir.join(format!("{hash}.txt"));
-    let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    fs::write(&text_path, texts.join("\u{c}"))
-        .with_context(|| format!("writing {}", text_path.display()))?;
-    Ok(())
 }
 
 fn run_stats(db: &Path) -> anyhow::Result<()> {

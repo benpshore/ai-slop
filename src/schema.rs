@@ -156,6 +156,7 @@ impl PageText {
             warning.starts_with("failed:")
                 || warning.starts_with("resource_limit:")
                 || warning.starts_with("unicode_mapping:")
+                || warning.starts_with("unresolved_text:")
         }) {
             Status::Partial
         } else {

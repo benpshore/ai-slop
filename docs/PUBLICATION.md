@@ -49,3 +49,12 @@ second link, and a commit failure; exercise eight concurrent publishers and
 replacement ownership; and force a real deferred-constraint SQLite commit
 failure to verify restoration of the previous result. Existing job tests check
 successful text/bibliography output and extraction failures before staging.
+
+The supervised CLI `tpe extract` also uses this shared publication helper.
+Unlike the application order above, the CLI prepares its SQLite transaction and
+updates timing before serializing/staging JSON/text; staging failures still drop
+and roll back that transaction. It publishes a collision-safe pair into `--out`
+and reports both final paths in its output record. It commits after directory
+sync, with the same handled-error and crash limitations. The source PDF is never
+an export target. Per-file publication errors are printed as Failed and do not
+stop unrelated inputs in the batch.

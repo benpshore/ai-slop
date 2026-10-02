@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
-pub(crate) struct StagedOutputs {
+/// Staged complete files with collision-safe publication and handled-error rollback.
+pub struct StagedOutputs {
     directory: PathBuf,
     base: String,
     files: Vec<(String, NamedTempFile)>,
@@ -16,7 +17,11 @@ pub(crate) struct StagedOutputs {
 }
 
 impl StagedOutputs {
-    pub(crate) fn stage(source: &Path, files: &[(&str, Vec<u8>)]) -> io::Result<Self> {
+    /// Stage complete output bytes beside the proposed base name.
+    ///
+    /// # Errors
+    /// Returns an I/O error when temporary-file creation, writing, or syncing fails.
+    pub fn stage(source: &Path, files: &[(&str, Vec<u8>)]) -> io::Result<Self> {
         let directory = source
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -51,7 +56,11 @@ impl StagedOutputs {
         Ok(staged)
     }
 
-    pub(crate) fn publish_then(
+    /// Publish without overwriting existing files, then commit the caller's transaction.
+    ///
+    /// # Errors
+    /// Reports publication/commit failures and any incomplete rollback cleanup.
+    pub fn publish_then(
         &mut self,
         commit: impl FnOnce() -> Result<(), String>,
     ) -> Result<Vec<PathBuf>, String> {
