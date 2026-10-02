@@ -70,6 +70,19 @@ fn probe(input: &Path, args: &[&str], library: Option<&str>) -> Report {
     report
 }
 
+fn assert_library_identity(report: &Report) {
+    let configured = std::path::PathBuf::from(std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").unwrap());
+    let library = if configured.is_file() {
+        configured
+    } else {
+        configured.join("libpdfium.so")
+    };
+    assert_eq!(
+        report.backend.as_ref().unwrap().library_sha256,
+        tpe::schema::sha256_hex(&std::fs::read(library).unwrap())
+    );
+}
+
 #[test]
 fn unavailable_library_is_explicit_and_controller_is_not_poisoned() {
     let temp = tempfile::tempdir().unwrap();
@@ -110,21 +123,12 @@ fn nested_forms_return_native_character_geometry_and_explicit_limits() {
     assert_eq!(result.total_pages, Some(2));
     assert_eq!(result.pages.len(), 2);
     assert_eq!(result.pages[1].rotation_degrees, 90);
-    let applied = result.applied_limits.unwrap();
+    let applied = result.applied_limits.as_ref().unwrap();
     assert!(applied.address_space_bytes <= 512 * 1024 * 1024);
     assert!(applied.cpu_seconds <= 15);
     assert!(applied.file_bytes <= 32 * 1024 * 1024);
     assert_eq!(applied.core_bytes, 0);
-    let configured = std::path::PathBuf::from(std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").unwrap());
-    let library = if configured.is_file() {
-        configured
-    } else {
-        configured.join("libpdfium.so")
-    };
-    assert_eq!(
-        result.backend.unwrap().library_sha256,
-        tpe::schema::sha256_hex(&std::fs::read(library).unwrap())
-    );
+    assert_library_identity(&result);
     for page in &result.pages {
         let letters: String = page
             .characters

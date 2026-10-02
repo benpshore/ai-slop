@@ -15,6 +15,9 @@ cp "$pin" "$evidence/source-pin.json"
 git rev-parse HEAD > "$evidence/code-sha.txt"
 date -u +%FT%TZ > "$evidence/started-at.txt"
 df -h > "$evidence/disk-before.txt"
+uname -a > "$evidence/host.txt"
+cat /etc/os-release >> "$evidence/host.txt"
+printf 'ImageOS=%s\nImageVersion=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" >> "$evidence/host.txt"
 
 checkout_revision() {
   local url=$1 revision=$2 directory=$3
@@ -67,6 +70,7 @@ gclient revinfo -a > "$evidence/dependency-revisions.txt"
 cp .gclient "$evidence/gclient.txt"
 cd pdfium
 build/install-build-deps.sh --no-prompt
+dpkg-query -W > "$evidence/host-packages.txt"
 gclient runhooks
 build/linux/sysroot_scripts/install-sysroot.py --arch=x64
 # A single shared library preserves the prebuilt library's deployment shape.
