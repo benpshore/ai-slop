@@ -13,6 +13,7 @@ const LIMIT: &str = "resource_limit: test decoder stopped early";
 enum Case {
     Ordinary,
     DecodeLimit,
+    UnicodeMapping,
     CaptionLimit,
 }
 
@@ -64,6 +65,8 @@ impl DocumentSession for Case {
         }
         page.warnings.push(if matches!(self, Self::DecodeLimit) {
             LIMIT.into()
+        } else if matches!(self, Self::UnicodeMapping) {
+            "unicode_mapping: pdfium map_errors=1, zero_unicode=0".into()
         } else {
             "ordinary diagnostic".into()
         });
@@ -77,7 +80,12 @@ impl DocumentSession for Case {
 
 #[test]
 fn decoder_and_late_processing_cutoffs_reach_json_chunks_and_ledger() {
-    for case in [Case::Ordinary, Case::DecodeLimit, Case::CaptionLimit] {
+    for case in [
+        Case::Ordinary,
+        Case::DecodeLimit,
+        Case::UnicodeMapping,
+        Case::CaptionLimit,
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input.pdf");
         std::fs::write(&input, b"%PDF fake input for test backend").unwrap();
@@ -104,12 +112,13 @@ fn decoder_and_late_processing_cutoffs_reach_json_chunks_and_ledger() {
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["status"], expected.as_str());
         if expected == Status::Partial {
-            assert!(
-                result
-                    .warnings
-                    .iter()
-                    .any(|w| w.starts_with("page 1: resource_limit:"))
-            );
+            assert!(result.warnings.iter().any(|w| w.starts_with(
+                if matches!(case, Case::UnicodeMapping) {
+                    "page 1: unicode_mapping:"
+                } else {
+                    "page 1: resource_limit:"
+                }
+            )));
         }
         let database = directory.path().join("ledger.sqlite");
         Ledger::open(&database)
