@@ -2,9 +2,9 @@
 //! content stream (text state, graphics state, Form `XObject`s) and yields
 //! one positioned [`Span`] per shown string. Nothing is ordered or repaired.
 //!
-//! Per-document work is cached inside the session: a font dictionary is
-//! resolved (encoding, widths, flags) once per `ObjectId` and shared by
-//! every page and Form `XObject` that references it, and a Form `XObject`'s
+//! Per-document work is cached inside the session: a used font dictionary is
+//! resolved (encoding, widths, flags) lazily and shared by `ObjectId` through
+//! a byte- and entry-bounded FIFO cache, and a Form `XObject`'s
 //! content stream is reused through a byte- and entry-bounded FIFO cache.
 //! Decoding and execution have separate per-page budgets; exhaustion fails
 //! the page explicitly instead of publishing silently truncated text. The caches hold only owned data, so they never borrow the
@@ -52,9 +52,8 @@
 //! have their encodings tabulated (`CMSY` code 50 is `∈`, not `2`), other
 //! embedded Type1 programs are read for their encoding array. Glyph names
 //! resolve through [`GLYPH_NAMES`], `uniXXXX`/`uXXXX`, then `lopdf`'s own
-//! glyph list. The policy is in the identity as `encodings=1`.
+//! glyph list. The bounded loading policy is in the identity as `encodings=2`.
 
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -66,6 +65,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
 use crate::schema::{BBox, BackendIdentity, Figure, Link, PageText, Span, config_digest};
+
+mod font_resources;
+use font_resources::{FontWork, MAX_FONT_CACHE_BYTES, MAX_FONT_CACHE_ENTRIES, MIN_FONT_CHARGE};
 
 /// The `lopdf` release this backend is built against. It is part of the
 /// [`BackendIdentity`], so a dependency bump must change it (a unit test
@@ -200,8 +202,9 @@ const MAX_FORM_FILTERS: usize = 8;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
-/// `/Differences` parse that tolerates unknown glyph names.
-const ENCODING_POLICY: &str = "1";
+/// `/Differences` parse that tolerates unknown glyph names;
+/// 2 = lazy, bounded font loading and preflight before `CMap` reverse expansion.
+const ENCODING_POLICY: &str = "2";
 
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,14 +288,15 @@ fn map_load_error(err: LopdfError) -> BackendError {
     }
 }
 
-/// Work that is identical for every page of one document, computed on first
-/// use and kept for the life of the session.
+/// Work shared across pages of one document, computed on use and retained
+/// in bounded caches until eviction or the end of the session.
 #[derive(Default)]
 struct SessionCache {
     /// Resolved font dictionaries, keyed by the indirect object they live in.
-    /// Fonts written directly into a resources dictionary have no id and are
-    /// resolved on every use.
+    /// Direct fonts have no id and are retained only by their current context.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
+    font_order: VecDeque<ObjectId>,
+    font_bytes: usize,
     /// FIFO eviction retains normal reuse without an unbounded miss cache.
     forms: HashMap<ObjectId, (Rc<TextProgram>, usize)>,
     form_order: VecDeque<ObjectId>,
@@ -305,6 +309,25 @@ struct SessionCache {
 }
 
 impl SessionCache {
+    fn insert_font(&mut self, id: ObjectId, font: &Rc<LoadedFont>) {
+        if font.charge > MAX_FONT_CACHE_BYTES || self.fonts.contains_key(&id) {
+            return;
+        }
+        while self.fonts.len() >= MAX_FONT_CACHE_ENTRIES
+            || self.font_bytes.saturating_add(font.charge) > MAX_FONT_CACHE_BYTES
+        {
+            let Some(oldest) = self.font_order.pop_front() else {
+                return;
+            };
+            if let Some(old) = self.fonts.remove(&oldest) {
+                self.font_bytes -= old.charge;
+            }
+        }
+        self.font_bytes += font.charge;
+        self.fonts.insert(id, Rc::clone(font));
+        self.font_order.push_back(id);
+    }
+
     fn insert_form(&mut self, id: ObjectId, program: &Rc<TextProgram>) -> bool {
         let bytes = program.estimated_bytes().max(MIN_FORM_CHARGE);
         if bytes > MAX_FORM_CACHE_BYTES {
@@ -1289,6 +1312,8 @@ fn own_table(doc: &Document, dict: &Dictionary) -> Option<ByteTable> {
 /// a string with it. The resource name is not part of it, as one font object
 /// may be reachable under different names on different pages.
 struct LoadedFont {
+    /// Conservative retained/transient allocation charge from the preflight.
+    charge: usize,
     /// `/BaseFont` if present.
     base_font: Option<String>,
     decode: Decode,
@@ -1302,6 +1327,7 @@ struct LoadedFont {
 impl LoadedFont {
     fn missing() -> Self {
         Self {
+            charge: MIN_FONT_CHARGE,
             base_font: None,
             decode: Decode::Latin1("not in resources"),
             composite: false,
@@ -1326,6 +1352,7 @@ fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
         Widths::Simple(simple_widths(doc, dict))
     };
     LoadedFont {
+        charge: MIN_FONT_CHARGE,
         base_font: base_font.map(lossy),
         decode,
         composite,
@@ -1338,7 +1365,7 @@ fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool) {
     if let Some(table) = own_table(doc, dict) {
         return (Decode::Table(table), true);
     }
-    match dict.get_font_encoding(doc) {
+    match dict.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM) {
         Ok(encoding) => {
             let one_to_one = !matches!(encoding, Encoding::UnicodeMapEncoding(_));
             (own_encoding(encoding), one_to_one)
@@ -1363,7 +1390,7 @@ fn composite_decode(doc: &Document, dict: &Dictionary) -> Decode {
     if !usable {
         return Decode::Replacement;
     }
-    match dict.get_font_encoding(doc) {
+    match dict.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM) {
         Ok(encoding) => own_encoding(encoding),
         Err(_) => Decode::Replacement,
     }
@@ -1501,12 +1528,33 @@ struct Context<'a> {
     resources: Vec<&'a Dictionary>,
 }
 
-fn find_font<'c>(contexts: &'c [Context<'_>], name: &[u8]) -> Option<&'c LoadedFont> {
-    contexts
-        .iter()
-        .rev()
-        .find_map(|layer| layer.fonts.get(name))
-        .map(Rc::as_ref)
+fn find_font(
+    doc: &Document,
+    cache: &mut SessionCache,
+    work: &mut FontWork,
+    contexts: &mut [Context<'_>],
+    name: &[u8],
+) -> Result<Option<Rc<LoadedFont>>, &'static str> {
+    if name.len() > 1024 {
+        return Err("font resource name byte limit exceeded");
+    }
+    for layer in contexts.iter_mut().rev() {
+        if let Some(font) = layer.fonts.get(name) {
+            return Ok(Some(Rc::clone(font)));
+        }
+        // Resolve only the name actually used by a non-empty shown string.
+        // Page resources precede inherited ones, and Forms shadow their caller.
+        for resources in &layer.resources {
+            if let Ok(Object::Dictionary(fonts)) = resources.get_deref(b"Font", doc)
+                && let Ok(value) = fonts.get(name)
+                && let Some(font) = resolve_font(doc, cache, work, value)?
+            {
+                layer.fonts.insert(name.to_vec(), Rc::clone(&font));
+                return Ok(Some(font));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The stream behind `/XObject name`, with the id of the indirect object
@@ -1536,44 +1584,29 @@ fn lookup_xobject<'a>(
 fn resolve_font(
     doc: &Document,
     cache: &mut SessionCache,
+    work: &mut FontWork,
     value: &Object,
-) -> Option<Rc<LoadedFont>> {
-    let (id, entry) = doc.dereference(value).ok()?;
-    let dict = entry.as_dict().ok()?;
-    match id {
-        Some(id) => {
-            let font = cache
-                .fonts
-                .entry(id)
-                .or_insert_with(|| Rc::new(load_font(doc, dict)));
-            Some(Rc::clone(font))
-        }
-        None => Some(Rc::new(load_font(doc, dict))),
-    }
-}
-
-/// Add the fonts of one resources dictionary to `fonts`; a name already
-/// present wins, matching `Document::get_page_fonts` (page resources before
-/// inherited ones).
-fn load_fonts_from_resources(
-    doc: &Document,
-    cache: &mut SessionCache,
-    resources: &Dictionary,
-    fonts: &mut BTreeMap<Vec<u8>, Rc<LoadedFont>>,
-) {
-    let Ok(font_map) = resources.get_deref(b"Font", doc) else {
-        return;
+) -> Result<Option<Rc<LoadedFont>>, &'static str> {
+    let Ok((id, Object::Dictionary(dict))) = doc.dereference(value) else {
+        return Ok(None);
     };
-    let Ok(font_map) = font_map.as_dict() else {
-        return;
-    };
-    for (name, value) in font_map {
-        if let Entry::Vacant(slot) = fonts.entry(name.clone())
-            && let Some(font) = resolve_font(doc, cache, value)
-        {
-            slot.insert(font);
-        }
+    work.load()?;
+    if let Some(id) = id
+        && let Some(font) = cache.fonts.get(&id)
+    {
+        // Contexts retain Rc references across eviction; charge their live
+        // decoders to the page allowance as well as to the session cache.
+        work.reserve(font.charge)?;
+        return Ok(Some(Rc::clone(font)));
     }
+    let allocation = font_resources::preflight(doc, dict, work)?;
+    let mut font = load_font(doc, dict);
+    font.charge = allocation;
+    let font = Rc::new(font);
+    if let Some(id) = id {
+        cache.insert_font(id, &font);
+    }
+    Ok(Some(font))
 }
 
 /// Graphics state as far as text placement needs it (saved by `q`/`Q`).
@@ -2690,6 +2723,7 @@ struct Interpreter<'a> {
     ligatures: u32,
     graphics: Graphics,
     form_work: FormWork,
+    font_work: FontWork,
     resource_error: Option<&'static str>,
 }
 
@@ -2886,30 +2920,34 @@ impl<'a> Interpreter<'a> {
         self.text_move(0.0, -leading);
     }
 
-    fn show(&mut self, bytes: &[u8], contexts: &[Context<'a>]) {
+    fn show(&mut self, bytes: &[u8], contexts: &mut [Context<'a>]) {
         if bytes.is_empty() {
             return;
         }
         let font_name = self.state.font.clone();
         let name: &[u8] = font_name.as_deref().unwrap_or_default();
-        let fallback: LoadedFont;
-        let font = if let Some(found) = find_font(contexts, name) {
-            found
-        } else {
-            fallback = LoadedFont::missing();
-            &fallback
+        let font = match find_font(self.doc, self.cache, &mut self.font_work, contexts, name) {
+            Ok(Some(font)) => font,
+            Ok(None) => Rc::new(LoadedFont::missing()),
+            Err(reason) => {
+                self.resource_error = Some(reason);
+                return;
+            }
         };
-        let text = self.decode(name, font, bytes);
-        let advance = self.advance(font, bytes);
+        let text = self.decode(name, &font, bytes);
+        let advance = self.advance(&font, bytes);
         let base_font = font.base_font.clone();
         self.emit(text, advance, base_font);
     }
 
-    fn show_array(&mut self, operands: &[Object], contexts: &[Context<'a>]) {
+    fn show_array(&mut self, operands: &[Object], contexts: &mut [Context<'a>]) {
         let Some(pieces) = operands.first().and_then(|obj| obj.as_array().ok()) else {
             return;
         };
         for element in pieces {
+            if self.resource_error.is_some() {
+                break;
+            }
             if let Object::String(bytes, _) = element {
                 self.show(bytes, contexts);
             } else if let Ok(adjust) = element.as_float() {
@@ -3162,7 +3200,6 @@ impl<'a> Interpreter<'a> {
             && let Ok(resources) = resources.as_dict()
         {
             form_context.resources.push(resources);
-            load_fonts_from_resources(doc, self.cache, resources, &mut form_context.fonts);
         }
 
         // The Form runs on a stack of its own: an unbalanced `Q` inside it
@@ -3212,7 +3249,7 @@ fn extract_page(
     };
     // Same walk as `Document::get_page_fonts` (the page's direct resources,
     // then the indirect ones up the `/Parent` chain; first name wins), but
-    // each font dictionary is resolved through the session cache.
+    // used fonts will be resolved lazily through the session cache.
     match doc.get_page_resources(page_id) {
         Ok((direct, ids)) => {
             if let Some(dict) = direct {
@@ -3222,9 +3259,6 @@ fn extract_page(
                 if let Ok(dict) = doc.get_dictionary(id) {
                     page_context.resources.push(dict);
                 }
-            }
-            for &resources in &page_context.resources {
-                load_fonts_from_resources(doc, cache, resources, &mut page_context.fonts);
             }
         }
         Err(err) => page_text.warnings.push(format!("fonts: {err}")),
@@ -3245,6 +3279,7 @@ fn extract_page(
         ligatures: 0,
         graphics: Graphics::default(),
         form_work: FormWork::default(),
+        font_work: FontWork::default(),
         resource_error: None,
     };
     let mut contexts = vec![page_context];
@@ -5172,7 +5207,7 @@ mod tests {
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
         config.insert("content".to_string(), "7".to_string());
-        config.insert("encodings".to_string(), "1".to_string());
+        config.insert("encodings".to_string(), "2".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
         config.insert("content".to_string(), "2".to_string());
@@ -5792,6 +5827,7 @@ mod tests {
             ligatures: 0,
             graphics: Graphics::default(),
             form_work: FormWork::default(),
+            font_work: FontWork::default(),
             resource_error: None,
         };
         interpreter.graphics = graphics;
@@ -6493,7 +6529,7 @@ mod tests {
         }
     }
 
-    /// This diagnostic documents an unresolved font path; it is not a limit.
+    /// Compare with the pre-repair measurements in `docs/FONT_RESOURCES.md`.
     #[test]
     #[ignore = "manual font-cache/CMap expansion audit; run each case in a fresh process"]
     fn measure_unused_font_cmap_expansion() {
@@ -6541,19 +6577,10 @@ mod tests {
         let page = session.page_text(1).unwrap();
         let elapsed = start.elapsed();
         assert!(page.spans.is_empty());
-        assert_eq!(session.cache.fonts.len(), fonts);
-        for font in session.cache.fonts.values() {
-            let Decode::UnicodeMap(Encoding::UnicodeMapEncoding(map)) = &font.decode else {
-                panic!("fixture must parse a ToUnicode map");
-            };
-            // The compact forward map has one range. The eagerly built reverse
-            // map retains every source code, even though no text used this font.
-            assert_eq!(map.bf_ranges[3].len(), 1);
-            assert_eq!(
-                map.get_source_codes_for_unicode(&[0x20]).unwrap().len(),
-                codes.div_ceil(65_536) as usize
-            );
-        }
+        assert!(
+            session.cache.fonts.is_empty(),
+            "unused fonts must not be decoded"
+        );
         let peak_rss_kib = std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -6569,11 +6596,219 @@ mod tests {
             "FONT_DIAGNOSTIC {}",
             serde_json::json!({
                 "codes_per_font": codes, "cmap_bytes": cmap.len(), "cached_fonts": session.cache.fonts.len(),
-                "expanded_reverse_entries": u64::from(codes) * fonts as u64,
+                "expanded_reverse_entries": 0,
                 "emitted_spans": page.spans.len(), "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                 "peak_rss_kib": peak_rss_kib,
             })
         );
+    }
+
+    fn font_with_cmap(doc: &mut Document, mapping: &str) -> Dictionary {
+        let cmap = format!(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /ResourceTest def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<00000000> <FFFFFFFF>\nendcodespacerange\n\
+             {mapping}\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
+        );
+        let id = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+        dictionary! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H", "ToUnicode" => id }
+    }
+
+    #[test]
+    fn unused_four_byte_cmap_is_not_expanded_and_used_cmap_fails_explicitly() {
+        let bytes = build_pdf_with_font(vec![vec![], text_ops(12, 50, 50, "x")], None, |doc| {
+            font_with_cmap(
+                doc,
+                "1 beginbfrange\n<00000000><FFFFFFFF><0020>\nendbfrange",
+            )
+        });
+        let mut session = open_session(&bytes);
+        let blank = session.page_text(1).unwrap();
+        assert!(blank.warnings.is_empty());
+        assert!(session.cache.fonts.is_empty());
+        let error = session.page_text(2).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: ToUnicode source-code cardinality limit exceeded"),
+            "{error}"
+        );
+        assert!(session.cache.fonts.is_empty());
+        assert!(session.page_text(1).unwrap().warnings.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("font-limit.pdf");
+        std::fs::write(&pdf, bytes).unwrap();
+        let job = crate::schema::Job {
+            path: pdf.to_string_lossy().into_owned(),
+            backend: "lopdf".into(),
+            pages: None,
+            password: None,
+            max_bytes: None,
+            figures_dir: None,
+        };
+        let result = crate::pipeline::run_job_with(&LopdfBackend::default(), &job).unwrap();
+        assert_eq!(result.status, crate::schema::Status::Partial);
+        assert_eq!(serde_json::to_value(&result).unwrap()["status"], "partial");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("resource_limit: ToUnicode"))
+        );
+        let database = dir.path().join("ledger.sqlite");
+        crate::ledger::Ledger::open(&database)
+            .unwrap()
+            .write_result(&result)
+            .unwrap();
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let stored: String = connection
+            .query_row("SELECT status FROM runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, "partial");
+    }
+
+    #[test]
+    fn small_cmap_keeps_upstream_decoding_and_unused_cmap_on_named_font_is_ignored() {
+        let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+            font_with_cmap(
+                doc,
+                "1 beginbfrange\n<61><63>[<0041> <0042> <0043>]\nendbfrange",
+            )
+        });
+        let mut session = open_session(&bytes);
+        assert_eq!(span_texts(&session.page_text(1).unwrap()), ["ABC"]);
+        let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+            let mut font = font_with_cmap(
+                doc,
+                "1 beginbfrange\n<00000000><FFFFFFFF><0020>\nendbfrange",
+            );
+            font.set("Subtype", "Type1");
+            font.set("Encoding", "WinAnsiEncoding");
+            font
+        });
+        assert_eq!(
+            span_texts(&open_session(&bytes).page_text(1).unwrap()),
+            ["abc"]
+        );
+    }
+
+    #[test]
+    fn cmap_decompression_and_predictor_limits_precede_font_fallback() {
+        for predictor in [false, true] {
+            let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                let mut stream = Stream::new(
+                    dictionary! {},
+                    vec![b'A'; font_resources::MAX_FONT_STREAM + 1],
+                );
+                stream.compress().unwrap();
+                if predictor {
+                    stream.dict.set("DecodeParms", dictionary! {
+                        "Predictor" => 2, "Columns" => 1, "Colors" => 10_000_000, "BitsPerComponent" => 1,
+                    });
+                }
+                let id = doc.add_object(stream);
+                dictionary! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H", "ToUnicode" => id }
+            });
+            let error = open_session(&bytes).page_text(1).unwrap_err().to_string();
+            let expected = if predictor {
+                "font stream filter/predictor limit exceeded"
+            } else {
+                "font decoded stream byte limit exceeded"
+            };
+            assert!(
+                error.contains(&format!("resource_limit: {expected}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_width_entries_are_bounded_before_flattening() {
+        let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+            let cid = doc.add_object(
+                dictionary! { "W" => vec![0.into(), Object::Array(vec![500.into(); 65_537])] },
+            );
+            dictionary! { "Type" => "Font", "Subtype" => "Type0", "DescendantFonts" => vec![cid.into()] }
+        });
+        let error = open_session(&bytes).page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: font widths/encoding item limit exceeded"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn irrelevant_embedded_programs_do_not_block_decodable_fonts() {
+        for route in ["named", "differences", "unicode", "tex", "type3", "used"] {
+            let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                let file = doc.add_object(Stream::new(dictionary! { "Filter" => vec![Object::Name(b"FlateDecode".to_vec()); MAX_FORM_FILTERS + 1] }, vec![]));
+                let descriptor = doc.add_object(dictionary! { "FontFile" => file });
+                let mut font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "FontDescriptor" => descriptor };
+                match route {
+                    "named" => font.set("Encoding", "WinAnsiEncoding"),
+                    "differences" => font.set("Encoding", dictionary! { "BaseEncoding" => "WinAnsiEncoding", "Differences" => vec![97.into(), "a".into()] }),
+                    "unicode" => {
+                        font = font_with_cmap(doc, "1 beginbfrange\n<61><63><0061>\nendbfrange");
+                        font.set("FontDescriptor", descriptor);
+                    }
+                    "tex" => font.set("BaseFont", "CMR10"),
+                    "type3" => font.set("Subtype", "Type3"),
+                    _ => {}
+                }
+                font
+            });
+            let page = open_session(&bytes).page_text(1);
+            if route == "used" {
+                assert!(
+                    page.unwrap_err()
+                        .to_string()
+                        .contains("resource_limit: font stream filter/predictor")
+                );
+            } else {
+                let page = page.unwrap();
+                assert_eq!(span_texts(&page), ["abc"], "{route}");
+                assert!(page.warnings.is_empty(), "{route}: {:?}", page.warnings);
+            }
+        }
+    }
+
+    #[test]
+    fn font_cache_caps_entries_and_charged_bytes_and_eviction_keeps_live_fonts_valid() {
+        let mut doc = Document::with_version("1.5");
+        let mut cache = SessionCache::default();
+        let mut first = None;
+        for i in 0..=MAX_FONT_CACHE_ENTRIES {
+            let id = doc.add_object(
+                dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            );
+            let loaded = resolve_font(&doc, &mut cache, &mut FontWork::default(), &id.into())
+                .unwrap()
+                .unwrap();
+            if i == 0 {
+                first = Some((id, loaded));
+            }
+        }
+        let (id, live) = first.unwrap();
+        assert_eq!(cache.fonts.len(), MAX_FONT_CACHE_ENTRIES);
+        assert_eq!(cache.font_order.len(), MAX_FONT_CACHE_ENTRIES);
+        assert_eq!(cache.font_bytes, MAX_FONT_CACHE_ENTRIES * MIN_FONT_CHARGE);
+        assert!(!cache.fonts.contains_key(&id));
+        let Decode::Table(table) = &live.decode else {
+            panic!("simple font")
+        };
+        assert_eq!(table.decode(b"still valid").as_deref(), Some("still valid"));
+        let mut large = LoadedFont::missing();
+        large.charge = MAX_FONT_CACHE_BYTES;
+        cache.insert_font((9000, 0), &Rc::new(large));
+        assert_eq!(cache.fonts.len(), 1);
+        assert_eq!(cache.font_bytes, MAX_FONT_CACHE_BYTES);
+        cache.insert_font((9001, 0), &live);
+        assert_eq!(cache.fonts.len(), 1);
+        assert_eq!(cache.font_order.len(), 1);
+        assert_eq!(cache.font_bytes, MIN_FONT_CHARGE);
+        let mut work = FontWork::default();
+        work.reserve(MAX_FONT_CACHE_BYTES).unwrap();
+        assert!(resolve_font(&doc, &mut cache, &mut work, &id.into()).is_err());
     }
 
     /// Run each N in a separate process to measure RSS without prior test peaks.
