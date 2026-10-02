@@ -14,8 +14,11 @@ def _run(command, timeout=120):
     result = subprocess.run(
         command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, check=False
     )
+    message = result.stderr.decode("utf-8", errors="replace").strip()
     if result.returncode:
-        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
+        raise RuntimeError(message or f"{command[0]} exited {result.returncode}")
+    if message:
+        print(message, file=sys.stderr)
 
 
 def convert_pdf(source, destination=None, *, overwrite=False, timeout=120):

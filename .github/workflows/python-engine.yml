@@ -62,6 +62,7 @@ jobs:
           uv run --locked --directory python-engine ruff format --check
           uv run --locked --directory python-engine ruff check
           uv run --locked --directory python-engine pytest
+          uv audit --locked --preview-features audit-command --directory python-engine
       - name: Build and exercise the installed tpe tool on PDF and HTTPS inputs
         env:
           UV_TOOL_DIR: ${{ runner.temp }}/python-tools

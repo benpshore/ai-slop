@@ -21,6 +21,15 @@ def test_core_stays_under_100_lines():
     assert len(Path(engine.__file__).read_text().splitlines()) <= 100
 
 
+def test_successful_conversion_preserves_poppler_warnings(monkeypatch, capsys):
+    def warning(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stderr=b"Syntax Warning: example\n")
+
+    monkeypatch.setattr(engine.subprocess, "run", warning)
+    engine._run(["pdftotext"])
+    assert "Syntax Warning: example" in capsys.readouterr().err
+
+
 def test_real_poppler_preserves_layout(tmp_path):
     source = paper(tmp_path / "paper with spaces.PDF")
     target = engine.convert_pdf(source)

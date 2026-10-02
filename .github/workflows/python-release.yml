@@ -1,0 +1,91 @@
+name: Python release
+
+# Reviewed version PRs use uv's patch bump; tags publish without changing main.
+on:
+  push:
+    tags: ['python-v0.0.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing reviewed Python tag to publish or retry
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.19'
+          python-version: '3.14.7'
+      - name: Require reviewed main source, matching version and next patch tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor HEAD origin/main
+          version=$(uv version --directory python-engine --short)
+          [[ "$version" =~ ^0\.0\.(0|[1-9][0-9]*)$ ]]
+          test "$RELEASE_TAG" = "python-v$version"
+          previous=$(git tag --list 'python-v0.0.*' --sort=-v:refname | awk -v current="$RELEASE_TAG" '$0 != current {print; exit}')
+          if [ -n "$previous" ]; then
+            [[ "$previous" =~ ^python-v0\.0\.(0|[1-9][0-9]*)$ ]]
+            test "${version##*.}" -eq "$((${previous##*.} + 1))"
+          else
+            test "$version" = '0.0.1'
+          fi
+      - name: Require successful Python engine CI on this same main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_SHA=$(git rev-parse HEAD)
+          for attempt in $(seq 1 60); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/python-engine.yml/runs?head_sha=$SOURCE_SHA&event=push&per_page=30" --jq '.workflow_runs | map(select(.head_sha == env.SOURCE_SHA and .head_branch == "main")) | sort_by(.created_at) | last | .conclusion // "pending"')
+            case "$state" in
+              success) exit 0 ;;
+              pending) sleep 10 ;;
+              *) echo "Python engine CI concluded $state; refusing publication"; exit 1 ;;
+            esac
+          done
+          echo 'No successful matching Python engine CI'; exit 1
+      - name: Build locked package and smoke the actual wheel tool
+        shell: bash
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/release-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/release-tools-bin
+        run: |
+          set -euo pipefail
+          uv sync --locked --directory python-engine --python 3.14.7 --no-dev
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          uv build --directory python-engine --python 3.14.7 --no-sources --out-dir "$RUNNER_TEMP/python-dist"
+          uv tool install --python 3.14.7 "$RUNNER_TEMP"/python-dist/*.whl
+          test "$("$UV_TOOL_BIN_DIR/tpe" --version)" = "${RELEASE_TAG#python-v}"
+          (cd "$RUNNER_TEMP/python-dist" && sha256sum -- *.whl *.tar.gz > SHA256SUMS)
+          printf 'Source: %s\nTag: %s\n' "$(git rev-parse HEAD)" "$RELEASE_TAG" > "$RUNNER_TEMP/python-dist/PROVENANCE.txt"
+          uv --version >> "$RUNNER_TEMP/python-dist/PROVENANCE.txt"
+          sha256sum python-engine/uv.lock >> "$RUNNER_TEMP/python-dist/PROVENANCE.txt"
+      - name: Publish Python wheel, sdist and checksums without replacing Rust latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/python-dist/* --verify-tag --latest=false --title "$RELEASE_TAG" --notes 'Python 3.14 package; requires Poppler. Install its wheel with uv tool install and use tpe. Tracks #164/#165.'
