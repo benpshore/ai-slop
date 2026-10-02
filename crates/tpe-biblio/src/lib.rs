@@ -35,7 +35,7 @@ pub mod util;
 pub use client::{Client, KEY_NCBI, KEY_OPENALEX, KEY_SEMANTIC_SCHOLAR, RateLimiter};
 pub use dedupe::merge_records;
 pub use error::BiblioError;
-pub use tpe_common::PaperRecord;
+pub use tpe_common::{PaperRecord, normalize_doi};
 
 /// Whether a full-text candidate points at a PDF or at an HTML landing page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

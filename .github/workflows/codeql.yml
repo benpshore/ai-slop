@@ -1,10 +1,11 @@
 name: CodeQL
 
+# Runs on main and weekly only: pull requests are covered by the required
+# `ci` check, and a CodeQL pass per push was queueing 10+ minutes per PR.
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
   schedule:
     - cron: "27 6 * * 1"
 
