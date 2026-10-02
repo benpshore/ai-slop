@@ -5,7 +5,8 @@ name: Build binaries
 # `tpe-<target>.tar.gz` (a single file `tpe` inside). The archive name is
 # the contract `tpe update`, mise (`github:` backend) and the install
 # instructions in docs/CLI.md rely on. `version` is embedded through the
-# `TPE_VERSION` build-time environment variable (build.rs).
+# `TPE_VERSION` build-time environment variable (build.rs); the conventional
+# leading v is removed for `tpe --version`.
 
 on:
   workflow_call:
@@ -19,6 +20,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/build-binaries.yml
+      - rust-toolchain.toml
+      - build.rs
 
 permissions:
   contents: read
@@ -44,6 +47,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: rustup show active-toolchain
       - run: rustc --version --verbose && uname -m
       - name: Runner architecture matches the target
         run: |
@@ -58,13 +62,17 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-bin-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-bin-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-bin-${{ matrix.target }}-
       - name: Build tpe
         run: cargo build --release --locked -p text-processing-engine --bin tpe
       - name: Smoke test
         run: |
-          ./target/release/tpe --version
+          set -eu
+          expected=${TPE_VERSION#v}
+          actual=$(./target/release/tpe --version)
+          test "$actual" = "tpe $expected"
+          printf '%s\n' "$actual"
           ./target/release/tpe backends
       - name: Package
         run: |

@@ -253,12 +253,14 @@ GPUI is Apache-2.0 and pre-1.0; Zed application code has different licensing. Pi
 
 ## Development and checks
 
-Follow [AGENTS.md](AGENTS.md). The application and required CI are Rust:
+Follow [AGENTS.md](AGENTS.md). The application and required CI are Rust, using
+the pinned Rust 1.98.1 toolchain and committed Cargo.lock. See the
+[Rust build contract](docs/RUST_BUILD.md) for release commands and MSRV status:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 ```
 
 Python is used only for corpus fetching, reference comparisons and accuracy evaluation.
