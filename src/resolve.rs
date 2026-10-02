@@ -404,19 +404,22 @@ fn bibliographic_search(
 
 /// Does a meaningful word of the record's venue (3+ chars, `RNA`, `Lancet`)
 /// appear in the entry? Function words such as "and" in a title are not
-/// journal evidence. Venue names help distinguish articles from preprints or
-/// posters when title, authors and year all agree.
-fn venue_in_entry(venue: &str, raw_folded: &str) -> bool {
+/// journal evidence. A word already supplied by the candidate title is not
+/// independent venue evidence either. Venue names help distinguish articles
+/// from preprints or posters when title, authors and year all agree.
+fn venue_in_entry(venue: &str, raw_folded: &str, title: &str) -> bool {
     let needles = words(&folded(venue), 3);
     if needles.is_empty() {
         return false;
     }
     let hay = words(raw_folded, 1);
+    let title_words = words(&folded(title), 1);
     needles.iter().any(|n| {
         !matches!(
             n.as_str(),
             "and" | "the" | "for" | "with" | "from" | "into" | "via"
-        ) && hay.iter().any(|h| h == n)
+        ) && !title_words.iter().any(|word| word == n)
+            && hay.iter().any(|h| h == n)
     })
 }
 
@@ -446,7 +449,7 @@ fn select_query_record(
                 let venue_bonus = if record
                     .venue
                     .as_deref()
-                    .is_some_and(|v| venue_in_entry(v, &raw))
+                    .is_some_and(|v| venue_in_entry(v, &raw, &record.title))
                 {
                     0.5
                 } else {
@@ -1042,6 +1045,37 @@ mod tests {
         for records in [[a.clone(), b.clone()], [b, a]] {
             let mut entry = ReferenceEntry {
                 raw: "Smith J. Molecular mechanisms for inflammation. 2020.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(select_query_record(&mut entry, records).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+        }
+    }
+
+    #[test]
+    fn venue_word_in_candidate_title_does_not_remove_query_ambiguity() {
+        // A merged input from PMC9866640:33 and PMC3777682:64 contains both
+        // complete titles. "Animal" is already title evidence for Rossiter;
+        // it must not also count as independent journal evidence.
+        let animal = PaperRecord {
+            doi: Some("10.1007/s11250-008-9266-7".to_string()),
+            title: "Living with transboundary animal diseases (TADs)".to_string(),
+            authors: vec!["Paul B. Rossiter".to_string()],
+            year: Some(2008),
+            venue: Some("Tropical Animal Health and Production".to_string()),
+            ..PaperRecord::default()
+        };
+        let visual = PaperRecord {
+            doi: Some("10.1017/s1355617711000981".to_string()),
+            title: "Impaired visual scanning and memory for faces in high-functioning autism spectrum disorders: it's not just the eyes".to_string(),
+            authors: vec!["J. Snow".to_string()],
+            year: Some(2011),
+            venue: Some("Journal of the International Neuropsychological Society".to_string()),
+            ..PaperRecord::default()
+        };
+        for records in [[animal.clone(), visual.clone()], [visual, animal]] {
+            let mut entry = ReferenceEntry {
+                raw: "Rossiter. Living with transboundary animal diseases (TADs). 2009. / Snow. Impaired visual scanning and memory for faces in high-functioning autism spectrum disorders: it's not just the eyes. 2011.".to_string(),
                 ..ReferenceEntry::default()
             };
             assert!(select_query_record(&mut entry, records).is_none());
