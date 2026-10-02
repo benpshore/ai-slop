@@ -1,0 +1,101 @@
+{
+  "record_type": "summary",
+  "commit_sha": "68ee9b4e08fde2f28e1042e1d6abb89e3547770d",
+  "git_tree_sha1": "bcb8da5d20d8409d4eae71737a974f40149bc8cc",
+  "source_manifest_path": "source-manifest.jsonl",
+  "source_manifest_format": "Each UTF-8 LF-terminated compact JSONL line is {\"path\":<sorted repository-relative tracked .rs path>,\"blob_sha256\":<SHA-256 of exact file bytes>}; rows sorted lexicographically by path.",
+  "source_manifest_sha256": "ebdc73271c47bbb7524496a3a39ec41731a952c96441e541d20385bba0b6d2a0",
+  "tracked_rust_file_count": 95,
+  "finding_count": 35,
+  "zero_unsafe": false,
+  "syntax_counts": {
+    "unsafe_blocks": 34,
+    "unsafe_functions": 1,
+    "unsafe_impls": 0,
+    "unsafe_traits": 0,
+    "unsafe_extern_blocks": 0,
+    "services_file_constructs": 9,
+    "speech_file_constructs": 26,
+    "unsafe_attributes": 0,
+    "unsafe_extern_functions": 0,
+    "unsafe_extern_traits": 0,
+    "unsafe_extern_impls": 0,
+    "unsafe_macro_token_forms": 0
+  },
+  "method": "Scanned all tracked `*.rs` files at the exact source commit. Reviewed word-token `unsafe` matches in context, separating code from line/block/doc comments and string/character literals. Explicitly checked `unsafe {}` blocks, unsafe function declarations, unsafe extern functions/blocks, unsafe traits/impls, Rust 2024 `#[unsafe(...)]` attributes, and locally written macro token bodies; no additional unsafe declarations, attributes, or macro token forms were found. No registry/dependency sources or generated build output were scanned.",
+  "scope": "All 95 tracked repository Rust files, across workspace crates and tests/build scripts regardless of cfg/target. The 35 findings are Rust unsafe syntax in source. Some occur in macOS-only Objective-C modules and were not compiled by the Linux PDFium release run. The source audit does not establish dependency safety or prove each FFI contract. This syntax scan found no unsafe extern blocks/functions/traits/impls, Rust 2024 unsafe attributes, or additional unsafe spellings in repository macro token bodies.",
+  "review_note": "Context review performed per source entry; initial dd7e04a and c0f973b artifacts remain preserved in sibling audit directories.",
+  "production_build": {
+    "command_argv": [
+      "cargo",
+      "run",
+      "--release",
+      "--locked",
+      "--target",
+      "x86_64-unknown-linux-gnu",
+      "--features",
+      "pdfium",
+      "--bin",
+      "tpe",
+      "--",
+      "extract",
+      "/workspace/scratch/production-release-versioned/synthetic-paper.pdf",
+      "--backend",
+      "pdfium",
+      "--db",
+      "/workspace/scratch/production-release-versioned/pdfium-ledger.sqlite",
+      "--out",
+      "/workspace/scratch/production-release-versioned/pdfium-output",
+      "--json",
+      "--progress"
+    ],
+    "profile": {
+      "codegen_units": 1,
+      "debug": false,
+      "lto": "fat",
+      "name": "release",
+      "opt_level": 3,
+      "panic": "unwind"
+    },
+    "features": [
+      "pdfium"
+    ],
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "target": "x86_64-unknown-linux-gnu",
+    "cargo_lock_sha256": "6e4a65efcb31d12c41a6b3cab6de3dd00b5fb2a980ad5ca1ac7060c17d4f2923",
+    "status": "passed",
+    "exit_code": 0,
+    "build_manifest_path": "build-manifest.json",
+    "build_manifest_sha256": "496c95f2b39975089cd440a6c76ba1f503051009d00b75dfd591a06571dc5f82",
+    "source_sha256_manifest_path": "build-source-sha256.json",
+    "source_sha256_manifest_sha256": "50998f6511e32f6d2c327a80eb246c8502625490d5936e255d1f5f53ee208e61",
+    "source_unchanged": true,
+    "version_matches_supplied_identity": true,
+    "binary_version": "tpe git-68ee9b4e08fde2f28e1042e1d6abb89e3547770d",
+    "binary_sha256": "45c9878fc2cfbe81e56b2404cd7d064e1dd455a0338bb899687e02bbc791cbdc",
+    "binary_bytes": 12700144,
+    "native_pdfium_release": "chromium/8066",
+    "runs": {
+      "auto": {
+        "status": "complete",
+        "exit_code": 0,
+        "backend": "lopdf",
+        "pages": 2,
+        "references": 3,
+        "citations": 3,
+        "warnings": []
+      },
+      "pdfium": {
+        "status": "complete",
+        "exit_code": 0,
+        "backend": "pdfium",
+        "pages": 2,
+        "references": 3,
+        "citations": 3,
+        "warnings": []
+      }
+    }
+  },
+  "follow_up": "Track local safety documentation and FFI contract gaps separately; see #122. This inventory reports syntax and visible context only."
+}
