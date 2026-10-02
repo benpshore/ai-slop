@@ -30,7 +30,8 @@
       "status": "In progress",
       "prs": [
         134,
-        135
+        135,
+        159
       ]
     },
     {
@@ -38,7 +39,10 @@
       "key": "resolver",
       "title": "Revalidate Crossref and biomedical resolution with independent labeled end-to-end evidence",
       "status": "In progress",
-      "prs": [157]
+      "prs": [
+        157,
+        161
+      ]
     },
     {
       "issue": 149,
@@ -71,7 +75,7 @@
       "issue": 152,
       "key": "ffi",
       "title": "Validate supervised PDFium evidence, FFI ownership and pinned upstream source builds",
-      "status": "In progress",
+      "status": "In review",
       "prs": [
         137,
         142
@@ -94,7 +98,8 @@
       "prs": [
         141,
         155,
-        156
+        156,
+        160
       ]
     },
     {
@@ -105,7 +110,8 @@
       "prs": [
         108,
         130,
-        131
+        131,
+        158
       ]
     }
   ]
