@@ -96,7 +96,7 @@
       "issue": 154,
       "key": "architecture",
       "title": "Simplify lopdf module boundaries and remove demonstrated redundant work",
-      "status": "In progress",
+      "status": "In review",
       "prs": [
         141,
         155,
@@ -113,7 +113,8 @@
         108,
         130,
         131,
-        158
+        158,
+        163
       ]
     }
   ]
