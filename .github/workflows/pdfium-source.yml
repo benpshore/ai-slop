@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -33,7 +37,9 @@ jobs:
           echo "PDFIUM_SOURCE_BUILD_ROOT=$RUNNER_TEMP/pdfium-source" >> "$GITHUB_ENV"
           echo "PDFIUM_DYNAMIC_LIB_PATH=$RUNNER_TEMP/pdfium-source/pdfium/out/Release/libpdfium.so" >> "$GITHUB_ENV"
       - name: Compile the reviewed upstream revision and its pinned tools
-        run: bash .github/scripts/pdfium-source-build.sh 2>&1 | tee pdfium-source-build.log
+        run: |
+          set -euo pipefail
+          bash .github/scripts/pdfium-source-build.sh 2>&1 | tee pdfium-source-build.log
       - name: Check the Rust binding against the source-built library
         run: |
           rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt

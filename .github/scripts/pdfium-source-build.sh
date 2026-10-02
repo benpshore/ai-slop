@@ -66,6 +66,11 @@ gclient sync --revision "pdfium@$revision" --no-history --shallow
 [[ $(git -C pdfium rev-parse HEAD) = "$revision" ]]
 [[ $(git -C depot_tools rev-parse HEAD) = "$depot_revision" ]]
 [[ $(git -C pdfium/third_party/depot_tools rev-parse HEAD) = "$depot_revision" ]]
+# Chromium GN/python wrappers discover this DEPS checkout even when bootstrap
+# gclient came from the separate tools directory. Initialize its pinned Python
+# and CIPD packages too, without enabling tool self-updates.
+(cd pdfium/third_party/depot_tools && ./ensure_bootstrap)
+export PATH="$build_root/pdfium/third_party/depot_tools:$PATH"
 gclient revinfo -a > "$evidence/dependency-revisions.txt"
 cp .gclient "$evidence/gclient.txt"
 cd pdfium
