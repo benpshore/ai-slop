@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "repository": "https://pdfium.googlesource.com/pdfium.git",
+  "revision": "fc46361ce75055cd549cb938fae5d6a3fe3a1a05",
+  "depot_tools_repository": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+  "depot_tools_revision_source": "vars.depot_tools_revision in this revision's DEPS",
+  "reference": "https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8066",
+  "note": "Explicit source experiment revision listed in the reviewed release notes; this is not a claim that these are the exact source bytes of the production prebuilt artifact. The full depot_tools SHA is transitively pinned by the immutable DEPS file and checked before running any tool. Production manifest.json is independent."
+}

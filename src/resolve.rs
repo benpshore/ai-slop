@@ -402,16 +402,25 @@ fn bibliographic_search(
     crossref::parse_crossref_found(&client.get_text(&url, &[])?)
 }
 
-/// Does a word of the record's venue (3+ chars, `RNA`, `Lancet`) appear in
-/// the entry? Journal names are how an article is told from its preprint or
-/// poster when title, authors and year all agree.
-fn venue_in_entry(venue: &str, raw_folded: &str) -> bool {
+/// Does a meaningful word of the record's venue (3+ chars, `RNA`, `Lancet`)
+/// appear in the entry? Function words such as "and" in a title are not
+/// journal evidence. A word already supplied by the candidate title is not
+/// independent venue evidence either. Venue names help distinguish articles
+/// from preprints or posters when title, authors and year all agree.
+fn venue_in_entry(venue: &str, raw_folded: &str, title: &str) -> bool {
     let needles = words(&folded(venue), 3);
     if needles.is_empty() {
         return false;
     }
     let hay = words(raw_folded, 1);
-    needles.iter().any(|n| hay.iter().any(|h| h == n))
+    let title_words = words(&folded(title), 1);
+    needles.iter().any(|n| {
+        !matches!(
+            n.as_str(),
+            "and" | "the" | "for" | "with" | "from" | "into" | "via"
+        ) && !title_words.iter().any(|word| word == n)
+            && hay.iter().any(|h| h == n)
+    })
 }
 
 /// Minimum winning margin between distinct query candidates. Search order is
@@ -440,7 +449,7 @@ fn select_query_record(
                 let venue_bonus = if record
                     .venue
                     .as_deref()
-                    .is_some_and(|v| venue_in_entry(v, &raw))
+                    .is_some_and(|v| venue_in_entry(v, &raw, &record.title))
                 {
                     0.5
                 } else {
@@ -981,11 +990,97 @@ mod tests {
 
     #[test]
     fn query_uses_venue_evidence_to_distinguish_versions() {
-        let preprint = query_record("10.1000/preprint");
-        let mut article = query_record("10.1000/article");
-        article.venue = Some("Immunology".to_string());
-        let selected = select_query_record(&mut query_entry(), [preprint, article]).unwrap();
-        assert_eq!(selected.doi.as_deref(), Some("10.1000/article"));
+        for venue in ["Immunology", "RNA", "The Lancet"] {
+            let preprint = query_record("10.1000/preprint");
+            let mut article = query_record("10.1000/article");
+            article.venue = Some(venue.to_string());
+            let mut entry = query_entry();
+            entry.raw = entry.raw.replace("Immunology", venue);
+            let selected = select_query_record(&mut entry, [preprint, article]).unwrap();
+            assert_eq!(selected.doi.as_deref(), Some("10.1000/article"));
+        }
+    }
+
+    #[test]
+    fn venue_function_word_does_not_outrank_a_better_title_match() {
+        // PMC11033918 reference 9, independently labeled by its JATS DOI.
+        // The live registry returned a related conference abstract whose venue
+        // shares only "and" with the citation. That is not journal evidence.
+        let article = PaperRecord {
+            doi: Some("10.1200/op.20.00266".to_string()),
+            title: "Restricted mouth opening in head and neck cancer: etiology, prevention, and treatment".to_string(),
+            authors: vec!["W. Abboud".to_string()],
+            year: Some(2020),
+            venue: Some("JCO Oncology Practice".to_string()),
+            ..PaperRecord::default()
+        };
+        let abstract_record = PaperRecord {
+            doi: Some("10.1016/j.ijom.2019.03.511".to_string()),
+            title: "Reduced mouth opening in head and neck cancer patients".to_string(),
+            authors: vec!["W. Abboud".to_string()],
+            year: Some(2019),
+            venue: Some("International Journal of Oral and Maxillofacial Surgery".to_string()),
+            ..PaperRecord::default()
+        };
+        for records in [
+            [article.clone(), abstract_record.clone()],
+            [abstract_record, article],
+        ] {
+            let mut entry = ReferenceEntry {
+                raw: "Abboud. Restricted mouth opening in head and neck cancer: etiology, prevention, and treatment. 2020.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            let selected = select_query_record(&mut entry, records).unwrap();
+            assert_eq!(selected.doi.as_deref(), Some("10.1200/op.20.00266"));
+        }
+    }
+
+    #[test]
+    fn venue_function_word_does_not_remove_query_ambiguity() {
+        let mut a = query_record("10.1000/a");
+        a.title = "Molecular mechanisms for inflammation".to_string();
+        let mut b = a.clone();
+        b.doi = Some("10.1000/b".to_string());
+        b.venue = Some("Journal for Biomedical Research".to_string());
+        for records in [[a.clone(), b.clone()], [b, a]] {
+            let mut entry = ReferenceEntry {
+                raw: "Smith J. Molecular mechanisms for inflammation. 2020.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(select_query_record(&mut entry, records).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+        }
+    }
+
+    #[test]
+    fn venue_word_in_candidate_title_does_not_remove_query_ambiguity() {
+        // A merged input from PMC9866640:33 and PMC3777682:64 contains both
+        // complete titles. "Animal" is already title evidence for Rossiter;
+        // it must not also count as independent journal evidence.
+        let animal = PaperRecord {
+            doi: Some("10.1007/s11250-008-9266-7".to_string()),
+            title: "Living with transboundary animal diseases (TADs)".to_string(),
+            authors: vec!["Paul B. Rossiter".to_string()],
+            year: Some(2008),
+            venue: Some("Tropical Animal Health and Production".to_string()),
+            ..PaperRecord::default()
+        };
+        let visual = PaperRecord {
+            doi: Some("10.1017/s1355617711000981".to_string()),
+            title: "Impaired visual scanning and memory for faces in high-functioning autism spectrum disorders: it's not just the eyes".to_string(),
+            authors: vec!["J. Snow".to_string()],
+            year: Some(2011),
+            venue: Some("Journal of the International Neuropsychological Society".to_string()),
+            ..PaperRecord::default()
+        };
+        for records in [[animal.clone(), visual.clone()], [visual, animal]] {
+            let mut entry = ReferenceEntry {
+                raw: "Rossiter. Living with transboundary animal diseases (TADs). 2009. / Snow. Impaired visual scanning and memory for faces in high-functioning autism spectrum disorders: it's not just the eyes. 2011.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(select_query_record(&mut entry, records).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+        }
     }
 
     #[test]
