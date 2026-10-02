@@ -1,0 +1,28 @@
+[project]
+name = "pdftextract-engine"
+version = "0.0.1"
+description = "Convert PDF files and folders with Poppler's layout-preserving text extraction"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = []
+
+[project.scripts]
+tpe = "pdftextract_engine:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.14"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+
+[build-system]
+requires = ["uv_build==0.12.19"]
+build-backend = "uv_build"
