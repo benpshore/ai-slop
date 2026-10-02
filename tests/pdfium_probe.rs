@@ -115,7 +115,16 @@ fn nested_forms_return_native_character_geometry_and_explicit_limits() {
     assert!(applied.cpu_seconds <= 15);
     assert!(applied.file_bytes <= 32 * 1024 * 1024);
     assert_eq!(applied.core_bytes, 0);
-    assert_eq!(result.backend.unwrap().library_sha256.len(), 64);
+    let configured = std::path::PathBuf::from(std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").unwrap());
+    let library = if configured.is_file() {
+        configured
+    } else {
+        configured.join("libpdfium.so")
+    };
+    assert_eq!(
+        result.backend.unwrap().library_sha256,
+        tpe::schema::sha256_hex(&std::fs::read(library).unwrap())
+    );
     for page in &result.pages {
         let letters: String = page
             .characters

@@ -215,7 +215,17 @@ pub fn run(input: &Path, limits: Limits) -> Result<Report> {
         return Ok(report);
     }
     report.input_sha256 = Some(sha256_hex(&fs::read(&snapshot)?));
-    let child = Command::new(std::env::current_exe()?)
+    // Bind and identify a private copy of the configured library. Replacing a
+    // deployment symlink after dlopen must not make the report hash a different
+    // file. Copy before child rlimits: RLIMIT_FSIZE bounds result writes, and a
+    // deliberately small output limit may be smaller than the native library.
+    let configured = std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH");
+    let library_snapshot = snapshot_library(temp.path(), configured.as_deref().map(Path::new))?;
+    let mut command = Command::new(std::env::current_exe()?);
+    if let Some(library) = library_snapshot {
+        command.env("PDFIUM_DYNAMIC_LIB_PATH", library);
+    }
+    let child = command
         .arg("worker")
         .arg(&snapshot)
         .arg(&output)
@@ -275,6 +285,32 @@ pub fn run(input: &Path, limits: Limits) -> Result<Report> {
     evidence.worker_exit = report.worker_exit;
     evidence.elapsed_ms = report.elapsed_ms;
     Ok(evidence)
+}
+
+fn snapshot_library(
+    directory: &Path,
+    configured: Option<&Path>,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(configured) = configured else {
+        return Ok(None);
+    };
+    if !configured.is_absolute() {
+        return Ok(None);
+    }
+    let library = library_file(configured);
+    // Let the worker report missing/unreadable libraries as unavailable.
+    let Ok(source) = File::open(&library) else {
+        return Ok(None);
+    };
+    if !source.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let snapshot = directory.join("libpdfium.so");
+    let mut target = File::create(&snapshot)?;
+    let copied = io::copy(&mut source.take(64 * 1024 * 1024 + 1), &mut target)?;
+    ensure!(copied <= 64 * 1024 * 1024, "PDFium library exceeds 64 MiB");
+    target.sync_all()?;
+    Ok(Some(snapshot))
 }
 
 #[cfg(target_os = "linux")]
@@ -540,6 +576,25 @@ fn extract(bytes: &[u8], report: &mut Report) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn library_identity_survives_replacing_the_configured_file() {
+        let source = tempfile::tempdir().unwrap();
+        let worker = tempfile::tempdir().unwrap();
+        let configured = source.path().join("libpdfium.so");
+        fs::write(&configured, b"original library bytes").unwrap();
+        let snapshot = snapshot_library(worker.path(), Some(&configured))
+            .unwrap()
+            .unwrap();
+        fs::remove_file(&configured).unwrap();
+        fs::write(&configured, b"replacement library bytes").unwrap();
+        assert_eq!(fs::read(snapshot).unwrap(), b"original library bytes");
+        assert!(
+            snapshot_library(worker.path(), Some(Path::new("relative")))
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     #[ignore = "child process used by worker_kernel_limits_leave_controller_unchanged"]
