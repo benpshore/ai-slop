@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, Params, Row, params};
+use rusqlite::{Connection, OptionalExtension, Params, Row, Transaction, params};
 use thiserror::Error;
 
 use crate::schema::{
@@ -38,6 +38,29 @@ pub enum LedgerError {
     NotFound(String),
     #[error("ledger schema version {found} but this build expects {expected}")]
     SchemaMismatch { found: u32, expected: u32 },
+}
+
+/// An uncommitted replacement. Dropping this rolls back all result rows,
+/// including deletion of a previous run with the same identity.
+/// Keep it alive while publishing external artifacts, then commit last.
+pub struct PendingResult<'a> {
+    tx: Transaction<'a>,
+    run: RunId,
+}
+
+impl PendingResult<'_> {
+    /// Record timings within the same transaction as the extraction.
+    pub fn update_timings(&self, timings: &StageTimings) -> Result<(), LedgerError> {
+        let json = serde_json::to_string(timings)?;
+        self.tx.execute(UPDATE_TIMINGS, params![json, self.run])?;
+        Ok(())
+    }
+
+    /// Make the complete replacement visible to ledger readers.
+    pub fn commit(self) -> Result<RunId, LedgerError> {
+        self.tx.commit()?;
+        Ok(self.run)
+    }
 }
 
 /// A stored run located by its identity key.
@@ -380,6 +403,15 @@ impl Ledger {
     /// (hash, backend name, backend version, config digest, schema version)
     /// is deleted first, so writing the same result twice leaves one run.
     pub fn write_result(&mut self, result: &ExtractionResult) -> Result<RunId, LedgerError> {
+        self.prepare_result(result)?.commit()
+    }
+
+    /// Stage all result rows without committing. A caller coordinating files
+    /// can publish them after this succeeds and commit the ledger last.
+    pub fn prepare_result(
+        &mut self,
+        result: &ExtractionResult,
+    ) -> Result<PendingResult<'_>, LedgerError> {
         let finished_at = now_unix();
         let started_at = finished_at - elapsed_seconds(&result.timings);
         let timings_json = serde_json::to_string(&result.timings)?;
@@ -431,8 +463,7 @@ impl Ledger {
         insert_metadata(&tx, run_id, &result.metadata)?;
         insert_references(&tx, run_id, &result.references)?;
         insert_citations(&tx, run_id, &result.citations)?;
-        tx.commit()?;
-        Ok(run_id)
+        Ok(PendingResult { tx, run: run_id })
     }
 
     /// Finds the most recently finished run whose document hash starts with
@@ -1189,6 +1220,45 @@ mod tests {
             page: 2,
             ..ReferenceEntry::default()
         }
+    }
+
+    #[test]
+    fn abandoned_result_restores_the_previous_run() {
+        let mut ledger = Ledger::open_in_memory().unwrap();
+        let result = sample_result();
+        let original = ledger.write_result(&result).unwrap();
+        let before = ledger.load_result(original).unwrap();
+        {
+            let pending = ledger.prepare_result(&result).unwrap();
+            let mut timings = result.timings;
+            timings.write_ms = 123.0;
+            pending.update_timings(&timings).unwrap();
+            // Simulate a failure while publishing an external artifact.
+        }
+        assert_eq!(ledger.load_result(original).unwrap(), before);
+        assert_eq!(ledger.stats().unwrap().runs, 1);
+    }
+
+    #[test]
+    fn prepared_result_commit_failure_rolls_back() {
+        let mut ledger = Ledger::open_in_memory().unwrap();
+        let result = sample_result();
+        let original = ledger.write_result(&result).unwrap();
+        let before = ledger.load_result(original).unwrap();
+        let pending = ledger.prepare_result(&result).unwrap();
+        // A deferred FK is checked at COMMIT, after file publication would
+        // have happened. This exercises a real SQLite commit failure.
+        pending
+            .tx
+            .execute_batch(
+                "CREATE TABLE commit_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE commit_child(id INTEGER REFERENCES commit_parent(id)
+               DEFERRABLE INITIALLY DEFERRED);
+             INSERT INTO commit_child VALUES (1);",
+            )
+            .unwrap();
+        assert!(pending.commit().is_err());
+        assert_eq!(ledger.load_result(original).unwrap(), before);
     }
 
     fn sample_result() -> ExtractionResult {
