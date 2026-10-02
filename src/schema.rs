@@ -149,14 +149,14 @@ pub struct PageText {
 }
 
 impl PageText {
-    /// Whether extraction or a later processing stage reached a work limit.
+    /// Whether extraction failed, reached a work limit, or has unresolved Unicode mapping.
     /// Ordinary diagnostic warnings do not make a page partial.
     pub fn extraction_status(&self) -> Status {
-        if self
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with("failed:") || warning.starts_with("resource_limit:"))
-        {
+        if self.warnings.iter().any(|warning| {
+            warning.starts_with("failed:")
+                || warning.starts_with("resource_limit:")
+                || warning.starts_with("unicode_mapping:")
+        }) {
             Status::Partial
         } else {
             Status::Complete
