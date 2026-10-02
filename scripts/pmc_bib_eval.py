@@ -1,7 +1,8 @@
 """Score `tpe bibliography` and `tpe extract` reference lists against PMC JATS truth.
 
     python3 scripts/pmc_bib_eval.py --manifest corpus/pmc-manifest.json --cache DIR \\
-        --bibliography out/bibliography.jsonl --extract out/extract.jsonl --out out/report
+        --bibliography out/bibliography.jsonl --extract out/extract.jsonl --out out/report \\
+        --code-sha SHA_OF_EXTRACTION_BINARY_SOURCE
 
 Writes `report.md`, `report.json` and `failures.md` into `--out`. The truth is
 the publisher's own reference list from the JATS XML pinned by the manifest;
@@ -9,6 +10,7 @@ what each metric means, and does not mean, is in docs/PMC_EVAL.md. Stdlib only.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -20,6 +22,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+
+SCORER_VERSION = "2"  # Adds provenance and exhaustive entry accounting; metrics unchanged.
 
 TITLE_ALIGN_MIN = 0.85
 TITLE_LOOSE_MIN = 0.9
@@ -357,6 +361,8 @@ def forward_records(path: Path | None) -> dict[str, dict]:
                 "references": rec.get("references") or [],
                 "elapsed_ms": ms,
                 "error": None,
+                "backend": rec.get("backend"),
+                "warnings": rec.get("warnings") or [],
                 "pages_text": [page.get("text") or "" for page in rec.get("pages") or []],
             }
         else:
@@ -366,6 +372,8 @@ def forward_records(path: Path | None) -> dict[str, dict]:
                 "references": [],
                 "elapsed_ms": rec.get("ms"),
                 "error": rec.get("error"),
+                "backend": rec.get("backend"),
+                "warnings": rec.get("warnings") or [],
             }
     return out
 
@@ -545,7 +553,34 @@ def score_list(
         "fffd_entries": sum(1 for ext in extracted if "\ufffd" in ext.raw),
         "leak_entries": sum(1 for ext in extracted if leaks(ext.raw, facts)),
         "numbered": numbered_labels([ext.label for ext in extracted]),
+        "entry_results": entry_results(pmcid, truth, extracted, pairs),
     }
+
+
+def entry_results(
+    pmcid: str, truth: list[TruthRef], extracted: list[ExtractedRef], pairs: Pairs
+) -> list[dict]:
+    """Keep every truth and extracted entry, including absent/unmatched ones."""
+    matched = dict(pairs)
+    used = {j for _, j in pairs}
+    results = []
+    for i, ref in enumerate(truth):
+        j = matched.get(i)
+        results.append(
+            {
+                "truth": asdict(ref),
+                "extracted": asdict(extracted[j]) if j is not None else None,
+                "fields": asdict(score_fields(pmcid, truth, extracted, [(i, j)], []))
+                if j is not None
+                else None,
+            }
+        )
+    results.extend(
+        {"truth": None, "extracted": asdict(ext), "fields": None}
+        for j, ext in enumerate(extracted)
+        if j not in used
+    )
+    return results
 
 
 def empty_list_score() -> dict:
@@ -605,12 +640,16 @@ def evaluate_paper(
             result = {"status": "missing", "elapsed_ms": None, "error": "no record", "found": False}
             result.update(empty_list_score())
             result["entries"] = []
+            result["entry_results"] = entry_results(pmcid, truth, [], [])
         else:
             entries = record.get("references") or []
             result = {
                 "status": record.get("status"),
                 "elapsed_ms": record.get("elapsed_ms"),
                 "error": record.get("error"),
+                "backend": record.get("backend"),
+                "warnings": record.get("warnings") or [],
+                "extraction_status": record.get("extraction_status", record.get("status")),
             }
             if name == "backward":
                 result["pages_scanned"] = record.get("pages_scanned")
@@ -626,10 +665,10 @@ def evaluate_paper(
             else:
                 result.update(empty_list_score())
                 result["extracted_count"] = len(entries)
-            result["entries"] = [
-                {"label": e.get("label"), "raw": e.get("raw"), "page": e.get("page")}
-                for e in entries
-            ]
+                result["entry_results"] = entry_results(
+                    pmcid, truth, [extracted_ref(e) for e in entries], []
+                )
+            result["entries"] = entries
         paper[name] = result
     paper["forward_context"] = heading_context((forward or {}).get("pages_text") or [])
     numbered = truth_numbered or paper["backward"].get("numbered", False)
@@ -1100,21 +1139,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bibliography-wall-s", type=float)
     parser.add_argument("--extract-wall-s", type=float)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--code-sha", required=True, help="SHA of the extraction binary's source checkout"
+    )
     args = parser.parse_args(argv)
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    backward = backward_records(args.bibliography)
+    forward = forward_records(args.extract)
     summary, papers, mismatches = evaluate(
         manifest,
         args.cache,
-        backward_records(args.bibliography),
-        forward_records(args.extract),
+        backward,
+        forward,
         args.bibliography_wall_s,
         args.extract_wall_s,
     )
     args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "manifest.json").write_bytes(args.manifest.read_bytes())
     report = render_report(summary, papers)
     (args.out / "report.md").write_text(report, encoding="utf-8")
     (args.out / "failures.md").write_text(render_failures(papers, mismatches), encoding="utf-8")
     payload = {
+        "provenance": provenance(args.manifest, args.code_sha, backward, forward),
         "summary": summary,
         "papers": papers,
         "mismatches": {k: [asdict(m) for m in v] for k, v in mismatches.items()},
@@ -1123,6 +1169,24 @@ def main(argv: list[str] | None = None) -> int:
     (args.out / "report.json").write_text(encoded, encoding="utf-8")
     sys.stdout.write(report.split("## Entry-count difference")[0])
     return 0
+
+
+def provenance(manifest: Path, code_sha: str, backward: dict, forward: dict) -> dict:
+    """Fingerprint the actual manifest/scorer, preserving per-record backend identity."""
+    identities = {}
+    for name, records in (("backward", backward), ("forward", forward)):
+        unique = {
+            json.dumps(r["backend"], sort_keys=True) for r in records.values() if r.get("backend")
+        }
+        identities[name] = [json.loads(value) for value in sorted(unique)]
+    return {
+        "code_sha": code_sha,
+        "corpus_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "scorer_version": SCORER_VERSION,
+        "scorer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "backend_identities": identities,
+        "resolution": "not_measured",
+    }
 
 
 if __name__ == "__main__":

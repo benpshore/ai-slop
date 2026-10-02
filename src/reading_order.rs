@@ -822,7 +822,7 @@ fn vertical_line(spans: &[Span], bbox: BBox, members: &[(usize, BBox)]) -> Line 
 /// Group vertical spans into lines: in content-stream order, a span joins
 /// the latest group it overlaps horizontally by `STACK_OVERLAP` of the
 /// narrower box and lies at most `STACK_GAP` ems above or below.
-fn vertical_lines(spans: &[Span], vertical: &[(usize, BBox)]) -> Vec<Line> {
+fn vertical_lines(spans: &[Span], vertical: &[(usize, BBox)]) -> (Vec<Line>, bool) {
     vertical_lines_with_budget(spans, vertical, MAX_VERTICAL_GROUP_COMPARISONS)
 }
 
@@ -830,7 +830,8 @@ fn vertical_lines_with_budget(
     spans: &[Span],
     vertical: &[(usize, BBox)],
     mut comparisons_left: usize,
-) -> Vec<Line> {
+) -> (Vec<Line>, bool) {
+    let mut limited = false;
     let mut order: Vec<(usize, BBox)> = vertical.to_vec();
     order.sort_by_key(|(i, _)| (spans[*i].seq, *i));
     let mut groups: Vec<(BBox, Vec<(usize, BBox)>)> = Vec::new();
@@ -838,6 +839,7 @@ fn vertical_lines_with_budget(
         let mut found = None;
         for (k, (g, _)) in groups.iter().enumerate().rev() {
             if comparisons_left == 0 {
+                limited = true;
                 break;
             }
             comparisons_left -= 1;
@@ -857,10 +859,11 @@ fn vertical_lines_with_budget(
             groups.push((b, vec![(i, b)]));
         }
     }
-    groups
+    let lines = groups
         .into_iter()
         .map(|(bbox, members)| vertical_line(spans, bbox, &members))
-        .collect()
+        .collect();
+    (lines, limited)
 }
 
 /// A line's glyph spans sorted left-to-right (then by `seq`).
@@ -1083,6 +1086,7 @@ struct Grouped {
     margin: Vec<Line>,
     unattached: usize,
     accent_skipped: bool,
+    vertical_limited: bool,
 }
 
 /// Group spans into lines by shared baseline and horizontal proximity, with
@@ -1125,7 +1129,8 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
     let (vertical, mut candidates) = split_vertical(spans, all, fallback, width);
     let mut inner: Vec<Line> = Vec::new();
     let mut margin: Vec<Line> = Vec::new();
-    for line in vertical_lines(spans, &vertical) {
+    let (vertical, vertical_limited) = vertical_lines(spans, &vertical);
+    for line in vertical {
         if line.bbox.is_some_and(|b| in_margin(b, width)) {
             margin.push(line);
         } else {
@@ -1288,6 +1293,7 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
         margin,
         unattached,
         accent_skipped: !compose_accents,
+        vertical_limited,
     }
 }
 
@@ -2041,6 +2047,7 @@ pub fn order_page(page: &mut PageText) {
         margin,
         unattached,
         accent_skipped,
+        vertical_limited,
     } = group_spans(
         turned.as_deref().unwrap_or(page.spans.as_slice()),
         Some(width),
@@ -2050,14 +2057,25 @@ pub fn order_page(page: &mut PageText) {
         let msg = format!("unattached accent glyph at page {number}: {unattached} span(s)");
         push_warning(page, msg);
     }
+    if vertical_limited {
+        push_warning(
+            page,
+            "resource_limit: vertical grouping budget exhausted; remaining spans kept separate"
+                .to_string(),
+        );
+    }
     if accent_skipped {
         let number = page.page;
-        let msg = format!("accent composition skipped at page {number}: work limit exceeded");
+        let msg = format!(
+            "resource_limit: accent composition skipped at page {number}: work limit exceeded"
+        );
         push_warning(page, msg);
     }
     if grouped.len() > MAX_LINES {
         let n = grouped.len();
-        let msg = format!("too many lines: {n} > {MAX_LINES}; the rest is appended unordered");
+        let msg = format!(
+            "resource_limit: too many lines: {n} > {MAX_LINES}; the rest is appended unordered"
+        );
         push_warning(page, msg);
     }
     if !margin.is_empty() {
@@ -2741,7 +2759,7 @@ mod tests {
         assert_eq!(page.text.matches('\u{302}').count(), 0);
         assert_eq!(
             page.warnings,
-            ["accent composition skipped at page 1: work limit exceeded"]
+            ["resource_limit: accent composition skipped at page 1: work limit exceeded"]
         );
     }
 
@@ -2761,7 +2779,7 @@ mod tests {
         assert!(page.lines.iter().all(|line| line.text == "^"));
         assert_eq!(
             page.warnings,
-            ["accent composition skipped at page 1: work limit exceeded"]
+            ["resource_limit: accent composition skipped at page 1: work limit exceeded"]
         );
     }
 
@@ -3141,6 +3159,26 @@ mod tests {
     }
 
     #[test]
+    fn vertical_budget_warning_reaches_the_page_once() {
+        let mut page = PageText::new(1, 612.0, 130_000.0, 0);
+        page.spans = (0..600)
+            .map(|i| {
+                let y = i as f32 * 200.0;
+                span("vertical", 100.0, y, 110.0, y + 100.0, i)
+            })
+            .collect();
+        order_page(&mut page);
+        order_page(&mut page);
+        let warnings: Vec<_> = page
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("resource_limit: vertical grouping"))
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(page.lines.len(), 600, "all spans survive exhaustion");
+    }
+
+    #[test]
     fn vertical_grouping_stops_searching_when_its_budget_is_exhausted() {
         let spans = vec![
             span("first", 10.0, 0.0, 20.0, 50.0, 0),
@@ -3154,11 +3192,13 @@ mod tests {
             .map(|(i, span)| (i, span.bbox.unwrap()))
             .collect();
 
-        let unlimited = vertical_lines_with_budget(&spans, &vertical, usize::MAX);
+        let (unlimited, limited) = vertical_lines_with_budget(&spans, &vertical, usize::MAX);
+        assert!(!limited);
         assert_eq!(unlimited.len(), 3);
         assert_eq!(unlimited[0].text, "first near first");
 
-        let bounded = vertical_lines_with_budget(&spans, &vertical, 2);
+        let (bounded, limited) = vertical_lines_with_budget(&spans, &vertical, 2);
+        assert!(limited);
         assert_eq!(bounded.len(), 4);
         assert_eq!(
             bounded

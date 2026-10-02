@@ -24,7 +24,7 @@ use tpe::backend;
 use tpe::bibliography::{self, Record};
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, Progress};
-use tpe::schema::{Job as EngineJob, Status};
+use tpe::schema::{Job as EngineJob, PageText, Status};
 
 /// The extraction backend every job uses.
 const BACKEND: &str = "lopdf";
@@ -479,16 +479,32 @@ fn run_text(
         count(result.document.pages as usize, "page"),
         count(result.references.len(), "reference")
     );
-    let warnings = if result.status == Status::Complete {
-        Vec::new()
-    } else {
-        result.warnings
-    };
+    let warnings = output_warnings(result.status, result.warnings, &result.pages);
     Ok(Outcome {
         outputs: paths,
         summary,
         warnings,
     })
+}
+
+/// Keep resource degradation visible even when every page completed.
+fn output_warnings(status: Status, warnings: Vec<String>, pages: &[PageText]) -> Vec<String> {
+    let mut warnings = if status == Status::Complete {
+        Vec::new()
+    } else {
+        warnings
+    };
+    for page in pages {
+        for warning in &page.warnings {
+            if warning.starts_with("resource_limit:") {
+                let message = format!("page {}: {warning}", page.page);
+                if !warnings.contains(&message) {
+                    warnings.push(message);
+                }
+            }
+        }
+    }
+    warnings
 }
 
 /// [`Action::Bibliography`]: the backward scan and, when a list is found,
@@ -519,7 +535,11 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
     if !record.found() {
         return Ok(Outcome {
             outputs: Vec::new(),
-            summary: "No reference list found".to_string(),
+            summary: if record.extraction_status == Status::Partial {
+                "partial: No reference list found".to_string()
+            } else {
+                "No reference list found".to_string()
+            },
             warnings: record.warnings,
         });
     }
@@ -535,11 +555,14 @@ fn run_bibliography(source: &Path, observe: &mut dyn FnMut(Progress)) -> Result<
     .map_err(|e| format!("staging bibliography: {e}"))?;
     let outputs = staged.publish_then(|| Ok(()))?;
     let scanned = record.pages_scanned.unwrap_or(0);
-    let summary = format!(
+    let mut summary = format!(
         "{} from the last {}",
         count(record.references.len(), "reference"),
         count(scanned as usize, "page")
     );
+    if record.extraction_status == Status::Partial {
+        summary.insert_str(0, "partial: ");
+    }
     Ok(Outcome {
         outputs,
         summary,
@@ -588,6 +611,18 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn completed_jobs_still_surface_resource_warnings() {
+        let mut page = tpe::schema::PageText::new(3, 612.0, 792.0, 0);
+        page.warnings
+            .push("resource_limit: example exhausted".to_string());
+        page.warnings.push("furniture removed: 1".to_string());
+        assert_eq!(
+            super::output_warnings(tpe::schema::Status::Complete, vec![], &[page]),
+            ["page 3: resource_limit: example exhausted"]
+        );
     }
 
     #[test]

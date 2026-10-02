@@ -14,6 +14,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      evaluator: ${{ steps.paths.outputs.evaluator }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Determine whether evaluator checks are required
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT" = workflow_dispatch ] || [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ]; then
+            required=true
+          else
+            if [ "$EVENT" = pull_request ]; then
+              git diff --name-only "$BASE...$HEAD" > "$RUNNER_TEMP/changed-paths"
+            else
+              git diff --name-only "$BASE" "$HEAD" > "$RUNNER_TEMP/changed-paths"
+            fi
+            required=$(sh .github/scripts/evaluator-paths.sh < "$RUNNER_TEMP/changed-paths")
+          fi
+          echo "evaluator=$required" >> "$GITHUB_OUTPUT"
+
   repo:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -25,23 +54,13 @@ jobs:
         run: |
           bad=$(git ls-files | grep -Ei '(^|/)(\.DS_Store|\.env(\..+)?|[^/]+\.(db|sqlite3?|duckdb|pem|key|p12|pfx))$' | grep -v '\.env\.example$' || true)
           if [ -n "$bad" ]; then echo "::error::remove from git: $bad"; exit 1; fi
+      - name: Verify required CI gating
+        run: sh .github/tests/ci-gate.sh
 
-  python:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          enable-cache: true
-      - run: uv sync --locked
-      - run: uv run ruff format --check
-      - run: uv run ruff check --output-format=github
-      - run: uv run pytest
-      - run: uv audit --locked --preview-features audit-command
-      - run: uv build
+  evaluation-tools:
+    needs: changes
+    if: needs.changes.outputs.evaluator == 'true'
+    uses: ./.github/workflows/evaluation-tools.yml
 
   rust:
     # x86-64 Linux plus native ARM64 Linux (aarch64-unknown-linux-gnu).
@@ -73,27 +92,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  swift:
+  # Repository policy and release automation require this aggregate to pass.
+  ci:
+    if: always()
+    needs: [changes, repo, rust, evaluation-tools]
     runs-on: ubuntu-latest
-    # ubuntu-latest has no Swift toolchain (none at all from Ubuntu 26.04), so the
-    # job runs inside the official image, pinned by digest (swift:6.4.0-noble).
-    container: swift:6.4.0-noble@sha256:64bab762bc73a3fda6d9ebc559258bd6d7660c10a705bb25ecacad2f99d066f9
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: swift build
-      - run: swift test
-
-  # The CMake targets need Objective-C++ and the Foundation framework, so they
-  # only build on macOS; run `cmake -S . -B build && cmake --build build &&
-  # ctest --test-dir build` locally (AGENTS.md). No macOS runners in Actions.
-
-  # The single required check in the branch ruleset. It passes only if every job above passed.
-  ci:
-    if: always()
-    needs: [repo, python, rust, swift]
-    runs-on: ubuntu-latest
-    steps:
-      - run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false
+      - env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REPO_RESULT: ${{ needs.repo.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          EVALUATOR_REQUIRED: ${{ needs.changes.outputs.evaluator }}
+          EVALUATOR_RESULT: ${{ needs.evaluation-tools.result }}
+        run: sh .github/scripts/check-ci.sh "$CHANGES_RESULT" "$REPO_RESULT" "$RUST_RESULT" "$EVALUATOR_REQUIRED" "$EVALUATOR_RESULT"

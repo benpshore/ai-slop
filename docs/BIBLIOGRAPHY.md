@@ -23,6 +23,9 @@ empty reference array and `not_found`, rather than a guessed list. An unreadable
 page produces `failed`, rather than a partial bibliography. Either case gives
 the batch a nonzero exit code while still emitting a JSON record for each PDF.
 The `warnings` array calls out any U+FFFD replacement character in an entry.
+`extraction_status` separately records `complete`, `partial`, or `failed` for
+the inspected pages. Resource cutoffs produce `partial` even when `status`
+is `found`; a `not_found` scan also retains its cutoff warnings.
 Failed records retain the same fields: any acquired SHA-256 and backend
 identity remain available, unknown scan fields are null, references are empty,
 and the error appears in `error` and `warnings`. Acquisition failures have a

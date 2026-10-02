@@ -1275,7 +1275,69 @@ fn section_lines_with_furniture(
     if !row.is_empty() {
         lines.push(finish_row(row));
     }
+    reattach_numbered_labels(lines)
+}
+
+/// A label-only column can precede all of its entry text in reading order.
+/// Reattach punctuated labels to the nearest text on their printed row before
+/// detecting list style or end headings. Bare integers remain untouched.
+fn reattach_numbered_labels(mut lines: Vec<SectionLine>) -> Vec<SectionLine> {
+    let standalone = |text: &str| {
+        text.strip_suffix(['.', ')']).is_some_and(|number| {
+            !number.is_empty() && number.len() <= 4 && number.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    let mut rows: BTreeMap<u32, Vec<(f32, usize)>> = BTreeMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !standalone(&line.text)
+            && let Some(y) = line.y0.filter(|y| y.is_finite())
+        {
+            rows.entry(line.page).or_default().push((y, i));
+        }
+    }
+    for page_rows in rows.values_mut() {
+        page_rows.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    let mut used = vec![false; lines.len()];
+    let mut removed = vec![false; lines.len()];
+    for i in 0..lines.len() {
+        let label = &lines[i];
+        if !standalone(&label.text) {
+            continue;
+        }
+        let (Some(x), Some(y), Some(page_rows)) = (label.x0, label.y0, rows.get(&label.page))
+        else {
+            continue;
+        };
+        let tolerance = 0.4 * label.size.unwrap_or(10.0);
+        if !x.is_finite() || !y.is_finite() || !tolerance.is_finite() || tolerance <= 0.0 {
+            continue;
+        }
+        let start = page_rows.partition_point(|&(baseline, _)| baseline < y - tolerance);
+        let end = page_rows.partition_point(|&(baseline, _)| baseline <= y + tolerance);
+        // Bound work even when hostile geometry puts every line on one row.
+        if end - start > MAX_ROW_FRAGMENTS {
+            continue;
+        }
+        let target = page_rows[start..end]
+            .iter()
+            .filter_map(|&(_, k)| {
+                let gap = lines[k].x0? - x;
+                (!used[k] && gap > 0.0 && gap <= LABEL_TEXT_GAP).then_some((gap, k))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, k)) = target {
+            lines[k].text = format!("{} {}", lines[i].text, lines[k].text);
+            lines[k].x0 = Some(x);
+            used[k] = true;
+            removed[i] = true;
+        }
+    }
     lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, line)| (!removed[i]).then_some(line))
+        .collect()
 }
 
 /// Printed number and label of a numbered entry start, per style. A bare
@@ -8438,6 +8500,95 @@ mod tests {
         );
         assert_eq!(refs[1].doi.as_deref(), Some("10.1371/journal.pone.0151670"));
         assert_eq!(refs[1].label.as_deref(), Some("Hawkins2016"));
+    }
+
+    #[test]
+    fn numbered_label_columns_continue_across_pages() {
+        for suffix in ['.', ')'] {
+            let first = page_of(
+                1,
+                vec![
+                    line_at("References", 0, 40.0, 700.0),
+                    line_at(
+                        &format!("1{suffix} Adams, A. First study. Nature 2020."),
+                        0,
+                        40.0,
+                        680.0,
+                    ),
+                    line_at(
+                        &format!("2{suffix} Baker, B. Second study. Science 2021."),
+                        0,
+                        40.0,
+                        650.0,
+                    ),
+                    line_at(
+                        &format!("3{suffix} Clark, C. Third study. Cell 2022."),
+                        0,
+                        40.0,
+                        620.0,
+                    ),
+                ],
+            );
+            // Reading order puts the whole narrow label column first, then
+            // the entry-text column. Continuation lines have no label.
+            let second = page_of(
+                2,
+                vec![
+                    line_at(&format!("4{suffix}"), 0, 40.0, 700.0),
+                    line_at(&format!("5{suffix}"), 0, 40.0, 670.0),
+                    line_at(&format!("6{suffix}"), 0, 40.0, 640.0),
+                    line_at("Davis, D. Fourth study.", 1, 60.0, 700.0),
+                    line_at("Nature 2023, 12, 10–20.", 1, 60.0, 690.0),
+                    line_at("Evans, E. Fifth study. Cell 2024.", 1, 60.0, 670.0),
+                    line_at("Ford, F. Sixth study. Science 2025.", 1, 60.0, 640.0),
+                    line_at("Appendix A", 1, 60.0, 600.0),
+                    line_at("Extra material.", 1, 60.0, 580.0),
+                ],
+            );
+            let pages = [first, second];
+            let section = find_reference_section(&pages).expect("numbered list");
+            let refs = segment_entries(&pages, &section);
+            assert_eq!(refs.len(), 6);
+            for (i, entry) in refs.iter().enumerate() {
+                assert_eq!(entry.label, Some(format!("{}{suffix}", i + 1)));
+                assert!(!entry.raw.contains("Appendix"));
+            }
+            assert!(refs[3].raw.contains("Fourth study. Nature 2023"));
+            assert_eq!(refs[3].page, 2);
+            assert!((refs[3].anchor.unwrap().x0 - 40.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn detached_numbered_labels_need_a_nearby_row_on_the_same_page() {
+        let line = |text: &str, page: u32, x: f32, y: f32| SectionLine {
+            text: text.to_string(),
+            page,
+            line: 0,
+            column: 0,
+            x0: Some(x),
+            y0: Some(y),
+            size: Some(10.0),
+        };
+        let original = vec![
+            line("1.", 1, 40.0, 700.0),
+            line("Too far right", 1, 100.0, 700.0),
+            line("Wrong baseline", 1, 60.0, 680.0),
+            line("Different page", 2, 60.0, 700.0),
+            line("2020", 2, 40.0, 600.0),
+            line("Bare year stays separate", 2, 60.0, 600.0),
+        ];
+        let result = reattach_numbered_labels(original.clone());
+        assert_eq!(
+            result.iter().map(|l| &l.text).collect::<Vec<_>>(),
+            original.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+
+        let mut crowded = vec![line("1.", 1, 40.0, 700.0)];
+        crowded.extend((0..=MAX_ROW_FRAGMENTS).map(|_| line("crowded", 1, 60.0, 700.0)));
+        let result = reattach_numbered_labels(crowded);
+        assert_eq!(result.len(), MAX_ROW_FRAGMENTS + 2);
+        assert_eq!(result[0].text, "1.");
     }
 
     #[test]

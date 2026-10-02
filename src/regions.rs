@@ -527,7 +527,11 @@ fn tag_page(page: &mut PageText, carry: Option<&[f32]>) -> RegionReport {
     if page.width <= 0.0 || page.lines.is_empty() {
         return report;
     }
-    if page.warnings.iter().any(|w| w.starts_with(WARNING_PREFIX)) {
+    if page
+        .warnings
+        .iter()
+        .any(|w| w.starts_with(WARNING_PREFIX) || w.starts_with("resource_limit: regions:"))
+    {
         return report;
     }
     if is_sideways(page) {
@@ -564,7 +568,7 @@ fn tag_page(page: &mut PageText, carry: Option<&[f32]>) -> RegionReport {
         // must not determine the roles on a deliberately pathological page.
         captions.clear();
         page.warnings.push(format!(
-            "{WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
+            "resource_limit: {WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
         ));
     }
     for &(k, kind) in &captions {
@@ -3207,7 +3211,7 @@ mod tests {
         assert_eq!(tag_regions(&mut pages), RegionReport::default());
         assert!(pages[0].lines.iter().all(|line| line.role == ROLE_BODY));
         assert!(pages[0].warnings.contains(&format!(
-            "{WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
+            "resource_limit: {WARNING_PREFIX}more than {CAPTION_CANDIDATE_MAX} caption candidates; caption-based tagging skipped"
         )));
 
         let first = pages.clone();
