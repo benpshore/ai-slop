@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: rustup show active-toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -28,6 +29,6 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-ubuntu-latest-${{ hashFiles('Cargo.lock') }}
+          key: cargo-ubuntu-latest-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-ubuntu-latest-
-      - run: cargo test --lib resolve::tests::live_ -- --ignored --nocapture --test-threads=1
+      - run: cargo test --locked --lib resolve::tests::live_ -- --ignored --nocapture --test-threads=1

@@ -52,6 +52,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: rustup show active-toolchain
       - run: rustc --version --verbose && uname -m && python3 --version
       - name: Choose the manifest (sample=true or a missing pinned manifest draws a fresh sample)
         run: |
@@ -74,9 +75,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock') }}
+          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-release-ubuntu-24.04-arm-
-      - run: cargo build --release
+      - run: cargo build --locked --release
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: steps.cargo.outputs.cache-hit != 'true'
         with:
@@ -85,7 +86,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock') }}
+          key: cargo-release-ubuntu-24.04-arm-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: corpus
         with:
