@@ -14,7 +14,7 @@ VERSION=${VERSION:-0.0.0}
 BUILD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 
-(cd "$ROOT" && PDFTEXTRACT_VERSION="$VERSION" cargo build --release -p tpe-app)
+(cd "$ROOT" && PDFTEXTRACT_VERSION="$VERSION" cargo build --release --locked -p tpe-app)
 
 APP="$TARGET/release/PDFTextract.app"
 rm -rf "$APP"

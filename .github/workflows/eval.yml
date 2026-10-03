@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup component add clippy rustfmt
+      - run: rustup show active-toolchain
       - run: rustc --version --verbose && uname -m
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -45,14 +45,14 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-release-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-release-${{ matrix.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-release-${{ matrix.os }}-
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .corpus-cache
           key: corpus-${{ hashFiles('corpus/manifest.json') }}
           restore-keys: corpus-
-      - run: cargo build --release
+      - run: cargo build --locked --release
       - name: Fetch the corpus (cached items are reused)
         run: ./target/release/tpe corpus fetch --manifest corpus/manifest.json --cache .corpus-cache --split "$SPLIT"
       - name: Evaluate

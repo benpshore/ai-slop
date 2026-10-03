@@ -16,11 +16,13 @@ on:
   pull_request:
     paths:
       - crates/tpe-app/**
+      - rust-toolchain.toml
       - .github/workflows/app.yml
   push:
     branches: [main]
     paths:
       - crates/tpe-app/**
+      - rust-toolchain.toml
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/app.yml
@@ -41,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - run: rustup component add clippy rustfmt
+      - run: rustup show active-toolchain
       - run: rustc --version --verbose && uname -m
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -50,11 +52,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-app-macos-15-${{ hashFiles('Cargo.lock') }}
+          key: cargo-app-macos-15-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-app-macos-15-
       - run: cargo fmt --check -p tpe-app
-      - run: cargo clippy -p tpe-app --all-targets -- -D warnings
-      - run: cargo test -p tpe-app
+      - run: cargo clippy --locked -p tpe-app --all-targets -- -D warnings
+      - run: cargo test --locked -p tpe-app
       - run: sh crates/tpe-app/bundle.sh
       - name: Bundle smoke test
         run: |

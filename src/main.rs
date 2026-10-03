@@ -37,7 +37,7 @@ const USER_AGENT: &str =
     "text-processing-engine eval (github.com/benpshore/text-processing-engine)";
 
 #[derive(Parser)]
-#[command(name = "tpe", version, about)]
+#[command(name = "tpe", version = env!("TPE_BUILD_VERSION"), about)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
