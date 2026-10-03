@@ -27,6 +27,7 @@ use tpe::pipeline::{self, PipelineError, Progress};
 use tpe::schema::{ExtractionResult, Job, Metadata};
 
 mod cli_worker;
+mod worker_allocator;
 mod worker_limits;
 
 /// Service-time target per 20-page chunk, in milliseconds.

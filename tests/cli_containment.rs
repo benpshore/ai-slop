@@ -286,6 +286,15 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
         .arg(fixture("existing-ocr.pdf"))
         .output()
         .unwrap();
+    eprintln!(
+        "pressure-evidence exit={} expected_decoded_bytes={} input_bytes={} input_sha256={} stdout={} stderr={}",
+        output.status,
+        2 * 1024 * 1024 * 1024_u64,
+        bytes.len(),
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     assert!(!output.status.success());
     let rows: Vec<Value> = String::from_utf8(output.stdout)
         .unwrap()
@@ -299,7 +308,7 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
         rows[1]["error"]
             .as_str()
             .unwrap()
-            .contains("memory allocation"),
+            .contains("memory allocation failed in native worker"),
         "{}",
         rows[1]
     );

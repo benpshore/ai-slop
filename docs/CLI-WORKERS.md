@@ -28,6 +28,13 @@ records include actual startup, requested and effective limits for extraction an
 publication under `worker_limits`. `--progress` replays buffered opened/page
 events after extraction; it is not live per-page delivery.
 
+After those limits are installed, Rust allocation failure terminates the worker,
+including failures from fallible reservation APIs. This prevents a decoder from
+swallowing an allocation error and returning a truncated prefix as success. The
+controller's allocator is unchanged. This policy does not intercept native
+`malloc`/`mmap` calls, impose a decoded-byte cap, or change ordinary corrupt-stream
+recovery; it complements the OS limits and deadline.
+
 This is an address-space limit, **not an RSS limit or a security sandbox**. Already
 reserved startup mappings can become resident. There may be up to `jobs` extracting
 processes plus one serialized publisher or output relay, each with its own allowance.
@@ -73,8 +80,10 @@ must reject a truncated final JSON line and consult the ledger.
 
 ```sh
 cargo test --locked --bin tpe worker_limits:: -- --test-threads=1
+cargo test --locked --bin tpe worker_allocator:: -- --test-threads=1
 cargo test --locked --test cli_containment --test worker_startup --test end_to_end -- --test-threads=2
 cargo test --release --locked --bin tpe worker_limits:: -- --test-threads=1
+cargo test --release --locked --bin tpe worker_allocator:: -- --test-threads=1
 cargo test --release --locked --test cli_containment --test worker_startup --test end_to_end -- --test-threads=2
 ```
 

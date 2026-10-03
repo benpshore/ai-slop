@@ -684,6 +684,7 @@ pub(super) fn run_worker(
         .recv()
         .context("initializing controller lease")?;
     let limits = worker_limits::install(growth_bytes, parent)?;
+    super::worker_allocator::enforce();
     let encoded = read_limited(request_path, REQUEST_BYTES, true)?;
     match phase {
         "extract" => extract_worker(&serde_json::from_slice(&encoded)?, limits)?,
