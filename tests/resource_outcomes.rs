@@ -136,15 +136,17 @@ fn decoder_and_late_processing_cutoffs_reach_json_chunks_and_ledger() {
 }
 
 #[test]
-fn no_list_does_not_erase_resource_cutoffs() {
-    for case in [Case::DecodeLimit, Case::CaptionLimit] {
+fn no_list_does_not_erase_partial_extraction_evidence() {
+    for case in [Case::DecodeLimit, Case::CaptionLimit, Case::UnicodeMapping] {
         let scan = scan_backward(&case, b"fake", None).unwrap();
         assert!(!scan.found);
-        assert!(
-            scan.warnings
-                .iter()
-                .any(|w| w.starts_with("resource_limit:"))
-        );
+        assert!(scan.warnings.iter().any(|w| w.starts_with(
+            if matches!(case, Case::UnicodeMapping) {
+                "unicode_mapping:"
+            } else {
+                "resource_limit:"
+            }
+        )));
         let record = Record::from_scan("input.pdf", "hash".into(), case.identity(), scan, 0.0);
         let value = serde_json::to_value(&record).unwrap();
         assert_eq!(value["status"], "not_found");

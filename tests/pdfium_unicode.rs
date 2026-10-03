@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use tpe::backend::{Extractor, pdfium_backend::PdfiumBackend};
+use tpe::bibliography::{Record, scan_backward, scan_backward_auto_observed};
 use tpe::pipeline::run_job;
 use tpe::router;
 use tpe::schema::{ExtractionResult, Job, Status};
@@ -130,6 +131,43 @@ fn auto_does_not_accept_unresolved_pdfium_mapping_as_complete() {
             .any(|w| w.starts_with("unresolved: pdfium Unicode mapping; native text retained"))
     );
     assert!(!result.pages[0].text.is_empty());
+}
+
+#[test]
+fn bibliography_preserves_mapping_evidence_without_attempting_ocr() {
+    if !native_available() {
+        return;
+    }
+    let bytes = std::fs::read(fixture("partial-cmap.pdf")).unwrap();
+    let backend = PdfiumBackend::default();
+    let direct = scan_backward(&backend, &bytes, None).unwrap();
+    let mut passes = 0;
+    let routed = scan_backward_auto_observed(&bytes, None, &mut |event| {
+        if matches!(event, tpe::pipeline::Progress::Opened { .. }) {
+            passes += 1;
+        }
+    })
+    .unwrap();
+    assert_eq!(passes, 2, "only lopdf and PDFium may run");
+    assert_eq!(routed.backend.name, "pdfium");
+    assert!(
+        routed
+            .scan
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("unresolved: pdfium Unicode mapping; native text retained"))
+    );
+    assert!(!routed.scan.warnings.iter().any(|w| {
+        w.starts_with("routed: docling") || w.starts_with("route not taken: docling")
+    }));
+    for (identity, scan) in [(backend.identity(), direct), (routed.backend, routed.scan)] {
+        assert!(scan.warnings.iter().any(|w| w.contains("map_errors=11")));
+        let record = Record::from_scan("partial-cmap.pdf", "hash".into(), identity, scan, 0.0);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["status"], "not_found");
+        assert_eq!(json["extraction_status"], "partial");
+        assert!(json["warnings"].to_string().contains("map_errors=11"));
+    }
 }
 
 #[test]
