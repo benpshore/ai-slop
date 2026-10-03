@@ -85,7 +85,7 @@ impl Record {
             extraction_status: if scan
                 .warnings
                 .iter()
-                .any(|w| w.starts_with("resource_limit:"))
+                .any(|w| w.starts_with("resource_limit:") || w.starts_with("unicode_mapping:"))
             {
                 Status::Partial
             } else {
@@ -373,9 +373,18 @@ fn scan_usable(scan: &BibliographyScan) -> bool {
 
 /// Replace `best` only when a found candidate improves the available evidence.
 /// Keep the existing result on ties and preserve route history on replacement.
+/// Unresolved `PDFium` mappings instead retain the native candidate regardless
+/// of list detection or rank, so an earlier plausible list cannot hide them.
 fn keep_better(best: &mut RoutedScan, mut candidate: RoutedScan, note: String) {
-    let better = candidate.scan.found
-        && (!best.scan.found || scan_quality(&candidate.scan) > scan_quality(&best.scan));
+    let unresolved_pdfium = candidate.backend.name == "pdfium"
+        && candidate
+            .scan
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("unicode_mapping:"));
+    let better = unresolved_pdfium
+        || (candidate.scan.found
+            && (!best.scan.found || scan_quality(&candidate.scan) > scan_quality(&best.scan)));
     if better || !best.scan.found {
         // Page/content warnings describe the selected extraction; route history
         // describes all attempted backends and survives a successful replacement.
@@ -400,6 +409,8 @@ fn keep_better(best: &mut RoutedScan, mut candidate: RoutedScan, note: String) {
 /// and decoding quality and plausibility take priority over entry count.
 /// A route whose backend is missing or fails
 /// is noted in the warnings and the best scan so far is returned.
+/// Unresolved `PDFium` mappings retain the native scan as Partial; automatic
+/// Docling recovery has not been verified and must not erase that evidence.
 pub fn scan_backward_auto_observed(
     bytes: &[u8],
     password: Option<&str>,
@@ -447,6 +458,18 @@ pub fn scan_backward_auto_observed(
                         },
                         note,
                     );
+                    if best
+                        .scan
+                        .warnings
+                        .iter()
+                        .any(|w| w.starts_with("unicode_mapping:"))
+                    {
+                        best.scan.warnings.push(
+                            "unresolved: pdfium Unicode mapping; native text retained because automatic OCR recovery is unverified"
+                                .to_string(),
+                        );
+                        return Ok(best);
+                    }
                     if scan_usable(&best.scan) {
                         return Ok(best);
                     }
@@ -592,6 +615,32 @@ mod tests {
         );
         assert_eq!(best.backend.name, "lopdf");
         assert!(!super::scan_usable(&best.scan));
+    }
+
+    #[test]
+    fn unresolved_pdfium_mapping_survives_list_ranking_and_json() {
+        for count in [0, 2, 3] {
+            let mut best = routed("lopdf", 3, 1, true);
+            best.scan.warnings = vec!["routed: earlier attempt".into(), "old diagnostic".into()];
+            let mut partial = routed("pdfium", count, 1, true);
+            let warning = "unicode_mapping: pdfium map_errors=1, zero_unicode=0";
+            partial.scan.warnings.push(warning.into());
+            super::keep_better(&mut best, partial, "routed: pdfium".into());
+            assert_eq!(best.backend.name, "pdfium");
+            assert_eq!(best.scan.references.len(), count);
+            assert_eq!(
+                best.scan.warnings,
+                [warning, "routed: earlier attempt", "routed: pdfium"]
+            );
+            assert!(!super::scan_usable(&best.scan));
+            let record = Record::from_scan("p.pdf", "hash".into(), best.backend, best.scan, 0.0);
+            let value = serde_json::to_value(&record).unwrap();
+            assert_eq!(value["extraction_status"], "partial");
+            assert_eq!(
+                value["status"],
+                if count == 0 { "not_found" } else { "found" }
+            );
+        }
     }
 
     #[test]

@@ -143,11 +143,11 @@ pub fn looks_scanned(page: &PageText) -> bool {
 /// Unicode? True on the backend's own warning, or on a share of U+FFFD.
 #[must_use]
 pub fn has_unmapped_text(page: &PageText) -> bool {
-    if page
-        .warnings
-        .iter()
-        .any(|w| w.contains("undecodable") || w.contains("decoded as Latin-1"))
-    {
+    if page.warnings.iter().any(|w| {
+        w.starts_with("unicode_mapping:")
+            || w.contains("undecodable")
+            || w.contains("decoded as Latin-1")
+    }) {
         return true;
     }
     let text: String = if page.text.is_empty() {

@@ -81,6 +81,9 @@ use pdfium_render::prelude::{
 };
 use unicode_normalization::UnicodeNormalization;
 
+mod unicode_mapping;
+use unicode_mapping::MappingDocument;
+
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
 use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest, sha256_hex};
 
@@ -123,6 +126,7 @@ impl Extractor for PdfiumBackend {
             "library_dir".to_string(),
             self.library_dir.clone().unwrap_or_default(),
         );
+        config.insert("unicode_mapping_policy".to_string(), "1".to_string());
         BackendIdentity {
             name: "pdfium".to_string(),
             version: version_string(),
@@ -164,10 +168,17 @@ impl PdfiumBackend {
         let doc = load(&pdfium, bytes, password)?;
         let page_count = u32::from(doc.pages().len());
         let info = read_info(&doc);
+        let mapping = MappingDocument::new(pdfium.bindings(), bytes, password);
         let mut pages = Vec::new();
         let mut figures = FigureStore::new(figure_cap);
         for page in 1..=page_count {
-            pages.push(extract_numbered(&doc, page, &mut figures));
+            let mut extracted = extract_numbered(&doc, page, &mut figures);
+            if let (Ok(text), Ok(index)) = (&mut extracted, u16::try_from(page - 1))
+                && let Some(warning) = mapping.warning(index)
+            {
+                text.warnings.push(warning);
+            }
+            pages.push(extracted);
         }
         Ok(PdfiumSession {
             page_count,
@@ -875,6 +886,7 @@ mod tests {
         assert_eq!(identity.version, "chromium/8066-binding-0.8.37");
         let mut config = BTreeMap::new();
         config.insert("library_dir".to_string(), String::new());
+        config.insert("unicode_mapping_policy".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
 
         let configured = PdfiumBackend {
