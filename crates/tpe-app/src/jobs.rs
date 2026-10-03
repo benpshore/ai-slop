@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::publication::StagedOutputs;
+use tpe::publication::StagedOutputs;
 
 use tpe::acquire;
 use tpe::backend;

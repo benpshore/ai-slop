@@ -8,13 +8,10 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::VecDeque;
 use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Mutex, mpsc};
-use std::thread;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
@@ -27,7 +24,10 @@ use tpe::eval::{self, CorpusReport, PaperEval};
 use tpe::latex_refs;
 use tpe::ledger::Ledger;
 use tpe::pipeline::{self, PipelineError, Progress};
-use tpe::schema::{ExtractionResult, Job, Metadata, Status};
+use tpe::schema::{ExtractionResult, Job, Metadata};
+
+mod cli_worker;
+mod worker_limits;
 
 /// Service-time target per 20-page chunk, in milliseconds.
 const TARGET_MS_PER_CHUNK: f64 = 30.0;
@@ -47,6 +47,16 @@ struct Cli {
 enum Cmd {
     /// Extract text, metadata and citations from PDF files into a ledger.
     Extract(ExtractArgs),
+    #[command(hide = true)]
+    NativeWorker {
+        request: PathBuf,
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        growth_bytes: u64,
+        #[arg(long)]
+        parent: u32,
+    },
     /// Extract the final bibliography by reading PDF pages from the end.
     Bibliography(BibliographyArgs),
     /// Print ledger statistics as `key: value` lines.
@@ -101,14 +111,14 @@ impl Split {
 
 #[derive(Args)]
 struct ExtractArgs {
-    /// PDF files to process.
+    /// PDF files or folders (regular PDFs, nonrecursive).
     #[arg(required = true, value_name = "PATH")]
     paths: Vec<PathBuf>,
     /// Path of the `SQLite` ledger; created when missing.
     #[arg(long, value_name = "FILE")]
     db: PathBuf,
-    /// Extraction backend name; `auto` routes `lopdf`, then `pdfium`, then docling.
-    #[arg(long, default_value = "auto")]
+    /// Native extraction backend: lopdf, pdfium, or auto without OCR.
+    #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Directory that receives `<hash>.json` and `<hash>.txt` per document.
     #[arg(long, value_name = "DIR")]
@@ -122,16 +132,28 @@ struct ExtractArgs {
     /// Inclusive 1-based page range such as `3-7`; a single number selects one page.
     #[arg(long, value_name = "A-B", value_parser = parse_pages)]
     pages: Option<(u32, u32)>,
-    /// Number of worker threads.
+    /// Number of parallel extraction processes (1..4); publication is serialized.
     #[arg(long, short, default_value_t = 1, value_name = "N")]
     jobs: usize,
-    /// Reject inputs larger than this many bytes.
+    /// Reject inputs larger than this many bytes (default 64 MiB).
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
+    /// Total document deadline including extraction, queueing and publication.
+    #[arg(long, default_value_t = 60_000)]
+    timeout_ms: u64,
+    /// Hard worker virtual-address-space growth above startup mappings, in MiB.
+    #[arg(long, default_value_t = 1024)]
+    max_memory_growth_mib: u64,
+    /// Maximum captured bytes per extraction/publication worker.
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    max_output_bytes: u64,
+    /// Maximum selected input files.
+    #[arg(long, default_value_t = 256)]
+    max_files: usize,
     /// Directory that receives figure bytes as `<hash>/<backend>-<digest>/p<page>-f<index>.<ext>`.
     #[arg(long, value_name = "DIR")]
     figures_dir: Option<PathBuf>,
-    /// Report progress as JSON lines on stderr: `opened` once per file, then `page` per page.
+    /// Replay buffered JSON progress on stderr after each extraction worker exits.
     #[arg(long)]
     progress: bool,
 }
@@ -252,7 +274,13 @@ struct EvalArgs {
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
-        Cmd::Extract(args) => run_extract(&args),
+        Cmd::Extract(args) => cli_worker::run(&args),
+        Cmd::NativeWorker {
+            request,
+            phase,
+            growth_bytes,
+            parent,
+        } => cli_worker::run_worker(&request, &phase, growth_bytes, parent),
         Cmd::Bibliography(args) => run_bibliography(&args),
         Cmd::Stats { db } => {
             run_stats(&db)?;
@@ -381,13 +409,6 @@ fn store_result(
         .with_context(|| format!("writing result for {label}"))
 }
 
-/// Outcome of one worker job, sent to the main thread over the channel.
-struct Outcome {
-    path: PathBuf,
-    wall_ms: f64,
-    result: Result<ExtractionResult, String>,
-}
-
 /// Human-readable text of a panic payload.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
@@ -397,83 +418,6 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "unknown panic".to_string()
     }
-}
-
-/// Pop the next input path, or `None` when the queue is empty or poisoned.
-fn next_path(queue: &Mutex<VecDeque<PathBuf>>) -> Option<PathBuf> {
-    let mut guard = queue.lock().ok()?;
-    guard.pop_front()
-}
-
-/// Run the pipeline for one path on a worker thread.
-fn extract_one(args: &ExtractArgs, path: PathBuf) -> Outcome {
-    let job = Job {
-        path: path.to_string_lossy().into_owned(),
-        backend: args.backend.clone(),
-        pages: args.pages,
-        password: args.password.clone(),
-        max_bytes: args.max_bytes,
-        figures_dir: figures_dir_field(args.figures_dir.as_deref()),
-    };
-    let start = Instant::now();
-    let mut observe = |event: Progress| {
-        if args.progress {
-            report_progress(&job.path, event);
-        }
-    };
-    // A panic inside a backend must fail this file only, not the whole batch.
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        pipeline::run_job_observed(&job, &mut observe)
-    }))
-    .map_or_else(
-        |payload| Err(format!("panic: {}", panic_message(&*payload))),
-        |outcome| outcome.map_err(|err| err.to_string()),
-    );
-    Outcome {
-        path,
-        wall_ms: elapsed_ms(start),
-        result,
-    }
-}
-
-fn run_extract(args: &ExtractArgs) -> anyhow::Result<ExitCode> {
-    check_backend(&args.backend)?;
-    pipeline::warm_up();
-    let mut ledger = open_ledger(&args.db)?;
-    if let Some(dir) = &args.out {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("creating output directory {}", dir.display()))?;
-    }
-
-    let queue: Mutex<VecDeque<PathBuf>> = Mutex::new(args.paths.iter().cloned().collect());
-    let workers = args.jobs.clamp(1, args.paths.len().max(1));
-    let (sender, receiver) = mpsc::channel::<Outcome>();
-
-    let any_failed = thread::scope(|scope| -> anyhow::Result<bool> {
-        for _ in 0..workers {
-            let sender = sender.clone();
-            let queue = &queue;
-            scope.spawn(move || {
-                while let Some(path) = next_path(queue) {
-                    let outcome = extract_one(args, path);
-                    if sender.send(outcome).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-
-        let mut any_failed = false;
-        for outcome in receiver {
-            if publish(&mut ledger, args, outcome)? {
-                any_failed = true;
-            }
-        }
-        Ok(any_failed)
-    })?;
-
-    Ok(exit_code(any_failed))
 }
 
 /// A bibliography-only result does not enter the full-document ledger: it
@@ -692,51 +636,6 @@ fn paper_metadata(bytes: &[u8], password: Option<&str>) -> Option<Metadata> {
     Some(tpe::metadata::extract_metadata(&session.info(), &[first]))
 }
 
-/// Record one outcome in the ledger (main thread only), write the optional
-/// output files and print its line. Returns `true` when the file failed.
-fn publish(ledger: &mut Ledger, args: &ExtractArgs, outcome: Outcome) -> anyhow::Result<bool> {
-    let Outcome {
-        path,
-        wall_ms,
-        result,
-    } = outcome;
-    let path_display = path.display().to_string();
-    match result {
-        Ok(mut result) => {
-            let write_start = Instant::now();
-            let run = store_result(ledger, &result, &path_display)?;
-            result.timings.write_ms = elapsed_ms(write_start);
-            ledger
-                .update_timings(run, &result.timings)
-                .with_context(|| format!("recording write time for {path_display}"))?;
-            if let Some(dir) = &args.out {
-                write_outputs(dir, &result)?;
-            }
-            if args.json {
-                println!("{}", serde_json::to_string(&result)?);
-            } else {
-                println!("{}", summary_line(&result, &path_display));
-            }
-            Ok(result.status == Status::Failed)
-        }
-        Err(err) => {
-            eprintln!("{path_display}: {err}");
-            if args.json {
-                let line = serde_json::json!({
-                    "status": Status::Failed.as_str(),
-                    "path": path_display,
-                    "error": err.clone(),
-                    "ms": wall_ms,
-                });
-                println!("{line}");
-            } else {
-                println!("failed\t-\t0p\t0 refs\t0 cites\t{wall_ms:.1} ms\t{path_display}");
-            }
-            Ok(true)
-        }
-    }
-}
-
 /// The tab-separated line printed per document.
 fn summary_line(result: &ExtractionResult, path: &str) -> String {
     let short = short_hash(&result.document.hash.0);
@@ -750,19 +649,6 @@ fn summary_line(result: &ExtractionResult, path: &str) -> String {
         result.references.len(),
         result.citations.len(),
     )
-}
-
-/// Write `<hash>.json` and `<hash>.txt` for one result into `dir`.
-fn write_outputs(dir: &Path, result: &ExtractionResult) -> anyhow::Result<()> {
-    let hash = result.document.hash.0.as_str();
-    let json_path = dir.join(format!("{hash}.json"));
-    let json = serde_json::to_string_pretty(result)?;
-    fs::write(&json_path, json).with_context(|| format!("writing {}", json_path.display()))?;
-    let text_path = dir.join(format!("{hash}.txt"));
-    let texts: Vec<&str> = result.pages.iter().map(|p| p.text.as_str()).collect();
-    fs::write(&text_path, texts.join("\u{c}"))
-        .with_context(|| format!("writing {}", text_path.display()))?;
-    Ok(())
 }
 
 fn run_stats(db: &Path) -> anyhow::Result<()> {

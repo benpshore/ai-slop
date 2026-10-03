@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
-pub(crate) struct StagedOutputs {
+/// Complete staged files, published without overwriting existing paths.
+pub struct StagedOutputs {
     directory: PathBuf,
     base: String,
     files: Vec<(String, NamedTempFile)>,
@@ -16,7 +17,8 @@ pub(crate) struct StagedOutputs {
 }
 
 impl StagedOutputs {
-    pub(crate) fn stage(source: &Path, files: &[(&str, Vec<u8>)]) -> io::Result<Self> {
+    /// Write and sync each temporary sibling before making any final name visible.
+    pub fn stage(source: &Path, files: &[(&str, Vec<u8>)]) -> io::Result<Self> {
         let directory = source
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -51,17 +53,36 @@ impl StagedOutputs {
         Ok(staged)
     }
 
-    pub(crate) fn publish_then(
+    /// Publish complete files, commit last, and roll back on a handled error.
+    pub fn publish_then(
         &mut self,
         commit: impl FnOnce() -> Result<(), String>,
     ) -> Result<Vec<PathBuf>, String> {
-        self.publish_with(|from, to| fs::hard_link(from, to), commit)
+        self.publish_then_with_paths(|_| commit())
     }
 
+    /// As [`Self::publish_then`], with the chosen no-clobber paths available
+    /// before commit, so receipts can be serialized while rollback is possible.
+    pub fn publish_then_with_paths(
+        &mut self,
+        commit: impl FnOnce(&[PathBuf]) -> Result<(), String>,
+    ) -> Result<Vec<PathBuf>, String> {
+        self.publish_with_paths(|from, to| fs::hard_link(from, to), commit)
+    }
+
+    #[cfg(test)]
     fn publish_with(
         &mut self,
-        mut link: impl FnMut(&Path, &Path) -> io::Result<()>,
+        link: impl FnMut(&Path, &Path) -> io::Result<()>,
         commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Vec<PathBuf>, String> {
+        self.publish_with_paths(link, |_| commit())
+    }
+
+    fn publish_with_paths(
+        &mut self,
+        mut link: impl FnMut(&Path, &Path) -> io::Result<()>,
+        commit: impl FnOnce(&[PathBuf]) -> Result<(), String>,
     ) -> Result<Vec<PathBuf>, String> {
         let mut generation = 1u64;
         loop {
@@ -96,12 +117,12 @@ impl StagedOutputs {
                 .checked_add(1)
                 .ok_or("output generation exhausted")?;
         }
-        let paths = self.linked.iter().map(|(_, path)| path.clone()).collect();
+        let paths: Vec<PathBuf> = self.linked.iter().map(|(_, path)| path.clone()).collect();
         // Sync the directory while rollback is still possible. There is no
         // fallback that exposes a partially written final file.
         let result = sync_directory(&self.directory)
             .map_err(|e| format!("syncing outputs: {e}"))
-            .and_then(|()| commit());
+            .and_then(|()| commit(&paths));
         if let Err(error) = result {
             return match self.rollback() {
                 Ok(()) => Err(error),
