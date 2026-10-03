@@ -17,6 +17,7 @@ on:
       - src/backend/**
       - Cargo.toml
       - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/native.yml
   push:
     branches: [main]
@@ -26,6 +27,7 @@ on:
       - tests/**
       - Cargo.toml
       - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/native.yml
 
 permissions:
@@ -59,7 +61,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - run: rustup component add clippy rustfmt
+      - run: rustup show active-toolchain
       - run: rustc --version --verbose && uname -m
       # ONNX Runtime is not provisioned by native/fetch.sh: the `ort` crate
       # (enabled by docling-pdf with `download-binaries`) downloads a prebuilt
@@ -76,7 +78,7 @@ jobs:
             ~/.cache/ort.pyke.io
             ~/Library/Caches/ort.pyke.io
             target
-          key: cargo-native-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-native-${{ matrix.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-native-${{ matrix.os }}-
       # PDFium differs per platform, so the key includes the OS; any change to
       # the manifest (a new URL or a pinned hash) invalidates it.
@@ -88,11 +90,11 @@ jobs:
           key: native-assets-${{ matrix.os }}-${{ hashFiles('native/manifest.json') }}
       - name: Provision PDFium and the docling models (prints file, bytes, sha256)
         run: sh native/fetch.sh
-      - run: cargo build --release --features docling,pdfium
+      - run: cargo build --locked --release --features docling,pdfium
       # --nocapture so the "skipped: ..." lines of the native smoke tests show
       # in the log: with the artifacts present, none of them should appear.
-      - run: cargo clippy --all-targets --features docling,pdfium -- -D warnings
-      - run: cargo test --features docling,pdfium -- --nocapture
+      - run: cargo clippy --locked --all-targets --features docling,pdfium -- -D warnings
+      - run: cargo test --locked --features docling,pdfium -- --nocapture
       # `tpe backends` (lists compiled-in backends and whether their native
       # dependencies load) is added in the same batch by another change;
       - name: List backends

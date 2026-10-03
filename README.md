@@ -247,15 +247,17 @@ GPUI is Apache-2.0 and pre-1.0; Zed application code has different licensing. Pi
 
 ## Development and checks
 
-Follow [AGENTS.md](AGENTS.md). Existing scaffold checks remain:
+Follow [AGENTS.md](AGENTS.md). Rust commands use the pinned Rust 1.98.1 toolchain
+and committed Cargo.lock. See the [Rust build contract](docs/RUST_BUILD.md) for
+release commands and MSRV status. Existing scaffold checks remain:
 
 ```sh
 uv run ruff format && uv run ruff check && uv run pytest && uv audit --preview-features audit-command
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --all --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace
 swift build && swift test
 cmake -S . -B build && cmake --build build && ctest --test-dir build
 ```
 
 `main` is protected: open a PR; the `ci` check must pass before merging (squash only). Never force-push `main`.
 
-Inherited merge-release automation currently publishes Python artifacts; it is not the intended ARM Rust distribution pipeline. Align packaging, tag-derived versions, and native CI in a focused implementation PR before declaring the engine releasable. The software is proprietary (see LICENSE); native-library and model licenses still apply to their components.
+Release automation publishes native Rust binaries with the git-tag version embedded by the pinned build. The software is proprietary (see LICENSE); native-library and model licenses still apply to their components.
