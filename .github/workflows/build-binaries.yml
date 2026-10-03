@@ -34,7 +34,7 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - os: macos-15
@@ -69,11 +69,18 @@ jobs:
           key: cargo-bin-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-bin-${{ matrix.target }}-
       - name: Build tpe
+        id: compile
         run: cargo build --release --locked -p text-processing-engine --bin tpe
-      - name: Native release worker limits and CLI boundary
+      - name: Native release OS memory limits
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           cargo test --release --locked -p text-processing-engine --bin tpe worker_limits:: -- --test-threads=1 --nocapture
-          cargo test --release --locked -p text-processing-engine --test cli_containment --test worker_startup --test end_to_end -- --test-threads=2 --nocapture
+      - name: Native release worker startup and publisher pressure
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --release --locked -p text-processing-engine --test worker_startup -- --test-threads=2 --nocapture
+      - name: Native release CLI boundary
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --release --locked -p text-processing-engine --test cli_containment --test end_to_end -- --test-threads=2 --nocapture
       - name: Smoke test
         run: |
           ./target/release/tpe --version

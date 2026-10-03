@@ -242,11 +242,13 @@ fn output_aliases_are_skipped_without_writing_through_them() {
 }
 
 fn compressed_pressure_pdf() -> Vec<u8> {
-    // Stream a 512 MiB expansion through a 1 MiB scratch buffer; the test
+    // Stream a 2 GiB expansion through a 1 MiB scratch buffer; the test
     // generator never holds the expanded adversarial document in memory.
+    // Use the supported default budget below: macOS allocator reservations
+    // can reject even the small native control at a 256 MiB growth allowance.
     let mut compressor = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
     let block = vec![b' '; 1024 * 1024];
-    for _ in 0..512 {
+    for _ in 0..2048 {
         compressor.write_all(&block).unwrap();
     }
     let content = compressor.finish().unwrap();
@@ -271,12 +273,17 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
     let root = TempDir::new().unwrap();
     let input = root.path().join("pressure.pdf");
     let bytes = compressed_pressure_pdf();
-    assert!(bytes.len() < 5 * 1024 * 1024);
+    assert!(
+        bytes.len() < 32 * 1024 * 1024,
+        "{} compressed bytes",
+        bytes.len()
+    );
     fs::write(&input, &bytes).unwrap();
     let output = command(root.path())
-        .args(["--max-memory-growth-mib", "256", "--timeout-ms", "10000"])
-        .arg(&input)
+        .args(["--max-memory-growth-mib", "1024", "--timeout-ms", "10000"])
         .arg(fixture("native.pdf"))
+        .arg(&input)
+        .arg(fixture("existing-ocr.pdf"))
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -285,17 +292,21 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
         .lines()
         .map(|s| serde_json::from_str(s).unwrap())
         .collect();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["status"], "failed", "{}", rows[0]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["status"], "complete", "{}", rows[0]);
+    assert_eq!(rows[1]["status"], "failed", "{}", rows[1]);
     assert!(
-        rows[0]["error"].as_str().unwrap().contains("worker exited"),
+        rows[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("memory allocation"),
         "{}",
-        rows[0]
+        rows[1]
     );
-    assert_eq!(rows[1]["status"], "complete", "{}", rows[1]);
+    assert_eq!(rows[2]["status"], "complete", "{}", rows[2]);
     assert_eq!(fs::read(input).unwrap(), bytes);
     let ledger = tpe::ledger::Ledger::open(&root.path().join("ledger.sqlite")).unwrap();
-    assert_eq!(ledger.stats().unwrap().runs, 1);
+    assert_eq!(ledger.stats().unwrap().runs, 2);
 }
 
 fn many_pages_pdf(count: u32) -> Vec<u8> {
@@ -467,7 +478,15 @@ fn full_stdout_pipe_obeys_deadline_after_commit_without_changing_caller_flags() 
         .spawn()
         .unwrap();
     assert!(!wait_bounded(&mut child, Duration::from_secs(5)).success());
-    assert_eq!(rustix::fs::fcntl_getfl(&write_end).unwrap(), flags);
+    let after = rustix::fs::fcntl_getfl(&write_end).unwrap();
+    let changed = (after ^ flags).bits();
+    // Darwin exposes FWASWRITTEN (0x10000) through F_GETFL. The kernel sets
+    // this history bit when bytes are written; it is not a caller-settable
+    // status flag. Keep checking every other bit, including O_NONBLOCK.
+    // https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/sys/fcntl.h#L135
+    #[cfg(target_os = "macos")]
+    let changed = changed & !0x0001_0000;
+    assert_eq!(changed, 0, "caller flags changed: {flags:?} -> {after:?}");
     let ledger = tpe::ledger::Ledger::open(&root.path().join("ledger.sqlite")).unwrap();
     assert_eq!(
         ledger.stats().unwrap().runs,

@@ -1,5 +1,8 @@
 //! Native support gates for the shipped extraction and publication workers.
 //! Run with `--nocapture` (or `--show-output`) to retain the measured limits.
+//! The default 1 GiB allowance must succeed. Smaller 32/256 MiB allowances
+//! record explicit resource failures: allocator regions and lazy mappings can
+//! require much more virtual space than the individual allocation requested.
 //! The test process never decodes the generated large result or loses ownership
 //! of a live child: captures, deadlines, and the stdin lease remain bounded.
 
@@ -17,6 +20,7 @@ use tempfile::TempDir;
 
 const MIB: u64 = 1024 * 1024;
 const LOW_GROWTH: u64 = 32 * MIB;
+const INTERMEDIATE_GROWTH: u64 = 256 * MIB;
 const DEFAULT_GROWTH: u64 = 1024 * MIB;
 const CAPTURE_BYTES: u64 = 128 * 1024;
 const WORKER_DEADLINE: Duration = Duration::from_secs(15);
@@ -201,16 +205,16 @@ fn allocation_failure(stderr: &str) -> bool {
     .any(|message| diagnostic.contains(message))
 }
 
-fn assert_allowed_low_failure(label: &str, growth: u64, run: &Run) {
-    assert_eq!(
-        growth, LOW_GROWTH,
+fn assert_allowed_startup_failure(label: &str, growth: u64, run: &Run) {
+    assert!(
+        matches!(growth, LOW_GROWTH | INTERMEDIATE_GROWTH),
         "default allowance failed: {label}: {}",
         run.stderr
     );
     assert!(
         allocation_failure(&run.stderr)
             || run.stderr.to_ascii_lowercase().contains("address-space"),
-        "{label}: unexpected low-budget failure {}: {}",
+        "{label}: unexpected smaller-allowance failure {}: {}",
         run.status,
         run.stderr
     );
@@ -244,9 +248,11 @@ fn actual_extract_and_publish_startup_records_low_and_default_limits_repeatedly(
     let root = TempDir::new().unwrap();
     let original = fs::read(fixture()).unwrap();
     let mut fallback_response = None;
-    // Establish an actual valid response first, so publication at 32 MiB is
-    // still exercised on a platform whose extractor needs more than 32 MiB.
-    for growth in [DEFAULT_GROWTH, LOW_GROWTH] {
+    // Establish an actual valid response first, so publication at 32/256 MiB
+    // is still exercised if extraction requires more address-space growth.
+    // Keep these diagnostics distinct from the strict same-budget pressure
+    // control below: startup failure cannot prove decoder containment.
+    for growth in [DEFAULT_GROWTH, INTERMEDIATE_GROWTH, LOW_GROWTH] {
         for attempt in 0..REPEATS {
             let extract_label = format!("extract-{}-{attempt}", growth / MIB);
             let extraction = run_worker(
@@ -275,7 +281,7 @@ fn actual_extract_and_publish_startup_records_low_and_default_limits_repeatedly(
                 extraction.stdout
             } else {
                 evidence(&extract_label, "extract", growth, &extraction, None);
-                assert_allowed_low_failure(&extract_label, growth, &extraction);
+                assert_allowed_startup_failure(&extract_label, growth, &extraction);
                 fallback_response.as_ref().unwrap().clone()
             };
             let publish_label = format!("publish-{}-{attempt}", growth / MIB);
@@ -295,7 +301,7 @@ fn actual_extract_and_publish_startup_records_low_and_default_limits_repeatedly(
                 );
             } else {
                 evidence(&publish_label, "publish", growth, &publication, None);
-                assert_allowed_low_failure(&publish_label, growth, &publication);
+                assert_allowed_startup_failure(&publish_label, growth, &publication);
             }
         }
     }

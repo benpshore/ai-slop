@@ -38,7 +38,7 @@ they are not a hard filesystem quota. Filesystem calls still depend on the OS.
 The controller holds bounded paths, small receipts and input selection, and never
 decodes document JSON. A separate limited publisher decodes results and stages
 exports. A limited output relay copies bytes with an 8 KiB buffer. A full output
-pipe can be interrupted without changing the caller's shared file flags.
+pipe can be interrupted without changing the caller-settable shared file flags.
 
 ## Failure, cancellation and publication
 
