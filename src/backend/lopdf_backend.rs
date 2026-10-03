@@ -2940,6 +2940,13 @@ fn extract_page(
     }
 
     let content_bytes = doc.get_page_content(page_id);
+    if std::env::var_os("TPE_PRESSURE_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "pressure-decoded page={page} bytes={} capacity={}",
+            content_bytes.len(),
+            content_bytes.capacity()
+        );
+    }
     let program = match lex_content(&content_bytes) {
         Ok(program) => program,
         Err(err) => return Err(page_error(page, format!("content stream: {err}"))),
