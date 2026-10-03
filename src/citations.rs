@@ -471,7 +471,7 @@ fn year_bare_re() -> &'static Regex {
 
 /// Start of a DOI, tolerating the single space a line wrap leaves after
 /// `10.` or before `/`.
-fn doi_start_re() -> &'static Regex {
+pub(crate) fn doi_start_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\b10\.\s?\d{4,9}\s?/").expect("valid regex"))
 }
@@ -1275,7 +1275,69 @@ fn section_lines_with_furniture(
     if !row.is_empty() {
         lines.push(finish_row(row));
     }
+    reattach_numbered_labels(lines)
+}
+
+/// A label-only column can precede all of its entry text in reading order.
+/// Reattach punctuated labels to the nearest text on their printed row before
+/// detecting list style or end headings. Bare integers remain untouched.
+fn reattach_numbered_labels(mut lines: Vec<SectionLine>) -> Vec<SectionLine> {
+    let standalone = |text: &str| {
+        text.strip_suffix(['.', ')']).is_some_and(|number| {
+            !number.is_empty() && number.len() <= 4 && number.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    let mut rows: BTreeMap<u32, Vec<(f32, usize)>> = BTreeMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !standalone(&line.text)
+            && let Some(y) = line.y0.filter(|y| y.is_finite())
+        {
+            rows.entry(line.page).or_default().push((y, i));
+        }
+    }
+    for page_rows in rows.values_mut() {
+        page_rows.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    let mut used = vec![false; lines.len()];
+    let mut removed = vec![false; lines.len()];
+    for i in 0..lines.len() {
+        let label = &lines[i];
+        if !standalone(&label.text) {
+            continue;
+        }
+        let (Some(x), Some(y), Some(page_rows)) = (label.x0, label.y0, rows.get(&label.page))
+        else {
+            continue;
+        };
+        let tolerance = 0.4 * label.size.unwrap_or(10.0);
+        if !x.is_finite() || !y.is_finite() || !tolerance.is_finite() || tolerance <= 0.0 {
+            continue;
+        }
+        let start = page_rows.partition_point(|&(baseline, _)| baseline < y - tolerance);
+        let end = page_rows.partition_point(|&(baseline, _)| baseline <= y + tolerance);
+        // Bound work even when hostile geometry puts every line on one row.
+        if end - start > MAX_ROW_FRAGMENTS {
+            continue;
+        }
+        let target = page_rows[start..end]
+            .iter()
+            .filter_map(|&(_, k)| {
+                let gap = lines[k].x0? - x;
+                (!used[k] && gap > 0.0 && gap <= LABEL_TEXT_GAP).then_some((gap, k))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, k)) = target {
+            lines[k].text = format!("{} {}", lines[i].text, lines[k].text);
+            lines[k].x0 = Some(x);
+            used[k] = true;
+            removed[i] = true;
+        }
+    }
     lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, line)| (!removed[i]).then_some(line))
+        .collect()
 }
 
 /// Printed number and label of a numbered entry start, per style. A bare
@@ -2499,7 +2561,7 @@ fn extend_across_wraps(
 /// First DOI with its byte range in `text`. Line wraps inside the DOI
 /// (`10.1007/ BF01504345`, `10. 1145/3292500`, `364399 1.3648400` after
 /// `doi.org/`) are closed up.
-fn find_doi(text: &str) -> Option<(Range<usize>, String)> {
+pub(crate) fn find_doi(text: &str) -> Option<(Range<usize>, String)> {
     let found = doi_start_re().find(text)?;
     let start = found.start();
     let lenient = text[..start].to_ascii_lowercase().ends_with("doi.org/");
@@ -4012,6 +4074,59 @@ fn lncs_authors_end(text: &str) -> Option<usize> {
     text[..found.end()].rfind(':')
 }
 
+/// Vancouver lists closed by a colon, as printed in BMC references:
+/// `Schmader KE: Title` or `Smith A, Jones BC, et al.: Title`.
+/// Validate the entire prefix before trying the more general comma styles.
+/// A lone one-initial prefix is ambiguous with titles such as `Vitamin D:`.
+fn vancouver_colon_authors_end(text: &str) -> Option<usize> {
+    let colon = text.find(':')?;
+    if colon > 1200 || !text[colon + 1..].starts_with(' ') {
+        return None;
+    }
+    let mut count = 0;
+    let mut first_initials = 0;
+    let mut parts = text[..colon].split(',').peekable();
+    while let Some(part) = parts.next() {
+        let part = part.trim();
+        if matches!(part, "et al" | "et al.") {
+            if count == 0 || parts.peek().is_some() {
+                return None;
+            }
+            break;
+        }
+        let mut tokens: Vec<&str> = part.split_whitespace().collect();
+        if tokens
+            .last()
+            .is_some_and(|t| matches!(*t, "Jr" | "Jr." | "II" | "III" | "2nd" | "3rd"))
+        {
+            tokens.pop();
+        }
+        let initials = tokens.pop()?;
+        let n = initials.chars().count();
+        if !(1..=4).contains(&n)
+            || !initials
+                .chars()
+                .all(|c| c.is_alphabetic() && c.is_uppercase())
+            || tokens.is_empty()
+            || tokens.len() > 4
+            || !tokens.iter().any(|t| t.starts_with(char::is_uppercase))
+            || !tokens.iter().all(|t| {
+                is_surname_particle(t)
+                    || (t.starts_with(char::is_uppercase)
+                        && t.chars()
+                            .all(|c| c.is_alphabetic() || matches!(c, '-' | '\'' | '’')))
+            })
+        {
+            return None;
+        }
+        if count == 0 {
+            first_initials = n;
+        }
+        count += 1;
+    }
+    (count > 1 || (count == 1 && first_initials >= 2)).then_some(colon)
+}
+
 /// An LNCS author list of surnames only, closed by a colon before the
 /// title: `Galun, Sharon, Basri, Brandt: Texture segmentation …`.
 fn lncs_surnames_re() -> &'static Regex {
@@ -4389,6 +4504,7 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         entry.year = Some(*value);
     }
     let quoted = find_quoted(&masked);
+    let vancouver_colon = vancouver_colon_authors_end(&masked);
 
     // Where the author list ends and where the title starts.
     let mut authors_end: Option<usize> = None;
@@ -4412,8 +4528,8 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         // `Regulation (EU) 2017/745 on medical devices. Official Journal`:
         // no authors; the leading clause is the title.
         authors_end = Some(0);
-    } else if let Some(colon) = lncs_authors_end(&masked) {
-        // Springer LNCS: `Surname, I., Other, J.: Title. In: Venue (Year)`.
+    } else if let Some(colon) = lncs_authors_end(&masked).or(vancouver_colon) {
+        // Springer LNCS and Vancouver lists with a verified author colon.
         authors_end = Some(colon);
         let after = masked[colon + 1..].trim_start();
         title_start = masked.len() - after.len();
@@ -4506,7 +4622,17 @@ pub fn parse_entry(entry: &mut ReferenceEntry) {
         return;
     };
     let author_segment = &body[..end];
-    if author_segment
+    if vancouver_colon == Some(end) {
+        // The predicate already validated every name, including particles and
+        // numeric suffixes. Preserve them instead of reapplying generic name
+        // heuristics, which would discard a valid `Sowder RC 2nd`.
+        entry.authors = author_segment
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !is_et_al(name))
+            .map(str::to_owned)
+            .collect();
+    } else if author_segment
         .chars()
         .next()
         .is_some_and(char::is_uppercase)
@@ -8441,6 +8567,95 @@ mod tests {
     }
 
     #[test]
+    fn numbered_label_columns_continue_across_pages() {
+        for suffix in ['.', ')'] {
+            let first = page_of(
+                1,
+                vec![
+                    line_at("References", 0, 40.0, 700.0),
+                    line_at(
+                        &format!("1{suffix} Adams, A. First study. Nature 2020."),
+                        0,
+                        40.0,
+                        680.0,
+                    ),
+                    line_at(
+                        &format!("2{suffix} Baker, B. Second study. Science 2021."),
+                        0,
+                        40.0,
+                        650.0,
+                    ),
+                    line_at(
+                        &format!("3{suffix} Clark, C. Third study. Cell 2022."),
+                        0,
+                        40.0,
+                        620.0,
+                    ),
+                ],
+            );
+            // Reading order puts the whole narrow label column first, then
+            // the entry-text column. Continuation lines have no label.
+            let second = page_of(
+                2,
+                vec![
+                    line_at(&format!("4{suffix}"), 0, 40.0, 700.0),
+                    line_at(&format!("5{suffix}"), 0, 40.0, 670.0),
+                    line_at(&format!("6{suffix}"), 0, 40.0, 640.0),
+                    line_at("Davis, D. Fourth study.", 1, 60.0, 700.0),
+                    line_at("Nature 2023, 12, 10–20.", 1, 60.0, 690.0),
+                    line_at("Evans, E. Fifth study. Cell 2024.", 1, 60.0, 670.0),
+                    line_at("Ford, F. Sixth study. Science 2025.", 1, 60.0, 640.0),
+                    line_at("Appendix A", 1, 60.0, 600.0),
+                    line_at("Extra material.", 1, 60.0, 580.0),
+                ],
+            );
+            let pages = [first, second];
+            let section = find_reference_section(&pages).expect("numbered list");
+            let refs = segment_entries(&pages, &section);
+            assert_eq!(refs.len(), 6);
+            for (i, entry) in refs.iter().enumerate() {
+                assert_eq!(entry.label, Some(format!("{}{suffix}", i + 1)));
+                assert!(!entry.raw.contains("Appendix"));
+            }
+            assert!(refs[3].raw.contains("Fourth study. Nature 2023"));
+            assert_eq!(refs[3].page, 2);
+            assert!((refs[3].anchor.unwrap().x0 - 40.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn detached_numbered_labels_need_a_nearby_row_on_the_same_page() {
+        let line = |text: &str, page: u32, x: f32, y: f32| SectionLine {
+            text: text.to_string(),
+            page,
+            line: 0,
+            column: 0,
+            x0: Some(x),
+            y0: Some(y),
+            size: Some(10.0),
+        };
+        let original = vec![
+            line("1.", 1, 40.0, 700.0),
+            line("Too far right", 1, 100.0, 700.0),
+            line("Wrong baseline", 1, 60.0, 680.0),
+            line("Different page", 2, 60.0, 700.0),
+            line("2020", 2, 40.0, 600.0),
+            line("Bare year stays separate", 2, 60.0, 600.0),
+        ];
+        let result = reattach_numbered_labels(original.clone());
+        assert_eq!(
+            result.iter().map(|l| &l.text).collect::<Vec<_>>(),
+            original.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+
+        let mut crowded = vec![line("1.", 1, 40.0, 700.0)];
+        crowded.extend((0..=MAX_ROW_FRAGMENTS).map(|_| line("crowded", 1, 60.0, 700.0)));
+        let result = reattach_numbered_labels(crowded);
+        assert_eq!(result.len(), MAX_ROW_FRAGMENTS + 2);
+        assert_eq!(result[0].text, "1.");
+    }
+
+    #[test]
     fn row_tolerance_follows_the_largest_fragment_size() {
         let fragment = |x0: f32, y0: f32, size: f32| SectionLine {
             page: 1,
@@ -9829,6 +10044,91 @@ mod tests {
         assert_eq!(
             lncs_authors_end("D. Goldberg, D. Nichols, Title: subtitle"),
             None
+        );
+    }
+
+    #[test]
+    fn vancouver_author_colon_precedes_title_and_venue_colons() {
+        let raw = "8. Schmader KE: Epidemiology and impact on quality of life of postherpetic neuralgia and painful diabetic neuropathy. Clin J Pain 2002, 18(6):350–354.";
+        let entry = parsed(raw, Some("8."));
+        assert_eq!(entry.raw, raw);
+        assert_eq!(entry.authors, ["Schmader KE"]);
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Epidemiology and impact on quality of life of postherpetic neuralgia and painful diabetic neuropathy"
+            )
+        );
+        assert_eq!(entry.venue.as_deref(), Some("Clin J Pain"));
+        assert_eq!(entry.year, Some(2002));
+        let entry = parsed(
+            "Bess JW Jr, Sowder RC 2nd, et al: Proteomic analysis. J Virol 2006, 80:9039–9052.",
+            None,
+        );
+        assert_eq!(entry.authors, ["Bess JW Jr", "Sowder RC 2nd"]);
+
+        let entry = parsed(
+            "1. Wild S, Roglic G, Green A, Sicree R, King H: Global prevalence of diabetes: estimates for the year 2000 and projections for 2030. Diabetes Care 2004, 27(5):1047–1053.",
+            Some("1."),
+        );
+        assert_eq!(
+            entry.authors,
+            ["Wild S", "Roglic G", "Green A", "Sicree R", "King H"]
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Global prevalence of diabetes: estimates for the year 2000 and projections for 2030"
+            )
+        );
+
+        let entry = parsed(
+            "3. Singh AS, Mulder C, Twisk JWR, Van Mechelen W, Chinapaw MJM: Tracking of childhood overweight into adulthood: a systematic review of the literature. Obes Rev 2008, 9:474–488.",
+            Some("3."),
+        );
+        assert!(entry.authors.iter().any(|a| a == "Van Mechelen W"));
+        assert_eq!(
+            entry.title.as_deref(),
+            Some(
+                "Tracking of childhood overweight into adulthood: a systematic review of the literature"
+            )
+        );
+    }
+
+    #[test]
+    fn vancouver_colon_requires_the_whole_personal_author_list() {
+        for prefix in [
+            "Smith AB Jr, Jones C",
+            "Van den Hurk K, O’Neil AB",
+            "Smith AB, et al",
+            "Smith\u{a0}AB, Jones C, et al.",
+        ] {
+            assert_eq!(
+                super::vancouver_colon_authors_end(&format!("{prefix}: Title.")),
+                Some(prefix.len()),
+                "{prefix}"
+            );
+        }
+        for text in [
+            "Vitamin D: bone and muscle health.",
+            "Methods: a practical handbook.",
+            "WHO Expert Consultation: Appropriate body-mass index.",
+            "Smith AB. Molecular mechanisms: a systematic review.",
+            "Smith AB,, Jones CD: Title.",
+            "Smith AB, et al., Jones CD: Title.",
+            "Smith AB, not an author: Title.",
+            "Smith AB:Title.",
+            "https://doi.org/10.1000/example",
+        ] {
+            assert_eq!(super::vancouver_colon_authors_end(text), None, "{text}");
+        }
+        let entry = parsed(
+            "Smith AB. Molecular mechanisms: a systematic review. J Med 2020;12:34–40.",
+            None,
+        );
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Molecular mechanisms: a systematic review")
         );
     }
 

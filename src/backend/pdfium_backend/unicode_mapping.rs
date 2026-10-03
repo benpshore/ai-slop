@@ -7,6 +7,8 @@
 
 use pdfium_render::prelude::{FPDF_DOCUMENT, FPDF_PAGE, FPDF_TEXTPAGE, PdfiumLibraryBindings};
 
+use crate::backend::BackendError;
+
 pub(super) struct MappingDocument<'a> {
     bindings: &'a dyn PdfiumLibraryBindings,
     handle: FPDF_DOCUMENT,
@@ -32,6 +34,15 @@ impl<'a> MappingDocument<'a> {
                 "unicode_mapping: pdfium evidence unavailable ({reason})"
             ))
         })
+    }
+
+    pub(super) fn page_count(&self) -> Result<u32, BackendError> {
+        if self.handle.is_null() {
+            return Err(BackendError::Malformed(
+                "pdfium page count unavailable: document open failed".to_string(),
+            ));
+        }
+        checked_page_count(self.bindings.FPDF_GetPageCount(self.handle))
     }
 
     fn inspect(&self, index: u16) -> Result<Option<String>, &'static str> {
@@ -66,6 +77,24 @@ impl<'a> MappingDocument<'a> {
         }
         Ok(evidence.warning())
     }
+}
+
+/// pdfium-render 0.8.37 uses u16 page indices and narrows the native signed
+/// count unchecked. Reject oversized or empty/failed counts before that API
+/// can silently truncate a document or expose invalid page-range arithmetic.
+fn checked_page_count(count: i32) -> Result<u32, BackendError> {
+    if count <= 0 {
+        return Err(BackendError::Malformed(format!(
+            "pdfium returned invalid page count {count}"
+        )));
+    }
+    if count > i32::from(u16::MAX) {
+        return Err(BackendError::Limit(format!(
+            "pdfium document has {count} pages; binding supports at most {}",
+            u16::MAX
+        )));
+    }
+    Ok(u32::try_from(count).expect("positive native page count"))
 }
 
 impl Drop for MappingDocument<'_> {
@@ -134,6 +163,27 @@ impl MappingEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_page_count_conversion_is_checked() {
+        for count in [-1, 0] {
+            assert!(matches!(
+                checked_page_count(count),
+                Err(BackendError::Malformed(_))
+            ));
+        }
+        assert_eq!(checked_page_count(1).unwrap(), 1);
+        assert_eq!(
+            checked_page_count(i32::from(u16::MAX)).unwrap(),
+            u32::from(u16::MAX)
+        );
+        for count in [i32::from(u16::MAX) + 1, i32::MAX] {
+            assert!(matches!(
+                checked_page_count(count),
+                Err(BackendError::Limit(_))
+            ));
+        }
+    }
 
     #[test]
     fn native_failure_closes_handles_and_preserves_the_next_query() {
