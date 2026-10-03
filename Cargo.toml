@@ -70,7 +70,7 @@ unicode-normalization = "0.1"
 ureq = "3"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-rustix = { version = "1", features = ["process", "param"] }
+rustix = { version = "1", features = ["process", "param", "stdio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

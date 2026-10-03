@@ -683,13 +683,8 @@ pub(super) fn run_worker(
     initialized
         .recv()
         .context("initializing controller lease")?;
-    if std::env::var_os("TPE_PRESSURE_DIAGNOSTICS").is_some() {
-        super::worker_allocator::enable();
-    }
     let limits = worker_limits::install(growth_bytes, parent)?;
-    if std::env::var_os("TPE_PRESSURE_DIAGNOSTICS").is_some() {
-        eprintln!("pressure-limits {}", serde_json::to_string(&limits)?);
-    }
+    super::worker_allocator::enforce();
     let encoded = read_limited(request_path, REQUEST_BYTES, true)?;
     match phase {
         "extract" => extract_worker(&serde_json::from_slice(&encoded)?, limits)?,
@@ -737,12 +732,10 @@ fn extract_worker(request: &ExtractRequest, limits: LimitEvidence) -> anyhow::Re
             super::report_progress(&request.job.path, event);
         }
     };
-    super::worker_allocator::evidence("before extraction");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline::run_job_observed(&request.job, &mut observe)
     }))
     .map_err(|payload| anyhow::anyhow!("panic: {}", super::panic_message(&*payload)))??;
-    super::worker_allocator::evidence("after extraction");
     serde_json::to_writer(
         io::stdout().lock(),
         &Response {

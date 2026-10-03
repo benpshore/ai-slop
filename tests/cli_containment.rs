@@ -280,8 +280,6 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
     );
     fs::write(&input, &bytes).unwrap();
     let output = command(root.path())
-        .env("TPE_PRESSURE_DIAGNOSTICS", "1")
-        .arg("--progress")
         .args(["--max-memory-growth-mib", "1024", "--timeout-ms", "10000"])
         .arg(fixture("native.pdf"))
         .arg(&input)
@@ -310,7 +308,7 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
         rows[1]["error"]
             .as_str()
             .unwrap()
-            .contains("memory allocation"),
+            .contains("memory allocation failed in native worker"),
         "{}",
         rows[1]
     );

@@ -76,10 +76,11 @@ jobs:
       - name: Build tpe
         id: compile
         run: cargo build --release --locked -p text-processing-engine --bin tpe
-      - name: Native release OS memory limits
+      - name: Native release OS memory limits and allocation failures
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           cargo test --release --locked -p text-processing-engine --bin tpe worker_limits:: -- --test-threads=1 --nocapture
+          cargo test --release --locked -p text-processing-engine --bin tpe worker_allocator:: -- --test-threads=1 --nocapture
       - name: Native release worker startup and publisher pressure
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: cargo test --release --locked -p text-processing-engine --test worker_startup -- --test-threads=2 --nocapture
