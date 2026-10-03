@@ -14,11 +14,19 @@ on:
         description: Release tag being built, e.g. v0.42.0
         type: string
         required: true
-  # Dry run on pull requests that touch this file: builds every target and
-  # uploads the archives as artifacts; nothing is released.
+  # Native PR validation for CLI/resource changes. Run the release worker
+  # probes on each shipped architecture; upload archives without releasing.
   pull_request:
     paths:
       - .github/workflows/build-binaries.yml
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - tests/cli_containment.rs
+      - tests/worker_startup.rs
+      - tests/end_to_end.rs
+      - tests/common/**
+      - tests/fixtures/native-worker/**
 
 permissions:
   contents: read
@@ -62,6 +70,10 @@ jobs:
           restore-keys: cargo-bin-${{ matrix.target }}-
       - name: Build tpe
         run: cargo build --release --locked -p text-processing-engine --bin tpe
+      - name: Native release worker limits and CLI boundary
+        run: |
+          cargo test --release --locked -p text-processing-engine --bin tpe worker_limits:: -- --test-threads=1 --nocapture
+          cargo test --release --locked -p text-processing-engine --test cli_containment --test worker_startup --test end_to_end -- --test-threads=2 --nocapture
       - name: Smoke test
         run: |
           ./target/release/tpe --version

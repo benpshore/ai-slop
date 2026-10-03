@@ -2,7 +2,8 @@
 //! hash and where they were observed. The file is stat'ed before and after
 //! the read so a concurrent modification is reported instead of hashed.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
 
 use thiserror::Error;
@@ -115,11 +116,21 @@ pub fn snapshot(path: &Path, max_bytes: Option<u64>) -> Result<Snapshot, Acquire
 /// [`snapshot`] without the hash: read `path` completely with the same
 /// checks, and leave hashing to the caller.
 pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, AcquireError> {
+    // Avoid opening known devices/FIFOs. The descriptor is checked again after
+    // opening, so replacing a regular path cannot turn this into a device read.
     let before_meta = fs::metadata(path)?;
     if !before_meta.is_file() {
         return Err(AcquireError::NotAFile);
     }
-    let before = observe(&before_meta);
+    let mut file = File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
+        return Err(AcquireError::NotAFile);
+    }
+    let before = observe(&opened);
+    if before != observe(&before_meta) {
+        return Err(AcquireError::ChangedDuringRead);
+    }
     if before.size == 0 {
         return Err(AcquireError::Empty);
     }
@@ -132,12 +143,34 @@ pub fn read_verified(path: &Path, max_bytes: Option<u64>) -> Result<Unhashed, Ac
         });
     }
 
-    let bytes = fs::read(path)?;
+    read_contents(&mut file, path, before, max_bytes)
+}
 
-    let after_meta = fs::metadata(path)?;
-    let after = observe(&after_meta);
+fn read_contents(
+    file: &mut File,
+    path: &Path,
+    before: Observed,
+    max_bytes: Option<u64>,
+) -> Result<Unhashed, AcquireError> {
+    // Bound the read itself, not just the metadata observed before it. Even
+    // without a caller cap, a concurrently growing file may not cause an
+    // allocation beyond the original size plus the sentinel byte.
+    let cap = max_bytes.map_or(before.size, |limit| limit.min(before.size));
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    if let Some(max) = max_bytes
+        && bytes.len() as u64 > max
+    {
+        return Err(AcquireError::TooLarge {
+            size: bytes.len() as u64,
+            max,
+        });
+    }
+
+    let after = observe(&file.metadata()?);
+    let path_after = observe(&fs::metadata(path)?);
     let read_len = bytes.len() as u64;
-    if after != before || read_len != before.size {
+    if after != before || path_after != before || read_len != before.size {
         return Err(AcquireError::ChangedDuringRead);
     }
 
@@ -207,6 +240,38 @@ mod tests {
             }
             other => panic!("expected TooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn growth_after_descriptor_observation_is_bounded_and_rejected() {
+        use std::io::{Seek, Write};
+        let mut input = NamedTempFile::new().unwrap();
+        input.write_all(b"12345678").unwrap();
+        let mut opened = File::open(input.path()).unwrap();
+        let before = observe(&opened.metadata().unwrap());
+        input.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+        let error = read_contents(&mut opened, input.path(), before, Some(8)).unwrap_err();
+        assert!(matches!(error, AcquireError::TooLarge { size: 9, max: 8 }));
+        assert_eq!(opened.stream_position().unwrap(), 9);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacing_the_path_does_not_change_the_open_snapshot_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("source.pdf");
+        fs::write(&path, b"original").unwrap();
+        let mut opened = File::open(&path).unwrap();
+        let before = observe(&opened.metadata().unwrap());
+        fs::rename(&path, dir.path().join("original.pdf")).unwrap();
+        fs::write(&path, b"replaced").unwrap();
+        let error = read_contents(&mut opened, &path, before, Some(64)).unwrap_err();
+        assert!(matches!(error, AcquireError::ChangedDuringRead));
+        assert_eq!(
+            fs::read(dir.path().join("original.pdf")).unwrap(),
+            b"original"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"replaced");
     }
 
     #[test]
