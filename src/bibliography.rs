@@ -16,7 +16,7 @@ use crate::reading_order;
 use crate::regions;
 use crate::router::{self, Assessment, Route};
 use crate::schema::BackendIdentity;
-use crate::schema::{PageText, ReferenceEntry};
+use crate::schema::{PageText, ReferenceEntry, Status};
 use crate::text_cleanup;
 
 /// A single end-list search. `found` means the list boundary passed the
@@ -48,6 +48,8 @@ pub struct Record {
     pub sha256: Option<String>,
     pub backend: BackendIdentity,
     pub status: &'static str,
+    /// Completeness of the pages inspected, independently of list detection.
+    pub extraction_status: Status,
     pub total_pages: Option<u32>,
     pub pages_scanned: Option<u32>,
     pub section_page: Option<u32>,
@@ -80,6 +82,15 @@ impl Record {
             sha256: Some(sha256),
             backend,
             status: if scan.found { "found" } else { "not_found" },
+            extraction_status: if scan
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("resource_limit:"))
+            {
+                Status::Partial
+            } else {
+                Status::Complete
+            },
             total_pages: Some(scan.total_pages),
             pages_scanned: Some(scan.pages_scanned),
             section_page: scan.section_page,
@@ -108,6 +119,7 @@ impl Record {
             sha256,
             backend,
             status: "failed",
+            extraction_status: Status::Failed,
             total_pages: None,
             pages_scanned: None,
             section_page: None,
@@ -187,6 +199,7 @@ fn scan_window(
     let mut session = extractor.open(bytes, password)?;
     let total_pages = session.page_count();
     let mut pages: Vec<PageText> = Vec::new();
+    let mut warnings = Vec::new();
     observe(Progress::Opened {
         pages: total_pages,
         total: total_pages,
@@ -211,6 +224,10 @@ fn scan_window(
         let mut checked = pages.clone();
         text_cleanup::clean_document(&mut checked);
         regions::tag_regions(&mut checked);
+        warnings = checked
+            .iter()
+            .flat_map(|page| page.warnings.iter().cloned())
+            .collect();
         for section in citations::find_reference_sections(&checked)
             .into_iter()
             .rev()
@@ -235,10 +252,6 @@ fn scan_window(
                 let link_pages = link_pages_via_lopdf(bytes, password, &checked);
                 crate::resolve::attach_links(&mut references, &link_pages);
             }
-            let mut warnings: Vec<String> = checked
-                .iter()
-                .flat_map(|page| page.warnings.iter().cloned())
-                .collect();
             for entry in &references {
                 if entry.raw.contains('\u{fffd}') {
                     warnings.push(format!(
@@ -264,6 +277,7 @@ fn scan_window(
     }
 
     let assessment = router::assess(&pages);
+    warnings.push("no bibliography boundary with at least three entries found".to_string());
     Ok(BibliographyScan {
         total_pages,
         pages_scanned: u32::try_from(pages.len()).unwrap_or(u32::MAX),
@@ -271,7 +285,7 @@ fn scan_window(
         section_page: None,
         heading: None,
         references: Vec::new(),
-        warnings: vec!["no bibliography boundary with at least three entries found".to_string()],
+        warnings,
         assessment,
         plausible: true,
     })
@@ -730,6 +744,7 @@ mod tests {
         assert!(record.found());
         let value = serde_json::to_value(&record).unwrap();
         assert_eq!(value["status"], "found");
+        assert_eq!(value["extraction_status"], "complete");
         assert_eq!(value["path"], "p.pdf");
         assert_eq!(value["total_pages"], 3);
         assert_eq!(value["pages_scanned"], 2);
@@ -747,6 +762,7 @@ mod tests {
         assert!(!failed.found());
         let value = serde_json::to_value(&failed).unwrap();
         assert_eq!(value["status"], "failed");
+        assert_eq!(value["extraction_status"], "failed");
         assert_eq!(value["sha256"], serde_json::Value::Null);
         assert_eq!(value["total_pages"], serde_json::Value::Null);
         assert_eq!(value["warnings"], serde_json::json!(["malformed"]));

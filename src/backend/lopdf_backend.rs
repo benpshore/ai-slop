@@ -2388,6 +2388,7 @@ struct Graphics {
     overflow: bool,
     /// Image placements, at most [`MAX_CLUSTER_BOXES`].
     rasters: Vec<Raster>,
+    raster_overflow: bool,
 }
 
 impl Graphics {
@@ -2414,6 +2415,8 @@ impl Graphics {
     fn add_raster(&mut self, raster: Raster) {
         if self.rasters.len() < MAX_CLUSTER_BOXES {
             self.rasters.push(raster);
+        } else {
+            self.raster_overflow = true;
         }
     }
 
@@ -2498,6 +2501,16 @@ impl<'a> Interpreter<'a> {
     /// as one warning.
     fn finish(mut self) -> PageText {
         let graphics = std::mem::take(&mut self.graphics);
+        if graphics.raster_overflow {
+            self.warn(format!(
+                "resource_limit: raster placements truncated (limit={MAX_CLUSTER_BOXES})"
+            ));
+        }
+        if graphics.overflow {
+            self.warn(format!(
+                "resource_limit: vector regions coalesced (limit={MAX_CLUSTER_BOXES})"
+            ));
+        }
         self.page.figures = graphics.into_figures();
         if self.ligatures > 0 {
             let count = self.ligatures;
@@ -2848,7 +2861,7 @@ impl<'a> Interpreter<'a> {
         if depth >= self.max_depth {
             let limit = self.max_depth;
             self.warn(format!(
-                "XObject {label}: nesting deeper than {limit}; skipped"
+                "resource_limit: XObject {label}: nesting deeper than {limit}; skipped"
             ));
             return;
         }
@@ -5488,6 +5501,10 @@ mod tests {
 
     /// Emit each of `texts` as one span on a fresh page and finish it.
     fn emit_all(texts: &[&str]) -> PageText {
+        emit_all_with_graphics(texts, Graphics::default())
+    }
+
+    fn emit_all_with_graphics(texts: &[&str], graphics: Graphics) -> PageText {
         let doc = Document::with_version("1.5");
         let mut cache = SessionCache::default();
         let mut interpreter = Interpreter {
@@ -5503,6 +5520,7 @@ mod tests {
             ligatures: 0,
             graphics: Graphics::default(),
         };
+        interpreter.graphics = graphics;
         for &text in texts {
             interpreter.emit(text.to_string(), 1.0, None);
         }
@@ -6215,7 +6233,13 @@ mod tests {
                 height_px: Some(1),
             });
         }
-        let figures = graphics.into_figures();
+        assert!(graphics.raster_overflow);
+        let page = emit_all_with_graphics(&[], graphics);
+        assert_eq!(
+            page.warnings,
+            ["resource_limit: raster placements truncated (limit=2000)"]
+        );
+        let figures = page.figures;
         assert_eq!(figures.len(), MAX_CLUSTER_BOXES);
         assert!(figures.iter().all(|figure| figure.kind == "raster"));
     }

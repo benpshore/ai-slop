@@ -459,8 +459,8 @@ pub fn run_job_with_observed(
         hashed,
         page_count,
         mut pages,
-        warnings,
-        status,
+        mut warnings,
+        mut status,
         info,
     } = parse_while_hashing(extractor, job, &read.bytes, &mut identity, observe)?;
     timings.parse_ms = elapsed_ms(parse_start);
@@ -479,6 +479,21 @@ pub fn run_job_with_observed(
     text_cleanup::clean_document(&mut pages);
     regions::tag_regions(&mut pages);
     timings.order_ms = elapsed_ms(order_start);
+
+    // Limits can be reached during decoding, ordering, or cleanup. Keep the
+    // retained text, but never publish a limited result as complete. Promote
+    // page-local cutoff diagnostics so JSON consumers and the ledger's run
+    // record do not have to infer completeness from nested warning strings.
+    for page in &pages {
+        if page.extraction_status() == Status::Partial {
+            status = Status::Partial;
+        }
+        for warning in &page.warnings {
+            if warning.starts_with("resource_limit:") {
+                warnings.push(format!("page {}: {warning}", page.page));
+            }
+        }
+    }
 
     let chunks = chunk_results(&pages, timings.parse_ms + timings.order_ms);
 
@@ -519,7 +534,7 @@ pub fn run_job_with_observed(
 /// when only a sub-range was extracted. `parse_plus_order_ms` is apportioned
 /// to chunks by page count. The chunk text hash covers the page texts joined
 /// by `"\n\x0C\n"`. A chunk is `Partial` when any of its pages carries a
-/// warning starting with `failed:`.
+/// warning starting with `failed:` or `resource_limit:`.
 pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkResult> {
     if pages.is_empty() {
         return Vec::new();
@@ -544,7 +559,7 @@ pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkR
             first_page = first_page.min(page.page);
             last_page = last_page.max(page.page);
             texts.push(page.text.as_str());
-            if page.warnings.iter().any(|w| w.starts_with("failed:")) {
+            if page.extraction_status() == Status::Partial {
                 status = Status::Partial;
             }
         }
