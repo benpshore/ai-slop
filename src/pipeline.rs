@@ -344,7 +344,7 @@ pub fn run_job_observed(
 
 /// Backend name that routes: `lopdf` first, then `pdfium` for pages whose
 /// fonts had no Unicode mapping, then docling (layout and OCR) for scans
-/// or other poor text (`crate::router`). Unresolved PDFium mapping evidence
+/// or other poor text (`crate::router`). Unresolved `PDFium` mapping evidence
 /// retains native Partial output: automatic OCR recovery is not verified.
 pub const AUTO_BACKEND: &str = "auto";
 
@@ -353,7 +353,7 @@ pub const AUTO_BACKEND: &str = "auto";
 /// backend is compiled in and works, its result replaces the `lopdf` one
 /// and a `routed: …` warning records why. A missing or failing backend
 /// keeps the `lopdf` result with a warning naming the route that was not
-/// taken. PDFium mapping diagnostics instead retain the native Partial result;
+/// taken. `PDFium` mapping diagnostics instead retain the native Partial result;
 /// those flags mark unverified mappings, not necessarily lost characters.
 /// Progress events are reported for every pass.
 pub fn run_job_auto_observed(
