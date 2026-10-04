@@ -25,11 +25,16 @@ on:
       - src/bibliography.rs
       - src/citations.rs
       - src/reading_order.rs
+      - src/reading_order/**
       - src/text_cleanup.rs
       - src/regions.rs
       - src/backend/lopdf_backend.rs
+      - src/backend/lopdf_backend/**
       - scripts/pmc_*.py
       - corpus/pmc-manifest.json
+      - corpus/verified/**
+      - tests/test_pmc_bib_eval.py
+      - tests/test_pmc_snapshot.py
       - .github/workflows/pmc-bibliography.yml
 
 permissions:
@@ -126,6 +131,7 @@ jobs:
       - name: Score against the JATS reference lists
         run: |
           python3 scripts/pmc_bib_eval.py \
+            --code-sha "$(git rev-parse HEAD)" \
             --manifest "$MANIFEST" --cache "$CACHE_DIR" \
             --bibliography out/bibliography.jsonl --extract out/extract.jsonl \
             --bibliography-wall-s "$(cat out/bib_wall_s)" --extract-wall-s "$(cat out/extract_wall_s)" \
@@ -146,4 +152,12 @@ jobs:
           path: |
             out/report
             out/bibliography.jsonl
+          if-no-files-found: ignore
+      - name: Preserve full forward extraction separately from the scored report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: pmc-forward-extraction
+          path: |
+            out/extract.jsonl
           if-no-files-found: ignore

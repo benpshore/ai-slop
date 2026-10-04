@@ -228,11 +228,20 @@ fn protect_sources(paths: &[PathBuf], db: &Path) -> anyhow::Result<PathBuf> {
         }
     }
     for source in paths {
-        let Ok(source_meta) = fs::metadata(source) else {
-            continue;
-        };
+        let source_path =
+            super::prospective_path_identity(source).context("resolving selected source path")?;
+        let source_meta = fs::metadata(source).ok();
         for destination in &destinations {
-            if let Ok(destination_meta) = fs::metadata(destination) {
+            if let Some(source_path) = &source_path {
+                ensure!(
+                    super::prospective_path_identity(destination)?.as_ref() != Some(source_path),
+                    "ledger or sidecar aliases input {}; choose a different --db",
+                    source.display()
+                );
+            }
+            if let (Some(source_meta), Ok(destination_meta)) =
+                (&source_meta, fs::metadata(destination))
+            {
                 #[cfg(unix)]
                 let same = {
                     use std::os::unix::fs::MetadataExt;
@@ -684,6 +693,7 @@ pub(super) fn run_worker(
         .recv()
         .context("initializing controller lease")?;
     let limits = worker_limits::install(growth_bytes, parent)?;
+    super::worker_allocator::enforce();
     let encoded = read_limited(request_path, REQUEST_BYTES, true)?;
     match phase {
         "extract" => extract_worker(&serde_json::from_slice(&encoded)?, limits)?,

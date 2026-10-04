@@ -295,6 +295,53 @@ fn year_in_entry(year: u16, raw_folded: &str) -> bool {
         .any(|w| candidates.iter().any(|y| w == y.to_string()))
 }
 
+/// Publishers sometimes append the citing paper's own citation to the last
+/// reference. Its author, year and title are not evidence for that reference.
+/// Preserve the original text on the entry for inspection.
+fn reference_text(raw: &str) -> &str {
+    static FOOTER: OnceLock<Regex> = OnceLock::new();
+    let footer = FOOTER.get_or_init(|| {
+        Regex::new(r"(?i)\bcite\s+this\s+(?:article|paper)\s+as\s*:").expect("valid regex")
+    });
+    footer.find(raw).map_or(raw, |m| &raw[..m.start()])
+}
+
+/// Multiple distinct printed DOIs can mark joined references or a reference
+/// to several works. Neither DOI order nor a query match chooses the intended
+/// identity. Reuse the citation parser's line-wrap repair, and treat repeated
+/// forms of the same DOI as one identity.
+fn reject_ambiguous_printed_dois(entry: &mut ReferenceEntry) -> bool {
+    let text = reference_text(&entry.raw);
+    let mut starts = crate::citations::doi_start_re().find_iter(text).peekable();
+    let mut search_from = 0;
+    let mut first = None;
+    while let Some(start) = starts.next() {
+        // Bound each repair to its own DOI. A broken first identifier must not
+        // hide later ones, and adjacent DOIs must not be joined as line wraps.
+        // Keep the preceding context: doi.org/ enables the parser's URL-wrap
+        // repair. Advancing past the previous start skips malformed prefixes.
+        let begin = search_from;
+        search_from = start.end();
+        let end = starts.peek().map_or(text.len(), regex::Match::start);
+        let Some((_, doi)) = crate::citations::find_doi(&text[begin..end]) else {
+            continue;
+        };
+        if let Some(doi) = normalize_doi(&doi) {
+            if first.as_ref().is_some_and(|previous| previous != &doi) {
+                entry.attempts.push(Attempt {
+                    method: "printed".to_string(),
+                    doi: None,
+                    outcome: "ambiguous".to_string(),
+                    detail: Some("entry contains multiple distinct printed DOIs".to_string()),
+                });
+                return true;
+            }
+            first = Some(doi);
+        }
+    }
+    false
+}
+
 /// Verify `record` against the printed `entry`: the score, or why not
 /// (which check failed, with both values). The checks read the raw entry
 /// text, not the parsed fields, so a parser slip cannot reject a correct
@@ -302,7 +349,7 @@ fn year_in_entry(year: u16, raw_folded: &str) -> bool {
 /// entry, its year (within one) must appear, and, when the record title
 /// has words to check, most of them must appear.
 fn verify(record: &PaperRecord, entry: &ReferenceEntry) -> Result<f32, String> {
-    let raw = folded(&entry.raw);
+    let raw = folded(reference_text(&entry.raw));
     let mut score_parts: Vec<f32> = Vec::new();
     if let Some(year) = record.year {
         if !year_in_entry(year, &raw) {
@@ -402,16 +449,25 @@ fn bibliographic_search(
     crossref::parse_crossref_found(&client.get_text(&url, &[])?)
 }
 
-/// Does a word of the record's venue (3+ chars, `RNA`, `Lancet`) appear in
-/// the entry? Journal names are how an article is told from its preprint or
-/// poster when title, authors and year all agree.
-fn venue_in_entry(venue: &str, raw_folded: &str) -> bool {
+/// Does a meaningful word of the record's venue (3+ chars, `RNA`, `Lancet`)
+/// appear in the entry? Function words such as "and" in a title are not
+/// journal evidence. A word already supplied by the candidate title is not
+/// independent venue evidence either. Venue names help distinguish articles
+/// from preprints or posters when title, authors and year all agree.
+fn venue_in_entry(venue: &str, raw_folded: &str, title: &str) -> bool {
     let needles = words(&folded(venue), 3);
     if needles.is_empty() {
         return false;
     }
     let hay = words(raw_folded, 1);
-    needles.iter().any(|n| hay.iter().any(|h| h == n))
+    let title_words = words(&folded(title), 1);
+    needles.iter().any(|n| {
+        !matches!(
+            n.as_str(),
+            "and" | "the" | "for" | "with" | "from" | "into" | "via"
+        ) && !title_words.iter().any(|word| word == n)
+            && hay.iter().any(|h| h == n)
+    })
 }
 
 /// Minimum winning margin between distinct query candidates. Search order is
@@ -422,7 +478,7 @@ fn select_query_record(
     entry: &mut ReferenceEntry,
     records: impl IntoIterator<Item = PaperRecord>,
 ) -> Option<Resolved> {
-    let raw = folded(&entry.raw);
+    let raw = folded(reference_text(&entry.raw));
     let mut candidates: Vec<(f32, Resolved)> = Vec::new();
     for record in records {
         let Some(doi) = record.doi.as_deref().and_then(normalize_doi) else {
@@ -440,7 +496,7 @@ fn select_query_record(
                 let venue_bonus = if record
                     .venue
                     .as_deref()
-                    .is_some_and(|v| venue_in_entry(v, &raw))
+                    .is_some_and(|v| venue_in_entry(v, &raw, &record.title))
                 {
                     0.5
                 } else {
@@ -491,7 +547,7 @@ fn select_query_record(
 /// (the parser can trim balanced suffix punctuation).
 fn printed_doi(entry: &ReferenceEntry) -> Option<String> {
     let parsed = entry.doi.as_deref().and_then(doi_in);
-    let raw = doi_in(&entry.raw);
+    let raw = doi_in(reference_text(&entry.raw));
     match (parsed, raw) {
         (Some(parsed), Some(raw)) if raw.starts_with(&parsed) => Some(raw),
         (Some(parsed), _) => Some(parsed),
@@ -569,6 +625,7 @@ fn with_retry<T>(mut request: impl FnMut() -> Result<T, BiblioError>) -> Result<
 fn biomedical_ids(text: &str) -> Vec<pmc::Identifier> {
     static PMID: OnceLock<Regex> = OnceLock::new();
     static PMCID: OnceLock<Regex> = OnceLock::new();
+    let text = reference_text(text);
     let pubmed_pattern = PMID.get_or_init(|| Regex::new(
         r"(?i)\b(?:PMID\s*:\s*|pubmed\.ncbi\.nlm\.nih\.gov/|ncbi\.nlm\.nih\.gov/pubmed/)([1-9]\d{0,11})\b"
     ).expect("valid regex"));
@@ -789,6 +846,9 @@ impl Resolver {
         &self,
         entry: &mut ReferenceEntry,
     ) -> Result<Option<&'static str>, BiblioError> {
+        if reject_ambiguous_printed_dois(entry) {
+            return Ok(None);
+        }
         if resolve_explicit_biomedical(entry, |entry, id| self.try_biomedical(entry, id)) {
             return Ok(entry.resolved.as_ref().map(|_| "europepmc"));
         }
@@ -814,7 +874,10 @@ impl Resolver {
                 return Ok(Some("europepmc"));
             }
         }
-        let query: String = entry.raw.chars().take(QUERY_CHARS).collect();
+        let query: String = reference_text(&entry.raw)
+            .chars()
+            .take(QUERY_CHARS)
+            .collect();
         let found = match with_retry(|| bibliographic_search(&self.client, &query, QUERY_ROWS)) {
             Ok(found) => found,
             Err(err) => {
@@ -981,11 +1044,202 @@ mod tests {
 
     #[test]
     fn query_uses_venue_evidence_to_distinguish_versions() {
-        let preprint = query_record("10.1000/preprint");
-        let mut article = query_record("10.1000/article");
-        article.venue = Some("Immunology".to_string());
-        let selected = select_query_record(&mut query_entry(), [preprint, article]).unwrap();
-        assert_eq!(selected.doi.as_deref(), Some("10.1000/article"));
+        for venue in ["Immunology", "RNA", "The Lancet"] {
+            let preprint = query_record("10.1000/preprint");
+            let mut article = query_record("10.1000/article");
+            article.venue = Some(venue.to_string());
+            let mut entry = query_entry();
+            entry.raw = entry.raw.replace("Immunology", venue);
+            let selected = select_query_record(&mut entry, [preprint, article]).unwrap();
+            assert_eq!(selected.doi.as_deref(), Some("10.1000/article"));
+        }
+    }
+
+    #[test]
+    fn venue_function_word_does_not_outrank_a_better_title_match() {
+        // PMC11033918 reference 9, independently labeled by its JATS DOI.
+        // The live registry returned a related conference abstract whose venue
+        // shares only "and" with the citation. That is not journal evidence.
+        let article = PaperRecord {
+            doi: Some("10.1200/op.20.00266".to_string()),
+            title: "Restricted mouth opening in head and neck cancer: etiology, prevention, and treatment".to_string(),
+            authors: vec!["W. Abboud".to_string()],
+            year: Some(2020),
+            venue: Some("JCO Oncology Practice".to_string()),
+            ..PaperRecord::default()
+        };
+        let abstract_record = PaperRecord {
+            doi: Some("10.1016/j.ijom.2019.03.511".to_string()),
+            title: "Reduced mouth opening in head and neck cancer patients".to_string(),
+            authors: vec!["W. Abboud".to_string()],
+            year: Some(2019),
+            venue: Some("International Journal of Oral and Maxillofacial Surgery".to_string()),
+            ..PaperRecord::default()
+        };
+        for records in [
+            [article.clone(), abstract_record.clone()],
+            [abstract_record, article],
+        ] {
+            let mut entry = ReferenceEntry {
+                raw: "Abboud. Restricted mouth opening in head and neck cancer: etiology, prevention, and treatment. 2020.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            let selected = select_query_record(&mut entry, records).unwrap();
+            assert_eq!(selected.doi.as_deref(), Some("10.1200/op.20.00266"));
+        }
+    }
+
+    #[test]
+    fn venue_function_word_does_not_remove_query_ambiguity() {
+        let mut a = query_record("10.1000/a");
+        a.title = "Molecular mechanisms for inflammation".to_string();
+        let mut b = a.clone();
+        b.doi = Some("10.1000/b".to_string());
+        b.venue = Some("Journal for Biomedical Research".to_string());
+        for records in [[a.clone(), b.clone()], [b, a]] {
+            let mut entry = ReferenceEntry {
+                raw: "Smith J. Molecular mechanisms for inflammation. 2020.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(select_query_record(&mut entry, records).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+        }
+    }
+
+    #[test]
+    fn venue_word_in_candidate_title_does_not_remove_query_ambiguity() {
+        // A merged input from PMC9866640:33 and PMC3777682:64 contains both
+        // complete titles. "Animal" is already title evidence for Rossiter;
+        // it must not also count as independent journal evidence.
+        let animal = PaperRecord {
+            doi: Some("10.1007/s11250-008-9266-7".to_string()),
+            title: "Living with transboundary animal diseases (TADs)".to_string(),
+            authors: vec!["Paul B. Rossiter".to_string()],
+            year: Some(2008),
+            venue: Some("Tropical Animal Health and Production".to_string()),
+            ..PaperRecord::default()
+        };
+        let visual = PaperRecord {
+            doi: Some("10.1017/s1355617711000981".to_string()),
+            title: "Impaired visual scanning and memory for faces in high-functioning autism spectrum disorders: it's not just the eyes".to_string(),
+            authors: vec!["J. Snow".to_string()],
+            year: Some(2011),
+            venue: Some("Journal of the International Neuropsychological Society".to_string()),
+            ..PaperRecord::default()
+        };
+        for records in [[animal.clone(), visual.clone()], [visual, animal]] {
+            let mut entry = ReferenceEntry {
+                raw: "Rossiter. Living with transboundary animal diseases (TADs). 2009. / Snow. Impaired visual scanning and memory for faces in high-functioning autism spectrum disorders: it's not just the eyes. 2011.".to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(select_query_record(&mut entry, records).is_none());
+            assert_eq!(entry.attempts.last().unwrap().outcome, "ambiguous");
+        }
+    }
+
+    #[test]
+    fn merged_wrapped_dois_are_ambiguous_before_any_registry_request() {
+        // Unchanged extraction from natural:PMC12745427:4 in the independent
+        // 384-case cohort: part of Bendau's entry is joined to Biddle's entry.
+        // The live baseline incorrectly accepted Biddle after rejecting Bendau.
+        let raw = "Sport bei depressiven Erkrankungen. NeuroTransmitter 33, 52–61. doi: 10.1007/ s15016-021-9343-y Biddle, S. J. H., and Asare, M. (2011). Physical activity and mental health in children and adolescents: a review of reviews. Br. J. Sports Med. 45, 886–895. doi: 10.1136/ bjsports-2011-090185 Bosnak-Guclu, M., Arikan, H., Savci, S., Inal-Ince, D., Tulumen, E., Aytemir, K., et al.";
+        let mut entries = [ReferenceEntry {
+            raw: raw.to_string(),
+            doi: Some("10.1007/s15016-021-9343-y".to_string()),
+            doi_link: Some("10.1007/s15016-021-9343-y".to_string()),
+            ..ReferenceEntry::default()
+        }];
+        let resolver = Resolver {
+            client: Client::new("test").with_offline(true),
+        };
+        let outcome = resolver.resolve_entries(&mut entries);
+        assert_eq!(outcome.unresolved, 1);
+        assert_eq!(
+            outcome.errors, 0,
+            "ambiguity must not need a network request"
+        );
+        assert_eq!(outcome.rejected, 0);
+        assert!(entries[0].resolved.is_none());
+        assert_eq!(entries[0].attempts.len(), 1);
+        assert_eq!(entries[0].attempts[0].outcome, "ambiguous");
+        assert_eq!(entries[0].raw, raw);
+    }
+
+    #[test]
+    fn repeated_doi_forms_do_not_create_ambiguity() {
+        for raw in [
+            "Smith. Molecular mechanisms of inflammation. 2020. doi:10.1000/ABC. https://doi.org/10.1000/abc",
+            "Smith. Molecular mechanisms of inflammation. 2020. doi:10.1000/ ABC; doi:10.1000/abc",
+            "Smith. Molecular mechanisms of inflammation. 2020. 10.1000/ABC 10.1000/abc",
+            "Smith. Molecular mechanisms of inflammation. 2020. https://doi.org/10.1000/abc def2; doi:10.1000/abcdef2",
+        ] {
+            let mut entry = ReferenceEntry {
+                raw: raw.to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(!reject_ambiguous_printed_dois(&mut entry));
+            assert!(entry.attempts.is_empty());
+        }
+        let mut entry = query_entry();
+        entry.raw.push_str(" 10.1000/a 10.1000/b");
+        assert!(reject_ambiguous_printed_dois(&mut entry));
+    }
+
+    #[test]
+    fn broken_doi_does_not_hide_later_conflicting_identifiers() {
+        let mut entries = [ReferenceEntry {
+            raw: "truncated doi: 10.1000/ ; Smith. Molecular mechanisms of inflammation. 2020. doi:10.1000/a Jones. Another complete citation. 2021. doi:10.1000/b".to_string(),
+            ..ReferenceEntry::default()
+        }];
+        let resolver = Resolver {
+            client: Client::new("test").with_offline(true),
+        };
+        let outcome = resolver.resolve_entries(&mut entries);
+        assert_eq!(outcome.unresolved, 1);
+        assert_eq!(outcome.errors, 0);
+        assert_eq!(outcome.rejected, 0);
+        assert_eq!(entries[0].attempts.len(), 1);
+        assert_eq!(entries[0].attempts[0].outcome, "ambiguous");
+    }
+
+    #[test]
+    fn citing_article_footer_cannot_verify_the_last_reference() {
+        // natural:PMC3408377:60: the footer DOI precedes the explicit boundary.
+        // It must still fail verification against Gaddis's reference text.
+        let raw = "60. Gaddis NC, Chertova E, Sheehy AM, Henderson LE, Malim MH: Comprehensive investigation of the molecular defect in vif-deficient human immunodeficiency virus type 1 virions. J Virol 2003, 77:5810–5820. doi:10.1186/1742-4690-9-53 Cite this article as: Arjan-Odedra et al.: Endogenous MOV10 inhibits the retrotransposition of endogenous retroelements but not the replication of exogenous retroviruses. Retrovirology 2012 9:53.";
+        let citing_article = PaperRecord {
+            doi: Some("10.1186/1742-4690-9-53".to_string()),
+            title: "Endogenous MOV10 inhibits the retrotransposition of endogenous retroelements but not the replication of exogenous retroviruses".to_string(),
+            authors: vec!["Shetal Arjan-Odedra".to_string()],
+            year: Some(2012),
+            venue: Some("Retrovirology".to_string()),
+            ..PaperRecord::default()
+        };
+        let correct = PaperRecord {
+            doi: Some("10.1128/jvi.77.10.5810-5820.2003".to_string()),
+            title: "Comprehensive investigation of the molecular defect in vif-deficient human immunodeficiency virus type 1 virions".to_string(),
+            authors: vec!["Nathaniel C. Gaddis".to_string()],
+            year: Some(2003),
+            venue: Some("Journal of Virology".to_string()),
+            ..PaperRecord::default()
+        };
+        for records in [
+            [citing_article.clone(), correct.clone()],
+            [correct.clone(), citing_article.clone()],
+        ] {
+            let mut entry = ReferenceEntry {
+                raw: raw.to_string(),
+                ..ReferenceEntry::default()
+            };
+            assert!(verify(&citing_article, &entry).is_err());
+            assert!(verify(&correct, &entry).is_ok());
+            assert_eq!(
+                select_query_record(&mut entry, records).unwrap().doi,
+                correct.doi
+            );
+            assert_eq!(entry.raw, raw);
+        }
+        assert!(biomedical_ids("Gaddis 2003. Cite this article as: PMID:22727223").is_empty());
     }
 
     #[test]

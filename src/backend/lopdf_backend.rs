@@ -2,12 +2,12 @@
 //! content stream (text state, graphics state, Form `XObject`s) and yields
 //! one positioned [`Span`] per shown string. Nothing is ordered or repaired.
 //!
-//! Per-document work is cached inside the session: a font dictionary is
-//! resolved (encoding, widths, flags) once per `ObjectId` and shared by
-//! every page and Form `XObject` that references it, and a Form `XObject`'s
-//! content stream is decompressed and lexed once while the decoded programs
-//! fit [`MAX_FORM_CACHE_BYTES`]; beyond that budget a Form is decoded on
-//! every use. The caches hold only owned data, so they never borrow the
+//! Per-document work is cached inside the session: a used font dictionary is
+//! resolved (encoding, widths, flags) lazily and shared by `ObjectId` through
+//! a byte- and entry-bounded FIFO cache, and a Form `XObject`'s
+//! content stream is reused through a byte- and entry-bounded FIFO cache.
+//! Decoding and execution have separate per-page budgets; exhaustion fails
+//! the page explicitly instead of publishing silently truncated text. The caches hold only owned data, so they never borrow the
 //! [`Document`] they were built from.
 //!
 //! Content streams are not parsed with `Content::decode`, which allocates
@@ -31,7 +31,7 @@
 //! shown with `Do` is the unit square under the CTM. Each page then gets
 //! `rule` figures (thin horizontal or vertical painted boxes), `vector`
 //! figures (the other painted boxes merged where they lie within
-//! [`CLUSTER_GAP`] of each other) and `raster` figures, in that order.
+//! `graphics::CLUSTER_GAP` of each other) and `raster` figures, in that order.
 //!
 //! Text is normalised, never repaired: every non-ASCII string is put in NFC,
 //! and the Latin presentation-form ligatures U+FB00 to U+FB06 (`ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ
@@ -52,20 +52,37 @@
 //! have their encodings tabulated (`CMSY` code 50 is `∈`, not `2`), other
 //! embedded Type1 programs are read for their encoding array. Glyph names
 //! resolve through [`GLYPH_NAMES`], `uniXXXX`/`uXXXX`, then `lopdf`'s own
-//! glyph list. The policy is in the identity as `encodings=1`.
+//! glyph list. The bounded loading policy is in the identity as `encodings=2`.
+//!
+//! Read the implementation by responsibility: `content` turns bytes into an
+//! owned program without consulting the document; this module resolves page
+//! resources and executes that program; `graphics` groups page-space boxes.
+//! `widths` owns font advance lookup after PDF arrays have been resolved.
+//! Parsing never owns execution state, and geometry never resolves PDF objects.
+//! The tests below exercise those boundaries together, including malformed
+//! content, Form reuse, coordinate transforms, and resource-limit reporting.
 
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 
 use lopdf::{
-    Dictionary, Document, Encoding, Error as LopdfError, LoadOptions, Object, ObjectId, ParseError,
-    Stream, StringFormat,
+    Dictionary, Document, Encoding, Error as LopdfError, LoadOptions, Object, ObjectId, Stream,
 };
 use unicode_normalization::UnicodeNormalization;
 
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
-use crate::schema::{BBox, BackendIdentity, Figure, Link, PageText, Span, config_digest};
+use crate::schema::{BBox, BackendIdentity, Link, PageText, Span, config_digest};
+
+mod content;
+mod graphics;
+mod widths;
+
+use content::{OpKind, TextProgram, is_pdf_space, lex_content};
+use graphics::{Graphics, MAX_CLUSTER_BOXES, MAX_CLUSTER_COMPARISONS, Raster, box_of};
+use widths::{CompositeWidths, SimpleWidths, Widths};
+
+mod font_resources;
+use font_resources::{FontWork, MAX_FONT_CACHE_BYTES, MAX_FONT_CACHE_ENTRIES, MIN_FONT_CHARGE};
 
 /// The `lopdf` release this backend is built against. It is part of the
 /// [`BackendIdentity`], so a dependency bump must change it (a unit test
@@ -164,30 +181,37 @@ const LIGATURE_POLICY: &str = "expand";
 /// identity so ledger runs from different policies are never confused:
 /// 1 = `Content::decode`; 2 = the streaming lexer with an isolated graphics
 /// stack per Form; 3 = painted paths and Image `XObject`s become figures;
-/// 4 = image placements are bounded per page.
-const CONTENT_POLICY: &str = "4";
+/// 4 = image placements are bounded per page; 5 = bounded Form decoding,
+/// caching and execution, with explicit page errors on resource exhaustion;
+/// 6 = fold balanced empty save/restore pairs when compiling Form programs;
+/// 7 = incrementally cluster painted boxes, with bounded comparisons/regions;
+/// 8 = skip proven redundant vector scans; charge containment probes too.
+/// 9 = retain incomplete evidence for skipped streams and truncated lexing.
+const CONTENT_POLICY: &str = "9";
 
-/// A painted box thinner than this (points) and at least [`RULE_LENGTH`]
-/// long is a `rule` figure.
-const RULE_THICKNESS: f32 = 2.0;
-/// Shortest `rule` figure, in points.
-const RULE_LENGTH: f32 = 30.0;
-/// Painted boxes closer than this (points) belong to one `vector` figure.
-const CLUSTER_GAP: f32 = 6.0;
-/// A `vector` cluster that fits in a square this wide (points) is dropped.
-const MIN_VECTOR_SIDE: f32 = 8.0;
-/// Most painted boxes or image placements retained on one page. Beyond this,
-/// painted boxes become one covering `vector` figure and images are ignored.
-const MAX_CLUSTER_BOXES: usize = 2000;
-/// Most decoded Form `XObject` program data kept per session. A document
-/// with many distinct, highly compressible Forms could otherwise grow the
-/// cache without bound; Forms beyond the budget are decoded on every use.
+/// Retained program allocation charge (not a process RSS limit).
 const MAX_FORM_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Also bound map buckets, allocator overhead and the eviction queue.
+const MAX_FORM_CACHE_ENTRIES: usize = 4096;
+const MIN_FORM_CHARGE: usize = 256;
+/// Limit both encoded and decoded bytes before lexing a Form.
+const MAX_FORM_DECODE_BYTES: usize = 8 * 1024 * 1024;
+/// Per-page limits also cover cache misses after eviction and direct Forms.
+const MAX_PAGE_FORM_DECODE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PAGE_FORM_WORK_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PAGE_FORM_CALLS: usize = 131_072;
+const MAX_FORM_FILTERS: usize = 8;
 
 /// Revision of the simple-font encoding policy, part of the backend identity:
 /// 1 = the TeX built-in encodings, embedded Type1 encodings and a
-/// `/Differences` parse that tolerates unknown glyph names.
-const ENCODING_POLICY: &str = "1";
+/// `/Differences` parse that tolerates unknown glyph names;
+/// 2 = lazy, bounded font loading and preflight before `CMap` reverse expansion;
+/// 3 = preserve the position of unmapped bytes and report lossy mapping evidence;
+/// 4 = prefer bounded `ToUnicode` maps over simple-font rendering encodings and
+/// preserve two-byte `Identity-H`/`Identity-V` code boundaries in sparse maps;
+/// 5 = retain usable rendering encodings when `ToUnicode` is malformed, with
+/// explicit Partial evidence instead of replacing readable text with Latin-1.
+const ENCODING_POLICY: &str = "5";
 
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,36 +295,179 @@ fn map_load_error(err: LopdfError) -> BackendError {
     }
 }
 
-/// Work that is identical for every page of one document, computed on first
-/// use and kept for the life of the session.
+/// Work shared across pages of one document, computed on use and retained
+/// in bounded caches until eviction or the end of the session.
 #[derive(Default)]
 struct SessionCache {
     /// Resolved font dictionaries, keyed by the indirect object they live in.
-    /// Fonts written directly into a resources dictionary have no id and are
-    /// resolved on every use.
+    /// Direct fonts have no id and are retained only by their current context.
     fonts: HashMap<ObjectId, Rc<LoadedFont>>,
-    /// The text-relevant operators and painted paths of Form `XObject`
-    /// streams, keyed by stream id, up to [`MAX_FORM_CACHE_BYTES`] of
-    /// decoded program data. Streams that fail to lex are not cached, so
-    /// their warning recurs exactly as it would without the cache; streams
-    /// beyond the budget are decoded on every use.
-    forms: HashMap<ObjectId, Rc<TextProgram>>,
-    /// Estimated bytes held by `forms`.
+    font_order: VecDeque<ObjectId>,
+    font_bytes: usize,
+    /// FIFO eviction retains normal reuse without an unbounded miss cache.
+    forms: HashMap<ObjectId, (Rc<TextProgram>, usize)>,
+    form_order: VecDeque<ObjectId>,
     form_bytes: usize,
+    #[cfg(test)]
+    last_form_work: Option<FormWork>,
+    /// Reference interpreter used only by equivalence tests and diagnostics.
+    #[cfg(test)]
+    disable_form_folding: bool,
 }
 
 impl SessionCache {
-    /// Retain `program` for `id` when it fits the remaining budget; returns
-    /// whether it was retained.
+    fn insert_font(&mut self, id: ObjectId, font: &Rc<LoadedFont>) {
+        if font.charge > MAX_FONT_CACHE_BYTES || self.fonts.contains_key(&id) {
+            return;
+        }
+        while self.fonts.len() >= MAX_FONT_CACHE_ENTRIES
+            || self.font_bytes.saturating_add(font.charge) > MAX_FONT_CACHE_BYTES
+        {
+            let Some(oldest) = self.font_order.pop_front() else {
+                return;
+            };
+            if let Some(old) = self.fonts.remove(&oldest) {
+                self.font_bytes -= old.charge;
+            }
+        }
+        self.font_bytes += font.charge;
+        self.fonts.insert(id, Rc::clone(font));
+        self.font_order.push_back(id);
+    }
+
     fn insert_form(&mut self, id: ObjectId, program: &Rc<TextProgram>) -> bool {
-        let bytes = program.estimated_bytes();
-        if self.form_bytes.saturating_add(bytes) > MAX_FORM_CACHE_BYTES {
+        let bytes = program.estimated_bytes().max(MIN_FORM_CHARGE);
+        if bytes > MAX_FORM_CACHE_BYTES {
             return false;
         }
+        // An existing immutable PDF object is already represented; do not
+        // double-charge it or add duplicate eviction records.
+        if self.forms.contains_key(&id) {
+            return true;
+        }
+        while self.forms.len() >= MAX_FORM_CACHE_ENTRIES
+            || self.form_bytes.saturating_add(bytes) > MAX_FORM_CACHE_BYTES
+        {
+            let Some(oldest) = self.form_order.pop_front() else {
+                return false;
+            };
+            if let Some((_, charge)) = self.forms.remove(&oldest) {
+                self.form_bytes -= charge;
+            }
+        }
         self.form_bytes += bytes;
-        self.forms.insert(id, Rc::clone(program));
+        self.forms.insert(id, (Rc::clone(program), bytes));
+        self.form_order.push_back(id);
         true
     }
+}
+
+/// Budgets reset for each page, so page order cannot exhaust a session-wide
+/// work allowance. These bound Form work, not document parsing or fonts.
+#[derive(Clone, Copy)]
+struct FormWork {
+    decode: usize,
+    execute: usize,
+    calls: usize,
+    #[cfg(test)]
+    interpreted_ops: usize,
+    #[cfg(test)]
+    elided_ops: usize,
+}
+
+impl Default for FormWork {
+    fn default() -> Self {
+        Self {
+            decode: MAX_PAGE_FORM_DECODE_BYTES,
+            execute: MAX_PAGE_FORM_WORK_BYTES,
+            calls: MAX_PAGE_FORM_CALLS,
+            #[cfg(test)]
+            interpreted_ops: 0,
+            #[cfg(test)]
+            elided_ops: 0,
+        }
+    }
+}
+
+fn charge(remaining: &mut usize, bytes: usize) -> bool {
+    if let Some(next) = remaining.checked_sub(bytes) {
+        *remaining = next;
+        true
+    } else {
+        false
+    }
+}
+
+struct FormDecodePolicy {
+    layers: usize,
+    uses_predictor: bool,
+}
+
+/// Check attacker-controlled filter metadata before entering lopdf's decoder.
+/// Predictor rows and their auxiliary color accumulators have separate bounds.
+fn form_decode_policy(stream: &Stream) -> Option<FormDecodePolicy> {
+    let layers = match stream.dict.get(b"Filter") {
+        Ok(Object::Array(filters)) => filters.len(),
+        Ok(_) => 1,
+        Err(_) => 0,
+    };
+    if layers > MAX_FORM_FILTERS {
+        return None;
+    }
+    // Match lopdf's decoder: only Flate/LZW use the dictionary-form
+    // parameters, and only TIFF 2 / PNG 10..15 apply prediction.
+    let predictor_filter = stream.filters().is_ok_and(|filters| {
+        filters
+            .iter()
+            .any(|filter| matches!(*filter, b"FlateDecode" | b"LZWDecode"))
+    });
+    let mut uses_predictor = false;
+    if predictor_filter
+        && let Ok(params) = stream.dict.get(b"DecodeParms").and_then(Object::as_dict)
+    {
+        let predictor = params
+            .get(b"Predictor")
+            .and_then(Object::as_i64)
+            .unwrap_or(1);
+        uses_predictor = predictor == 2 || (10..=15).contains(&predictor);
+        if !uses_predictor {
+            return Some(FormDecodePolicy {
+                layers: layers.max(1),
+                uses_predictor,
+            });
+        }
+        let dimension = |key: &[u8], default| {
+            usize::try_from(
+                params
+                    .get(key)
+                    .and_then(Object::as_i64)
+                    .unwrap_or(default)
+                    .max(1),
+            )
+            .ok()
+        };
+        let colors = dimension(b"Colors", 1)?;
+        let component_bits = dimension(b"BitsPerComponent", 8)?;
+        let bits = dimension(b"Columns", 1)?
+            .checked_mul(colors)?
+            .checked_mul(component_bits)?;
+        if bits > MAX_FORM_DECODE_BYTES.checked_mul(8)? {
+            return None;
+        }
+        // Packed rows do not bound the unpacked per-color accumulator in
+        // lopdf's reverse_tiff_predictor2_subbyte (Vec<u16>). Independently
+        // cap that auxiliary allocation before any decompression takes place.
+        if predictor == 2
+            && matches!(component_bits, 1 | 2 | 4)
+            && colors.checked_mul(size_of::<u16>())? > MAX_FORM_DECODE_BYTES
+        {
+            return None;
+        }
+    }
+    Some(FormDecodePolicy {
+        layers: layers.max(1),
+        uses_predictor,
+    })
 }
 
 struct LopdfSession {
@@ -508,125 +675,6 @@ fn to_code(value: f32) -> Option<u32> {
     }
 }
 
-/// Glyph widths of a simple (single-byte) font.
-struct SimpleWidths {
-    first_char: u32,
-    /// `/Widths`, in glyph space.
-    widths: Vec<f32>,
-    /// `/MissingWidth`, in glyph space.
-    missing: Option<f32>,
-    /// Glyph space to text space: 1/1000 for `Type1`/`TrueType`, the horizontal
-    /// scale of `/FontMatrix` for Type3.
-    glyph_scale: f32,
-}
-
-impl SimpleWidths {
-    fn unknown() -> Self {
-        Self {
-            first_char: 0,
-            widths: Vec::new(),
-            missing: None,
-            glyph_scale: THOUSANDTH,
-        }
-    }
-
-    /// Advance of `code` in text space (1.0 = the font size).
-    fn width(&self, code: u32) -> f32 {
-        let fallback = match self.missing {
-            Some(missing) => missing * self.glyph_scale,
-            None => DEFAULT_WIDTH * THOUSANDTH,
-        };
-        let Some(offset) = code.checked_sub(self.first_char) else {
-            return fallback;
-        };
-        let Ok(index) = usize::try_from(offset) else {
-            return fallback;
-        };
-        match self.widths.get(index) {
-            Some(glyph_width) => glyph_width * self.glyph_scale,
-            None => fallback,
-        }
-    }
-}
-
-/// Glyph widths of a composite (Type0) font, keyed by CID.
-struct CompositeWidths {
-    /// `(first, last, width)` runs from the `/W` array: sorted by `first`
-    /// when `disjoint`, otherwise in `/W` order.
-    ranges: Vec<(u32, u32, f32)>,
-    /// No two runs overlap, so at most one contains a CID and a binary
-    /// search finds it. Otherwise the first run in `/W` order that contains
-    /// the CID wins, found by a linear scan.
-    disjoint: bool,
-    default_width: f32,
-}
-
-impl CompositeWidths {
-    /// Index the `/W` runs for lookup. Empty runs (`first > last`) contain
-    /// no CID and are dropped from the sorted index.
-    fn new(ranges: Vec<(u32, u32, f32)>, default_width: f32) -> Self {
-        let mut sorted: Vec<(u32, u32, f32)> = ranges
-            .iter()
-            .copied()
-            .filter(|&(first, last, _)| first <= last)
-            .collect();
-        sorted.sort_by_key(|&(first, _, _)| first);
-        let disjoint = sorted.windows(2).all(|pair| match pair {
-            [left, right] => left.1 < right.0,
-            _ => true,
-        });
-        if disjoint {
-            Self {
-                ranges: sorted,
-                disjoint,
-                default_width,
-            }
-        } else {
-            Self {
-                ranges,
-                disjoint,
-                default_width,
-            }
-        }
-    }
-
-    /// Advance of `cid` in text space (1.0 = the font size).
-    fn width(&self, cid: u32) -> f32 {
-        if self.disjoint {
-            let after = self.ranges.partition_point(|&(first, _, _)| first <= cid);
-            if let Some(&(_, last, glyph_width)) = after
-                .checked_sub(1)
-                .and_then(|index| self.ranges.get(index))
-                && cid <= last
-            {
-                return glyph_width * THOUSANDTH;
-            }
-        } else {
-            for &(first, last, glyph_width) in &self.ranges {
-                if (first..=last).contains(&cid) {
-                    return glyph_width * THOUSANDTH;
-                }
-            }
-        }
-        self.default_width * THOUSANDTH
-    }
-}
-
-enum Widths {
-    Simple(SimpleWidths),
-    Composite(CompositeWidths),
-}
-
-impl Widths {
-    /// Advance of `code` in text space (1.0 = the font size).
-    fn text_width(&self, code: u32) -> f32 {
-        match self {
-            Self::Simple(simple) => simple.width(code),
-            Self::Composite(composite) => composite.width(code),
-        }
-    }
-}
-
 /// A single-byte encoding flattened into one entry per byte value.
 ///
 /// `lopdf` decodes its `OneByteEncoding` and `Differences` encodings one
@@ -634,8 +682,8 @@ impl Widths {
 /// to zero or more chars, or the whole string is rejected. Entry `b` is
 /// therefore exactly what `Document::decode_text` produces for the string
 /// `[b]`, and `None` where it fails, so decoding through the table yields
-/// the same text (and the same failures) as decoding through `lopdf`
-/// without touching the encoding's glyph tables or the `Differences` map.
+/// the same mapped text (and failures) as `lopdf`. Empty mappings become
+/// U+FFFD in place, preserving the position of each unknown source glyph.
 struct ByteTable {
     entries: Vec<Option<String>>,
 }
@@ -649,14 +697,19 @@ impl ByteTable {
         Self { entries }
     }
 
-    /// The text for `bytes`, or `None` where `lopdf` would have failed.
+    /// The text for `bytes`, retaining empty mappings as U+FFFD in place,
+    /// or `None` where `lopdf` would have failed.
     fn decode(&self, bytes: &[u8]) -> Option<String> {
         let mut out = String::with_capacity(bytes.len());
         for &byte in bytes {
             let Some(Some(piece)) = self.entries.get(usize::from(byte)) else {
                 return None;
             };
-            out.push_str(piece);
+            if piece.is_empty() {
+                out.push('\u{FFFD}');
+            } else {
+                out.push_str(piece);
+            }
         }
         Some(out)
     }
@@ -667,11 +720,15 @@ impl ByteTable {
 enum Decode {
     /// A single-byte encoding, flattened (see [`ByteTable`]).
     Table(ByteTable),
+    /// Upstream's fallback for a malformed composite map, with visible uncertainty.
+    UnverifiedTable(ByteTable),
     /// A predefined `CMap` name `lopdf` handles as `SimpleEncoding`; rebuilt
     /// (a free borrow) for each string.
     Named(Vec<u8>),
     /// A parsed `/ToUnicode` `CMap`, wrapped as `Encoding::UnicodeMapEncoding`.
     UnicodeMap(Encoding<'static>),
+    /// Identity-H/V consumes exactly two source bytes, including unknown codes.
+    IdentityUnicodeMap(Encoding<'static>),
     /// No encoding is available (for the given reason); bytes are Latin-1.
     Latin1(&'static str),
     /// The font cannot be decoded at all; every code becomes U+FFFD.
@@ -1152,6 +1209,8 @@ fn own_table(doc: &Document, dict: &Dictionary) -> Option<ByteTable> {
 /// a string with it. The resource name is not part of it, as one font object
 /// may be reachable under different names on different pages.
 struct LoadedFont {
+    /// Conservative retained/transient allocation charge from the preflight.
+    charge: usize,
     /// `/BaseFont` if present.
     base_font: Option<String>,
     decode: Decode,
@@ -1159,16 +1218,20 @@ struct LoadedFont {
     composite: bool,
     /// Decoding yields exactly one char per byte, so dropped bytes are detectable.
     one_to_one: bool,
+    /// A present but unusable `ToUnicode` map must not certify fallback text.
+    unverified_unicode_map: bool,
     widths: Widths,
 }
 
 impl LoadedFont {
     fn missing() -> Self {
         Self {
+            charge: MIN_FONT_CHARGE,
             base_font: None,
             decode: Decode::Latin1("not in resources"),
             composite: false,
             one_to_one: false,
+            unverified_unicode_map: false,
             widths: Widths::Simple(SimpleWidths::unknown()),
         }
     }
@@ -1178,8 +1241,8 @@ fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
     let subtype = dict.get(b"Subtype").and_then(Object::as_name);
     let composite = subtype.is_ok_and(|name| name == b"Type0");
     let base_font = dict.get(b"BaseFont").and_then(Object::as_name).ok();
-    let (decode, one_to_one) = if composite {
-        (composite_decode(doc, dict), false)
+    let (decode, one_to_one, unverified_unicode_map) = if composite {
+        (composite_decode(doc, dict), false, false)
     } else {
         simple_decode(doc, dict)
     };
@@ -1189,24 +1252,57 @@ fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
         Widths::Simple(simple_widths(doc, dict))
     };
     LoadedFont {
+        charge: MIN_FONT_CHARGE,
         base_font: base_font.map(lossy),
         decode,
         composite,
         one_to_one,
+        unverified_unicode_map,
         widths,
     }
 }
 
-fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool) {
+fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool, bool) {
+    let unverified_unicode_map = if let Ok(to_unicode) = dict.get(b"ToUnicode") {
+        // ToUnicode specifies extraction text and takes priority over Encoding,
+        // which selects rendered glyphs (PDF 1.7 section 5.9.1). lopdf checks
+        // Encoding first, so give its bounded parser only the Unicode map.
+        // Font preflight has already charged and checked this stream.
+        let mut unicode_font = Dictionary::new();
+        unicode_font.set("Type", "Font");
+        unicode_font.set("ToUnicode", to_unicode.clone());
+        if let Ok(encoding @ Encoding::UnicodeMapEncoding(_)) =
+            unicode_font.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM)
+        {
+            return (Decode::Table(ByteTable::build(&encoding)), false, false);
+        }
+        // A malformed map does not invalidate a usable /Encoding or Differences
+        // table. Retain that text and carry the mapping uncertainty separately.
+        true
+    } else {
+        false
+    };
     if let Some(table) = own_table(doc, dict) {
-        return (Decode::Table(table), true);
+        return (Decode::Table(table), true, unverified_unicode_map);
     }
-    match dict.get_font_encoding(doc) {
+    match dict.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM) {
+        // A simple font always consumes one source byte per glyph. The generic
+        // CMap decoder probes up to four bytes after an absent mapping, which
+        // can swallow later, correctly mapped characters in a sparse map.
+        Ok(encoding @ Encoding::UnicodeMapEncoding(_)) => (
+            Decode::Table(ByteTable::build(&encoding)),
+            false,
+            unverified_unicode_map,
+        ),
         Ok(encoding) => {
             let one_to_one = !matches!(encoding, Encoding::UnicodeMapEncoding(_));
-            (own_encoding(encoding), one_to_one)
+            (own_encoding(encoding), one_to_one, unverified_unicode_map)
         }
-        Err(_) => (Decode::Latin1("no usable encoding"), false),
+        Err(_) => (
+            Decode::Latin1("no usable encoding"),
+            false,
+            unverified_unicode_map,
+        ),
     }
 }
 
@@ -1226,7 +1322,17 @@ fn composite_decode(doc: &Document, dict: &Dictionary) -> Decode {
     if !usable {
         return Decode::Replacement;
     }
-    match dict.get_font_encoding(doc) {
+    match dict.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM) {
+        Ok(Encoding::UnicodeMapEncoding(cmap))
+            if encoding_obj.is_some_and(|object| {
+                matches!(object.as_name(), Ok(b"Identity-H" | b"Identity-V"))
+            }) =>
+        {
+            Decode::IdentityUnicodeMap(Encoding::UnicodeMapEncoding(cmap))
+        }
+        Ok(encoding @ Encoding::OneByteEncoding(_)) => {
+            Decode::UnverifiedTable(ByteTable::build(&encoding))
+        }
         Ok(encoding) => own_encoding(encoding),
         Err(_) => Decode::Replacement,
     }
@@ -1311,7 +1417,7 @@ fn composite_widths(doc: &Document, dict: &Dictionary) -> CompositeWidths {
             ranges = parse_w_array(doc, array);
         }
     }
-    CompositeWidths::new(ranges, default_width)
+    CompositeWidths::new(&ranges, default_width)
 }
 
 /// Parse a CID font `/W` array, which mixes `c [w1 w2 ...]` and
@@ -1364,12 +1470,33 @@ struct Context<'a> {
     resources: Vec<&'a Dictionary>,
 }
 
-fn find_font<'c>(contexts: &'c [Context<'_>], name: &[u8]) -> Option<&'c LoadedFont> {
-    contexts
-        .iter()
-        .rev()
-        .find_map(|layer| layer.fonts.get(name))
-        .map(Rc::as_ref)
+fn find_font(
+    doc: &Document,
+    cache: &mut SessionCache,
+    work: &mut FontWork,
+    contexts: &mut [Context<'_>],
+    name: &[u8],
+) -> Result<Option<Rc<LoadedFont>>, &'static str> {
+    if name.len() > 1024 {
+        return Err("font resource name byte limit exceeded");
+    }
+    for layer in contexts.iter_mut().rev() {
+        if let Some(font) = layer.fonts.get(name) {
+            return Ok(Some(Rc::clone(font)));
+        }
+        // Resolve only the name actually used by a non-empty shown string.
+        // Page resources precede inherited ones, and Forms shadow their caller.
+        for resources in &layer.resources {
+            if let Ok(Object::Dictionary(fonts)) = resources.get_deref(b"Font", doc)
+                && let Ok(value) = fonts.get(name)
+                && let Some(font) = resolve_font(doc, cache, work, value)?
+            {
+                layer.fonts.insert(name.to_vec(), Rc::clone(&font));
+                return Ok(Some(font));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The stream behind `/XObject name`, with the id of the indirect object
@@ -1399,44 +1526,29 @@ fn lookup_xobject<'a>(
 fn resolve_font(
     doc: &Document,
     cache: &mut SessionCache,
+    work: &mut FontWork,
     value: &Object,
-) -> Option<Rc<LoadedFont>> {
-    let (id, entry) = doc.dereference(value).ok()?;
-    let dict = entry.as_dict().ok()?;
-    match id {
-        Some(id) => {
-            let font = cache
-                .fonts
-                .entry(id)
-                .or_insert_with(|| Rc::new(load_font(doc, dict)));
-            Some(Rc::clone(font))
-        }
-        None => Some(Rc::new(load_font(doc, dict))),
-    }
-}
-
-/// Add the fonts of one resources dictionary to `fonts`; a name already
-/// present wins, matching `Document::get_page_fonts` (page resources before
-/// inherited ones).
-fn load_fonts_from_resources(
-    doc: &Document,
-    cache: &mut SessionCache,
-    resources: &Dictionary,
-    fonts: &mut BTreeMap<Vec<u8>, Rc<LoadedFont>>,
-) {
-    let Ok(font_map) = resources.get_deref(b"Font", doc) else {
-        return;
+) -> Result<Option<Rc<LoadedFont>>, &'static str> {
+    let Ok((id, Object::Dictionary(dict))) = doc.dereference(value) else {
+        return Ok(None);
     };
-    let Ok(font_map) = font_map.as_dict() else {
-        return;
-    };
-    for (name, value) in font_map {
-        if let Entry::Vacant(slot) = fonts.entry(name.clone())
-            && let Some(font) = resolve_font(doc, cache, value)
-        {
-            slot.insert(font);
-        }
+    work.load()?;
+    if let Some(id) = id
+        && let Some(font) = cache.fonts.get(&id)
+    {
+        // Contexts retain Rc references across eviction; charge their live
+        // decoders to the page allowance as well as to the session cache.
+        work.reserve(font.charge)?;
+        return Ok(Some(Rc::clone(font)));
     }
+    let allocation = font_resources::preflight(doc, dict, work)?;
+    let mut font = load_font(doc, dict);
+    font.charge = allocation;
+    let font = Rc::new(font);
+    if let Some(id) = id {
+        cache.insert_font(id, &font);
+    }
+    Ok(Some(font))
 }
 
 /// Graphics state as far as text placement needs it (saved by `q`/`Q`).
@@ -1511,962 +1623,6 @@ fn replacement_text(composite: bool, bytes: &[u8]) -> String {
     std::iter::repeat_n('\u{FFFD}', codes).collect()
 }
 
-/// How deep `lopdf` lets arrays and dictionaries nest in a content stream
-/// (`reader::MAX_NESTING_DEPTH`).
-const MAX_NESTING: usize = 100;
-/// How deep `lopdf` lets parentheses nest inside a literal string
-/// (`reader::MAX_BRACKET`).
-const MAX_PAREN_NESTING: usize = 100;
-
-/// The content-stream operators the interpreter acts on, plus the painted
-/// paths (`FillPath`, `StrokePath`) the lexer folds path operators into.
-/// Every other operator (clipping, colour, line style, `gs`, marked content,
-/// shading, Type3 `d0`/`d1`, `ET`, inline images) is lexed and dropped
-/// without materialising its operands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OpKind {
-    /// `q`
-    Save,
-    /// `Q`
-    Restore,
-    /// `cm`
-    Concat,
-    /// `BT`
-    BeginText,
-    /// `Tf`
-    Font,
-    /// `Td`
-    Move,
-    /// `TD`
-    MoveSetLeading,
-    /// `Tm`
-    TextMatrix,
-    /// `T*`
-    NextLine,
-    /// `TL`
-    Leading,
-    /// `Tc`
-    CharSpacing,
-    /// `Tw`
-    WordSpacing,
-    /// `Tz`
-    HorizontalScale,
-    /// `Ts`
-    Rise,
-    /// `Tj`
-    Show,
-    /// `'`
-    NextLineShow,
-    /// `"`
-    SpacingShow,
-    /// `TJ`
-    ShowArray,
-    /// `Do`
-    Invoke,
-    /// A path painted by `f F f* B B* b b*`; its box is in
-    /// [`TextProgram::paths`]. Never returned by [`OpKind::from_operator`].
-    FillPath,
-    /// A path painted by `S s` only; its box is in [`TextProgram::paths`].
-    StrokePath,
-}
-
-impl OpKind {
-    fn from_operator(operator: &[u8]) -> Option<Self> {
-        let kind = match operator {
-            b"q" => Self::Save,
-            b"Q" => Self::Restore,
-            b"cm" => Self::Concat,
-            b"BT" => Self::BeginText,
-            b"Tf" => Self::Font,
-            b"Td" => Self::Move,
-            b"TD" => Self::MoveSetLeading,
-            b"Tm" => Self::TextMatrix,
-            b"T*" => Self::NextLine,
-            b"TL" => Self::Leading,
-            b"Tc" => Self::CharSpacing,
-            b"Tw" => Self::WordSpacing,
-            b"Tz" => Self::HorizontalScale,
-            b"Ts" => Self::Rise,
-            b"Tj" => Self::Show,
-            b"'" => Self::NextLineShow,
-            b"\"" => Self::SpacingShow,
-            b"TJ" => Self::ShowArray,
-            b"Do" => Self::Invoke,
-            _ => return None,
-        };
-        Some(kind)
-    }
-
-    /// Whether this is a painted path, whose `first` indexes
-    /// [`TextProgram::paths`] instead of the operands.
-    fn is_path(self) -> bool {
-        matches!(self, Self::FillPath | Self::StrokePath)
-    }
-}
-
-/// What a path operator does to the path under construction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PathOp {
-    /// `m`, `l` (one point), `v`, `y` (two) or `c` (three): the first
-    /// `2 × n` operands are the points.
-    Points(usize),
-    /// `re x y width height`.
-    Rect,
-    /// `S s` (`stroke`) or `f F f* B B* b b*`.
-    Paint { stroke: bool },
-    /// `n`: the path ends unpainted.
-    Discard,
-}
-
-/// The path operator `operator` names. `h` adds no point and `W`/`W*` only
-/// clip, so they are not path operators here.
-fn path_op(operator: &[u8]) -> Option<PathOp> {
-    let op = match operator {
-        b"m" | b"l" => PathOp::Points(1),
-        b"v" | b"y" => PathOp::Points(2),
-        b"c" => PathOp::Points(3),
-        b"re" => PathOp::Rect,
-        b"S" | b"s" => PathOp::Paint { stroke: true },
-        b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" => PathOp::Paint { stroke: false },
-        b"n" => PathOp::Discard,
-        _ => return None,
-    };
-    Some(op)
-}
-
-/// One kept operator and the range of its operands in
-/// [`TextProgram::operands`].
-#[derive(Clone, Copy, Debug)]
-struct TextOp {
-    kind: OpKind,
-    first: usize,
-    end: usize,
-}
-
-/// The operators of one content stream that the interpreter acts on, in
-/// stream order, with their operands exactly as `Content::decode` yields them,
-/// and the painted paths among them.
-#[derive(Default)]
-struct TextProgram {
-    ops: Vec<TextOp>,
-    operands: Vec<Object>,
-    /// `[x0, y0, x1, y1]` of each painted path, in the stream's coordinates.
-    paths: Vec<[f32; 4]>,
-}
-
-impl TextProgram {
-    /// Rough size of the program in memory: the vectors' elements plus the
-    /// heap bytes of string, name and array operands.
-    fn estimated_bytes(&self) -> usize {
-        fn heap_bytes(object: &Object) -> usize {
-            match object {
-                Object::String(bytes, _) | Object::Name(bytes) => bytes.len(),
-                Object::Array(items) => items
-                    .iter()
-                    .map(|item| size_of::<Object>() + heap_bytes(item))
-                    .sum(),
-                _ => 0,
-            }
-        }
-        self.ops.len() * size_of::<TextOp>()
-            + self.operands.len() * size_of::<Object>()
-            + self.paths.len() * size_of::<[f32; 4]>()
-            + self.operands.iter().map(heap_bytes).sum::<usize>()
-    }
-
-    /// The operands of `op` (none for a painted path).
-    fn operands(&self, op: TextOp) -> &[Object] {
-        if op.kind.is_path() {
-            return &[];
-        }
-        self.operands.get(op.first..op.end).unwrap_or_default()
-    }
-
-    /// The box of a painted path.
-    fn path_box(&self, op: TextOp) -> Option<[f32; 4]> {
-        if op.kind.is_path() {
-            self.paths.get(op.first).copied()
-        } else {
-            None
-        }
-    }
-}
-
-/// Why no object or operation could be read at some position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Halt {
-    /// Nothing valid here (a `nom` error): `lopdf` backtracks, and at the
-    /// top level it stops and keeps the operations read so far.
-    Stop,
-    /// `lopdf` rejects the whole content stream (a `nom` failure).
-    Fatal,
-}
-
-/// The end of a lexed object (before any white space after it) and, in
-/// build mode, the object.
-type Lexed = Result<(usize, Option<Object>), Halt>;
-
-/// White space `lopdf` skips between content-stream tokens.
-fn is_content_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
-}
-
-/// PDF white space, skipped inside arrays, dictionaries and hex strings.
-fn is_pdf_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\0' | 0x0C)
-}
-
-fn is_delimiter(byte: u8) -> bool {
-    matches!(
-        byte,
-        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
-    )
-}
-
-fn is_regular(byte: u8) -> bool {
-    !is_pdf_space(byte) && !is_delimiter(byte)
-}
-
-fn is_digit(byte: u8) -> bool {
-    byte.is_ascii_digit()
-}
-
-fn is_operator_char(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'*' | b'\'' | b'"')
-}
-
-/// White space around the `EI` that ends an inline image of unknown length.
-fn is_ei_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\n' | b'\r')
-}
-
-/// The position after the run of bytes from `pos` for which `keep` holds.
-fn skip_while(bytes: &[u8], pos: usize, keep: fn(u8) -> bool) -> usize {
-    let rest = bytes.get(pos..).unwrap_or_default();
-    pos + rest.iter().take_while(|&&byte| keep(byte)).count()
-}
-
-fn skip_content_space(bytes: &[u8], pos: usize) -> usize {
-    skip_while(bytes, pos, is_content_space)
-}
-
-/// The end of the end-of-line marker (`\r\n`, `\n` or `\r`) at `pos`.
-fn eol_end(bytes: &[u8], pos: usize) -> Option<usize> {
-    match bytes.get(pos..)? {
-        [b'\r', b'\n', ..] => Some(pos + 2),
-        [b'\r' | b'\n', ..] => Some(pos + 1),
-        _ => None,
-    }
-}
-
-/// The end of the `%` comment at `pos`, after its end-of-line marker;
-/// `None` when there is no comment there or nothing terminates it.
-fn comment_end(bytes: &[u8], pos: usize) -> Option<usize> {
-    if bytes.get(pos) != Some(&b'%') {
-        return None;
-    }
-    let eol = skip_while(bytes, pos + 1, |byte| byte != b'\r' && byte != b'\n');
-    eol_end(bytes, eol)
-}
-
-/// White space and comments, as `lopdf` skips them inside arrays and
-/// dictionaries.
-fn skip_space(bytes: &[u8], mut pos: usize) -> usize {
-    loop {
-        let next = skip_while(bytes, pos, is_pdf_space);
-        match comment_end(bytes, next) {
-            Some(end) => pos = end,
-            None => return next,
-        }
-    }
-}
-
-fn hex_value(digit: u8) -> u8 {
-    match digit {
-        b'0'..=b'9' => digit - b'0',
-        b'a'..=b'f' => digit - b'a' + 10,
-        b'A'..=b'F' => digit - b'A' + 10,
-        _ => 0,
-    }
-}
-
-fn parse_ascii<T: std::str::FromStr>(bytes: &[u8], start: usize, end: usize) -> Result<T, Halt> {
-    let text = bytes
-        .get(start..end)
-        .and_then(|slice| std::str::from_utf8(slice).ok());
-    text.and_then(|text| text.parse::<T>().ok())
-        .ok_or(Halt::Stop)
-}
-
-/// The name whose `/` is at `pos`: its end and, in build mode, its bytes
-/// with `#xx` escapes decoded. A `#` without two hex digits ends it.
-fn lex_name(bytes: &[u8], pos: usize, build: bool) -> (usize, Vec<u8>) {
-    let mut name = Vec::new();
-    let mut at = pos + 1;
-    loop {
-        match bytes.get(at..).unwrap_or_default() {
-            [b'#', high, low, ..] if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() => {
-                if build {
-                    name.push((hex_value(*high) << 4) | hex_value(*low));
-                }
-                at += 3;
-            }
-            [byte, ..] if *byte != b'#' && is_regular(*byte) => {
-                if build {
-                    name.push(*byte);
-                }
-                at += 1;
-            }
-            _ => return (at, name),
-        }
-    }
-}
-
-/// The escape sequence whose backslash ends at `pos`: its end and the byte
-/// it stands for (`None` for a line continuation).
-fn lex_escape(bytes: &[u8], pos: usize) -> Result<(usize, Option<u8>), Halt> {
-    let Some(&first) = bytes.get(pos) else {
-        return Err(Halt::Stop);
-    };
-    if (b'0'..=b'7').contains(&first) {
-        let mut value: u16 = 0;
-        let mut end = pos;
-        for &digit in bytes.iter().skip(pos).take(3) {
-            if !(b'0'..=b'7').contains(&digit) {
-                break;
-            }
-            value = value * 8 + u16::from(digit - b'0');
-            end += 1;
-        }
-        // Overflow past 0o377 is ignored, as the spec (and `lopdf`) say.
-        return Ok((end, Some(value as u8)));
-    }
-    if let Some(end) = eol_end(bytes, pos) {
-        return Ok((end, None));
-    }
-    let value = match first {
-        b'n' => b'\n',
-        b'r' => b'\r',
-        b't' => b'\t',
-        b'b' => 0x08,
-        b'f' => 0x0C,
-        other => other,
-    };
-    Ok((pos + 1, Some(value)))
-}
-
-/// The literal string whose `(` is at `pos`: its end and, in build mode,
-/// its bytes. Balanced inner parentheses are kept, raw end-of-line markers
-/// are kept as written, and more than [`MAX_PAREN_NESTING`] open inner
-/// parentheses make the string unreadable, as in `lopdf`.
-fn lex_literal(bytes: &[u8], pos: usize, build: bool) -> Result<(usize, Vec<u8>), Halt> {
-    let mut out = Vec::new();
-    let mut open: usize = 0;
-    let mut at = pos + 1;
-    loop {
-        let Some(&byte) = bytes.get(at) else {
-            return Err(Halt::Stop);
-        };
-        match byte {
-            b')' => {
-                at += 1;
-                if open == 0 {
-                    return Ok((at, out));
-                }
-                open -= 1;
-                if build {
-                    out.push(byte);
-                }
-            }
-            b'(' => {
-                if open >= MAX_PAREN_NESTING {
-                    return Err(Halt::Stop);
-                }
-                open += 1;
-                at += 1;
-                if build {
-                    out.push(byte);
-                }
-            }
-            b'\\' => {
-                let (end, escaped) = lex_escape(bytes, at + 1)?;
-                if build && let Some(value) = escaped {
-                    out.push(value);
-                }
-                at = end;
-            }
-            _ => {
-                if build {
-                    out.push(byte);
-                }
-                at += 1;
-            }
-        }
-    }
-}
-
-/// The hex string whose `<` is at `pos`: its end and, in build mode, its
-/// bytes. White space between digits is ignored and an odd final digit is
-/// padded with 0.
-fn lex_hex(bytes: &[u8], pos: usize, build: bool) -> Result<(usize, Vec<u8>), Halt> {
-    let mut out: Vec<u8> = Vec::new();
-    let mut low_next = false;
-    let mut at = pos + 1;
-    loop {
-        let next = skip_while(bytes, at, is_pdf_space);
-        match bytes.get(next) {
-            Some(&digit) if digit.is_ascii_hexdigit() => {
-                if build {
-                    let value = hex_value(digit);
-                    if low_next {
-                        if let Some(last) = out.last_mut() {
-                            *last |= value;
-                        }
-                    } else {
-                        out.push(value << 4);
-                    }
-                }
-                low_next = !low_next;
-                at = next + 1;
-            }
-            _ => break,
-        }
-    }
-    let close = skip_while(bytes, at, is_pdf_space);
-    if bytes.get(close) == Some(&b'>') {
-        Ok((close + 1, out))
-    } else {
-        Err(Halt::Stop)
-    }
-}
-
-/// A number at `pos` (`-.5`, `6.`, `+3`): `Ok(None)` when there is none,
-/// `Err(Stop)` for an integer outside `i64`, which `lopdf` cannot read.
-fn lex_number(
-    bytes: &[u8],
-    pos: usize,
-    build: bool,
-) -> Result<Option<(usize, Option<Object>)>, Halt> {
-    let mut digits_start = pos;
-    if matches!(bytes.get(pos), Some(b'+' | b'-')) {
-        digits_start += 1;
-    }
-    let digits_end = skip_while(bytes, digits_start, is_digit);
-    let has_digits = digits_end > digits_start;
-    let fraction_start = digits_end + 1;
-    let is_real = bytes.get(digits_end) == Some(&b'.')
-        && (has_digits || bytes.get(fraction_start).is_some_and(u8::is_ascii_digit));
-    if is_real {
-        let end = skip_while(bytes, fraction_start, is_digit);
-        let value = if build {
-            Some(Object::Real(parse_ascii::<f32>(bytes, pos, end)?))
-        } else {
-            None
-        };
-        return Ok(Some((end, value)));
-    }
-    if !has_digits {
-        return Ok(None);
-    }
-    let value: i64 = parse_ascii(bytes, pos, digits_end)?;
-    Ok(Some((digits_end, build.then_some(Object::Integer(value)))))
-}
-
-/// An indirect reference `n g R` at `pos` (allowed only inside arrays and
-/// dictionaries): its end and id.
-fn lex_reference(bytes: &[u8], pos: usize) -> Option<(usize, ObjectId)> {
-    let id_end = skip_while(bytes, pos, is_digit);
-    let id: u32 = parse_ascii(bytes, pos, id_end).ok()?;
-    let generation_start = skip_space(bytes, id_end);
-    let generation_end = skip_while(bytes, generation_start, is_digit);
-    let generation: u16 = parse_ascii(bytes, generation_start, generation_end).ok()?;
-    let marker = skip_space(bytes, generation_end);
-    (bytes.get(marker) == Some(&b'R')).then_some((marker + 1, (id, generation)))
-}
-
-/// One object at `pos`, read as `lopdf` reads a content-stream operand
-/// (`direct == false`) or an array element or dictionary value
-/// (`direct == true`, where `n g R` references are allowed too). Nested
-/// arrays and dictionaries get `depth` as their budget. Nothing is
-/// allocated unless `build`.
-fn lex_object(bytes: &[u8], pos: usize, depth: usize, direct: bool, build: bool) -> Lexed {
-    let rest = bytes.get(pos..).unwrap_or_default();
-    if rest.starts_with(b"null") {
-        return Ok((pos + 4, build.then_some(Object::Null)));
-    }
-    if rest.starts_with(b"true") {
-        return Ok((pos + 4, build.then_some(Object::Boolean(true))));
-    }
-    if rest.starts_with(b"false") {
-        return Ok((pos + 5, build.then_some(Object::Boolean(false))));
-    }
-    if direct && let Some((end, id)) = lex_reference(bytes, pos) {
-        return Ok((end, build.then_some(Object::Reference(id))));
-    }
-    if let Some(number) = lex_number(bytes, pos, build)? {
-        return Ok(number);
-    }
-    match rest {
-        [b'/', ..] => {
-            let (end, name) = lex_name(bytes, pos, build);
-            Ok((end, build.then_some(Object::Name(name))))
-        }
-        [b'(', ..] => {
-            let (end, text) = lex_literal(bytes, pos, build)?;
-            Ok((
-                end,
-                build.then_some(Object::String(text, StringFormat::Literal)),
-            ))
-        }
-        [b'<', b'<', ..] => lex_dictionary(bytes, pos, depth, build),
-        [b'<', ..] => {
-            let (end, text) = lex_hex(bytes, pos, build)?;
-            let format = StringFormat::Hexadecimal;
-            Ok((end, build.then_some(Object::String(text, format))))
-        }
-        [b'[', ..] => lex_array(bytes, pos, depth, build),
-        _ => Err(Halt::Stop),
-    }
-}
-
-/// An array element or dictionary value and the white space after it. A
-/// container with no budget left is fatal, as in `lopdf`.
-fn lex_direct(bytes: &[u8], pos: usize, depth: usize, build: bool) -> Lexed {
-    if depth == 0 {
-        return Err(Halt::Fatal);
-    }
-    let (end, value) = lex_object(bytes, pos, depth - 1, true, build)?;
-    Ok((skip_space(bytes, end), value))
-}
-
-/// The array whose `[` is at `pos`.
-fn lex_array(bytes: &[u8], pos: usize, depth: usize, build: bool) -> Lexed {
-    let mut items: Vec<Object> = Vec::new();
-    let mut at = skip_space(bytes, pos + 1);
-    loop {
-        match lex_direct(bytes, at, depth, build) {
-            Ok((end, item)) => {
-                items.extend(item);
-                at = end;
-            }
-            Err(Halt::Stop) => break,
-            Err(Halt::Fatal) => return Err(Halt::Fatal),
-        }
-    }
-    if bytes.get(at) == Some(&b']') {
-        Ok((at + 1, build.then_some(Object::Array(items))))
-    } else {
-        Err(Halt::Stop)
-    }
-}
-
-/// `/Key value` pairs from `pos` up to the first position that does not
-/// start one: that position and, in build mode, the entries.
-fn lex_entries(
-    bytes: &[u8],
-    pos: usize,
-    depth: usize,
-    build: bool,
-) -> Result<(usize, Dictionary), Halt> {
-    let mut dict = Dictionary::new();
-    let mut at = pos;
-    while bytes.get(at) == Some(&b'/') {
-        let (name_end, key) = lex_name(bytes, at, build);
-        match lex_direct(bytes, skip_space(bytes, name_end), depth, build) {
-            Ok((end, value)) => {
-                if let Some(value) = value {
-                    dict.set(key, value);
-                }
-                at = end;
-            }
-            Err(Halt::Stop) => break,
-            Err(Halt::Fatal) => return Err(Halt::Fatal),
-        }
-    }
-    Ok((at, dict))
-}
-
-/// The dictionary whose `<<` is at `pos`.
-fn lex_dictionary(bytes: &[u8], pos: usize, depth: usize, build: bool) -> Lexed {
-    let (at, dict) = lex_entries(bytes, skip_space(bytes, pos + 2), depth, build)?;
-    if bytes.get(at..).is_some_and(|rest| rest.starts_with(b">>")) {
-        Ok((at + 2, build.then_some(Object::Dictionary(dict))))
-    } else {
-        Err(Halt::Stop)
-    }
-}
-
-fn inline_entry<'d>(dict: &'d Dictionary, short: &[u8], long: &[u8]) -> Option<&'d Object> {
-    dict.get(short).or_else(|_| dict.get(long)).ok()
-}
-
-/// The data length `lopdf` computes for an unfiltered inline image, `None`
-/// where it cannot (and scans for `EI` instead).
-fn inline_image_length(dict: &Dictionary) -> Option<usize> {
-    let width = inline_entry(dict, b"W", b"Width")?.as_i64().ok()? as usize;
-    let height = inline_entry(dict, b"H", b"Height")?.as_i64().ok()? as usize;
-    let bits = inline_entry(dict, b"BPC", b"BitsPerComponent")?
-        .as_i64()
-        .ok()? as usize;
-    let mask = inline_entry(dict, b"IM", b"ImageMask")
-        .is_some_and(|value| matches!(value.as_bool(), Ok(true)));
-    let colours: usize = if mask {
-        1
-    } else {
-        match inline_entry(dict, b"CS", b"ColorSpace")?.as_name().ok()? {
-            b"DeviceGray" | b"Gray" => 1,
-            b"DeviceRGB" | b"RGB" => 3,
-            b"DeviceRGBA" | b"RGBA" | b"DeviceCMYK" | b"CMYK" => 4,
-            _ => return None,
-        }
-    };
-    if inline_entry(dict, b"F", b"Filter").is_some() {
-        return None;
-    }
-    let stride = width.checked_mul(colours.checked_mul(bits)?)?.div_ceil(8);
-    height.checked_mul(stride)
-}
-
-/// Skip the inline image whose `BI` ends at `pos`, as `lopdf` reads it:
-/// the data length comes from the image dictionary when `lopdf` can compute
-/// it (so data bytes that spell `EI` are skipped), otherwise the data runs
-/// to the first `EI` with white space on both sides. `None` where `lopdf`
-/// rejects the whole content stream, with one exception: an `EI` that ends
-/// the stream right after white space is accepted (`lopdf` wants white
-/// space after it too), so a stream cut off after its last inline image
-/// keeps its text.
-fn skip_inline_image(bytes: &[u8], pos: usize) -> Option<usize> {
-    let start = skip_content_space(bytes, pos);
-    let (at, dict) = lex_entries(bytes, start, MAX_NESTING, true).ok()?;
-    if !bytes.get(at..)?.starts_with(b"ID") {
-        return None;
-    }
-    let data = skip_content_space(bytes, at + 2);
-    if let Some(length) = inline_image_length(&dict)
-        && let Some(data_end) = data.checked_add(length)
-        && data_end <= bytes.len()
-    {
-        let marker = skip_content_space(bytes, data_end);
-        if !bytes.get(marker..)?.starts_with(b"EI") {
-            return None;
-        }
-        return Some(skip_content_space(bytes, marker + 2));
-    }
-    let rest = bytes.get(data..)?;
-    let found = rest.windows(4).position(|window| {
-        matches!(window, [before, b'E', b'I', after] if is_ei_space(*before) && is_ei_space(*after))
-    });
-    if let Some(found) = found {
-        return Some(skip_content_space(bytes, data + found + 3));
-    }
-    match rest {
-        [.., before, b'E', b'I'] if is_ei_space(*before) => Some(bytes.len()),
-        _ => None,
-    }
-}
-
-fn invalid_content() -> LopdfError {
-    LopdfError::Parse(ParseError::InvalidContentStream)
-}
-
-/// Read a content stream as `Content::decode` does and keep only the
-/// operators [`OpKind`] names, with their operands, and one box per painted
-/// path (see [`record_path`]). Everything else is tokenised and dropped
-/// without allocating. Like `lopdf`, lexing stops
-/// quietly at the first token it cannot read, keeping what came before,
-/// and fails only where `lopdf` rejects the whole stream (an inline image
-/// without `ID` or `EI`, arrays or dictionaries nested too deep). The one
-/// place it is more lenient is an inline image whose `EI` ends the stream
-/// (see [`skip_inline_image`]).
-fn lex_content(bytes: &[u8]) -> Result<TextProgram, LopdfError> {
-    let mut program = TextProgram::default();
-    let mut starts: Vec<usize> = Vec::new();
-    let mut path: Option<[f32; 4]> = None;
-    let mut pos = skip_content_space(bytes, 0);
-    loop {
-        let mut at = pos;
-        while let Some(end) = comment_end(bytes, at) {
-            at = skip_content_space(bytes, end);
-        }
-        if bytes.get(at..).is_some_and(|rest| rest.starts_with(b"BI")) {
-            pos = skip_inline_image(bytes, at + 2).ok_or_else(invalid_content)?;
-            continue;
-        }
-        starts.clear();
-        loop {
-            match lex_object(bytes, at, MAX_NESTING, false, false) {
-                Ok((end, _)) => {
-                    starts.push(at);
-                    at = skip_content_space(bytes, end);
-                }
-                Err(Halt::Stop) => break,
-                Err(Halt::Fatal) => return Err(invalid_content()),
-            }
-        }
-        let end = skip_while(bytes, at, is_operator_char);
-        if end == at {
-            return Ok(program);
-        }
-        let operator = bytes.get(at..end).unwrap_or_default();
-        if let Some(kind) = OpKind::from_operator(operator) {
-            let first = program.operands.len();
-            for &start in &starts {
-                if let Ok((_, Some(operand))) = lex_object(bytes, start, MAX_NESTING, false, true) {
-                    program.operands.push(operand);
-                }
-            }
-            let last = program.operands.len();
-            program.ops.push(TextOp {
-                kind,
-                first,
-                end: last,
-            });
-        } else if let Some(op) = path_op(operator) {
-            record_path(&mut program, &mut path, op, bytes, &starts);
-        }
-        pos = skip_content_space(bytes, end);
-    }
-}
-
-/// The first `out.len()` operands (starting at `starts`) as numbers; false
-/// when there are fewer or one of them is not a number.
-fn read_numbers(bytes: &[u8], starts: &[usize], out: &mut [f32]) -> bool {
-    if starts.len() < out.len() {
-        return false;
-    }
-    for (slot, &start) in out.iter_mut().zip(starts) {
-        *slot = match lex_number(bytes, start, true) {
-            Ok(Some((_, Some(Object::Integer(value))))) => value as f32,
-            Ok(Some((_, Some(Object::Real(value))))) => value,
-            _ => return false,
-        };
-    }
-    true
-}
-
-/// Widen `path` (`[x0, y0, x1, y1]`, `None` before its first point) to
-/// take in the point `(x, y)`.
-fn grow(path: &mut Option<[f32; 4]>, x: f32, y: f32) {
-    match path {
-        Some(bounds) => {
-            bounds[0] = bounds[0].min(x);
-            bounds[1] = bounds[1].min(y);
-            bounds[2] = bounds[2].max(x);
-            bounds[3] = bounds[3].max(y);
-        }
-        None => *path = Some([x, y, x, y]),
-    }
-}
-
-/// Apply one path operator: construction widens the box of the current
-/// path (curve control points included), painting records it in `program`
-/// as one [`OpKind::FillPath`] or [`OpKind::StrokePath`] and starts a new
-/// path, `n` drops it. The operands are read from their `starts` into a
-/// fixed buffer; an operator whose operands are not numbers adds nothing.
-/// `cm`, `q`, `Q`, `Do` and text cannot occur inside a path object, so the
-/// box needs no CTM here.
-fn record_path(
-    program: &mut TextProgram,
-    path: &mut Option<[f32; 4]>,
-    op: PathOp,
-    bytes: &[u8],
-    starts: &[usize],
-) {
-    let mut values: [f32; 6] = [0.0; 6];
-    match op {
-        PathOp::Points(count) => {
-            let Some(slots) = values.get_mut(..count * 2) else {
-                return;
-            };
-            if read_numbers(bytes, starts, slots) {
-                for &[x, y] in slots.as_chunks::<2>().0 {
-                    grow(path, x, y);
-                }
-            }
-        }
-        PathOp::Rect => {
-            if read_numbers(bytes, starts, &mut values[..4]) {
-                let [x, y, width, height, _, _] = values;
-                grow(path, x, y);
-                grow(path, x + width, y + height);
-            }
-        }
-        PathOp::Paint { stroke } => {
-            if let Some(bounds) = path.take() {
-                let kind = if stroke {
-                    OpKind::StrokePath
-                } else {
-                    OpKind::FillPath
-                };
-                let index = program.paths.len();
-                program.paths.push(bounds);
-                program.ops.push(TextOp {
-                    kind,
-                    first: index,
-                    end: index + 1,
-                });
-            }
-        }
-        PathOp::Discard => *path = None,
-    }
-}
-
-/// The smallest box holding every one of `corners`.
-fn box_of(corners: [(f32, f32); 4]) -> BBox {
-    let mut bbox = BBox {
-        x0: f32::MAX,
-        y0: f32::MAX,
-        x1: f32::MIN,
-        y1: f32::MIN,
-    };
-    for (x, y) in corners {
-        bbox.x0 = bbox.x0.min(x);
-        bbox.y0 = bbox.y0.min(y);
-        bbox.x1 = bbox.x1.max(x);
-        bbox.y1 = bbox.y1.max(y);
-    }
-    bbox
-}
-
-/// The smallest box holding both `a` and `b`.
-fn enclose(a: BBox, b: BBox) -> BBox {
-    BBox {
-        x0: a.x0.min(b.x0),
-        y0: a.y0.min(b.y0),
-        x1: a.x1.max(b.x1),
-        y1: a.y1.max(b.y1),
-    }
-}
-
-/// Whether `a` and `b` overlap or lie within `gap` of each other.
-fn near(a: BBox, b: BBox, gap: f32) -> bool {
-    a.x0 <= b.x1 + gap && b.x0 <= a.x1 + gap && a.y0 <= b.y1 + gap && b.y0 <= a.y1 + gap
-}
-
-/// Merge `boxes` into clusters: two boxes share a cluster when they (or
-/// the clusters grown so far around them) overlap or lie within
-/// [`CLUSTER_GAP`]. Each new box absorbs every cluster near it, rescanning
-/// after each merge, so no two clusters left are near each other (a fixed
-/// point). Clusters come top to bottom, then left to right.
-fn cluster(boxes: &[BBox]) -> Vec<BBox> {
-    let mut clusters: Vec<BBox> = Vec::new();
-    for &bbox in boxes {
-        let mut grown = bbox;
-        let mut at = 0;
-        while at < clusters.len() {
-            if near(clusters[at], grown, CLUSTER_GAP) {
-                grown = enclose(grown, clusters.swap_remove(at));
-                at = 0;
-            } else {
-                at += 1;
-            }
-        }
-        clusters.push(grown);
-    }
-    clusters.sort_by(|a, b| b.y1.total_cmp(&a.y1).then(a.x0.total_cmp(&b.x0)));
-    clusters
-}
-
-/// An Image `XObject` as placed on the page.
-struct Raster {
-    bbox: BBox,
-    width_px: Option<u32>,
-    height_px: Option<u32>,
-}
-
-/// Painted paths and images of one page, in page space, gathered while its
-/// content runs.
-#[derive(Default)]
-struct Graphics {
-    /// Thin painted boxes (see [`RULE_THICKNESS`]).
-    rules: Vec<BBox>,
-    /// The other painted boxes, at most [`MAX_CLUSTER_BOXES`].
-    shapes: Vec<BBox>,
-    /// Union of every box that is not a rule.
-    extent: Option<BBox>,
-    /// More than [`MAX_CLUSTER_BOXES`] boxes that are not rules were painted.
-    overflow: bool,
-    /// Image placements, at most [`MAX_CLUSTER_BOXES`].
-    rasters: Vec<Raster>,
-    raster_overflow: bool,
-}
-
-impl Graphics {
-    fn add_path(&mut self, bbox: BBox) {
-        let width = bbox.x1 - bbox.x0;
-        let height = bbox.y1 - bbox.y0;
-        let horizontal = height < RULE_THICKNESS && width >= RULE_LENGTH;
-        let vertical = width < RULE_THICKNESS && height >= RULE_LENGTH;
-        if horizontal || vertical {
-            self.rules.push(bbox);
-            return;
-        }
-        self.extent = Some(match self.extent {
-            Some(so_far) => enclose(so_far, bbox),
-            None => bbox,
-        });
-        if self.shapes.len() < MAX_CLUSTER_BOXES {
-            self.shapes.push(bbox);
-        } else {
-            self.overflow = true;
-        }
-    }
-
-    fn add_raster(&mut self, raster: Raster) {
-        if self.rasters.len() < MAX_CLUSTER_BOXES {
-            self.rasters.push(raster);
-        } else {
-            self.raster_overflow = true;
-        }
-    }
-
-    /// `rule` figures, then `vector` clusters at least [`MIN_VECTOR_SIDE`]
-    /// wide or high, then `raster` figures; indexed in that order.
-    fn into_figures(self) -> Vec<Figure> {
-        let mut figures: Vec<Figure> = Vec::new();
-        for bbox in self.rules {
-            push_figure(&mut figures, "rule", bbox, None, None);
-        }
-        let clusters: Vec<BBox> = if self.overflow {
-            self.extent.into_iter().collect()
-        } else {
-            cluster(&self.shapes)
-        };
-        for bbox in clusters {
-            if bbox.x1 - bbox.x0 >= MIN_VECTOR_SIDE || bbox.y1 - bbox.y0 >= MIN_VECTOR_SIDE {
-                push_figure(&mut figures, "vector", bbox, None, None);
-            }
-        }
-        for raster in self.rasters {
-            let (width_px, height_px) = (raster.width_px, raster.height_px);
-            push_figure(&mut figures, "raster", raster.bbox, width_px, height_px);
-        }
-        figures
-    }
-}
-
-/// Append a figure of `kind` with the next index; no bytes are captured.
-fn push_figure(
-    figures: &mut Vec<Figure>,
-    kind: &str,
-    bbox: BBox,
-    width_px: Option<u32>,
-    height_px: Option<u32>,
-) {
-    let index = u32::try_from(figures.len()).unwrap_or(u32::MAX);
-    figures.push(Figure {
-        index,
-        bbox: Some(bbox),
-        kind: kind.to_string(),
-        mime: None,
-        width_px,
-        height_px,
-        sha256: None,
-        file: None,
-        caption: None,
-    });
-}
-
 /// A non-negative integer entry of an image dictionary, when it is direct.
 fn pixel_count(dict: &Dictionary, key: &[u8]) -> Option<u32> {
     let value = dict.get(key).ok()?.as_i64().ok()?;
@@ -2488,6 +1644,9 @@ struct Interpreter<'a> {
     /// Ligatures expanded so far on this page.
     ligatures: u32,
     graphics: Graphics,
+    form_work: FormWork,
+    font_work: FontWork,
+    resource_error: Option<&'static str>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -2506,9 +1665,13 @@ impl<'a> Interpreter<'a> {
                 "resource_limit: raster placements truncated (limit={MAX_CLUSTER_BOXES})"
             ));
         }
-        if graphics.overflow {
+        if graphics.work_limited {
             self.warn(format!(
-                "resource_limit: vector regions coalesced (limit={MAX_CLUSTER_BOXES})"
+                "resource_limit: vector clustering budget exhausted (comparisons={MAX_CLUSTER_COMPARISONS})"
+            ));
+        } else if graphics.overflow {
+            self.warn(format!(
+                "resource_limit: vector regions coalesced (cluster limit={MAX_CLUSTER_BOXES})"
             ));
         }
         self.page.figures = graphics.into_figures();
@@ -2523,6 +1686,13 @@ impl<'a> Interpreter<'a> {
 
     fn run(&mut self, program: &TextProgram, contexts: &mut Vec<Context<'a>>, depth: u32) {
         for &op in &program.ops {
+            if self.resource_error.is_some() {
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.form_work.interpreted_ops += 1;
+            }
             let operands = program.operands(op);
             match op.kind {
                 OpKind::Save => self.stack.push(self.state.clone()),
@@ -2672,30 +1842,34 @@ impl<'a> Interpreter<'a> {
         self.text_move(0.0, -leading);
     }
 
-    fn show(&mut self, bytes: &[u8], contexts: &[Context<'a>]) {
+    fn show(&mut self, bytes: &[u8], contexts: &mut [Context<'a>]) {
         if bytes.is_empty() {
             return;
         }
         let font_name = self.state.font.clone();
         let name: &[u8] = font_name.as_deref().unwrap_or_default();
-        let fallback: LoadedFont;
-        let font = if let Some(found) = find_font(contexts, name) {
-            found
-        } else {
-            fallback = LoadedFont::missing();
-            &fallback
+        let font = match find_font(self.doc, self.cache, &mut self.font_work, contexts, name) {
+            Ok(Some(font)) => font,
+            Ok(None) => Rc::new(LoadedFont::missing()),
+            Err(reason) => {
+                self.resource_error = Some(reason);
+                return;
+            }
         };
-        let text = self.decode(name, font, bytes);
-        let advance = self.advance(font, bytes);
+        let text = self.decode(name, &font, bytes);
+        let advance = self.advance(&font, bytes);
         let base_font = font.base_font.clone();
         self.emit(text, advance, base_font);
     }
 
-    fn show_array(&mut self, operands: &[Object], contexts: &[Context<'a>]) {
+    fn show_array(&mut self, operands: &[Object], contexts: &mut [Context<'a>]) {
         let Some(pieces) = operands.first().and_then(|obj| obj.as_array().ok()) else {
             return;
         };
         for element in pieces {
+            if self.resource_error.is_some() {
+                break;
+            }
             if let Object::String(bytes, _) = element {
                 self.show(bytes, contexts);
             } else if let Ok(adjust) = element.as_float() {
@@ -2707,24 +1881,60 @@ impl<'a> Interpreter<'a> {
 
     /// Decode `bytes` shown with the font resource `name`.
     fn decode(&mut self, name: &[u8], font: &LoadedFont, bytes: &[u8]) -> String {
+        if font.unverified_unicode_map {
+            self.warn(format!(
+                "unicode_mapping: font {}: no usable ToUnicode map; usable fallback encoding retained",
+                lossy(name)
+            ));
+        }
         match &font.decode {
-            Decode::Table(table) => match table.decode(bytes) {
-                Some(text) => self.check_unmapped(name, font, text, bytes),
-                None => self.undecodable(name, font, bytes),
-            },
+            Decode::Table(table) | Decode::UnverifiedTable(table) => {
+                if matches!(font.decode, Decode::UnverifiedTable(_)) {
+                    self.warn(format!(
+                        "unicode_mapping: font {}: no usable ToUnicode map; unverified fallback encoding",
+                        lossy(name)
+                    ));
+                }
+                match table.decode(bytes) {
+                    Some(text) => self.check_unmapped(name, font, text, bytes),
+                    None => self.undecodable(name, font, bytes),
+                }
+            }
             Decode::Named(encoding_name) => {
                 let encoding = Encoding::SimpleEncoding(encoding_name);
                 self.decode_with(name, font, &encoding, bytes)
             }
             Decode::UnicodeMap(encoding) => self.decode_with(name, font, encoding, bytes),
+            Decode::IdentityUnicodeMap(encoding) => {
+                let Encoding::UnicodeMapEncoding(cmap) = encoding else {
+                    return self.undecodable(name, font, bytes);
+                };
+                let mut text = String::with_capacity(bytes.len());
+                for code in bytes.chunks(2) {
+                    let mapped = match code {
+                        [hi, lo] => cmap.get(u32::from(u16::from_be_bytes([*hi, *lo])), 2),
+                        _ => None,
+                    };
+                    if let Some(units) = mapped.filter(|units| !units.is_empty()) {
+                        text.extend(char::decode_utf16(units).map(|ch| ch.unwrap_or('\u{FFFD}')));
+                    } else {
+                        text.push('\u{FFFD}');
+                    }
+                }
+                self.check_unmapped(name, font, text, bytes)
+            }
             Decode::Latin1(reason) => {
                 let label = lossy(name);
-                self.warn(format!("font {label}: {reason}; decoded as Latin-1"));
+                self.warn(format!(
+                    "unicode_mapping: font {label}: {reason}; decoded as Latin-1"
+                ));
                 bytes.iter().copied().map(char::from).collect()
             }
             Decode::Replacement => {
                 let label = lossy(name);
-                self.warn(format!("font {label}: undecodable; U+FFFD substituted"));
+                self.warn(format!(
+                    "unicode_mapping: font {label}: undecodable; U+FFFD substituted"
+                ));
                 replacement_text(font.composite, bytes)
             }
         }
@@ -2746,7 +1956,7 @@ impl<'a> Interpreter<'a> {
     fn undecodable(&mut self, name: &[u8], font: &LoadedFont, bytes: &[u8]) -> String {
         let label = lossy(name);
         self.warn(format!(
-            "font {label}: undecodable string; U+FFFD substituted"
+            "unicode_mapping: font {label}: undecodable string; U+FFFD substituted"
         ));
         replacement_text(font.composite, bytes)
     }
@@ -2766,13 +1976,14 @@ impl<'a> Interpreter<'a> {
                 text.extend(std::iter::repeat_n('\u{FFFD}', dropped));
                 let label = lossy(name);
                 self.warn(format!(
-                    "font {label}: {dropped} unmapped byte(s); U+FFFD used"
+                    "unicode_mapping: font {label}: {dropped} unmapped byte(s); U+FFFD used"
                 ));
             }
-        } else if text.contains('\u{FFFD}') {
+        }
+        if text.contains('\u{FFFD}') {
             let label = lossy(name);
             self.warn(format!(
-                "font {label}: unmapped code(s); U+FFFD substituted"
+                "unicode_mapping: font {label}: unmapped code(s); U+FFFD substituted"
             ));
         }
         text
@@ -2843,7 +2054,9 @@ impl<'a> Interpreter<'a> {
         };
         let label = lossy(name);
         let Some((stream_id, stream)) = lookup_xobject(doc, contexts, name) else {
-            self.warn(format!("XObject {label}: not in resources"));
+            self.warn(format!(
+                "extraction_incomplete: XObject {label}: not in resources"
+            ));
             return;
         };
         let subtype = stream
@@ -2865,24 +2078,80 @@ impl<'a> Interpreter<'a> {
             ));
             return;
         }
-        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).map(Rc::clone));
-        let program = if let Some(program) = cached {
-            program
+        if !charge(&mut self.form_work.calls, 1) {
+            self.resource_error = Some("Form invocation budget exceeded");
+            return;
+        }
+        let cached = stream_id.and_then(|id| self.cache.forms.get(&id).cloned());
+        let (program, work) = if let Some(cached) = cached {
+            cached
         } else {
-            let content_bytes = match stream.get_plain_content() {
-                Ok(bytes) => bytes,
-                Err(_) => stream.content.clone(),
-            };
-            let Ok(program) = lex_content(&content_bytes) else {
-                self.warn(format!("XObject {label}: undecodable content stream"));
+            let Some(policy) = form_decode_policy(stream) else {
+                self.resource_error = Some("Form filter/predictor limit exceeded");
                 return;
             };
+            // Reserve before decoding. For a single filter, refund unused
+            // bytes afterwards unless prediction needs scratch space. Chained
+            // filters can have large intermediate outputs, so keep their full
+            // worst-case charge. Non-predictor DecodeParms do not prevent refunds.
+            let layers = policy.layers;
+            let limit = MAX_FORM_DECODE_BYTES.min(self.form_work.decode / layers);
+            if limit == 0 || stream.content.len() > limit {
+                self.resource_error = Some("Form decode byte budget exceeded");
+                return;
+            }
+            self.form_work.decode -= limit * layers;
+            let content_bytes = match stream.get_plain_content_with_limit(limit) {
+                Ok(bytes) => bytes,
+                Err(LopdfError::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
+                    ..
+                })) => {
+                    self.resource_error = Some("Form decoded stream limit exceeded");
+                    return;
+                }
+                Err(_) => {
+                    self.warn(format!(
+                        "extraction_incomplete: XObject {label}: undecodable content stream"
+                    ));
+                    return;
+                }
+            };
+            if layers == 1 && !policy.uses_predictor {
+                self.form_work.decode += limit - content_bytes.len().max(stream.content.len());
+            }
+            let Ok(mut program) = lex_content(&content_bytes) else {
+                self.warn(format!(
+                    "extraction_incomplete: XObject {label}: undecodable content stream"
+                ));
+                return;
+            };
+            #[cfg(test)]
+            let fold = !self.cache.disable_form_folding;
+            #[cfg(not(test))]
+            let fold = true;
+            if fold {
+                program.fold_empty_saves();
+            }
+            let work = program.estimated_bytes().max(MIN_FORM_CHARGE);
             let program = Rc::new(program);
             if let Some(id) = stream_id {
                 self.cache.insert_form(id, &program);
             }
-            program
+            (program, work)
         };
+        if !charge(&mut self.form_work.execute, work) {
+            self.resource_error = Some("Form execution byte budget exceeded");
+            return;
+        }
+        if program.incomplete {
+            self.warn(format!(
+                "extraction_incomplete: XObject {label}: malformed content tail; parsed prefix retained"
+            ));
+        }
+        #[cfg(test)]
+        {
+            self.form_work.elided_ops += program.elided_ops;
+        }
         // Nothing in it shows text, paints or moves the text position, and
         // it cannot reach the caller's state, so running it would change
         // nothing.
@@ -2901,7 +2170,6 @@ impl<'a> Interpreter<'a> {
             && let Ok(resources) = resources.as_dict()
         {
             form_context.resources.push(resources);
-            load_fonts_from_resources(doc, self.cache, resources, &mut form_context.fonts);
         }
 
         // The Form runs on a stack of its own: an unbalanced `Q` inside it
@@ -2915,6 +2183,54 @@ impl<'a> Interpreter<'a> {
         self.stack = saved_stack;
         self.state = saved_state;
     }
+}
+
+/// Match lopdf's content concatenation and corrupt-stream fallback, while
+/// retaining evidence whenever a requested stream could not be read faithfully.
+fn page_content_with_evidence(
+    doc: &Document,
+    page_id: ObjectId,
+    page_dict: &Dictionary,
+    warnings: &mut Vec<String>,
+) -> Vec<u8> {
+    if let Ok(contents) = page_dict.get(b"Contents") {
+        let supported = match doc.dereference(contents) {
+            Ok((_, Object::Null)) => true,
+            Ok((_, Object::Stream(_))) => matches!(contents, Object::Reference(_)),
+            Ok((_, Object::Array(items))) => items
+                .iter()
+                .all(|item| matches!(item, Object::Reference(_))),
+            _ => false,
+        };
+        if !supported {
+            warnings.push(
+                "extraction_incomplete: page Contents structure could not be resolved completely"
+                    .to_string(),
+            );
+        }
+    }
+    let mut content = Vec::new();
+    for object_id in doc.get_page_contents(page_id) {
+        match doc.get_object(object_id).and_then(Object::as_stream) {
+            Ok(stream) => {
+                if let Ok(data) = stream.decompressed_content() {
+                    content.extend_from_slice(&data);
+                } else {
+                    warnings.push(format!(
+                        "extraction_incomplete: page content stream {} {}: undecodable; raw bytes retained",
+                        object_id.0, object_id.1
+                    ));
+                    content.extend_from_slice(&stream.content);
+                }
+                content.push(b'\n');
+            }
+            Err(_) => warnings.push(format!(
+                "extraction_incomplete: page content stream {} {}: unavailable",
+                object_id.0, object_id.1
+            )),
+        }
+    }
+    content
 }
 
 fn extract_page(
@@ -2939,11 +2255,18 @@ fn extract_page(
         page_text.warnings.push(message);
     }
 
-    let content_bytes = doc.get_page_content(page_id);
+    let content_bytes =
+        page_content_with_evidence(doc, page_id, page_dict, &mut page_text.warnings);
     let program = match lex_content(&content_bytes) {
         Ok(program) => program,
         Err(err) => return Err(page_error(page, format!("content stream: {err}"))),
     };
+    if program.incomplete {
+        page_text.warnings.push(
+            "extraction_incomplete: malformed page content tail; parsed prefix retained"
+                .to_string(),
+        );
+    }
 
     let mut page_context = Context {
         fonts: BTreeMap::new(),
@@ -2951,7 +2274,7 @@ fn extract_page(
     };
     // Same walk as `Document::get_page_fonts` (the page's direct resources,
     // then the indirect ones up the `/Parent` chain; first name wins), but
-    // each font dictionary is resolved through the session cache.
+    // used fonts will be resolved lazily through the session cache.
     match doc.get_page_resources(page_id) {
         Ok((direct, ids)) => {
             if let Some(dict) = direct {
@@ -2961,9 +2284,6 @@ fn extract_page(
                 if let Ok(dict) = doc.get_dictionary(id) {
                     page_context.resources.push(dict);
                 }
-            }
-            for &resources in &page_context.resources {
-                load_fonts_from_resources(doc, cache, resources, &mut page_context.fonts);
             }
         }
         Err(err) => page_text.warnings.push(format!("fonts: {err}")),
@@ -2983,9 +2303,19 @@ fn extract_page(
         max_depth,
         ligatures: 0,
         graphics: Graphics::default(),
+        form_work: FormWork::default(),
+        font_work: FontWork::default(),
+        resource_error: None,
     };
     let mut contexts = vec![page_context];
     interpreter.run(&program, &mut contexts, 0);
+    #[cfg(test)]
+    {
+        interpreter.cache.last_form_work = Some(interpreter.form_work);
+    }
+    if let Some(reason) = interpreter.resource_error {
+        return Err(page_error(page, format!("resource_limit: {reason}")));
+    }
     Ok(interpreter.finish())
 }
 
@@ -4764,9 +4094,12 @@ static MSBM_NAMES: &[(u8, &str)] = &[
 #[cfg(test)]
 mod tests {
     use lopdf::content::{Content, Operation};
-    use lopdf::dictionary;
+    use lopdf::{StringFormat, dictionary};
 
+    use super::content::TextOp;
+    use super::graphics::cluster;
     use super::*;
+    use crate::schema::Figure;
 
     fn close(actual: f32, expected: f32) -> bool {
         (actual - expected).abs() < 1e-3
@@ -4901,15 +4234,22 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
-        config.insert("content".to_string(), "4".to_string());
-        config.insert("encodings".to_string(), "1".to_string());
+        config.insert("content".to_string(), "9".to_string());
+        config.insert("encodings".to_string(), "5".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
         config.insert("content".to_string(), "2".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
         config.insert("content".to_string(), "3".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));
-        config.insert("content".to_string(), "4".to_string());
+        config.insert("content".to_string(), "5".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "6".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "7".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("content".to_string(), "8".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
         // Nor the digest from before the TeX encodings.
         config.remove("encodings");
         assert_ne!(identity.config_digest, config_digest(&config));
@@ -5170,14 +4510,26 @@ mod tests {
         };
         with_encoding(&font, |encoding, table| {
             let bytes = all_bytes();
-            let expected = Document::decode_text(encoding, &bytes).ok();
+            let expected: Option<String> = bytes
+                .iter()
+                .map(|byte| {
+                    Document::decode_text(encoding, &[*byte]).ok().map(|text| {
+                        if text.is_empty() {
+                            "\u{FFFD}".to_string()
+                        } else {
+                            text
+                        }
+                    })
+                })
+                .collect();
             assert_eq!(table.decode(&bytes), expected);
             assert_eq!(
                 table.decode(b"Hello, world!").as_deref(),
                 Some("Hello, world!")
             );
-            // Byte 1 has no glyph in StandardEncoding: silently dropped.
-            assert_eq!(table.decode(&[1]).as_deref(), Some(""));
+            // Byte 1 has no glyph in StandardEncoding: keep its position.
+            assert_eq!(table.decode(&[1]).as_deref(), Some("\u{FFFD}"));
+            assert_eq!(table.decode(b"A\x01B").as_deref(), Some("A\u{FFFD}B"));
         });
     }
 
@@ -5191,7 +4543,18 @@ mod tests {
         };
         with_encoding(&font, |encoding, table| {
             let bytes = all_bytes();
-            let expected = Document::decode_text(encoding, &bytes).ok();
+            let expected: Option<String> = bytes
+                .iter()
+                .map(|byte| {
+                    Document::decode_text(encoding, &[*byte]).ok().map(|text| {
+                        if text.is_empty() {
+                            "\u{FFFD}".to_string()
+                        } else {
+                            text
+                        }
+                    })
+                })
+                .collect();
             assert!(expected.is_some());
             assert_eq!(table.decode(&bytes), expected);
             assert_eq!(table.decode(&[0xE9]).as_deref(), Some("\u{E9}"));
@@ -5212,7 +4575,18 @@ mod tests {
         };
         with_encoding(&font, |encoding, table| {
             let bytes = all_bytes();
-            let expected = Document::decode_text(encoding, &bytes).ok();
+            let expected: Option<String> = bytes
+                .iter()
+                .map(|byte| {
+                    Document::decode_text(encoding, &[*byte]).ok().map(|text| {
+                        if text.is_empty() {
+                            "\u{FFFD}".to_string()
+                        } else {
+                            text
+                        }
+                    })
+                })
+                .collect();
             assert!(expected.is_some());
             assert_eq!(table.decode(&bytes), expected);
             assert_eq!(table.decode(b"AB").as_deref(), Some("\u{E9}\u{DF}"));
@@ -5266,12 +4640,12 @@ mod tests {
         let mut session = open_session(&bytes);
         let page = session.page_text(1).unwrap();
         assert_eq!(page.spans.len(), 1);
-        // Byte 65 is /eacute; byte 1 has no glyph, so it is dropped by the
-        // encoding and restored as U+FFFD at the end, with a warning.
+        // Byte 65 is /eacute; byte 1 has no glyph, so U+FFFD preserves its
+        // position and the warning identifies the unresolved mapping.
         assert_eq!(page.spans[0].text, "\u{E9}\u{FFFD}");
         assert_eq!(
             page.warnings,
-            vec!["font F1: 1 unmapped byte(s); U+FFFD used".to_string()]
+            vec!["unicode_mapping: font F1: unmapped code(s); U+FFFD substituted".to_string()]
         );
         let font = session.cache.fonts.values().next().unwrap();
         assert!(matches!(font.decode, Decode::Table(_)));
@@ -5297,6 +4671,183 @@ mod tests {
         let bytes = build_pdf_with_font(vec![ops], None, make_font);
         let mut session = open_session(&bytes);
         session.page_text(1).unwrap()
+    }
+
+    #[test]
+    fn sparse_simple_cmap_preserves_later_codes_and_multi_character_mappings() {
+        let make_font = |doc: &mut Document| {
+            let cmap = doc.add_object(Stream::new(
+                dictionary! {},
+                b"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+\
+                /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+\
+                /CMapName /Sparse def
+/CMapType 2 def
+\
+                1 begincodespacerange
+<00> <FF>
+endcodespacerange
+\
+                2 beginbfchar
+<41> <00660069>
+<43> <0043>
+endbfchar
+\
+                endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+"
+                .to_vec(),
+            ));
+            dictionary! {
+                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Custom",
+                "ToUnicode" => cmap,
+            }
+        };
+        let missing = show_with_font(b"ABC", make_font);
+        assert_eq!(missing.spans[0].text, "fi\u{FFFD}C");
+        assert!(
+            missing
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("unicode_mapping:"))
+        );
+        let mapped = show_with_font(b"AC", make_font);
+        assert_eq!(mapped.spans[0].text, "fiC");
+        assert!(mapped.warnings.is_empty(), "{:?}", mapped.warnings);
+    }
+
+    #[test]
+    fn simple_font_to_unicode_takes_precedence_over_rendering_encoding() {
+        for encoding in [
+            Object::Name(b"WinAnsiEncoding".to_vec()),
+            Object::Dictionary(dictionary! {
+                "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => vec![65.into(), "A".into(), "B".into(), "C".into()],
+            }),
+        ] {
+            let page = show_with_font(b"ABC", |doc| {
+                let cmap = doc.add_object(Stream::new(
+                    dictionary! {},
+                    b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+                    /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+                    /CMapName /Override def\n/CMapType 2 def\n\
+                    1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+                    2 beginbfchar\n<41> <00660069>\n<43> <03B1>\nendbfchar\n\
+                    endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+                        .to_vec(),
+                ));
+                dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Custom",
+                    "Encoding" => encoding, "ToUnicode" => cmap,
+                }
+            });
+            assert_eq!(page.spans[0].text, "fi\u{FFFD}\u{03B1}");
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+        }
+    }
+
+    #[test]
+    fn malformed_simple_to_unicode_cannot_silently_fall_back_to_complete() {
+        let page = show_with_font(b"ABC", |doc| {
+            let cmap = doc.add_object(Stream::new(dictionary! {}, b"not a CMap".to_vec()));
+            dictionary! {
+                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+                "Encoding" => "WinAnsiEncoding", "ToUnicode" => cmap,
+            }
+        });
+        assert_eq!(page.spans[0].text, "ABC");
+        assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+        assert!(
+            page.warnings
+                .iter()
+                .any(|warning| warning.contains("no usable ToUnicode map"))
+        );
+    }
+
+    #[test]
+    fn malformed_to_unicode_preserves_named_and_differences_text_as_partial() {
+        for (encoding, shown, expected) in [
+            (
+                Object::Name(b"WinAnsiEncoding".to_vec()),
+                b"\x80".as_slice(),
+                "€",
+            ),
+            (
+                Object::Dictionary(dictionary! {
+                    "BaseEncoding" => "WinAnsiEncoding",
+                    "Differences" => vec![65.into(), "eacute".into(), "germandbls".into()],
+                }),
+                b"AB".as_slice(),
+                "éß",
+            ),
+        ] {
+            let page = show_with_font(shown, |doc| {
+                let cmap = doc.add_object(Stream::new(dictionary! {}, b"not a CMap".to_vec()));
+                dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Custom",
+                    "Encoding" => encoding, "ToUnicode" => cmap,
+                }
+            });
+            assert_eq!(page.spans[0].text, expected);
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+            assert!(page.warnings.iter().any(|warning| {
+                warning.starts_with("unicode_mapping:")
+                    && warning.contains("usable fallback encoding retained")
+            }));
+        }
+    }
+
+    #[test]
+    fn sparse_identity_cmap_preserves_mapped_codes_after_an_unknown_code() {
+        for encoding in ["Identity-H", "Identity-V"] {
+            let page = show_with_font(&[0, 65, 0, 66, 0, 67], |doc| {
+                let mut font =
+                    font_with_cmap(doc, "2 beginbfchar\n<0041><0041>\n<0043><0043>\nendbfchar");
+                font.set("Encoding", encoding);
+                font
+            });
+            assert_eq!(page.spans[0].text, "A\u{FFFD}C");
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+        }
+    }
+
+    #[test]
+    fn identity_cmap_does_not_accept_one_byte_codes_or_an_odd_trailing_byte() {
+        let page = show_with_font(b"ABC", |doc| {
+            let mut font = font_with_cmap(doc, "1 beginbfrange\n<41><43><0041>\nendbfrange");
+            font.set("Encoding", "Identity-H");
+            font
+        });
+        assert_eq!(page.spans[0].text, "\u{FFFD}\u{FFFD}");
+        assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+    }
+
+    #[test]
+    fn simple_rendering_encoding_cannot_bypass_to_unicode_resource_limits() {
+        for encoding in [
+            Object::Name(b"WinAnsiEncoding".to_vec()),
+            Object::Dictionary(dictionary! { "BaseEncoding" => "WinAnsiEncoding" }),
+        ] {
+            let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                let mut font = font_with_cmap(
+                    doc,
+                    "1 beginbfrange\n<00000000><FFFFFFFF><0020>\nendbfrange",
+                );
+                font.set("Subtype", "Type1");
+                font.set("Encoding", encoding);
+                font
+            });
+            let error = open_session(&bytes).page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: ToUnicode source-code cardinality limit exceeded"),
+                "{error}"
+            );
+        }
     }
 
     /// The clear-text start of a Type1 font program whose built-in encoding
@@ -5384,10 +4935,10 @@ mod tests {
         });
         // `lopdf` would have dropped the whole encoding for
         // `StandardEncoding` and read "BA".
-        assert_eq!(page.spans[0].text, "\u{E9}\u{FFFD}");
+        assert_eq!(page.spans[0].text, "\u{FFFD}\u{E9}");
         assert_eq!(
             page.warnings,
-            vec!["font F1: 1 unmapped byte(s); U+FFFD used".to_string()]
+            vec!["unicode_mapping: font F1: unmapped code(s); U+FFFD substituted".to_string()]
         );
     }
 
@@ -5519,6 +5070,9 @@ mod tests {
             max_depth: 8,
             ligatures: 0,
             graphics: Graphics::default(),
+            form_work: FormWork::default(),
+            font_work: FontWork::default(),
+            resource_error: None,
         };
         interpreter.graphics = graphics;
         for &text in texts {
@@ -5618,17 +5172,521 @@ mod tests {
                 MAX_FORM_CACHE_BYTES / 2 + 1
             ])],
             paths: Vec::new(),
+            elided_ops: 0,
+            incomplete: false,
         });
         assert!(cache.insert_form((1, 0), &big));
-        assert!(!cache.insert_form((2, 0), &big), "over budget");
+        assert!(cache.insert_form((2, 0), &big), "evict the oldest entry");
+        assert!(!cache.forms.contains_key(&(1, 0)));
         assert_eq!(cache.forms.len(), 1);
         let small = Rc::new(TextProgram {
             ops: Vec::new(),
             operands: Vec::new(),
             paths: Vec::new(),
+            elided_ops: 0,
+            incomplete: false,
         });
         assert!(cache.insert_form((3, 0), &small));
         assert_eq!(cache.forms.len(), 2);
+    }
+
+    #[test]
+    fn tiny_forms_are_charged_and_cache_cardinality_is_bounded() {
+        let mut cache = SessionCache::default();
+        let empty = Rc::new(TextProgram::default());
+        for id in 1..=10_000 {
+            assert!(cache.insert_form((id, 0), &empty));
+            assert!(cache.forms.len() <= MAX_FORM_CACHE_ENTRIES);
+            assert_eq!(cache.form_order.len(), cache.forms.len());
+            assert_eq!(cache.form_bytes, cache.forms.len() * MIN_FORM_CHARGE);
+        }
+        let before = cache.form_bytes;
+        assert!(cache.insert_form((10_000, 0), &empty));
+        assert_eq!(
+            cache.form_bytes, before,
+            "duplicate insert is not charged twice"
+        );
+        assert!(cache.forms.contains_key(&(10_000, 0)));
+        assert!(!cache.forms.contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn form_charge_includes_spare_capacity_and_nested_dictionary_data() {
+        let program = TextProgram {
+            operands: vec![Object::Dictionary(dictionary! {
+                "Data" => Object::string_literal(Vec::<u8>::with_capacity(4096)),
+            })],
+            ops: Vec::with_capacity(100),
+            paths: Vec::new(),
+            elided_ops: 0,
+            incomplete: false,
+        };
+        assert!(program.estimated_bytes() >= 4096 + 100 * size_of::<TextOp>());
+    }
+
+    fn replace_test_form(session: &mut LopdfSession, mut content: Stream, direct: bool) {
+        let (id, original) = session
+            .doc
+            .objects
+            .iter()
+            .find_map(|(id, obj)| {
+                let stream = obj.as_stream().ok()?;
+                (stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+                    .then_some((*id, stream.clone()))
+            })
+            .unwrap();
+        content.dict.set("Subtype", "Form");
+        content.dict.set(
+            "Resources",
+            original.dict.get(b"Resources").unwrap().clone(),
+        );
+        session
+            .doc
+            .objects
+            .insert(id, Object::Stream(content.clone()));
+        if direct {
+            for obj in session.doc.objects.values_mut() {
+                if let Ok(dict) = obj.as_dict_mut()
+                    && let Ok(xobjects) = dict.get_mut(b"XObject").and_then(Object::as_dict_mut)
+                {
+                    xobjects.set("X1", Object::Stream(content.clone()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_invoked_forms_are_partial_and_keep_native_text() {
+        let mut operations = text_ops(12, 60, 700, "Readable native text remains.");
+        operations.push(Operation::new("Do", vec!["X1".into()]));
+        let bytes = build_pdf(vec![operations.clone()], Some(vec![]));
+        for stream in [
+            Stream::new(dictionary! {"Filter" => "ASCIIHexDecode"}, b"GG>".to_vec()),
+            Stream::new(dictionary! {}, b"BI".to_vec()),
+        ] {
+            let mut session = open_session(&bytes);
+            replace_test_form(&mut session, stream, false);
+            let page = session.page_text(1).unwrap();
+            assert_eq!(span_texts(&page), vec!["Readable native text remains."]);
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+            assert!(
+                page.warnings
+                    .iter()
+                    .any(|warning| { warning.starts_with("extraction_incomplete: XObject X1:") })
+            );
+        }
+        let mut session = open_session(&build_pdf(vec![operations], None));
+        let page = session.page_text(1).unwrap();
+        assert_eq!(span_texts(&page), vec!["Readable native text remains."]);
+        assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+    }
+
+    #[test]
+    fn unused_malformed_form_does_not_make_page_partial() {
+        let bytes = build_pdf(
+            vec![text_ops(12, 60, 700, "Readable native text remains.")],
+            Some(vec![]),
+        );
+        let mut session = open_session(&bytes);
+        replace_test_form(
+            &mut session,
+            Stream::new(dictionary! {}, b"BI".to_vec()),
+            false,
+        );
+        let page = session.page_text(1).unwrap();
+        assert_eq!(span_texts(&page), vec!["Readable native text remains."]);
+        assert_eq!(page.extraction_status(), crate::schema::Status::Complete);
+        assert!(page.warnings.is_empty());
+    }
+
+    #[test]
+    fn truncated_content_preserves_prefix_and_partial_evidence_on_cache_hits() {
+        let operations = text_ops(12, 60, 700, "Readable native text remains.");
+        let mut content = Content { operations }.encode().unwrap();
+        content.extend_from_slice(b" (");
+        let page_bytes = build_pdf(vec![vec![]], None);
+        let mut page_session = open_session(&page_bytes);
+        let page_id = page_session.pages[&1];
+        let content_id = page_session
+            .doc
+            .add_object(Stream::new(dictionary! {}, content.clone()));
+        page_session
+            .doc
+            .get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Contents", content_id);
+        let page = page_session.page_text(1).unwrap();
+        assert_eq!(span_texts(&page), vec!["Readable native text remains."]);
+        assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+
+        let form_bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        let mut form_session = open_session(&form_bytes);
+        replace_test_form(
+            &mut form_session,
+            Stream::new(dictionary! {}, content),
+            false,
+        );
+        for _ in 0..2 {
+            let page = form_session.page_text(1).unwrap();
+            assert_eq!(span_texts(&page), vec!["Readable native text remains."]);
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+            assert!(
+                page.warnings
+                    .iter()
+                    .any(|warning| warning.contains("malformed content tail"))
+            );
+        }
+        assert_eq!(form_session.cache.forms.len(), 1);
+    }
+
+    #[test]
+    fn lexer_incomplete_flag_distinguishes_malformed_tails_from_valid_endings() {
+        for valid in [
+            b"q Q".as_slice(),
+            b"q Q \0\x0c",
+            b"q Q % final comment",
+            b"% comment",
+            b"q Q \0 % comment\n\x0c% final comment",
+        ] {
+            assert!(!lex_content(valid).unwrap().incomplete, "{valid:?}");
+        }
+        for invalid in [
+            b"q Q (".as_slice(),
+            b"q Q )",
+            b"q Q 1 2",
+            b"q Q \0 (lost) Tj",
+        ] {
+            assert!(lex_content(invalid).unwrap().incomplete, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn page_content_recovery_is_partial_and_preserves_valid_streams() {
+        let bytes = build_pdf(
+            vec![text_ops(12, 60, 700, "Readable native text remains.")],
+            None,
+        );
+        for bad_kind in ["missing", "nonstream", "undecodable", "array-item"] {
+            for valid_first in [false, true] {
+                let mut session = open_session(&bytes);
+                let page_id = session.pages[&1];
+                let valid = session
+                    .doc
+                    .get_dictionary(page_id)
+                    .unwrap()
+                    .get(b"Contents")
+                    .unwrap()
+                    .clone();
+                let bad = match bad_kind {
+                    "missing" => Object::Reference((session.doc.max_id + 100, 0)),
+                    "nonstream" => Object::Reference(session.doc.add_object(dictionary! {})),
+                    "undecodable" => Object::Reference(session.doc.add_object(Stream::new(
+                        dictionary! { "Filter" => "ASCIIHexDecode" },
+                        b"invalid".to_vec(),
+                    ))),
+                    _ => Object::Integer(7),
+                };
+                let contents = if valid_first {
+                    vec![valid, bad]
+                } else {
+                    vec![bad, valid]
+                };
+                session
+                    .doc
+                    .get_object_mut(page_id)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("Contents", contents);
+                let page = session.page_text(1).unwrap();
+                assert_eq!(span_texts(&page), vec!["Readable native text remains."]);
+                assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_all_page_content_is_partial_but_blank_pages_are_complete() {
+        let bytes = build_pdf(vec![vec![]], None);
+        for contents in [Object::Reference((1000, 0)), Object::Integer(7)] {
+            let mut session = open_session(&bytes);
+            session
+                .doc
+                .get_object_mut(session.pages[&1])
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Contents", contents);
+            let page = session.page_text(1).unwrap();
+            assert!(page.spans.is_empty());
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+        }
+        for contents in [None, Some(Object::Null), Some(Object::Array(vec![]))] {
+            let mut session = open_session(&bytes);
+            let page = session
+                .doc
+                .get_object_mut(session.pages[&1])
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            if let Some(contents) = contents {
+                page.set("Contents", contents);
+            } else {
+                page.remove(b"Contents");
+            }
+            let page = session.page_text(1).unwrap();
+            assert_eq!(page.extraction_status(), crate::schema::Status::Complete);
+            assert!(page.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn oversized_compressed_form_is_rejected_before_lexing() {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        let mut session = open_session(&bytes);
+        let mut stream = Stream::new(dictionary! {}, vec![b' '; MAX_FORM_DECODE_BYTES + 1]);
+        stream.compress().unwrap();
+        assert!(stream.content.len() < MAX_FORM_DECODE_BYTES / 100);
+        replace_test_form(&mut session, stream, false);
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form decoded stream"),
+            "{error}"
+        );
+        assert!(
+            session.cache.forms.is_empty(),
+            "never lexed/cached the compressed bytes as fallback"
+        );
+    }
+
+    #[test]
+    fn repeated_uncached_forms_stop_at_the_page_decode_budget() {
+        let calls = vec![Operation::new("Do", vec!["X1".into()]); 9];
+        let bytes = build_pdf(vec![calls], Some(vec![]));
+        let mut session = open_session(&bytes);
+        let stream = Stream::new(dictionary! {}, vec![b' '; MAX_FORM_DECODE_BYTES]);
+        replace_test_form(&mut session, stream, true);
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form decode byte budget"),
+            "{error}"
+        );
+        assert!(
+            session.cache.forms.is_empty(),
+            "direct Forms cannot be cached by object id"
+        );
+    }
+
+    #[test]
+    fn cached_empty_forms_have_a_work_limit_and_page_budgets_reset() {
+        let many = vec![Operation::new("Do", vec!["X1".into()]); MAX_PAGE_FORM_CALLS + 1];
+        let once = vec![Operation::new("Do", vec!["X1".into()])];
+        let bytes = build_pdf(vec![many, once], Some(vec![]));
+        let mut session = open_session(&bytes);
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(error.contains("resource_limit: Form invocation"), "{error}");
+        assert_eq!(session.cache.forms.len(), 1);
+        assert!(session.page_text(2).is_ok());
+    }
+
+    #[test]
+    fn hostile_form_filter_metadata_is_rejected_before_decoding() {
+        let mut stream = Stream::new(
+            dictionary! {
+                "Filter" => vec![Object::Name(b"FlateDecode".to_vec()); MAX_FORM_FILTERS + 1],
+            },
+            vec![],
+        );
+        assert!(form_decode_policy(&stream).is_none());
+        stream.dict.set("Filter", "FlateDecode");
+        stream.dict.set(
+            "DecodeParms",
+            dictionary! {
+                "Predictor" => 12,
+                "Columns" => i64::MAX,
+                "Colors" => i64::MAX,
+            },
+        );
+        assert!(form_decode_policy(&stream).is_none());
+    }
+
+    #[test]
+    fn subbyte_tiff_accumulator_is_bounded_before_decoding() {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        for component_bits in [1, 2, 4] {
+            // Each packed row fits exactly, while Vec<u16> would allocate
+            // 128 / 64 / 32 MiB respectively, even for one decoded byte.
+            let colors = MAX_FORM_DECODE_BYTES * 8 / component_bits;
+            let mut stream = flate_test_form(&[0]);
+            stream.dict.set(
+                "DecodeParms",
+                dictionary! {
+                    "Predictor" => 2,
+                    "Columns" => 1,
+                    "Colors" => i64::try_from(colors).unwrap(),
+                    "BitsPerComponent" => i64::try_from(component_bits).unwrap(),
+                },
+            );
+            assert!(form_decode_policy(&stream).is_none());
+            let mut session = open_session(&bytes);
+            replace_test_form(&mut session, stream.clone(), false);
+            let error = session.page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: Form filter/predictor"),
+                "{error}"
+            );
+            assert!(session.cache.forms.is_empty());
+            assert_eq!(
+                session.cache.last_form_work.unwrap().decode,
+                MAX_PAGE_FORM_DECODE_BYTES
+            );
+
+            // Boundary check without actually allocating the accumulator.
+            let params = stream
+                .dict
+                .get_mut(b"DecodeParms")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            params.set(
+                "Colors",
+                i64::try_from(MAX_FORM_DECODE_BYTES / size_of::<u16>()).unwrap(),
+            );
+            assert!(form_decode_policy(&stream).is_some());
+            stream
+                .dict
+                .get_mut(b"DecodeParms")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Colors",
+                    i64::try_from(MAX_FORM_DECODE_BYTES / size_of::<u16>() + 1).unwrap(),
+                );
+            assert!(form_decode_policy(&stream).is_none());
+        }
+    }
+
+    /// Nine distinct indirect Forms force nine cache misses on one page.
+    fn distinct_parameterized_forms(stream: &Stream) -> LopdfSession {
+        let bytes = build_pdf(vec![vec![]], None);
+        let mut session = open_session(&bytes);
+        let mut xobjects = Dictionary::new();
+        let mut operations = Vec::new();
+        for index in 0..9 {
+            let name = format!("X{index}");
+            let mut form = stream.clone();
+            form.dict.set("Subtype", "Form");
+            let id = session.doc.add_object(form);
+            xobjects.set(name.as_bytes(), id);
+            operations.push(Operation::new("Do", vec![Object::Name(name.into_bytes())]));
+        }
+        let content = session.doc.add_object(Stream::new(
+            dictionary! {},
+            Content { operations }.encode().unwrap(),
+        ));
+        let page = session
+            .doc
+            .get_object_mut(session.pages[&1])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        page.set("Contents", content);
+        page.set("Resources", dictionary! { "XObject" => xobjects });
+        session
+    }
+
+    fn flate_test_form(plain: &[u8]) -> Stream {
+        use std::io::Write;
+        // Stream::compress skips compression when the encoding would grow;
+        // these tiny fixtures must still exercise the actual Flate decoder.
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plain).unwrap();
+        Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            encoder.finish().unwrap(),
+        )
+    }
+
+    #[test]
+    fn non_predictor_decode_parameters_refund_nine_distinct_forms() {
+        let plain = b"q Q ";
+        let mut flate = flate_test_form(plain);
+        flate
+            .dict
+            .set("DecodeParms", dictionary! { "Predictor" => 1 });
+        // MSB-first 9-bit LZW codes: clear, four literals, EOD. This tiny
+        // fixture stays below the code-width transition for either EarlyChange.
+        let codes = [256u16, 113, 32, 81, 32, 257];
+        let mut encoded = vec![0u8; (codes.len() * 9).div_ceil(8)];
+        for (index, code) in codes.into_iter().enumerate() {
+            for bit in 0..9 {
+                let offset = index * 9 + bit;
+                encoded[offset / 8] |= (((code >> (8 - bit)) & 1) as u8) << (7 - offset % 8);
+            }
+        }
+        let lzw = Stream::new(
+            dictionary! {
+                "Filter" => "LZWDecode",
+                "DecodeParms" => dictionary! { "EarlyChange" => 0 },
+            },
+            encoded,
+        );
+        for stream in [flate, lzw] {
+            assert_eq!(stream.get_plain_content_with_limit(1024).unwrap(), plain);
+            let mut session = distinct_parameterized_forms(&stream);
+            let page = session.page_text(1).unwrap();
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+            assert_eq!(session.cache.forms.len(), 9);
+            assert_eq!(
+                MAX_PAGE_FORM_DECODE_BYTES - session.cache.last_form_work.unwrap().decode,
+                9 * plain.len().max(stream.content.len()),
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_predictors_and_chains_keep_the_worst_case_reservation() {
+        let mut tiff = flate_test_form(b"q Q ");
+        tiff.dict.set(
+            "DecodeParms",
+            dictionary! {
+                "Predictor" => 2, "Columns" => 1, "Colors" => 1, "BitsPerComponent" => 8,
+            },
+        );
+        let mut png = flate_test_form(b"\0q Q ");
+        png.dict.set(
+            "DecodeParms",
+            dictionary! { "Predictor" => 12, "Columns" => 4 },
+        );
+        let chain = Stream::new(
+            dictionary! {
+                "Filter" => vec![Object::Name(b"ASCIIHexDecode".to_vec()), Object::Name(b"ASCIIHexDecode".to_vec())],
+            },
+            b"3731323035313230>".to_vec(),
+        );
+        for stream in [tiff, png, chain] {
+            assert_eq!(stream.get_plain_content_with_limit(1024).unwrap(), b"q Q ");
+            let mut session = distinct_parameterized_forms(&stream);
+            let error = session.page_text(1).unwrap_err().to_string();
+            assert!(
+                error.contains("resource_limit: Form decode byte budget"),
+                "{error}"
+            );
+            assert_eq!(session.cache.last_form_work.unwrap().decode, 0);
+        }
     }
 
     #[test]
@@ -5700,6 +5758,654 @@ mod tests {
     }
 
     type OpList = Result<Vec<(String, Vec<Object>)>, String>;
+
+    #[test]
+    #[ignore = "requires TPE_CORPUS_CACHE containing the pinned public PDFs"]
+    fn measure_corpus_form_work() {
+        let root = std::env::var("TPE_CORPUS_CACHE").expect("set TPE_CORPUS_CACHE");
+        let mut peaks = [0usize; 3];
+        let mut peak_files = [String::new(), String::new(), String::new()];
+        let mut documents = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path().join("paper.pdf");
+            if !path.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let mut session = open_session(&bytes);
+            documents += 1;
+            for page in 1..=session.pages.len() as u32 {
+                session.page_text(page).unwrap();
+                let used = session.cache.last_form_work.unwrap();
+                for (index, value) in [
+                    MAX_PAGE_FORM_CALLS - used.calls,
+                    MAX_PAGE_FORM_DECODE_BYTES - used.decode,
+                    MAX_PAGE_FORM_WORK_BYTES - used.execute,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if value > peaks[index] {
+                        peaks[index] = value;
+                        peak_files[index] = format!("{} page {page}", path.display());
+                    }
+                }
+            }
+        }
+        assert_eq!(documents, 70);
+        eprintln!(
+            "corpus Form peaks: calls={}, decode_bytes={}, execution_charge={}; locations={peak_files:?}",
+            peaks[0], peaks[1], peaks[2]
+        );
+    }
+
+    /// Three Form levels: A calls B N times, B calls C N times, C saves/restores N times.
+    fn shallow_nested_forms_pdf(n: usize, text: bool) -> Vec<u8> {
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(vec![]),
+        );
+        let mut session = open_session(&bytes);
+        let form = |content, resources| {
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => resources,
+                },
+                content,
+            )
+        };
+        let leaf: &[u8] = if text {
+            b"q BT /F1 10 Tf 1 0 0 1 50 50 Tm (X) Tj ET Q\n"
+        } else {
+            b"q Q\n"
+        };
+        let c = session.doc.add_object(form(leaf.repeat(n), dictionary! {}));
+        let b = session.doc.add_object(form(
+            b"/C Do\n".repeat(n),
+            dictionary! {
+                "XObject" => dictionary! { "C" => c },
+            },
+        ));
+        let a = session
+            .doc
+            .objects
+            .values_mut()
+            .find_map(|obj| {
+                let stream = obj.as_stream_mut().ok()?;
+                (stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form"))
+                    .then_some(stream)
+            })
+            .unwrap();
+        a.set_content(b"/B Do\n".repeat(n));
+        a.dict.set(
+            "Resources",
+            dictionary! { "XObject" => dictionary! { "B" => b } },
+        );
+        let mut output = Vec::new();
+        session.doc.save_to(&mut output).unwrap();
+        output
+    }
+
+    #[test]
+    fn shallow_nested_forms_charge_each_repeated_execution_and_fail_explicitly() {
+        for n in [20, 40, 80, 160] {
+            let bytes = shallow_nested_forms_pdf(n, false);
+            let mut session = open_session(&bytes);
+            let page = session.page_text(1).unwrap();
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+            assert!(page.spans.is_empty());
+            assert_eq!(session.cache.forms.len(), 3);
+            let used = session.cache.last_form_work.unwrap();
+            assert_eq!(MAX_PAGE_FORM_CALLS - used.calls, 1 + n + n * n);
+            assert_eq!(used.interpreted_ops, 1 + n + n * n);
+            assert_eq!(used.elided_ops, 2 * n.pow(3));
+            let mut expected_charge = 0;
+            for (program, charge) in session.cache.forms.values() {
+                let repetitions = match program.ops.first().map(|op| op.kind) {
+                    None => n * n, // C: N^2 visits, empty after folding q/Q.
+                    Some(OpKind::Invoke) if program.operands[0].as_name().unwrap() == b"C" => n,
+                    Some(OpKind::Invoke) => 1,
+                    _ => panic!("unexpected nested Form program"),
+                };
+                expected_charge += charge * repetitions;
+            }
+            assert_eq!(MAX_PAGE_FORM_WORK_BYTES - used.execute, expected_charge);
+        }
+        let mut session = open_session(&shallow_nested_forms_pdf(400, false));
+        let error = session.page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: Form invocation budget"),
+            "{error}"
+        );
+        assert_eq!(session.cache.forms.len(), 3);
+        assert_eq!(session.cache.last_form_work.unwrap().calls, 0);
+        // The production folded path still rejects genuinely repeated output
+        // at the execution budget, before it runs out of invocation allowance.
+        let mut session = open_session(&shallow_nested_forms_pdf(64, true));
+        assert!(
+            session
+                .page_text(1)
+                .unwrap_err()
+                .to_string()
+                .contains("resource_limit: Form execution byte budget")
+        );
+        assert!(session.cache.last_form_work.unwrap().calls > 0);
+        // Nonempty programs still consume the execution budget.
+        let mut session = open_session(&shallow_nested_forms_pdf(160, false));
+        session.cache.disable_form_folding = true;
+        assert!(
+            session
+                .page_text(1)
+                .unwrap_err()
+                .to_string()
+                .contains("resource_limit: Form execution byte budget")
+        );
+    }
+
+    #[test]
+    fn form_folding_preserves_repeated_text_and_transforms() {
+        for n in [2usize, 4, 8] {
+            let bytes = shallow_nested_forms_pdf(n, true);
+            let mut folded = open_session(&bytes);
+            let mut reference = open_session(&bytes);
+            reference.cache.disable_form_folding = true;
+            let page = folded.page_text(1).unwrap();
+            assert_eq!(page, reference.page_text(1).unwrap());
+            assert_eq!(page.spans.len(), n.pow(3));
+            assert!(page.spans.iter().all(|s| s.text == "X"));
+        }
+        let form = [
+            vec![
+                Operation::new("q", vec![]),
+                Operation::new("q", vec![]),
+                Operation::new("Q", vec![]),
+                Operation::new("Q", vec![]),
+            ],
+            text_ops(10, 50, 50, "Positioned"),
+        ]
+        .concat();
+        let mut calls = Vec::new();
+        for x in [20, 80] {
+            calls.extend([
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![1.into(), 0.into(), 0.into(), 1.into(), x.into(), 30.into()],
+                ),
+                Operation::new("Do", vec!["X1".into()]),
+                Operation::new("Q", vec![]),
+            ]);
+        }
+        let bytes = build_pdf(vec![calls], Some(form));
+        let mut reference = open_session(&bytes);
+        reference.cache.disable_form_folding = true;
+        let page = open_session(&bytes).page_text(1).unwrap();
+        assert_eq!(page, reference.page_text(1).unwrap());
+        assert_eq!(page.spans.len(), 2);
+        assert_ne!(page.spans[0].bbox, page.spans[1].bbox);
+    }
+
+    #[test]
+    fn form_folding_keeps_state_and_paint_barriers_and_unbalanced_restores() {
+        let mut program = lex_content(b"Q q q Q Q q 1 0 0 1 7 9 cm Q q 0 0 3 4 re f Q q BT /F1 12 Tf (X) Tj ET Q q /X1 Do Q q").unwrap();
+        let original = program.ops.len();
+        program.fold_empty_saves();
+        assert_eq!(program.elided_ops, 4);
+        assert_eq!(program.ops.len(), original - 4);
+        assert_eq!(program.ops.first().unwrap().kind, OpKind::Restore);
+        assert_eq!(program.ops.last().unwrap().kind, OpKind::Save);
+        for kind in [
+            OpKind::Concat,
+            OpKind::FillPath,
+            OpKind::Show,
+            OpKind::Invoke,
+        ] {
+            assert!(program.ops.iter().any(|op| op.kind == kind));
+        }
+    }
+
+    /// Compare with the pre-repair measurements in `docs/FONT_RESOURCES.md`.
+    #[test]
+    #[ignore = "manual font-cache/CMap expansion audit; run each case in a fresh process"]
+    fn measure_unused_font_cmap_expansion() {
+        let codes = std::env::var("TPE_FONT_DIAGNOSTIC_CODES")
+            .unwrap_or_else(|_| "65536".into())
+            .parse::<u32>()
+            .unwrap();
+        let fonts = std::env::var("TPE_FONT_DIAGNOSTIC_FONTS")
+            .unwrap_or_else(|_| "1".into())
+            .parse::<usize>()
+            .unwrap();
+        // Keep this audit fixture safe to run locally. These are test bounds,
+        // not enforced production policy: source ranges can reach u32::MAX.
+        assert!((1..=262_144).contains(&codes));
+        assert!((1..=4).contains(&fonts));
+        let cmap = format!(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /Audit def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<00000000> <FFFFFFFF>\nendcodespacerange\n\
+             1 beginbfrange\n<00000000> <{:08X}> <0020>\nendbfrange\n\
+             endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend",
+            codes - 1
+        );
+        let mut session = open_session(&build_pdf(vec![vec![]], None));
+        let cmap_id = session
+            .doc
+            .add_object(Stream::new(dictionary! {}, cmap.as_bytes().to_vec()));
+        let mut font_map = Dictionary::new();
+        for index in 0..fonts {
+            let id = session.doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Audit",
+                "Encoding" => "Identity-H", "ToUnicode" => cmap_id,
+            });
+            font_map.set(format!("F{index}"), id);
+        }
+        session
+            .doc
+            .get_object_mut(session.pages[&1])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", dictionary! { "Font" => font_map });
+        let start = std::time::Instant::now();
+        let page = session.page_text(1).unwrap();
+        let elapsed = start.elapsed();
+        assert!(page.spans.is_empty());
+        assert!(
+            session.cache.fonts.is_empty(),
+            "unused fonts must not be decoded"
+        );
+        let peak_rss_kib = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines().find_map(|line| {
+                    line.strip_prefix("VmHWM:")?
+                        .split_whitespace()
+                        .next()?
+                        .parse::<usize>()
+                        .ok()
+                })
+            });
+        eprintln!(
+            "FONT_DIAGNOSTIC {}",
+            serde_json::json!({
+                "codes_per_font": codes, "cmap_bytes": cmap.len(), "cached_fonts": session.cache.fonts.len(),
+                "expanded_reverse_entries": 0,
+                "emitted_spans": page.spans.len(), "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                "peak_rss_kib": peak_rss_kib,
+            })
+        );
+    }
+
+    fn font_with_cmap(doc: &mut Document, mapping: &str) -> Dictionary {
+        let cmap = format!(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /ResourceTest def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<00000000> <FFFFFFFF>\nendcodespacerange\n\
+             {mapping}\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
+        );
+        let id = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+        // This helper permits variable-width source maps. Identity-H/V tests
+        // opt in explicitly, since those encodings require two-byte codes.
+        dictionary! { "Type" => "Font", "Subtype" => "Type0", "ToUnicode" => id }
+    }
+
+    #[test]
+    fn unused_four_byte_cmap_is_not_expanded_and_used_cmap_fails_explicitly() {
+        let bytes = build_pdf_with_font(vec![vec![], text_ops(12, 50, 50, "x")], None, |doc| {
+            font_with_cmap(
+                doc,
+                "1 beginbfrange\n<00000000><FFFFFFFF><0020>\nendbfrange",
+            )
+        });
+        let mut session = open_session(&bytes);
+        let blank = session.page_text(1).unwrap();
+        assert!(blank.warnings.is_empty());
+        assert!(session.cache.fonts.is_empty());
+        let error = session.page_text(2).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: ToUnicode source-code cardinality limit exceeded"),
+            "{error}"
+        );
+        assert!(session.cache.fonts.is_empty());
+        assert!(session.page_text(1).unwrap().warnings.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("font-limit.pdf");
+        std::fs::write(&pdf, bytes).unwrap();
+        let job = crate::schema::Job {
+            path: pdf.to_string_lossy().into_owned(),
+            backend: "lopdf".into(),
+            pages: None,
+            password: None,
+            max_bytes: None,
+            figures_dir: None,
+        };
+        let result = crate::pipeline::run_job_with(&LopdfBackend::default(), &job).unwrap();
+        assert_eq!(result.status, crate::schema::Status::Partial);
+        assert_eq!(serde_json::to_value(&result).unwrap()["status"], "partial");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("resource_limit: ToUnicode"))
+        );
+        let database = dir.path().join("ledger.sqlite");
+        crate::ledger::Ledger::open(&database)
+            .unwrap()
+            .write_result(&result)
+            .unwrap();
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let stored: String = connection
+            .query_row("SELECT status FROM runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, "partial");
+    }
+
+    #[test]
+    fn small_cmap_keeps_upstream_decoding_and_named_font_prefers_unicode() {
+        let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+            font_with_cmap(
+                doc,
+                "1 beginbfrange\n<61><63>[<0041> <0042> <0043>]\nendbfrange",
+            )
+        });
+        let mut session = open_session(&bytes);
+        assert_eq!(span_texts(&session.page_text(1).unwrap()), ["ABC"]);
+        let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+            let mut font = font_with_cmap(
+                doc,
+                "1 beginbfrange\n<61><63>[<0041> <0042> <0043>]\nendbfrange",
+            );
+            font.set("Subtype", "Type1");
+            font.set("Encoding", "WinAnsiEncoding");
+            font
+        });
+        assert_eq!(
+            span_texts(&open_session(&bytes).page_text(1).unwrap()),
+            ["ABC"]
+        );
+    }
+
+    #[test]
+    fn cmap_binary_trailer_preserves_decoding_and_malformed_font_fallback() {
+        // Exact trailer of object80 from pinned arxiv:2510.26824v2. The font
+        // metadata diagnostic found two small CMaps with bytes after end/end.
+        for malformed in [false, true] {
+            let extract = |trailer: &[u8]| {
+                let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                    let font = font_with_cmap(
+                        doc,
+                        "1 beginbfrange\n<61><63>[<0041> <0042> <0043>]\nendbfrange",
+                    );
+                    let id = font.get(b"ToUnicode").unwrap().as_reference().unwrap();
+                    let stream = doc.get_object_mut(id).unwrap().as_stream_mut().unwrap();
+                    if malformed {
+                        // Both captured CMaps omit begincmap, so lopdf rejects
+                        // them before mappings and retains its font fallback.
+                        let text = std::str::from_utf8(&stream.content).unwrap();
+                        stream.content = text.replace("begincmap\n", "").into_bytes();
+                    }
+                    stream.content.extend_from_slice(trailer);
+                    font
+                });
+                let page = open_session(&bytes).page_text(1).unwrap();
+                assert_eq!(
+                    page.extraction_status(),
+                    if malformed {
+                        crate::schema::Status::Partial
+                    } else {
+                        crate::schema::Status::Complete
+                    }
+                );
+                span_texts(&page)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            let plain = extract(b"");
+            if !malformed {
+                assert_eq!(plain, ["ABC"]);
+            }
+            for trailer in [
+                b"\r]|a\x0689W\xb1\x8f\xf2f".as_slice(),
+                b"\rs\xf5\x0e\x9f?(W\xb1\x9e\x83f",
+            ] {
+                assert_eq!(extract(trailer), plain);
+            }
+        }
+    }
+
+    #[test]
+    fn premature_outer_cmap_epilogue_is_rejected_by_upstream_grammar() {
+        let epilogue = "endcmap CMapName currentdict /CMap defineresource pop end end\n";
+        for boundary in [
+            "/CIDInit",
+            "12 dict",
+            "begincmap",
+            "/CIDSystemInfo",
+            "1 begincodespacerange",
+        ] {
+            let mut doc = Document::with_version("1.5");
+            let font = font_with_cmap(&mut doc, "1 beginbfchar\n<61><0041>\nendbfchar");
+            let id = font.get(b"ToUnicode").unwrap().as_reference().unwrap();
+            let stream = doc.get_object_mut(id).unwrap().as_stream_mut().unwrap();
+            let text = std::str::from_utf8(&stream.content).unwrap();
+            stream.content = text
+                .replacen(boundary, &format!("{epilogue}{boundary}"), 1)
+                .into_bytes();
+            // The preflight may stop here, but the mandatory upstream prolog,
+            // metadata and first section reject the misplaced epilogue before
+            // constructing any mapping, including mappings later in the file.
+            assert!(font_resources::preflight(&doc, &font, &mut FontWork::default()).is_ok());
+            assert!(
+                matches!(
+                    font.get_font_encoding(&doc).unwrap(),
+                    Encoding::OneByteEncoding(_)
+                ),
+                "{boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn cmap_decompression_and_predictor_limits_precede_font_fallback() {
+        for predictor in [false, true] {
+            let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                let mut stream = Stream::new(
+                    dictionary! {},
+                    vec![b'A'; font_resources::MAX_FONT_STREAM + 1],
+                );
+                stream.compress().unwrap();
+                if predictor {
+                    stream.dict.set("DecodeParms", dictionary! {
+                        "Predictor" => 2, "Columns" => 1, "Colors" => 10_000_000, "BitsPerComponent" => 1,
+                    });
+                }
+                let id = doc.add_object(stream);
+                dictionary! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H", "ToUnicode" => id }
+            });
+            let error = open_session(&bytes).page_text(1).unwrap_err().to_string();
+            let expected = if predictor {
+                "font stream filter/predictor limit exceeded"
+            } else {
+                "font decoded stream byte limit exceeded"
+            };
+            assert!(
+                error.contains(&format!("resource_limit: {expected}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_width_entries_are_bounded_before_flattening() {
+        let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+            let cid = doc.add_object(
+                dictionary! { "W" => vec![0.into(), Object::Array(vec![500.into(); 65_537])] },
+            );
+            dictionary! { "Type" => "Font", "Subtype" => "Type0", "DescendantFonts" => vec![cid.into()] }
+        });
+        let error = open_session(&bytes).page_text(1).unwrap_err().to_string();
+        assert!(
+            error.contains("resource_limit: font widths/encoding item limit exceeded"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn irrelevant_embedded_programs_do_not_block_decodable_fonts() {
+        for route in ["named", "differences", "unicode", "tex", "type3", "used"] {
+            let bytes = build_pdf_with_font(vec![text_ops(12, 50, 50, "abc")], None, |doc| {
+                let file = doc.add_object(Stream::new(dictionary! { "Filter" => vec![Object::Name(b"FlateDecode".to_vec()); MAX_FORM_FILTERS + 1] }, vec![]));
+                let descriptor = doc.add_object(dictionary! { "FontFile" => file });
+                let mut font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "FontDescriptor" => descriptor };
+                match route {
+                    "named" => font.set("Encoding", "WinAnsiEncoding"),
+                    "differences" => font.set("Encoding", dictionary! { "BaseEncoding" => "WinAnsiEncoding", "Differences" => vec![97.into(), "a".into()] }),
+                    "unicode" => {
+                        font = font_with_cmap(doc, "1 beginbfrange\n<61><63><0061>\nendbfrange");
+                        font.set("FontDescriptor", descriptor);
+                    }
+                    "tex" => font.set("BaseFont", "CMR10"),
+                    "type3" => font.set("Subtype", "Type3"),
+                    _ => {}
+                }
+                font
+            });
+            let page = open_session(&bytes).page_text(1);
+            if route == "used" {
+                assert!(
+                    page.unwrap_err()
+                        .to_string()
+                        .contains("resource_limit: font stream filter/predictor")
+                );
+            } else {
+                let page = page.unwrap();
+                assert_eq!(span_texts(&page), ["abc"], "{route}");
+                assert!(page.warnings.is_empty(), "{route}: {:?}", page.warnings);
+            }
+        }
+    }
+
+    #[test]
+    fn font_cache_caps_entries_and_charged_bytes_and_eviction_keeps_live_fonts_valid() {
+        let mut doc = Document::with_version("1.5");
+        let mut cache = SessionCache::default();
+        let mut first = None;
+        for i in 0..=MAX_FONT_CACHE_ENTRIES {
+            let id = doc.add_object(
+                dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            );
+            let loaded = resolve_font(&doc, &mut cache, &mut FontWork::default(), &id.into())
+                .unwrap()
+                .unwrap();
+            if i == 0 {
+                first = Some((id, loaded));
+            }
+        }
+        let (id, live) = first.unwrap();
+        assert_eq!(cache.fonts.len(), MAX_FONT_CACHE_ENTRIES);
+        assert_eq!(cache.font_order.len(), MAX_FONT_CACHE_ENTRIES);
+        assert_eq!(cache.font_bytes, MAX_FONT_CACHE_ENTRIES * MIN_FONT_CHARGE);
+        assert!(!cache.fonts.contains_key(&id));
+        let Decode::Table(table) = &live.decode else {
+            panic!("simple font")
+        };
+        assert_eq!(table.decode(b"still valid").as_deref(), Some("still valid"));
+        let mut large = LoadedFont::missing();
+        large.charge = MAX_FONT_CACHE_BYTES;
+        cache.insert_font((9000, 0), &Rc::new(large));
+        assert_eq!(cache.fonts.len(), 1);
+        assert_eq!(cache.font_bytes, MAX_FONT_CACHE_BYTES);
+        cache.insert_font((9001, 0), &live);
+        assert_eq!(cache.fonts.len(), 1);
+        assert_eq!(cache.font_order.len(), 1);
+        assert_eq!(cache.font_bytes, MIN_FONT_CHARGE);
+        let mut work = FontWork::default();
+        work.reserve(MAX_FONT_CACHE_BYTES).unwrap();
+        assert!(resolve_font(&doc, &mut cache, &mut work, &id.into()).is_err());
+    }
+
+    /// Run each N in a separate process to measure RSS without prior test peaks.
+    #[test]
+    #[ignore = "manual nested-Forms timing/RSS diagnostic; set TPE_FORM_DIAGNOSTIC_N"]
+    fn measure_shallow_nested_forms() {
+        let n = std::env::var("TPE_FORM_DIAGNOSTIC_N")
+            .unwrap_or_else(|_| "80".into())
+            .parse::<usize>()
+            .unwrap();
+        let text = std::env::var_os("TPE_FORM_DIAGNOSTIC_TEXT").is_some();
+        let reference = std::env::var_os("TPE_FORM_DIAGNOSTIC_UNOPTIMIZED").is_some();
+        let bytes = shallow_nested_forms_pdf(n, text);
+        let mut session = open_session(&bytes);
+        session.cache.disable_form_folding = reference;
+        let start = std::time::Instant::now();
+        let result = session.page_text(1);
+        let elapsed = start.elapsed();
+        let used = session.cache.last_form_work.unwrap();
+        let peak_rss_kib = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("VmHWM:")?
+                        .split_whitespace()
+                        .next()?
+                        .parse::<usize>()
+                        .ok()
+                })
+            });
+        eprintln!(
+            "FORM_DIAGNOSTIC {}",
+            serde_json::json!({
+                "n": n, "text": text, "folded": !reference, "pdf_bytes": bytes.len(),
+                "elapsed_ms": elapsed.as_secs_f64() * 1000.0, "peak_rss_kib": peak_rss_kib,
+                "interpreted_ops": used.interpreted_ops, "elided_noop_ops": used.elided_ops,
+                "calls": MAX_PAGE_FORM_CALLS - used.calls,
+                "execution_charge": MAX_PAGE_FORM_WORK_BYTES - used.execute,
+                "emitted_spans": result.as_ref().ok().map(|p| p.spans.len()),
+                "emitted_text_bytes": result.as_ref().ok().map(|p| p.spans.iter().map(|s| s.text.len()).sum::<usize>()),
+                "result": result.map_or_else(|err| err.to_string(), |_| "ok".into()),
+            })
+        );
+    }
+
+    /// Manual diagnostic; no flaky wall-clock threshold in the test suite.
+    #[test]
+    #[ignore = "run in release mode with --nocapture for a cache reuse diagnostic"]
+    fn measure_form_cache_reuse() {
+        let mut form = Vec::new();
+        for _ in 0..100 {
+            form.extend(text_ops(10, 50, 50, "Reusable Form text"));
+        }
+        let bytes = build_pdf(
+            vec![vec![Operation::new("Do", vec!["X1".into()])]],
+            Some(form),
+        );
+        let mut cached = open_session(&bytes);
+        let mut cold = open_session(&bytes);
+        let expected = cached.page_text(1).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(cached.page_text(1).unwrap(), expected);
+        }
+        let retained = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            cold.cache.forms.clear();
+            cold.cache.form_order.clear();
+            cold.cache.form_bytes = 0;
+            assert_eq!(cold.page_text(1).unwrap(), expected);
+        }
+        eprintln!(
+            "1000 repeated pages, retained Form cache: {retained:?}; no persistent Form cache: {:?}",
+            start.elapsed()
+        );
+    }
 
     /// The kept operators and their operands, from the streaming lexer
     /// (painted paths left out).
@@ -5951,8 +6657,8 @@ mod tests {
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         assert_eq!(session.cache.forms.len(), 1);
         let cached = session.cache.forms.values().next().unwrap();
-        assert_eq!(cached.ops.len(), 200);
-        assert!(cached.ops.iter().all(|op| op.kind == OpKind::StrokePath));
+        assert_eq!(cached.0.ops.len(), 200);
+        assert!(cached.0.ops.iter().all(|op| op.kind == OpKind::StrokePath));
         // The form's boxes (0,2)-(204,20) moved by the page's `cm`.
         assert_eq!(result.figures.len(), 1, "{:?}", result.figures);
         assert_box(&result.figures[0], 200.0, 302.0, 404.0, 320.0);
@@ -6212,10 +6918,77 @@ mod tests {
             let x = (step * 20) as f32;
             graphics.add_path(boxed(x, 0.0, x + 10.0, 10.0));
         }
-        let figures = graphics.into_figures();
+        let page = emit_all_with_graphics(&[], graphics);
+        assert_eq!(
+            page.warnings,
+            ["resource_limit: vector regions coalesced (cluster limit=2000)"]
+        );
+        let figures = page.figures;
         assert_eq!(figures.len(), 1);
         assert_eq!(figures[0].kind, "vector");
         assert_box(&figures[0], 0.0, 0.0, 40_010.0, 10.0);
+    }
+
+    #[test]
+    fn dense_paths_keep_separate_vector_clusters_and_match_full_clustering() {
+        let mut graphics = Graphics::default();
+        let mut boxes = Vec::new();
+        for i in 0..6000 {
+            let x = if i % 2 == 0 { 0.0 } else { 100.0 };
+            let bbox = BBox {
+                x0: x,
+                y0: 0.0,
+                x1: x + 10.0,
+                y1: 10.0,
+            };
+            boxes.push(bbox);
+            graphics.add_path(bbox);
+        }
+        assert_eq!(graphics.shapes.len(), 2);
+        assert!(graphics.comparisons < 3 * boxes.len());
+        let page = emit_all_with_graphics(&[], graphics);
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+        let actual: Vec<_> = page
+            .figures
+            .iter()
+            .map(|figure| figure.bbox.unwrap())
+            .collect();
+        assert_eq!(actual, cluster(&boxes));
+        assert_eq!(actual.len(), 2);
+    }
+
+    #[test]
+    fn incremental_clusters_preserve_bridges_and_report_comparison_exhaustion() {
+        let mut graphics = Graphics::default();
+        let mut boxes = Vec::new();
+        for x in [0.0, 30.0, 14.0, 100.0, 80.0, 60.0, 45.0] {
+            let bbox = BBox {
+                x0: x,
+                y0: 0.0,
+                x1: x + 12.0,
+                y1: 10.0,
+            };
+            boxes.push(bbox);
+            graphics.add_path(bbox);
+            let mut actual = graphics.shapes.clone();
+            actual.sort_by(|a, b| b.y1.total_cmp(&a.y1).then(a.x0.total_cmp(&b.x0)));
+            assert_eq!(actual, cluster(&boxes));
+        }
+        graphics.comparisons = MAX_CLUSTER_COMPARISONS;
+        graphics.add_path(BBox {
+            x0: 200.0,
+            y0: 0.0,
+            x1: 210.0,
+            y1: 10.0,
+        });
+        assert!(graphics.work_limited);
+        let page = emit_all_with_graphics(&[], graphics);
+        assert_eq!(
+            page.warnings,
+            ["resource_limit: vector clustering budget exhausted (comparisons=4000000)"]
+        );
+        assert_eq!(page.figures.len(), 1);
+        assert_box(&page.figures[0], 0.0, 0.0, 210.0, 10.0);
     }
 
     #[test]
@@ -6242,29 +7015,5 @@ mod tests {
         let figures = page.figures;
         assert_eq!(figures.len(), MAX_CLUSTER_BOXES);
         assert!(figures.iter().all(|figure| figure.kind == "raster"));
-    }
-
-    #[test]
-    fn composite_widths_lookup_matches_first_match_scan() {
-        let ranges = vec![
-            (10, 10, 300.0),
-            (1, 3, 100.0),
-            (20, 25, 700.0),
-            (5, 4, 999.0),
-        ];
-        let widths = CompositeWidths::new(ranges, 1000.0);
-        assert!(widths.disjoint);
-        assert!(close(widths.width(2), 0.1));
-        assert!(close(widths.width(10), 0.3));
-        assert!(close(widths.width(25), 0.7));
-        assert!(close(widths.width(0), 1.0));
-        assert!(close(widths.width(4), 1.0));
-        assert!(close(widths.width(11), 1.0));
-        assert!(close(widths.width(26), 1.0));
-
-        let overlapping = CompositeWidths::new(vec![(1, 10, 100.0), (5, 5, 900.0)], 500.0);
-        assert!(!overlapping.disjoint);
-        assert!(close(overlapping.width(5), 0.1));
-        assert!(close(overlapping.width(11), 0.5));
     }
 }

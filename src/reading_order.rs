@@ -81,6 +81,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::schema::{BBox, Line, PageText, Span};
 
+mod line_index;
+use line_index::{LineIndex, MAX_HORIZONTAL_WORK};
+
 /// Maximum XY-cut recursion depth.
 const MAX_DEPTH: u32 = 64;
 /// Maximum number of lines laid out on one page; the rest is appended as is.
@@ -344,6 +347,7 @@ fn line_top_first(a: &Line, b: &Line) -> Ordering {
 /// Index of the line under construction that a span with `bbox` belongs to:
 /// same baseline within `BASELINE_TOLERANCE` and x ranges within
 /// `LINE_REACH` of each other. `largest` bounds the search.
+#[cfg(test)]
 fn find_line(builds: &[LineBuild], bbox: BBox, size: f32, largest: f32) -> Option<usize> {
     for (k, line) in builds.iter().enumerate().rev() {
         if line.baseline - bbox.y0 > BASELINE_TOLERANCE * largest {
@@ -1087,6 +1091,7 @@ struct Grouped {
     unattached: usize,
     accent_skipped: bool,
     vertical_limited: bool,
+    horizontal_limit: Option<line_index::Limit>,
 }
 
 /// Group spans into lines by shared baseline and horizontal proximity, with
@@ -1112,6 +1117,14 @@ pub fn group_lines(spans: &[Span]) -> Vec<Line> {
 /// when `None` or not a positive number), with the vertical margin lines
 /// kept apart.
 fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
+    group_spans_with_horizontal_budget(spans, page_width, MAX_HORIZONTAL_WORK)
+}
+
+fn group_spans_with_horizontal_budget(
+    spans: &[Span],
+    page_width: Option<f32>,
+    horizontal_work: usize,
+) -> Grouped {
     let all = positioned(spans);
     if all.is_empty() {
         return Grouped::default();
@@ -1173,26 +1186,27 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
     let compose_accents = accent_work <= MAX_ACCENT_WORK;
 
     let mut builds: Vec<LineBuild> = Vec::new();
+    let mut line_index = LineIndex::new(horizontal_work);
     let mut accents: Vec<(usize, BBox, String)> = Vec::new();
     // Spans ending in an accent glyph: span index, the byte offset of the
     // tail and its marks.
     let mut tails: Vec<(usize, usize, String)> = Vec::new();
     for (i, bbox) in &candidates {
         let text = &spans[*i].text;
-        // Keep accent-only spans out of ordinary line grouping even when
-        // composition is disabled. Feeding them to `find_line` can make an
-        // accent-only page quadratic when every mark shares a baseline but
-        // is too far from all the lines before it.
+        // Accent-only spans use the later glyph-attachment pass. If its
+        // budget is exhausted, preserve each accent separately instead of
+        // merging it into an ordinary line without its intended base glyph.
         if let Some(marks) = accent_marks(text) {
             accents.push((*i, *bbox, marks));
             continue;
         }
         let size = span_size(&spans[*i], fallback);
-        if let Some(k) = find_line(&builds, *bbox, size, largest) {
+        if let Some(k) = line_index.find(&builds, *bbox, size, largest) {
             let line = &mut builds[k];
             line.bbox = union(line.bbox, *bbox);
             line.size = line.size.max(size);
             line.spans.push((*i, *bbox));
+            line_index.update(k, line);
         } else {
             builds.push(LineBuild {
                 baseline: bbox.y0,
@@ -1201,6 +1215,7 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
                 spans: vec![(*i, *bbox)],
                 accents: Vec::new(),
             });
+            line_index.update(builds.len() - 1, builds.last().expect("just appended"));
         }
         if compose_accents && let Some((cut, marks)) = trailing_accent(text) {
             tails.push((*i, cut, marks));
@@ -1294,6 +1309,7 @@ fn group_spans(spans: &[Span], page_width: Option<f32>) -> Grouped {
         unattached,
         accent_skipped: !compose_accents,
         vertical_limited,
+        horizontal_limit: line_index.limit,
     }
 }
 
@@ -2048,6 +2064,7 @@ pub fn order_page(page: &mut PageText) {
         unattached,
         accent_skipped,
         vertical_limited,
+        horizontal_limit,
     } = group_spans(
         turned.as_deref().unwrap_or(page.spans.as_slice()),
         Some(width),
@@ -2063,6 +2080,9 @@ pub fn order_page(page: &mut PageText) {
             "resource_limit: vertical grouping budget exhausted; remaining spans kept separate"
                 .to_string(),
         );
+    }
+    if let Some(limit) = horizontal_limit {
+        push_warning(page, limit.warning());
     }
     if accent_skipped {
         let number = page.page;
@@ -2220,6 +2240,68 @@ mod tests {
         let mut page = PageText::new(1, 612.0, 792.0, 0);
         page.spans = spans;
         page
+    }
+
+    #[test]
+    fn horizontal_budget_preserves_every_remaining_span() {
+        let spans: Vec<_> = (0..12)
+            .map(|i| {
+                let x = i as f32 * 9.0;
+                span("a", x, 100.0, x + 8.0, 110.0, i)
+            })
+            .collect();
+        let complete = group_spans(&spans, Some(612.0));
+        assert!(complete.horizontal_limit.is_none());
+        assert_eq!(complete.lines.len(), 1);
+        let limited = group_spans_with_horizontal_budget(&spans, Some(612.0), 0);
+        assert!(limited.horizontal_limit.is_some());
+        let mut kept: Vec<_> = limited
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .copied()
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, (0..12).collect::<Vec<_>>());
+        assert_eq!(
+            limited
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<String>(),
+            "a".repeat(12)
+        );
+    }
+
+    #[test]
+    fn horizontal_index_limit_is_visible_on_the_page_without_dropping_text() {
+        let count = MAX_LINES + 1;
+        let mut page = PageText::new(1, count as f32 * 40.0 + 100.0, 792.0, 0);
+        page.spans = (0..count)
+            .map(|i| {
+                let x = i as f32 * 40.0;
+                span("a", x, 100.0, x + 10.0, 110.0, i as u32)
+            })
+            .collect();
+        order_page(&mut page);
+        assert_eq!(page.lines.len(), count);
+        assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+        assert_eq!(page.text.chars().filter(|&ch| ch == 'a').count(), count);
+        assert_eq!(
+            page.warnings
+                .iter()
+                .filter(|w| w.starts_with("resource_limit: horizontal grouping"))
+                .count(),
+            1
+        );
+        let mut kept: Vec<_> = page
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .copied()
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, (0..count as u32).collect::<Vec<_>>());
     }
 
     fn texts(page: &PageText) -> Vec<&str> {

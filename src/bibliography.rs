@@ -82,15 +82,7 @@ impl Record {
             sha256: Some(sha256),
             backend,
             status: if scan.found { "found" } else { "not_found" },
-            extraction_status: if scan
-                .warnings
-                .iter()
-                .any(|w| w.starts_with("resource_limit:") || w.starts_with("unicode_mapping:"))
-            {
-                Status::Partial
-            } else {
-                Status::Complete
-            },
+            extraction_status: scan_extraction_status(&scan),
             total_pages: Some(scan.total_pages),
             pages_scanned: Some(scan.pages_scanned),
             section_page: scan.section_page,
@@ -198,6 +190,9 @@ fn scan_window(
 ) -> Result<BibliographyScan, BackendError> {
     let mut session = extractor.open(bytes, password)?;
     let total_pages = session.page_count();
+    if total_pages == 0 {
+        return Err(BackendError::PageRange { page: 1, count: 0 });
+    }
     let mut pages: Vec<PageText> = Vec::new();
     let mut warnings = Vec::new();
     observe(Progress::Opened {
@@ -207,6 +202,8 @@ fn scan_window(
 
     for number in (floor.max(1)..=total_pages).rev() {
         let mut page = session.page_text(number)?;
+        // Assess the backend evidence before cleanup can remove unreadable text.
+        router::mark_incomplete(&mut page);
         if extractor.provides_reading_order() {
             reading_order::lines_in_backend_order(&mut page);
         } else {
@@ -354,12 +351,30 @@ pub struct RoutedScan {
     pub backend: BackendIdentity,
 }
 
+/// Completeness is independent of whether a bibliography boundary was found.
+/// A scanned or unmapped tail remains partial even when no list was recovered.
+fn scan_extraction_status(scan: &BibliographyScan) -> Status {
+    if scan.assessment.scanned > 0
+        || scan.assessment.unmapped > 0
+        || scan.warnings.iter().any(|warning| {
+            warning.starts_with("failed:")
+                || warning.starts_with("resource_limit:")
+                || warning.starts_with("unicode_mapping:")
+                || warning.starts_with("extraction_incomplete:")
+        })
+    {
+        Status::Partial
+    } else {
+        Status::Complete
+    }
+}
+
 /// Rank found lists by the evidence that prompted routing: usable decoding,
 /// then list plausibility, then entry count. Count alone cannot distinguish
 /// repaired text from an equally long corrupted list or spurious extra entries.
 fn scan_quality(scan: &BibliographyScan) -> (bool, bool, usize) {
     (
-        scan.assessment.scanned == 0 && scan.assessment.unmapped == 0,
+        scan_extraction_status(scan) == Status::Complete,
         scan.plausible,
         scan.references.len(),
     )
@@ -373,8 +388,8 @@ fn scan_usable(scan: &BibliographyScan) -> bool {
 
 /// Replace `best` only when a found candidate improves the available evidence.
 /// Keep the existing result on ties and preserve route history on replacement.
-/// Unresolved `PDFium` mappings instead retain the native candidate regardless
-/// of list detection or rank, so an earlier plausible list cannot hide them.
+/// Mapping evidence from a rejected `PDFium` candidate is retained separately:
+/// uncertainty must survive, but cannot justify discarding a better native list.
 fn keep_better(best: &mut RoutedScan, mut candidate: RoutedScan, note: String) {
     let unresolved_pdfium = candidate.backend.name == "pdfium"
         && candidate
@@ -382,9 +397,8 @@ fn keep_better(best: &mut RoutedScan, mut candidate: RoutedScan, note: String) {
             .warnings
             .iter()
             .any(|w| w.starts_with("unicode_mapping:"));
-    let better = unresolved_pdfium
-        || (candidate.scan.found
-            && (!best.scan.found || scan_quality(&candidate.scan) > scan_quality(&best.scan)));
+    let better = candidate.scan.found
+        && (!best.scan.found || scan_quality(&candidate.scan) > scan_quality(&best.scan));
     if better || !best.scan.found {
         // Page/content warnings describe the selected extraction; route history
         // describes all attempted backends and survives a successful replacement.
@@ -396,6 +410,14 @@ fn keep_better(best: &mut RoutedScan, mut candidate: RoutedScan, note: String) {
             .cloned();
         candidate.scan.warnings.extend(history);
         *best = candidate;
+    } else if unresolved_pdfium {
+        for warning in &candidate.scan.warnings {
+            if let Some(detail) = warning.strip_prefix("unicode_mapping:") {
+                best.scan.warnings.push(format!(
+                    "unicode_mapping: rejected pdfium candidate:{detail}"
+                ));
+            }
+        }
     }
     best.scan.warnings.push(note);
 }
@@ -465,7 +487,7 @@ pub fn scan_backward_auto_observed(
                         .any(|w| w.starts_with("unicode_mapping:"))
                     {
                         best.scan.warnings.push(
-                            "unresolved: pdfium Unicode mapping; native text retained because automatic OCR recovery is unverified"
+                            "unresolved: Unicode mapping evidence remains; best native bibliography retained because automatic OCR recovery is unverified"
                                 .to_string(),
                         );
                         return Ok(best);
@@ -575,6 +597,20 @@ mod tests {
     }
 
     #[test]
+    fn limited_candidate_cannot_replace_or_certify_an_intact_list() {
+        let mut best = routed("lopdf", 3, 0, true);
+        let mut limited = routed("pdfium", 8, 0, true);
+        limited
+            .scan
+            .warnings
+            .push("resource_limit: retained partial page".to_string());
+        assert!(!super::scan_usable(&limited.scan));
+        super::keep_better(&mut best, limited, "routed: pdfium".to_string());
+        assert_eq!(best.backend.name, "lopdf");
+        assert_eq!(best.scan.references.len(), 3);
+    }
+
+    #[test]
     fn fallback_keeps_repaired_text_even_with_equal_entry_count() {
         let mut best = routed("lopdf", 3, 1, true);
         let mut repaired = routed("pdfium", 3, 0, true);
@@ -618,28 +654,43 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_pdfium_mapping_survives_list_ranking_and_json() {
-        for count in [0, 2, 3] {
+    fn unresolved_pdfium_mapping_survives_without_erasing_the_better_native_list() {
+        for count in [0, 2, 3, 4] {
             let mut best = routed("lopdf", 3, 1, true);
+            best.scan.references[0].raw = "Retained native citation".into();
             best.scan.warnings = vec!["routed: earlier attempt".into(), "old diagnostic".into()];
             let mut partial = routed("pdfium", count, 1, true);
             let warning = "unicode_mapping: pdfium map_errors=1, zero_unicode=0";
             partial.scan.warnings.push(warning.into());
             super::keep_better(&mut best, partial, "routed: pdfium".into());
-            assert_eq!(best.backend.name, "pdfium");
-            assert_eq!(best.scan.references.len(), count);
-            assert_eq!(
-                best.scan.warnings,
-                [warning, "routed: earlier attempt", "routed: pdfium"]
+            if count <= 3 {
+                assert_eq!(best.backend.name, "lopdf");
+                assert_eq!(best.scan.references.len(), 3);
+                assert_eq!(best.scan.references[0].raw, "Retained native citation");
+                assert!(best.scan.warnings.contains(&"old diagnostic".into()));
+                assert!(
+                    best.scan
+                        .warnings
+                        .iter()
+                        .any(|w| w.starts_with("unicode_mapping: rejected pdfium candidate:"))
+                );
+            } else {
+                assert_eq!(best.backend.name, "pdfium");
+                assert_eq!(best.scan.references.len(), count);
+                assert!(!best.scan.warnings.contains(&"old diagnostic".into()));
+                assert!(best.scan.warnings.contains(&warning.into()));
+            }
+            assert!(
+                best.scan
+                    .warnings
+                    .contains(&"routed: earlier attempt".into())
             );
+            assert!(best.scan.warnings.contains(&"routed: pdfium".into()));
             assert!(!super::scan_usable(&best.scan));
             let record = Record::from_scan("p.pdf", "hash".into(), best.backend, best.scan, 0.0);
             let value = serde_json::to_value(&record).unwrap();
             assert_eq!(value["extraction_status"], "partial");
-            assert_eq!(
-                value["status"],
-                if count == 0 { "not_found" } else { "found" }
-            );
+            assert_eq!(value["status"], "found");
         }
     }
 
@@ -712,6 +763,20 @@ mod tests {
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn zero_page_scan_is_rejected_before_any_progress_or_complete_record() {
+        let bytes = pdf(&[]);
+        let mut events = Vec::new();
+        let result = scan_backward_observed(&LopdfBackend::default(), &bytes, None, &mut |event| {
+            events.push(event);
+        });
+        assert!(matches!(
+            result,
+            Err(crate::backend::BackendError::PageRange { page: 1, count: 0 })
+        ));
+        assert!(events.is_empty());
     }
 
     #[test]

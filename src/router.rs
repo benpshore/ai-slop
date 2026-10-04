@@ -11,8 +11,9 @@
 //!   Unicode mapping (`undecodable`, `decoded as Latin-1`, or a share of
 //!   U+FFFD in the text). `pdfium` reads the embedded font program's own
 //!   tables and usually recovers the characters;
-//! * [`Route::Docling`]: no text layer under a page-sized image (a scan), or
-//!   `pdfium` still produced unmapped text. Only OCR can name those glyphs.
+//! * [`Route::Docling`]: no text layer under a page-sized image (a scan),
+//!   without unresolved native mapping evidence. Unverified Unicode mappings
+//!   remain Partial; OCR has not proved recovery of those source characters.
 //!
 //! Nothing here touches geometry or reading order.
 
@@ -37,7 +38,7 @@ pub enum Route {
     Lopdf,
     /// Re-read with `pdfium`: fonts without a usable Unicode mapping.
     Pdfium,
-    /// Re-read with docling (layout + OCR): scanned pages or still-unmapped text.
+    /// Re-read with docling (layout + OCR): scanned pages.
     Docling,
 }
 
@@ -69,20 +70,20 @@ impl Assessment {
     /// The route for pages assessed like this after a `lopdf` pass.
     #[must_use]
     pub fn route(self) -> Route {
-        if self.scanned > 0 {
-            Route::Docling
-        } else if self.unmapped > 0 {
+        if self.unmapped > 0 {
             Route::Pdfium
+        } else if self.scanned > 0 {
+            Route::Docling
         } else {
             Route::Lopdf
         }
     }
 
-    /// The route after a `pdfium` pass: unmapped text that `pdfium` could not
-    /// repair goes to OCR; scans always do.
+    /// After `pdfium`, only scans without unresolved mappings go to OCR.
+    /// Mapping uncertainty retains the native result and its Partial status.
     #[must_use]
     pub fn route_after_pdfium(self) -> Route {
-        if self.scanned > 0 || self.unmapped > 0 {
+        if self.scanned > 0 && self.unmapped == 0 {
             Route::Docling
         } else {
             Route::Pdfium
@@ -159,6 +160,32 @@ pub fn has_unmapped_text(page: &PageText) -> bool {
     chars > 0 && (fffd as f32) / (chars as f32) >= FFFD_SHARE
 }
 
+/// Record unresolved extraction evidence before ordering/cleanup can remove
+/// short spans. A blank page with no large raster remains complete. These
+/// diagnostics describe uncertainty; they do not claim that OCR recovered it.
+pub fn mark_incomplete(page: &mut PageText) {
+    if looks_scanned(page)
+        && !page
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("extraction_incomplete:"))
+    {
+        page.warnings.push(
+            "extraction_incomplete: page-sized raster with insufficient extracted text; OCR completeness unverified"
+                .to_string(),
+        );
+    }
+    if has_unmapped_text(page)
+        && !page
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("unicode_mapping:"))
+    {
+        page.warnings
+            .push("unicode_mapping: extracted text has unresolved character mappings".to_string());
+    }
+}
+
 /// Assess `pages` (any subset of a document, ordered or not).
 #[must_use]
 pub fn assess(pages: &[PageText]) -> Assessment {
@@ -167,11 +194,15 @@ pub fn assess(pages: &[PageText]) -> Assessment {
         ..Assessment::default()
     };
     for page in pages {
-        if looks_scanned(page) {
+        let scanned = looks_scanned(page);
+        let unmapped = has_unmapped_text(page);
+        if scanned {
             a.scanned += 1;
-        } else if has_unmapped_text(page) {
+        }
+        if unmapped {
             a.unmapped += 1;
-        } else {
+        }
+        if !scanned && !unmapped {
             let text: String = if page.text.is_empty() {
                 page.spans.iter().map(|s| s.text.as_str()).collect()
             } else {
@@ -254,7 +285,7 @@ mod tests {
         assert!(has_unmapped_text(&p));
         let a = assess(std::slice::from_ref(&p));
         assert_eq!(a.route(), Route::Pdfium);
-        assert_eq!(a.route_after_pdfium(), Route::Docling);
+        assert_eq!(a.route_after_pdfium(), Route::Pdfium);
     }
 
     #[test]
@@ -266,6 +297,19 @@ mod tests {
             "and on ".repeat(60)
         ));
         assert!(!has_unmapped_text(&clean));
+    }
+
+    #[test]
+    fn scan_with_unmapped_text_preserves_both_signals() {
+        let mut p = page("bad \u{fffd}");
+        p.figures.push(raster(0.9));
+        mark_incomplete(&mut p);
+        mark_incomplete(&mut p);
+        assert_eq!(p.warnings.len(), 2);
+        let assessment = assess(&[p]);
+        assert_eq!(assessment.scanned, 1);
+        assert_eq!(assessment.unmapped, 1);
+        assert_eq!(assessment.route(), Route::Pdfium);
     }
 
     #[test]
