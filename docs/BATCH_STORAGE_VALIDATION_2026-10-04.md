@@ -1,5 +1,9 @@
 # Batch/storage validation — 2026-10-04
 
+This records the independently reviewed module patch. Its subsequent workspace
+wiring and combined verification are in the
+[web integration handoff](WEB_ALPHA_INTEGRATION_20261004.md).
+
 Tracking: [#186](https://github.com/benpshore/pdftextract/issues/186), child of [#179](https://github.com/benpshore/pdftextract/issues/179), with controls for [#178](https://github.com/benpshore/pdftextract/issues/178).
 
 Base fetched and verified from draft PR #175: `baafb472873750e7e84d32c3c8e6fa7a680e37db`, branch `feat/native-toolkit-private-alpha-20261004`. Implementation branch: `feat/web-batch-storage-lifecycle-20261004`. The draft PR targets that integration branch. Native repair branches were not edited. The bounded implementation agent and independent reviewer used the requested Astra/ultra configuration; the delegation tool exposed no separate double-speed switch.

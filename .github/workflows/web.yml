@@ -40,10 +40,12 @@ jobs:
       - run: node scripts/test-import-queue.mjs
       - run: node scripts/test-import-controls.mjs
       - run: node scripts/test-workspace-storage.mjs
+      - run: node scripts/test-text-import.mjs
       - run: node scripts/test-office.mjs
       - run: node scripts/test-node-imports.mjs
       - run: node ../scripts/test-web-workspace.cjs
       - run: node ../scripts/test-web-reader.cjs
+      - run: node ../scripts/test-web-workspace-lifecycle.cjs
       - run: node --experimental-strip-types ../scripts/test-site-mcp.mjs
       - run: node --experimental-strip-types ../scripts/test-site-uploads-workers.mjs
       - run: node --experimental-strip-types ../scripts/test-site-lifecycle-workers.mjs

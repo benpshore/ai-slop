@@ -21,7 +21,7 @@ const webRoot = path.join(repositoryRoot, 'web');
 const req = createRequire(path.join(webRoot, 'package.json'));
 const { JSDOM } = req('jsdom');
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://tpe.test/' });
-for (const key of ['window', 'document', 'DOMParser', 'HTMLElement', 'HTMLTextAreaElement', 'Node', 'Event', 'MouseEvent', 'history', 'location'])
+for (const key of ['window', 'document', 'DOMParser', 'HTMLElement', 'HTMLTextAreaElement', 'Element', 'NodeFilter', 'HTMLInputElement', 'CustomEvent', 'MutationObserver', 'getComputedStyle', 'Node', 'Event', 'MouseEvent', 'history', 'location'])
     global[key] = key === 'window' ? dom.window : dom.window[key];
 Object.defineProperty(global, 'navigator', { value: dom.window.navigator, configurable: true });
 global.File = File;
@@ -98,12 +98,23 @@ global.fetch = async (value, options = {}) => {
 global.Worker = class {
     constructor() { throw Error('HTML must never reach the PDF worker'); }
 };
+const localModules = new Map();
+function loadLocal(name, parent = path.join(webRoot, 'app/workspace.tsx')) {
+    const base = name.startsWith('@/') ? path.join(webRoot, name.slice(2)) : path.resolve(path.dirname(parent), name);
+    const filename = [base, base + '.ts', base + '.tsx'].find(value => fs.existsSync(value) && fs.statSync(value).isFile());
+    if (!filename) throw new Error('Unknown local module: ' + name);
+    if (localModules.has(filename)) return localModules.get(filename).exports;
+    const child = new Module(filename); child.filename = filename; child.paths = Module._nodeModulePaths(webRoot); localModules.set(filename, child);
+    child.require = dependency => helpers[dependency] || (dependency.startsWith('@/') || dependency.startsWith('.') ? loadLocal(dependency, filename) : req(dependency));
+    child._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText, filename);
+    return child.exports;
+}
 const source = path.join(webRoot, 'app', 'workspace.tsx');
 const compiled = ts.transpileModule(fs.readFileSync(source, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
 const mod = new Module(source);
 mod.filename = source;
 mod.paths = Module._nodeModulePaths(webRoot);
-mod.require = name => helpers[name] || req(name);
+mod.require = name => helpers[name] || (name.startsWith('@/') ? loadLocal(name) : req(name));
 mod._compile(compiled, source);
 const Workspace = mod.exports.default;
 (async () => {
@@ -150,7 +161,7 @@ const Workspace = mod.exports.default;
     const pick = document.querySelector('input[type=file]');
     Object.defineProperty(pick, 'files', { configurable: true, value: [new File(['Hold'], 'hold.txt'), new File(['Cancel'], 'cancel.txt')] });
     await act(async () => { pick.dispatchEvent(new Event('change', { bubbles: true })); await new Promise(resolve => setTimeout(resolve, 20)); });
-    await act(async () => { document.querySelector('button[aria-label="Cancel cancel.txt"]').click(); releaseHold(); await new Promise(resolve => setTimeout(resolve, 30)); });
+    await act(async () => { document.querySelector('button[aria-label="Cancel import of cancel.txt"]').click(); releaseHold(); await new Promise(resolve => setTimeout(resolve, 30)); });
     assert(![...rows.values()].some(row => row.original_name === 'cancel.txt'));
     assert.match([...document.querySelectorAll('.queue-item')].find(row => row.textContent.includes('cancel.txt')).textContent, /Cancelled/);
     await act(async () => { reopened.unmount(); });

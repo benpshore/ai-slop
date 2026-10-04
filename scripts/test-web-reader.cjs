@@ -14,7 +14,7 @@ const web = path.resolve(__dirname, '../web');
 const req = createRequire(path.join(web, 'package.json'));
 const {JSDOM} = req('jsdom');
 const dom = new JSDOM('<div id="root"></div>', {url:'https://reader.test/'});
-for (const key of ['window','document','DOMParser','HTMLElement','Node','Event','MouseEvent','history','location']) global[key] = key === 'window' ? dom.window : dom.window[key];
+for (const key of ['window','document','DOMParser','HTMLElement','Element','NodeFilter','HTMLInputElement','CustomEvent','MutationObserver','getComputedStyle','Node','Event','MouseEvent','history','location']) global[key] = key === 'window' ? dom.window : dom.window[key];
 Object.defineProperty(global, 'navigator', {value:dom.window.navigator, configurable:true});
 global.File = File;
 global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -59,8 +59,19 @@ global.fetch = async value=>{
   if(id==='race'&&staleGet&&++raceFetches===1){await staleGet.promise;return Response.json({record:row('race','Stale title'),result:result('Stale title','Stale text')});}
   return Response.json({record:rows.get(id),result:savedResults.get(id)||null});
 };
+const localModules = new Map();
+function loadLocal(name, parent = path.join(web, 'app/workspace.tsx')) {
+    const base = name.startsWith('@/') ? path.join(web, name.slice(2)) : path.resolve(path.dirname(parent), name);
+    const filename = [base, base + '.ts', base + '.tsx'].find(value => fs.existsSync(value) && fs.statSync(value).isFile());
+    if (!filename) throw new Error('Unknown local module: ' + name);
+    if (localModules.has(filename)) return localModules.get(filename).exports;
+    const child = new Module(filename); child.filename = filename; child.paths = Module._nodeModulePaths(web); localModules.set(filename, child);
+    child.require = dependency => helpers[dependency] || (dependency.startsWith('@/') || dependency.startsWith('.') ? loadLocal(dependency, filename) : req(dependency));
+    child._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText, filename);
+    return child.exports;
+}
 const source=path.join(web,'app/workspace.tsx'), mod=new Module(source);
-mod.filename=source;mod.paths=Module._nodeModulePaths(web);mod.require=name=>helpers[name]||req(name);
+mod.filename=source;mod.paths=Module._nodeModulePaths(web);mod.require=name=>helpers[name]||(name.startsWith('@/')?loadLocal(name):req(name));
 mod._compile(ts.transpileModule(fs.readFileSync(source,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,source);
 const Workspace=mod.exports.default;
 const checks=[];

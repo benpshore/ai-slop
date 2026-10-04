@@ -7,10 +7,10 @@
       "sha256": "d9949f4680594c6f2306d3be769877e6d23f5873d739ff1736cadcaafaa28344"
     },
     {
-      "bytes": 6088,
+      "bytes": 6741,
       "mode": "0644",
       "path": "README.md",
-      "sha256": "01162af6de566f6b55e4deceb3b4df3273c0334723c2381167ed85cc7f9b513e"
+      "sha256": "9c323e8136e770f592580ae25883bb643c50ea39bedd6d6da661d68fb1e71b63"
     },
     {
       "bytes": 996,
@@ -73,10 +73,10 @@
       "sha256": "4265a2e7c2dcb3a6f4b7026f762bf5b6e4caec76cc13c0a45987ee9a9f2e42cc"
     },
     {
-      "bytes": 15169,
+      "bytes": 15443,
       "mode": "0644",
       "path": "app/globals.css",
-      "sha256": "3daef371af6f9b9c9b103e3d9953b51e1a059004679f1f261463ee8a302c2f9b"
+      "sha256": "2fcfc562a5fcc5b1b1ba520f737b160aab4f85ab52bfd8e94d823751d0f6549d"
     },
     {
       "bytes": 524,
@@ -97,10 +97,10 @@
       "sha256": "e15031512d92c9bd0bb4fa9eabcd676dbe14e2e05fec1317cd7060b202cb21c3"
     },
     {
-      "bytes": 50280,
+      "bytes": 61221,
       "mode": "0644",
       "path": "app/workspace.tsx",
-      "sha256": "67c79991fcf01056af722cbeb5d4a88739410075e96c264bf34fc3035546c96b"
+      "sha256": "192077819d5208b68fc482b38d52b10f35dc5812097b7c0345eb3916da16999b"
     },
     {
       "bytes": 7211,
@@ -547,10 +547,10 @@
       "sha256": "469039938a39d116c56face60bdba8adbb5b494ac9466277d78f61fc6d75e7f7"
     },
     {
-      "bytes": 5992,
+      "bytes": 6367,
       "mode": "0644",
       "path": "docs/STORAGE_LIFECYCLE.md",
-      "sha256": "e02b638e7e68a668a5ad4f17bbf697d90cdccf75b18cd7c10dfc65f723677039"
+      "sha256": "074405f8f120582a3ae6cec85042a82d74b2b96e44230a208e8c3eebed9cd9c0"
     },
     {
       "bytes": 148,
@@ -661,10 +661,10 @@
       "sha256": "1c93d747e384c8e17e3e3dd5361b24412babf5eba2a11d2ae7a75f4e0924112c"
     },
     {
-      "bytes": 585,
+      "bytes": 989,
       "mode": "0644",
       "path": "lib/document-client.ts",
-      "sha256": "7d54f35bea1d48e05bc65007d4b9d57b6a8fd96c5ba3dea45036f216b153364f"
+      "sha256": "5e8594eaa3e23a4775261bf35629323781d5a45efc1db4981b553a7f144c8fc6"
     },
     {
       "bytes": 3160,
@@ -713,6 +713,12 @@
       "mode": "0644",
       "path": "lib/source-fetch.ts",
       "sha256": "f9819b6cdfa58267d2d8e697798f20ec71fe4271bed7d47eb3b121ec9b096bbd"
+    },
+    {
+      "bytes": 8268,
+      "mode": "0644",
+      "path": "lib/text-import.ts",
+      "sha256": "52dff7f83bc3f7f3419c0093c21caa22a5248f3674a40e82489d5c2393e38ac3"
     },
     {
       "bytes": 132,
@@ -809,6 +815,12 @@
       "mode": "0644",
       "path": "public/window.svg",
       "sha256": "decf1cf7bb22b5c99c4857cfcd5718ce5465c4454166317589c83fc73df74b66"
+    },
+    {
+      "bytes": 17436,
+      "mode": "0644",
+      "path": "scripts/benchmark-text-import.mjs",
+      "sha256": "d505829f865db0fd78a4d4b0ab9ed77dbe0f790019939743d3135eb44565a756"
     },
     {
       "bytes": 661,
@@ -947,6 +959,12 @@
       "mode": "0644",
       "path": "scripts/test-office.mjs",
       "sha256": "0c35e57e6a1c7159a57dfe7ab624c51b58c3d5b3bb3324afa5e9f43c34fb967b"
+    },
+    {
+      "bytes": 12810,
+      "mode": "0644",
+      "path": "scripts/test-text-import.mjs",
+      "sha256": "9fdbd5e59fdcfbffe48f695cc97286e36a581654c37a0da7e691ee769a9a40eb"
     },
     {
       "bytes": 11241,

@@ -1,5 +1,9 @@
 # Reader and Upload repair — 2026-10-04
 
+This records the initial reader patch. The subsequent combined implementation,
+migration requirements, and final verification are in the
+[web integration handoff](WEB_ALPHA_INTEGRATION_20261004.md).
+
 Tracking: [child issue #184](https://github.com/benpshore/pdftextract/issues/184)
 under [experience epic #178](https://github.com/benpshore/pdftextract/issues/178),
 with source evidence under [#176](https://github.com/benpshore/pdftextract/issues/176)
