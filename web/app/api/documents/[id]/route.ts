@@ -1,5 +1,12 @@
-import { owner, storage, ownedRecord, failure, jsonEnvelope } from '@/lib/server';
+import { owner, storage, ownedRecord, failure, jsonEnvelope, boundedBody } from '@/lib/server';
+import {deleteDocument} from '@/lib/document-lifecycle';
 type Context={params:Promise<{id:string}>};
+export async function DELETE(request:Request,context:Context){try{
+ const user=await owner(request),{id}=await context.params;
+ const input=JSON.parse(new TextDecoder().decode(await boundedBody(request,1024)));
+ if(input.confirmDocumentId!==id)throw new Response('Confirm the document to delete.',{status:400});
+ await deleteDocument(id,user);return new Response(null,{status:204});
+}catch(e){return failure(e);}}
 export async function GET(request:Request,context:Context){try{const user=await owner();const {id}=await context.params;const record=await ownedRecord(id,user);const object=record.result_key?await storage().bucket.get(String(record.result_key)):null;return jsonEnvelope(record,object?.body??null);}catch(e){return failure(e);}}
 export async function PATCH(request:Request,context:Context){try{
  const user=await owner(request),{id}=await context.params;const previous=await ownedRecord(id,user);

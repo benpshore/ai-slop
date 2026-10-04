@@ -1,4 +1,5 @@
 import {owner,storage,boundedBody,ownedRecord,failure} from '@/lib/server';
+import {guardUpload,discardDeletedUpload} from '@/lib/document-lifecycle';
 import type {UploadSession} from '@/lib/uploads';
 export async function POST(request:Request){try{
  const user=await owner(request);
@@ -20,7 +21,7 @@ export async function POST(request:Request){try{
  if(input.target==='asset'&&!/^image\/(?:png|jpeg|webp|gif|bmp|tiff|avif)$/.test(input.mime))throw new Error('Unsupported embedded image type.');
  const upload=await storage().bucket.createMultipartUpload(key,{httpMetadata:{contentType:mime}});
  const session:UploadSession={id,owner:user,documentId,key,uploadId:upload.uploadId,target:input.target,bytes:input.bytes,createdAt:new Date().toISOString(),name,kind:input.kind||'json',sourceUrl,mime,...(input.target==='result'?{summary:input.summary,baseResultKey}:{})};
- try{await storage().bucket.put(`uploads/${id}`,JSON.stringify(session));}catch(error){await upload.abort();throw error;}
+ try{await storage().bucket.put(`uploads/${id}`,JSON.stringify(session));await guardUpload(session);}catch(error){await upload.abort();await discardDeletedUpload(session);throw error;}
  // R2 allows 10,000 parts. This is transport sizing, not a file acceptance cap.
  const chunkSize=Math.max(8*1024*1024,Math.ceil(input.bytes/10000));
  return Response.json({session:id,chunkSize},{status:201});
