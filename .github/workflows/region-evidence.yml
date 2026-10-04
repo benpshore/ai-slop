@@ -1,0 +1,31 @@
+name: Region evidence contract
+
+on:
+  pull_request:
+    paths:
+      - experiments/region-evidence/**
+      - rust-toolchain.toml
+      - .github/workflows/region-evidence.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record executable toolchain identity
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+          cargo clippy --version
+          rustup target list --installed
+      - run: cargo fmt --manifest-path experiments/region-evidence/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path experiments/region-evidence/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path experiments/region-evidence/Cargo.toml
