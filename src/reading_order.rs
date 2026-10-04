@@ -200,6 +200,11 @@ const BAND_LINES: usize = 4;
 /// Fraction of a region's width below which every line of a page header or
 /// footer band stays.
 const BAND_WIDTH: f32 = 0.4;
+/// A column heading stays associated with nearby prose only within two
+/// normal line heights; more widely separated running heads remain bands.
+const COLUMN_HEADING_GAP: f32 = 2.0;
+/// Tolerance in points for a heading aligned with its column's left edge.
+const COLUMN_HEADING_ALIGN: f32 = 1.0;
 
 /// Thresholds of one XY-cut run, in points.
 #[allow(clippy::struct_field_names)]
@@ -1383,7 +1388,12 @@ fn x_extent(boxes: &[BBox], group: &[usize]) -> (f32, f32) {
 /// each narrower than `BAND_WIDTH` of the region's width, with at least
 /// `COEXIST_LINES` lines of `BRIDGE_COLUMN` of the width on the other side
 /// of the gap. `0` and `by_top.len()` stand for no band.
-fn furniture_bands(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> (usize, usize) {
+fn furniture_bands(
+    boxes: &[BBox],
+    by_top: &[usize],
+    min_gap: f32,
+    split_x: Option<f32>,
+) -> (usize, usize) {
     let n = by_top.len();
     let Some(&top_line) = by_top.first() else {
         return (0, n);
@@ -1412,6 +1422,11 @@ fn furniture_bands(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> (usize, us
     };
     let head = first
         .filter(|&p| p <= BAND_LINES && by_top[..p].iter().all(short) && prose(&by_top[p..]))
+        .filter(|&p| {
+            !split_x.is_some_and(|x| {
+                column_heading_band(boxes, &by_top[..p], &by_top[p..], x, min_gap / ROW_GAP)
+            })
+        })
         .unwrap_or(0);
     let foot = last
         .filter(|&p| n - p <= BAND_LINES && by_top[p..].iter().all(short) && prose(&by_top[..p]))
@@ -1419,14 +1434,57 @@ fn furniture_bands(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> (usize, us
     (head, foot)
 }
 
+/// Two short headings can open the respective columns at the same height.
+/// They belong with their nearby, left-aligned prose, not in a shared page
+/// header (`Ethical Considerations` beside `References`, arXiv:2502.00857).
+/// Require this association on both sides of a proven column split. A
+/// right-aligned folio, spanning title or widely separated running head does
+/// not qualify. Text is deliberately not used to identify heading names.
+fn column_heading_band(
+    boxes: &[BBox],
+    head: &[usize],
+    body: &[usize],
+    split_x: f32,
+    line_height: f32,
+) -> bool {
+    let side = |b: BBox| usize::from(b.x0 >= split_x);
+    let mut left = [f32::INFINITY; 2];
+    let mut top = [f32::NEG_INFINITY; 2];
+    for &i in body {
+        let b = boxes[i];
+        let column = side(b);
+        left[column] = left[column].min(b.x0);
+        top[column] = top[column].max(b.y1);
+    }
+    let mut seen = [false; 2];
+    for &i in head {
+        let b = boxes[i];
+        let column = side(b);
+        let gap = b.y0 - top[column];
+        if (b.x0 - left[column]).abs() > COLUMN_HEADING_ALIGN
+            || gap < 0.0
+            || gap > COLUMN_HEADING_GAP * line_height
+        {
+            return false;
+        }
+        seen[column] = true;
+    }
+    seen == [true, true]
+}
+
 /// Like [`row_cut`], but only a cut whose upper part or lower part consists
 /// of margin lines alone (see [`margin_runs`]) or is a page header or
 /// footer band (see [`furniture_bands`]) qualifies: it splits a title,
 /// running header, footer or page number off the top or bottom of the
 /// region and nothing else.
-fn spanning_row_cut(boxes: &[BBox], by_top: &[usize], min_gap: f32) -> Option<usize> {
+fn spanning_row_cut(
+    boxes: &[BBox],
+    by_top: &[usize],
+    min_gap: f32,
+    split_x: Option<f32>,
+) -> Option<usize> {
     let (top_run, bottom_run) = margin_runs(boxes, by_top);
-    let (head, foot) = furniture_bands(boxes, by_top, min_gap);
+    let (head, foot) = furniture_bands(boxes, by_top, min_gap, split_x);
     let top_end = top_run.max(head);
     let bottom_start = (by_top.len() - bottom_run).min(foot);
     widest_row_gap(boxes, by_top, min_gap, |pos| {
@@ -1806,7 +1864,7 @@ impl XyCut<'_> {
             let row = if has_column {
                 // The right side starts at the box at the cut.
                 let split_x = cut.map(|at| boxes[by_left[at]].x0);
-                spanning_row_cut(boxes, &by_top, params.row_gap).or_else(|| {
+                spanning_row_cut(boxes, &by_top, params.row_gap, split_x).or_else(|| {
                     let x = split_x?;
                     let at = row_cut(boxes, &by_top, params.row_gap)?;
                     rows_read_first(boxes, self.texts, &by_top, at, x).then_some(at)
@@ -1815,7 +1873,7 @@ impl XyCut<'_> {
                 let masked =
                     masked_column_cut(boxes, &by_top, &by_left, params.column_gap, &mut self.marks);
                 let margin = if masked {
-                    spanning_row_cut(boxes, &by_top, params.row_gap)
+                    spanning_row_cut(boxes, &by_top, params.row_gap, None)
                 } else {
                     None
                 };
@@ -3670,6 +3728,41 @@ mod tests {
         assert_eq!(texts(&page), expected);
         assert!(page.text.starts_with("Short running head\n\n7\n\nFig. 6: "));
         assert!(page.text.contains("goes here\n\nright row 0 of"));
+    }
+
+    #[test]
+    fn distant_running_heads_aligned_with_both_columns_remain_a_header_band() {
+        let mut spans = vec![
+            span("Left running head", 50.0, 760.0, 180.0, 770.0, 0),
+            span("Right running head", 320.0, 760.0, 450.0, 770.0, 1),
+        ];
+        for row in 0..4 {
+            let y = 700.0 - 18.0 * row as f32;
+            for (side, x) in [("left", 50.0), ("right", 320.0)] {
+                spans.push(span(
+                    &format!("{side} column body row {row} continues here"),
+                    x,
+                    y,
+                    x + 240.0,
+                    y + 10.0,
+                    spans.len() as u32,
+                ));
+            }
+        }
+        let mut page = page_with(spans);
+        order_page(&mut page);
+        let ordered = texts(&page);
+        assert_eq!(&ordered[..2], ["Left running head", "Right running head"]);
+        assert!(
+            ordered[2..6]
+                .iter()
+                .all(|line| line.starts_with("left column"))
+        );
+        assert!(
+            ordered[6..]
+                .iter()
+                .all(|line| line.starts_with("right column"))
+        );
     }
 
     #[test]
