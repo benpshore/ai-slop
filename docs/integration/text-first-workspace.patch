@@ -1,0 +1,57 @@
+diff --git a/web/app/workspace.tsx b/web/app/workspace.tsx
+index 3f3e4cb..aa87989 100644
+--- a/web/app/workspace.tsx
++++ b/web/app/workspace.tsx
+@@ -13,6 +13,7 @@ import {captureSource, saveExtracted, uploadOriginal, uploadAssetFile, decodeSou
+ import {retainArticleImages} from '@/lib/article-assets';
+ import {readWorkspace, writeWorkspace} from '@/lib/workspace-storage';
+ import type {DocumentRow, Extracted} from '@/lib/types';
++import {prepareTextImport} from '@/lib/text-import';
+
+ type Phase = 'waiting'|'fetching'|'uploading'|'extracting'|'saving'|'saved'|'failed'|'cancelled'|'interrupted';
+ type Source = {type:'file';file:File;url?:string;decoded?:string;member?:boolean}|{type:'url';url:string;feed:boolean}|{type:'stored';name:string;url?:string;decoded?:string;member?:boolean};
+@@ -175,14 +176,24 @@ export default function Workspace({userId}:{userId:string}) {
+         file=new File([await response.blob()],item.source.name,{type:response.headers.get('X-TPE-Original-Content-Type')||item.record.mime||''});sourceUrl=item.source.url||'';decoded=item.source.decoded;
+       }else {file=item.source.file;sourceUrl=item.source.url||'';decoded=item.source.decoded;}
+       signal.throwIfAborted();
++      // Read local text before storage; keep the original and result for recovery.
++      update(id,{phase:'extracting',progress:null,message:'Reading the source…'});
++      const textDraft=reusingOriginal?null:await prepareTextImport(file,{sourceUrl,signal});
++      if(textDraft){
++        update(id,{result:textDraft.result,savePending:true,message:'Text ready. Saving…'});
++        // Give React a task boundary to commit the readable state. This is not a paint guarantee.
++        await new Promise<void>(resolve=>setTimeout(resolve,0));
++        signal.throwIfAborted();
++      }
+       let record=item.record;
+       if(!record){update(id,{phase:'uploading',progress:0,message:'Saving the original…'});record=await uploadOriginal(file,{sourceUrl,signal,onProgress:fraction=>update(id,{progress:100*fraction})});update(id,{record});
+         const current=selectionRef.current;if(current&&'queueId'in current&&current.queueId===id)historySelection(record.id,id,view,true);
+       }
+       signal.throwIfAborted();update(id,{phase:'extracting',progress:null,message:'Reading the saved source…'});
+-      if(decoded===undefined&&['html','feed','text','css','xml','json'].includes(record.kind))decoded=await decodeSource(file,file.type||record.mime||'',signal);
++      if(!textDraft&&decoded===undefined&&['html','feed','text','css','xml','json'].includes(record.kind))decoded=await decodeSource(file,file.type||record.mime||'',signal);
+       let extracted:Extracted;
+-      if(record.kind==='archive'){
++      if(textDraft&&record.kind==='text')extracted=textDraft.result;
++      else if(record.kind==='archive'){
+         const members:{path:string;status:string;documentId?:string;error?:string}[]=[];
+         for await(const member of expandUploads([file],progress=>update(id,{message:progress.phase+' · '+progress.path,progress:progress.total?100*progress.completed/progress.total:null}),signal)){
+           signal.throwIfAborted();
+@@ -293,7 +304,7 @@ export default function Workspace({userId}:{userId:string}) {
+     const lifecycle=new AbortController();try{Promise.resolve(context.registerTool({name:'capture_source',title:'Capture a web page or feed',description:'Privately save a public source, extract it, and retain its import status.',inputSchema:{type:'object',properties:{url:{type:'string'},feed:{type:'boolean'}},required:['url'],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:async(input:unknown)=>{if(!input||typeof input!=='object'||!('url'in input)||typeof input.url!=='string'||!safeUrl(input.url))throw new Error('A public HTTP or HTTPS URL is required.');return captureRef.current(input.url,'feed'in input&&input.feed===true);}},{signal:lifecycle.signal})).catch(()=>{});}catch{}return()=>lifecycle.abort();
+   },[]);
+   function changeView(value:string){setView(value);const address=new URL(window.location.href);address.searchParams.set('tab',value);history.replaceState({...history.state,tpe:{scroll:window.scrollY}},'',address);}
+-  const saveState=selectedItem?selectedItem.savePending?'Result retained here; save needs a retry.':selectedItem.phase==='saved'?'Saved privately':selectedItem.message:'Saved privately';
++  const saveState=selectedItem?selectedItem.savePending?(activePhases.has(selectedItem.phase)?'Text ready. Saving…':'Result retained here; save needs a retry.'):selectedItem.phase==='saved'?'Saved privately':selectedItem.message:'Saved privately';
+   async function detectClipboardUrl() {
+     if(paste.trim()||!navigator.clipboard?.readText)return;
+     try {const value=(await navigator.clipboard.readText()).trim();if(/^https?:\/\//i.test(value)&&safeUrl(value)&&!composerValue.current.trim()){dirtyDraft.current=true;setPaste(value);setAnnouncement('Link found on your clipboard. Send to import it.');}}catch { /* Clipboard access is optional; normal paste always works. */ }
+@@ -321,7 +332,7 @@ export default function Workspace({userId}:{userId:string}) {
+       {loading&&<p role="status">Opening document…</p>}
+       {!selection?<div className="empty-state"><h2>Bring your reading here.</h2><p>Paste a link, add files, or drop them onto this page. Your originals stay saved.</p></div>:<>
+         <div className="reader-heading"><div><p className="help" role="status" aria-live="polite">{saveState}</p><h2 ref={resultHeading} tabIndex={-1}>{result?.title||selected?.title||selectedItem?.name||'Document'}</h2></div></div>
+-        {selectedItem?.savePending&&<div className="notice"><p>Your result is ready here but has not been saved.</p><Button disabled={activePhases.has(selectedItem.phase)} onClick={()=>retry(selectedItem.id,true)}>Retry save</Button></div>}
++        {selectedItem?.savePending&&!activePhases.has(selectedItem.phase)&&<div className="notice"><p>Your result is ready here but has not been saved.</p><Button disabled={activePhases.has(selectedItem.phase)} onClick={()=>retry(selectedItem.id,true)}>Retry save</Button></div>}
+         {selected?.kind==='image'&&<img className="original-image" src={'/api/documents/'+selected.id+'/media'} alt={selected.title} loading="lazy"/>}
+         {selected&&['media','audio','video'].includes(selected.kind)&&(/\.(mp3|wav|m4a|aac|oga|flac|opus)$/i.test(selected.original_name)||selected.kind==='audio'?<audio className="original-media" controls preload="metadata" src={'/api/documents/'+selected.id+'/media'}/>:<video className="original-media" controls playsInline preload="metadata" src={'/api/documents/'+selected.id+'/media'}/>)}
+         {result?<>
