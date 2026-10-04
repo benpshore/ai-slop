@@ -1,9 +1,10 @@
 'use client';
 
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import type {ClipboardEvent, DragEvent} from 'react';
-import {AlertCircle, ArrowUp, ChevronDown, Download, FileText, FolderOpen, ImagePlus, LockKeyhole, Plus, Search, Upload, X} from 'lucide-react';
+import {AlertCircle, ArrowUp, Check, ChevronDown, Copy, Download, FileText, FolderOpen, ImagePlus, LoaderCircle, LockKeyhole, Search, Upload, X} from 'lucide-react';
 import DOMPurify from 'dompurify';
+import {marked} from 'marked';
 import {Button} from '@/components/ui/button';
 import {clipHtml, parseFeed, safeUrl, textDois, doiFrom} from '@/lib/clip';
 import {expandUploads} from '@/lib/imports';
@@ -18,11 +19,17 @@ type Phase = 'waiting'|'fetching'|'uploading'|'extracting'|'saving'|'saved'|'fai
 type Source = {type:'file';file:File;url?:string;decoded?:string;member?:boolean}|{type:'url';url:string;feed:boolean}|{type:'stored';name:string;url?:string;decoded?:string;member?:boolean};
 type QueueItem = {id:string;name:string;source:Source;phase:Phase;progress:number|null;message:string;error?:string;record?:DocumentRow;result?:Extracted;savePending?:boolean;retrySave?:boolean;parentId?:string};
 type Selection = {queueId:string}|{record:DocumentRow;result:Extracted|null};
-type Snapshot = {version:1;items:QueueItem[];draft:{url:string;kind:string;paste:string;query:string};selection:{queueId?:string;documentId?:string}|null;view:string;scroll:number};
+type ReadingMode = 'reading'|'plain';
+type Snapshot = {version:1;items:QueueItem[];draft:{url:string;kind:string;paste:string;query:string};selection:{queueId?:string;documentId?:string}|null;view:string;readingMode?:ReadingMode;scroll:number};
 type DropEntry = {isFile:boolean;isDirectory:boolean;name:string;file?:(done:(file:File)=>void,fail:(error:DOMException)=>void)=>void;createReader?:()=>{readEntries:(done:(entries:DropEntry[])=>void,fail:(error:DOMException)=>void)=>void}};
 const activePhases = new Set<Phase>(['waiting','fetching','uploading','extracting','saving']);
 const messageOf = (error:unknown) => error instanceof Error ? error.message : String(error);
 const phaseLabel = (phase:Phase) => ({waiting:'Waiting',fetching:'Fetching',uploading:'Saving original',extracting:'Extracting',saving:'Saving result',saved:'Saved',failed:'Needs attention',cancelled:'Cancelled',interrupted:'Interrupted'})[phase];
+const progressValue = (item:QueueItem) => item.progress!==null&&Number.isFinite(item.progress)?Math.min(100,Math.max(0,item.progress)):undefined;
+function StageProgress({item}:{item:QueueItem}) {
+  const value=progressValue(item);
+  return <div className="stage-progress"><progress max={100} value={value} aria-label={phaseLabel(item.phase)+' for '+item.name} aria-valuetext={item.message+(value===undefined?'':' '+Math.round(value)+'% of this stage.')}/><p className="help">{item.message}{value!==undefined&&<span className="stage-percent">{Math.round(value)}% of this stage</span>}</p></div>;
+}
 
 async function json<T>(response:Response):Promise<T> {
   if (!response.ok) { let message=await response.text();try { message=JSON.parse(message).error||message; } catch {} throw new Error(message||'Request failed ('+response.status+').'); }
@@ -62,10 +69,23 @@ function readableHtml(html:string,documentId?:string):string {
   }
   return document.body.innerHTML;
 }
+function ReaderContent({html,markdown,text,documentId,markdownFile,mode}:{html:string;markdown:string;text:string;documentId?:string;markdownFile:boolean;mode:ReadingMode}) {
+  const readingHtml=useMemo(()=>{
+    // Text/CSS/XML imports also keep an export field named markdown. Preserve
+    // their literal source unless this is a Markdown file or a distinct projection.
+    const projection=markdown&&(markdownFile||markdown!==text)?markdown:'';
+    const source=html||(projection?marked.parse(projection,{async:false,gfm:true,breaks:true}).trim():'');
+    return source?readableHtml(source,documentId):'';
+  },[html,markdown,text,documentId,markdownFile]);
+  if(mode==='plain')return <article aria-label="Plain text" className="reading plain-reading">{text||'No plain text was found.'}</article>;
+  if(readingHtml)return <article aria-label="Reading" className="reading" dangerouslySetInnerHTML={{__html:readingHtml}}/>;
+  return <article aria-label="Reading" className="reading">{(text||markdown)?(text||markdown).split(/\n\s*\n/).map((paragraph,index)=><p className="text-paragraph" key={index}>{paragraph}</p>):<p>No readable text was found. You can open the original below.</p>}</article>;
+}
 
 export default function Workspace({userId}:{userId:string}) {
   const [queue,setQueue]=useState<QueueItem[]>([]),[selection,setSelection]=useState<Selection|null>(null),[documents,setDocuments]=useState<DocumentRow[]>([]);
   const [url,setUrl]=useState(''),[kind,setKind]=useState('file'),[paste,setPaste]=useState(''),[query,setQuery]=useState(''),[view,setView]=useState('text');
+  const [readingMode,setReadingMode]=useState<ReadingMode>('reading'),[copied,setCopied]=useState<Extracted|null>(null),[folderSupported,setFolderSupported]=useState(false);
   const [error,setError]=useState(''),[recoveryWarning,setRecoveryWarning]=useState(''),[announcement,setAnnouncement]=useState(''),[queueOpen,setQueueOpen]=useState(true),[dragging,setDragging]=useState(false),[loading,setLoading]=useState(false),[restored,setRestored]=useState(false);
   const queueRef=useRef<QueueItem[]>([]),selectionRef=useRef<Selection|null>(null),running=useRef(false),mounted=useRef(true),generation=useRef(0),listGeneration=useRef(0),dirtyDraft=useRef(false),recoveryReady=useRef(false);
   const pendingDisposals=useRef(new Map<string,()=>Promise<void>>()),composerValue=useRef(paste);composerValue.current=paste;
@@ -74,10 +94,13 @@ export default function Workspace({userId}:{userId:string}) {
   const pumpRef=useRef<()=>Promise<void>>(async()=>{}),checkpointRef=useRef<()=>Promise<void>>(async()=>{}),openSavedRef=useRef<(id:string,tab?:string,scroll?:number)=>Promise<void>>(async()=>{});
   const captureRef=useRef<(url:string,feed:boolean)=>Promise<unknown>>(async()=>{});
   const fileInput=useRef<HTMLInputElement>(null),folderInput=useRef<HTMLInputElement>(null),photoInput=useRef<HTMLInputElement>(null),resultHeading=useRef<HTMLHeadingElement>(null);
+  const attachFolderInput=useCallback((element:HTMLInputElement|null)=>{folderInput.current=element;if(element){setFolderSupported('webkitdirectory'in element);element.setAttribute('webkitdirectory','');}},[]);
   const selectedItem=selection && 'queueId' in selection ? queue.find(item=>item.id===selection.queueId) : undefined;
   const selected=selectedItem?.record || (selection && 'record' in selection?selection.record:null);
   const result=selectedItem?.result || (selection && 'record' in selection?selection.result:null);
   const pending=queue.filter(item=>activePhases.has(item.phase)).length;
+  const processing=[...queue].reverse().find(item=>activePhases.has(item.phase)&&item.phase!=='waiting');
+  const newlyReady=[...queue].reverse().find(item=>item.result&&item.result.status!=='failed'&&item.result.metadata?.extractionAvailable!==false&&item.id!==selectedItem?.id&&(!item.record||item.record.id!==selected?.id));
 
   function choose(value:Selection|null) {selectionRef.current=value;if(mounted.current)setSelection(value);}
   function update(id:string,patch:Partial<QueueItem>) {
@@ -89,34 +112,44 @@ export default function Workspace({userId}:{userId:string}) {
     const data=await json<{documents:DocumentRow[]}>(await fetch('/api/documents?q='+encodeURIComponent(search)));
     if(request===listGeneration.current&&mounted.current)setDocuments(data.documents);
   },[]);
-  function historySelection(documentId?:string,queueId?:string,tab='text',replace=false) {
+  function historySelection(documentId?:string,queueId?:string,tab='text',replace=false,mode:ReadingMode='reading') {
     const current={...(history.state||{}),tpe:{scroll:window.scrollY}};history.replaceState(current,'');
     const address=new URL(window.location.href);address.searchParams.delete('document');address.searchParams.delete('queue');
     if(documentId)address.searchParams.set('document',documentId);else if(queueId)address.searchParams.set('queue',queueId);
     address.searchParams.set('tab',tab);
+    if(mode==='plain')address.searchParams.set('mode','plain');else address.searchParams.delete('mode');
     history[replace?'replaceState':'pushState']({...current,tpe:{scroll:replace?window.scrollY:0}},'',address);
   }
   function selectQueue(id:string,navigate=true) {
-    generation.current++;setLoading(false);choose({queueId:id});setView('text');
     const item=queueRef.current.find(value=>value.id===id);
+    if(navigate&&selectionRef.current&&'queueId'in selectionRef.current&&selectionRef.current.queueId===id){
+      generation.current++;setLoading(false);
+      const address=new URL(window.location.href);if(address.searchParams.get('document')!==item?.record?.id&&address.searchParams.get('queue')!==id)historySelection(item?.record?.id,id,view,false,readingMode);
+      return;
+    }
+    generation.current++;setLoading(false);choose({queueId:id});setView('text');setReadingMode('reading');
     if(navigate)historySelection(item?.record?.id,id);
-    if(item?.record&&!item.result){void fetchRecord(item.record.id).then(response=>json<{record:DocumentRow;result:Extracted|null}>(response)).then(data=>update(id,{record:data.record,...(data.result?{result:data.result}:{})})).catch(reason=>setError(messageOf(reason)));}
+    if(item?.record&&!item.result){void fetchRecord(item.record.id).then(response=>json<{record:DocumentRow;result:Extracted|null}>(response)).then(data=>{const current=queueRef.current.find(value=>value.id===id);if(current&&!current.result&&current.record?.id===data.record.id)update(id,{...(current.record===item.record?{record:data.record}:{}),...(data.result?{result:data.result}:{})});}).catch(reason=>{if(selectionRef.current&&'queueId'in selectionRef.current&&selectionRef.current.queueId===id)setError(messageOf(reason));});}
   }
+  function focusReader(){requestAnimationFrame(()=>requestAnimationFrame(()=>{const reader=document.getElementById('reader');reader?.scrollIntoView?.({block:'start'});reader?.focus({preventScroll:true});}));}
+  function readQueue(id:string){selectQueue(id);focusReader();}
   function fetchRecord(id:string):Promise<Response> {return fetch('/api/documents/'+encodeURIComponent(id));}
   async function openSaved(id:string,tab='text',scroll=0) {
     const request=++generation.current;setLoading(true);setError('');
+    const mode:ReadingMode=new URL(window.location.href).searchParams.get('mode')==='plain'?'plain':'reading';
     const existing=queueRef.current.find(item=>item.record?.id===id&&item.result);
-    if(existing){choose({queueId:existing.id});setView(tab);setLoading(false);requestAnimationFrame(()=>window.scrollTo({top:scroll}));return;}
-    try {const data=await json<{record:DocumentRow;result:Extracted|null}>(await fetchRecord(id));if(request!==generation.current||!mounted.current)return;choose(data);setView(tab);requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo({top:scroll})));}
+    if(existing){choose({queueId:existing.id});setView(tab);setReadingMode(mode);setLoading(false);requestAnimationFrame(()=>window.scrollTo({top:scroll}));return;}
+    try {const data=await json<{record:DocumentRow;result:Extracted|null}>(await fetchRecord(id));if(request!==generation.current||!mounted.current)return;choose(data);setView(tab);setReadingMode(mode);requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo({top:scroll})));}
     catch(reason){if(request===generation.current)setError(messageOf(reason));}
     finally{if(request===generation.current)setLoading(false);}
   }
   openSavedRef.current=openSaved;
-  function openRecord(record:DocumentRow) {historySelection(record.id);void openSaved(record.id);}
+  function openRecord(record:DocumentRow) {historySelection(record.id);void openSaved(record.id).then(()=>{const current=selectionRef.current;if(current&&('record'in current?current.record.id===record.id:queueRef.current.find(item=>item.id===current.queueId)?.record?.id===record.id))focusReader();});}
 
   function add(sources:{source:Source;name:string;parentId?:string}[],start=true):string[] {
     const items=sources.map(input=>({...input,id:crypto.randomUUID(),phase:'waiting' as const,progress:null,message:'Waiting to import.'}));
-    queueRef.current=[...queueRef.current,...items];setQueue(queueRef.current);setQueueOpen(true);
+    queueRef.current=[...queueRef.current,...items];setQueue(queueRef.current);
+    if(items.length)setAnnouncement(items.length===1?items[0].name+' added to imports.':items.length+' files added to imports.');
     if(items.length&&!selectionRef.current&&!loading)selectQueue(items[0].id);
     if(start)queueMicrotask(()=>void pumpRef.current());
     return items.map(item=>item.id);
@@ -177,7 +210,7 @@ export default function Workspace({userId}:{userId:string}) {
       signal.throwIfAborted();
       let record=item.record;
       if(!record){update(id,{phase:'uploading',progress:0,message:'Saving the original…'});record=await uploadOriginal(file,{sourceUrl,signal,onProgress:fraction=>update(id,{progress:100*fraction})});update(id,{record});
-        const current=selectionRef.current;if(current&&'queueId'in current&&current.queueId===id)historySelection(record.id,id,view,true);
+        const current=selectionRef.current;if(current&&'queueId'in current&&current.queueId===id){const address=new URL(window.location.href);if(address.searchParams.get('queue')===id||address.searchParams.get('document')===record.id)historySelection(record.id,id,address.searchParams.get('tab')||'text',true,address.searchParams.get('mode')==='plain'?'plain':'reading');}
       }
       signal.throwIfAborted();update(id,{phase:'extracting',progress:null,message:'Reading the saved source…'});
       if(decoded===undefined&&['html','feed','text','css','xml','json'].includes(record.kind))decoded=await decodeSource(file,file.type||record.mime||'',signal);
@@ -246,16 +279,19 @@ export default function Workspace({userId}:{userId:string}) {
   }
   async function drop(event:DragEvent) {
     event.preventDefault();setDragging(false);
-    const entries=Array.from(event.dataTransfer.items).map(item=>(item as unknown as {webkitGetAsEntry?:()=>DropEntry|null}).webkitGetAsEntry?.()).filter((entry):entry is DropEntry=>!!entry);
-    if(entries.some(entry=>entry.isDirectory)){
-      const stack=entries.map(entry=>({entry,path:entry.name}));
+    const dropped=Array.from(event.dataTransfer.items).filter(item=>item.kind==='file').map(item=>({entry:(item as unknown as {webkitGetAsEntry?:()=>DropEntry|null}).webkitGetAsEntry?.(),file:item.getAsFile()}));
+    if(dropped.some(item=>item.entry?.isDirectory)){
+      // Some browsers expose directory entries for only part of a mixed drop.
+      // Keep ordinary files whose entry API is unavailable in the same queue.
+      addFiles(dropped.filter(item=>!item.entry&&item.file).map(item=>item.file!));
+      const stack=dropped.flatMap(item=>item.entry?[{entry:item.entry,path:item.entry.name}]:[]).reverse();
       while(stack.length){const current=stack.pop()!;try{if(current.entry.isFile&&current.entry.file){const file=await new Promise<File>((resolve,reject)=>current.entry.file!(resolve,reject));add([{source:{type:'file',file},name:current.path}]);}else if(current.entry.createReader){const reader=current.entry.createReader();while(true){const children=await new Promise<DropEntry[]>((resolve,reject)=>reader.readEntries(resolve,reject));if(!children.length)break;stack.push(...children.reverse().map(entry=>({entry,path:current.path+'/'+entry.name})));}}}catch(reason){const failed=add([{source:{type:'stored',name:current.path},name:current.path}],false)[0];update(failed,{phase:'failed',message:'Reselect this folder or file to try again.',error:'Could not read '+current.path+': '+messageOf(reason)});}}
     }else if(event.dataTransfer.files.length)addFiles(event.dataTransfer.files);
     else addText(event.dataTransfer.getData('text/uri-list').split('\n').filter(line=>!line.startsWith('#')).join('\n')||event.dataTransfer.getData('text/plain'),event.dataTransfer.getData('text/html'));
   }
 
   function snapshot():Snapshot {
-    return {version:1,items:queueRef.current.map(item=>({ ...item,source:item.record&&item.source.type==='file'?{type:'stored',name:item.source.file.name,url:item.source.url,decoded:item.source.decoded,member:item.source.member}:item.source,result:item.savePending?item.result:undefined})),draft:{url,kind,paste,query},selection:selectionRef.current?'queueId'in selectionRef.current?{queueId:selectionRef.current.queueId}:{documentId:selectionRef.current.record.id}:null,view,scroll:window.scrollY};
+    return {version:1,items:queueRef.current.map(item=>({ ...item,source:item.record&&item.source.type==='file'?{type:'stored',name:item.source.file.name,url:item.source.url,decoded:item.source.decoded,member:item.source.member}:item.source,result:item.savePending?item.result:undefined})),draft:{url,kind,paste,query},selection:selectionRef.current?'queueId'in selectionRef.current?{queueId:selectionRef.current.queueId}:{documentId:selectionRef.current.record.id}:null,view,readingMode,scroll:window.scrollY};
   }
   checkpointRef.current=async()=>{
     if(!recoveryReady.current)return;
@@ -267,11 +303,12 @@ export default function Workspace({userId}:{userId:string}) {
     const restoreLocation=(fallback?:Snapshot)=>{
       const address=new URL(window.location.href),id=address.searchParams.get('document'),queueId=address.searchParams.get('queue');
       const tab=address.searchParams.get('tab')||fallback?.view||'text',scroll=history.state?.tpe?.scroll??fallback?.scroll??0;
+      const mode:ReadingMode=(address.searchParams.get('mode')||fallback?.readingMode)==='plain'?'plain':'reading';
       if(id)void openSavedRef.current(id,tab,scroll);
-      else if(queueId&&queueRef.current.some(item=>item.id===queueId)){selectQueue(queueId,false);setView(tab);requestAnimationFrame(()=>window.scrollTo({top:scroll}));}
-      else if(fallback?.selection?.documentId){historySelection(fallback.selection.documentId,undefined,tab,true);void openSavedRef.current(fallback.selection.documentId,tab,scroll);}
-      else if(fallback?.selection?.queueId&&queueRef.current.some(item=>item.id===fallback.selection!.queueId)){const item=queueRef.current.find(item=>item.id===fallback.selection!.queueId)!;historySelection(item.record?.id,item.id,tab,true);selectQueue(item.id,false);setView(tab);}
-      else {generation.current++;choose(null);setView(tab);}
+      else if(queueId&&queueRef.current.some(item=>item.id===queueId)){selectQueue(queueId,false);setView(tab);setReadingMode(mode);requestAnimationFrame(()=>window.scrollTo({top:scroll}));}
+      else if(fallback?.selection?.documentId){historySelection(fallback.selection.documentId,undefined,tab,true,mode);void openSavedRef.current(fallback.selection.documentId,tab,scroll);}
+      else if(fallback?.selection?.queueId&&queueRef.current.some(item=>item.id===fallback.selection!.queueId)){const item=queueRef.current.find(item=>item.id===fallback.selection!.queueId)!;historySelection(item.record?.id,item.id,tab,true,mode);selectQueue(item.id,false);setView(tab);setReadingMode(mode);}
+      else {generation.current++;setLoading(false);choose(null);setView(tab);setReadingMode(mode);}
     };
     void readWorkspace<Snapshot>(userId).then(saved=>{
       if(!mounted.current)return;
@@ -287,13 +324,19 @@ export default function Workspace({userId}:{userId:string}) {
   // The owner-scoped workspace is restored once; callbacks read their current refs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[userId,refresh]);
-  useEffect(()=>{if(!restored||checkpointTimer.current)return;checkpointTimer.current=setTimeout(()=>{checkpointTimer.current=null;void checkpointRef.current();},250);},[queue,url,kind,paste,query,selection,view,restored]);
+  useEffect(()=>{if(!restored||checkpointTimer.current)return;checkpointTimer.current=setTimeout(()=>{checkpointTimer.current=null;void checkpointRef.current();},250);},[queue,url,kind,paste,query,selection,view,readingMode,restored]);
   useEffect(()=>{
     const context=(document as Document&{modelContext?:{registerTool:(tool:unknown,options:unknown)=>unknown}}).modelContext;if(!context?.registerTool)return;
     const lifecycle=new AbortController();try{Promise.resolve(context.registerTool({name:'capture_source',title:'Capture a web page or feed',description:'Privately save a public source, extract it, and retain its import status.',inputSchema:{type:'object',properties:{url:{type:'string'},feed:{type:'boolean'}},required:['url'],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:async(input:unknown)=>{if(!input||typeof input!=='object'||!('url'in input)||typeof input.url!=='string'||!safeUrl(input.url))throw new Error('A public HTTP or HTTPS URL is required.');return captureRef.current(input.url,'feed'in input&&input.feed===true);}},{signal:lifecycle.signal})).catch(()=>{});}catch{}return()=>lifecycle.abort();
   },[]);
   function changeView(value:string){setView(value);const address=new URL(window.location.href);address.searchParams.set('tab',value);history.replaceState({...history.state,tpe:{scroll:window.scrollY}},'',address);}
-  const saveState=selectedItem?selectedItem.savePending?'Result retained here; save needs a retry.':selectedItem.phase==='saved'?'Saved privately':selectedItem.message:'Saved privately';
+  function changeReadingMode(value:ReadingMode){setReadingMode(value);const address=new URL(window.location.href);if(value==='plain')address.searchParams.set('mode','plain');else address.searchParams.delete('mode');history.replaceState({...history.state,tpe:{scroll:window.scrollY}},'',address);}
+  const saveState=selectedItem?selectedItem.savePending?activePhases.has(selectedItem.phase)?'Ready to read · finishing save…':'Ready to read · not yet saved':selectedItem.phase==='saved'?'Saved privately':selectedItem.message:'Saved privately';
+  async function copyMarkdown() {
+    if(!result)return;
+    try {if(!navigator.clipboard?.writeText)throw new Error('Clipboard access is unavailable.');await navigator.clipboard.writeText(result.markdown||result.text);if(mounted.current){setCopied(result);setAnnouncement(result.title+' Markdown copied.');}}
+    catch {if(mounted.current){setError('Markdown could not be copied. Use Download Markdown to keep a copy.');setAnnouncement('Copy failed. Download Markdown is still available.');}}
+  }
   async function detectClipboardUrl() {
     if(paste.trim()||!navigator.clipboard?.readText)return;
     try {const value=(await navigator.clipboard.readText()).trim();if(/^https?:\/\//i.test(value)&&safeUrl(value)&&!composerValue.current.trim()){dirtyDraft.current=true;setPaste(value);setAnnouncement('Link found on your clipboard. Send to import it.');}}catch { /* Clipboard access is optional; normal paste always works. */ }
@@ -308,25 +351,29 @@ export default function Workspace({userId}:{userId:string}) {
       <form className="composer" onSubmit={event=>{event.preventDefault();submitComposer();}}>
         <label htmlFor="source-paste" className="sr-only">Paste a link or text</label>
         <textarea id="source-paste" rows={2} value={paste} onFocus={()=>void detectClipboardUrl()} onChange={event=>{dirtyDraft.current=true;setPaste(event.target.value);}} onKeyDown={event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();submitComposer();}}} placeholder="Paste a link or text…"/>
-        <div className="composer-actions"><details className="add-menu"><summary aria-label="Add files or a folder"><Plus aria-hidden="true"/></summary><div className="add-menu-options"><button type="button" onClick={event=>{event.currentTarget.closest('details')?.removeAttribute('open');fileInput.current?.click();}}><Upload/>Add files</button><button type="button" onClick={event=>{event.currentTarget.closest('details')?.removeAttribute('open');folderInput.current?.click();}}><FolderOpen/>Add folder</button><button type="button" onClick={event=>{event.currentTarget.closest('details')?.removeAttribute('open');photoInput.current?.click();}}><ImagePlus/>Add photos</button></div></details><span className="composer-hint">Or drop files here</span><Button type="submit" disabled={!paste.trim()} aria-label="Import pasted source" className="send-button"><ArrowUp/></Button></div>
-        <input ref={fileInput} className="sr-only" type="file" multiple aria-label="Choose source files" onChange={event=>{if(event.target.files)addFiles(event.target.files);event.target.value='';}}/>
-        <input ref={element=>{folderInput.current=element;element?.setAttribute('webkitdirectory','');}} className="sr-only" type="file" multiple aria-label="Choose a folder" onChange={event=>{if(event.target.files)addFiles(event.target.files);event.target.value='';}}/>
-        <input ref={photoInput} className="sr-only" type="file" accept="image/*" multiple aria-label="Choose photos" onChange={event=>{if(event.target.files)addFiles(event.target.files);event.target.value='';}}/>
+        <div className="composer-actions"><details className="add-menu"><summary><Upload aria-hidden="true"/><span>Upload</span><ChevronDown aria-hidden="true"/></summary><div className="add-menu-options"><button type="button" onClick={event=>{event.currentTarget.closest('details')?.removeAttribute('open');fileInput.current?.click();}}><Upload aria-hidden="true"/>Add files</button><button type="button" disabled={!folderSupported} onClick={event=>{event.currentTarget.closest('details')?.removeAttribute('open');folderInput.current?.click();}}><FolderOpen aria-hidden="true"/>Add folder</button><button type="button" onClick={event=>{event.currentTarget.closest('details')?.removeAttribute('open');photoInput.current?.click();}}><ImagePlus aria-hidden="true"/>Add photos</button><p className="help">{folderSupported?'Choose multiple files or one folder at a time. Each selection joins the same queue.':'Folder picking is unavailable in this browser. Add files, or drop folders where supported.'}</p></div></details><span className="composer-hint">Or drop files here</span><Button type="submit" disabled={!paste.trim()} aria-label="Import pasted source" className="send-button"><ArrowUp aria-hidden="true"/></Button></div>
+        <input ref={fileInput} hidden type="file" multiple aria-label="Choose source files" onChange={event=>{if(event.target.files)addFiles(event.target.files);event.target.value='';}}/>
+        <input ref={attachFolderInput} hidden type="file" multiple aria-label="Choose a folder" onChange={event=>{if(event.target.files)addFiles(event.target.files);event.target.value='';}}/>
+        <input ref={photoInput} hidden type="file" accept="image/*" multiple aria-label="Choose photos" onChange={event=>{if(event.target.files)addFiles(event.target.files);event.target.value='';}}/>
       </form>
+      <p className="intake-hint help">Files and folders share one import queue. Drop both together where your browser supports it.</p>
+      {!!pending&&<div className="processing-status" role="status" aria-live="polite" aria-atomic="true"><LoaderCircle className="processing-spinner" aria-hidden="true"/><div><strong>{processing?phaseLabel(processing.phase):'Waiting to import'}</strong><span>{processing?.name||pending+' queued'}{pending>1?' · '+pending+' imports remaining':''}</span>{processing&&!queueOpen&&<StageProgress item={processing}/>}</div></div>}
+      {newlyReady&&<div className="ready-action"><Button variant="outline" onClick={()=>readQueue(newlyReady.id)}>Open {newlyReady.result?.title||newlyReady.name}</Button></div>}
       {error&&<div className="notice error" role="alert"><AlertCircle/><p>{error}</p><button className="icon-button" onClick={()=>setError('')} aria-label="Dismiss message"><X/></button></div>}
       {recoveryWarning&&<div className="notice" role="status"><AlertCircle/><p>{recoveryWarning}</p></div>}
-      {!!queue.length&&<section className="queue-panel" aria-label="Imports"><button className="section-toggle" aria-expanded={queueOpen} onClick={()=>setQueueOpen(!queueOpen)}><span>{pending?'Importing…':'Recent imports'}</span><ChevronDown/></button>{queueOpen&&<ol className="queue-list">{queue.map(item=><li key={item.id} className={'queue-item '+(selectedItem?.id===item.id?'selected':'')}><div className="queue-row"><button className="queue-open" onClick={()=>selectQueue(item.id)} aria-current={selectedItem?.id===item.id?true:undefined}><strong>{item.name}</strong><span className={'queue-phase phase-'+item.phase}>{phaseLabel(item.phase)}</span></button>{activePhases.has(item.phase)&&<button className="icon-button" onClick={()=>cancelItem(item.id)} aria-label={'Cancel '+item.name}><X/></button>}{['failed','cancelled','interrupted'].includes(item.phase)&&(item.source.type!=='stored'||!!item.record)&&<Button variant="outline" onClick={()=>retry(item.id,!!item.savePending)}>{item.savePending?'Save again':'Retry'}</Button>}</div>{activePhases.has(item.phase)&&<><progress max={100} value={item.progress??undefined} aria-label={item.name+' progress'}/><p className="help">{item.message}</p></>}{item.error&&<p className="queue-error">{item.error}</p>}</li>)}</ol>}</section>}
+      {!!queue.length&&<section className="queue-panel" aria-label="Imports"><button className="section-toggle" aria-expanded={queueOpen} onClick={()=>setQueueOpen(!queueOpen)}><span>{pending?'Imports · '+pending+' in progress':'Recent imports'}</span><ChevronDown aria-hidden="true"/></button>{queueOpen&&<ol className="queue-list">{queue.map(item=><li key={item.id} className={'queue-item '+(selectedItem?.id===item.id?'selected':'')}><div className="queue-row"><button className="queue-open" onClick={()=>readQueue(item.id)} aria-current={selectedItem?.id===item.id?true:undefined}><strong>{item.name}</strong><span className={'queue-phase phase-'+item.phase}>{phaseLabel(item.phase)}</span></button>{activePhases.has(item.phase)&&<button className="icon-button" onClick={()=>cancelItem(item.id)} aria-label={'Cancel '+item.name}><X aria-hidden="true"/></button>}{['failed','cancelled','interrupted'].includes(item.phase)&&(item.source.type!=='stored'||!!item.record)&&<Button variant="outline" onClick={()=>retry(item.id,!!item.savePending)}>{item.savePending?'Save again':'Retry'}</Button>}</div>{activePhases.has(item.phase)&&item.phase!=='waiting'&&<StageProgress item={item}/>}{item.error&&<p className="queue-error">{item.error}</p>}</li>)}</ol>}</section>}
       <details className="library"><summary>Saved documents</summary><form className="search-form" onSubmit={event=>{event.preventDefault();void refresh(query).catch(reason=>setError(messageOf(reason)));}}><label className="sr-only" htmlFor="search">Search saved documents</label><input id="search" value={query} onChange={event=>{dirtyDraft.current=true;setQuery(event.target.value);}} placeholder="Search"/><Button type="submit" variant="outline" aria-label="Search"><Search/></Button></form><div className="document-list">{documents.length?documents.map(record=><button key={record.id} aria-current={selected?.id===record.id?true:undefined} className={'document-item '+(selected?.id===record.id?'selected':'')} onClick={()=>openRecord(record)}><strong>{record.title}</strong><span className="help">{record.status==='uploaded'?'Original saved':record.status==='failed'?'Needs attention':'Saved'}</span></button>):<p className="help">Your saved sources appear here.</p>}</div></details>
     </aside><section id="reader" className="result-pane" aria-label="Document reader" aria-busy={loading} tabIndex={-1}>
       {loading&&<p role="status">Opening document…</p>}
-      {!selection?<div className="empty-state"><h2>Bring your reading here.</h2><p>Paste a link, add files, or drop them onto this page. Your originals stay saved.</p></div>:<>
+      {!selection?<div className="empty-state"><h2>Bring your reading here.</h2><p>Paste a link or use Upload to add files. Your reading appears here as soon as it is ready.</p></div>:<>
         <div className="reader-heading"><div><p className="help" role="status" aria-live="polite">{saveState}</p><h2 ref={resultHeading} tabIndex={-1}>{result?.title||selected?.title||selectedItem?.name||'Document'}</h2></div></div>
-        {selectedItem?.savePending&&<div className="notice"><p>Your result is ready here but has not been saved.</p><Button disabled={activePhases.has(selectedItem.phase)} onClick={()=>retry(selectedItem.id,true)}>Retry save</Button></div>}
+        {selectedItem?.savePending&&!activePhases.has(selectedItem.phase)&&<div className="notice"><p>Your result is ready here but has not been saved. You can copy or download it now.</p><Button onClick={()=>retry(selectedItem.id,true)}>Retry save</Button></div>}
         {selected?.kind==='image'&&<img className="original-image" src={'/api/documents/'+selected.id+'/media'} alt={selected.title} loading="lazy"/>}
         {selected&&['media','audio','video'].includes(selected.kind)&&(/\.(mp3|wav|m4a|aac|oga|flac|opus)$/i.test(selected.original_name)||selected.kind==='audio'?<audio className="original-media" controls preload="metadata" src={'/api/documents/'+selected.id+'/media'}/>:<video className="original-media" controls playsInline preload="metadata" src={'/api/documents/'+selected.id+'/media'}/>)}
         {result?<>
-          {result.status==='failed'?<div className="notice error"><AlertCircle/><p>{result.warnings.join(' ')}</p></div>:result.metadata?.extractionAvailable===false?<p>The original is saved. Text extraction is not available for this file type.</p>:result.html?<article className="reading" dangerouslySetInnerHTML={{__html:readableHtml(result.html,selected?.id)}}/>:<article className="reading plain-reading">{result.text||result.markdown||'No readable text was found. You can open the original below.'}</article>}
-          <div className="reader-secondary"><details><summary>Download</summary><div className="export-actions">{selected&&<Button asChild variant="outline"><a href={'/api/documents/'+selected.id+'/original'}><Download/>Original</a></Button>}<Button variant="outline" onClick={()=>download('extraction.md',result.markdown||result.text,'text/markdown')}>Markdown</Button><Button variant="outline" onClick={()=>download('extraction.json',JSON.stringify({source:selected,...result},null,2))}>JSON</Button></div></details>
+          {result.status!=='failed'&&result.metadata?.extractionAvailable!==false&&<div className="reader-toolbar"><div className="reading-modes" role="group" aria-label="Reading mode"><button aria-pressed={readingMode==='reading'} onClick={()=>changeReadingMode('reading')}>Reading</button><button aria-pressed={readingMode==='plain'} onClick={()=>changeReadingMode('plain')}>Plain text</button></div><div className="markdown-actions"><Button variant="outline" onClick={()=>void copyMarkdown()}>{copied===result?<Check aria-hidden="true"/>:<Copy aria-hidden="true"/>}Copy Markdown</Button><Button variant="outline" onClick={()=>download('extraction.md',result.markdown||result.text,'text/markdown')}><Download aria-hidden="true"/>Download Markdown</Button></div></div>}
+          {result.status==='failed'?<div className="notice error"><AlertCircle/><p>{result.warnings.join(' ')}</p></div>:result.metadata?.extractionAvailable===false?<p>The original is saved. Text extraction is not available for this file type.</p>:<ReaderContent html={result.html||''} markdown={result.markdown||''} text={result.text} documentId={selected?.id} markdownFile={/\.(md|markdown)$/i.test(selected?.original_name||selectedItem?.name||'')} mode={readingMode}/>}
+          <div className="reader-secondary"><details><summary>Original and other downloads</summary><div className="export-actions">{selected&&<Button asChild variant="outline"><a href={'/api/documents/'+selected.id+'/original'}><Download aria-hidden="true"/>Original</a></Button>}<Button variant="outline" onClick={()=>download('extraction.json',JSON.stringify({source:selected,...result},null,2))}>JSON</Button></div></details>
             {!!result.links.length&&<details open={view==='links'} onToggle={event=>{if(event.currentTarget.open&&view!=='links')changeView('links');else if(!event.currentTarget.open&&view==='links')changeView('text');}}><summary>Source links</summary><div className="link-list">{result.links.map((link,index)=><div key={index} className="link-card">{link.label&&<p>{link.label}</p>}{safeUrl(link.url)?<a href={link.url} target="_blank" rel="noreferrer noopener">{link.url}</a>:<code>{link.url}</code>}</div>)}</div></details>}
             <details open={view==='evidence'} onToggle={event=>{if(event.currentTarget.open&&view!=='evidence')changeView('evidence');else if(!event.currentTarget.open&&view==='evidence')changeView('text');}}><summary>Details and review notes</summary><dl className="evidence"><dt>Engine</dt><dd>{result.engine}</dd>{selected&&<><dt>Original SHA-256</dt><dd className="hash">{selected.sha256||'Available after storage verification'}</dd><dt>Saved</dt><dd>{new Date(selected.created_at).toLocaleString()}</dd>{selected.source_url&&<><dt>Source</dt><dd>{selected.source_url}</dd></>}</>}</dl>{result.warnings.length>0&&<ul className="review-notes">{result.warnings.map((warning,index)=><li key={index}>{warning}</li>)}</ul>}<details><summary>Structured data</summary><pre className="code-panel">{JSON.stringify({metadata:result.metadata,tables:result.tables},null,2)}</pre></details>{selected&&!pending&&<Button variant="outline" onClick={rereadOriginal}>Re-read original</Button>}</details>
           </div>

@@ -7,10 +7,10 @@
       "sha256": "d9949f4680594c6f2306d3be769877e6d23f5873d739ff1736cadcaafaa28344"
     },
     {
-      "bytes": 5199,
+      "bytes": 5773,
       "mode": "0644",
       "path": "README.md",
-      "sha256": "536dc01742985dd2c8195fe3e293a67d884d7ad52945addb06791eee6f0beb1c"
+      "sha256": "5995e9815f0f44be2a12d1b5c75c11ebb5d13413ad56f61765c162c4363d8420"
     },
     {
       "bytes": 996,
@@ -73,10 +73,10 @@
       "sha256": "4265a2e7c2dcb3a6f4b7026f762bf5b6e4caec76cc13c0a45987ee9a9f2e42cc"
     },
     {
-      "bytes": 12815,
+      "bytes": 15169,
       "mode": "0644",
       "path": "app/globals.css",
-      "sha256": "730bb7d63742e45615e42f481d6eb4b530ca2d50157924c82d56020e0ed5855e"
+      "sha256": "3daef371af6f9b9c9b103e3d9953b51e1a059004679f1f261463ee8a302c2f9b"
     },
     {
       "bytes": 524,
@@ -97,10 +97,10 @@
       "sha256": "e15031512d92c9bd0bb4fa9eabcd676dbe14e2e05fec1317cd7060b202cb21c3"
     },
     {
-      "bytes": 42834,
+      "bytes": 50280,
       "mode": "0644",
       "path": "app/workspace.tsx",
-      "sha256": "d9fa2a7133125191a6e605b08aad024fb40e77d2d9807048be28feeb209df044"
+      "sha256": "67c79991fcf01056af722cbeb5d4a88739410075e96c264bf34fc3035546c96b"
     },
     {
       "bytes": 7211,
@@ -709,16 +709,16 @@
       "sha256": "614bce25b089c3f19b1e17a6346c74b858034040154c6621e7d35303004767cc"
     },
     {
-      "bytes": 2467,
+      "bytes": 2492,
       "mode": "0644",
       "path": "package.json",
-      "sha256": "eb7f1a36fd700b7bd94ed5f8af2f337f79be7a33c5f6af18b71a5678bbc53279"
+      "sha256": "8f10ed90bc75470a48c6d8877147a82bb87ec461e6c874612f222c19b5728dc9"
     },
     {
-      "bytes": 361452,
+      "bytes": 361730,
       "mode": "0644",
       "path": "pnpm-lock.yaml",
-      "sha256": "ad9d6261cb3434a3b6d6adc9e3e04c98326ff9086483c9007489a98b551c02cd"
+      "sha256": "6dc00ec69ea001c54b39e465af57fb54fa7f30d499aa273afe538cc2c7a728bd"
     },
     {
       "bytes": 758,

@@ -44,6 +44,7 @@ node scripts/test-import-flow.mjs
 node scripts/test-office.mjs
 node scripts/test-node-imports.mjs
 node ../scripts/test-web-workspace.cjs
+node ../scripts/test-web-reader.cjs
 node --experimental-strip-types ../scripts/test-site-mcp.mjs
 node --experimental-strip-types ../scripts/test-site-uploads-workers.mjs
 pnpm run build
@@ -52,6 +53,14 @@ pnpm run build
 Before local type checking/building, create the local binding configuration as described in `../docs/WEB_ALPHA.md`. An external host must implement a verified identity boundary rather than trusting caller-supplied authentication headers. Do not disable authorization to make deployment work.
 
 The focused tests use JSDOM, mocks, Node/WASM and real local Workers D1/R2 bindings as identified in each script. They are **not** proof of iPhone/iPad browser behavior or 50 GB capacity. `scripts/test-browser-imports.mjs` is a separate browser harness; its execution has not been verified in this workspace.
+
+Reader/Upload repair tracking and verification are documented in
+[`../docs/WEB_READER_UPLOAD_REPAIR.md`](../docs/WEB_READER_UPLOAD_REPAIR.md).
+`../scripts/test-web-reader-browser.mjs` mounts the actual reader and styles in
+a synthetic local Chromium fixture with mocked service responses. It exercises
+mobile layout and user interactions without accessing a deployed Site or user
+documents. Use a provisioned Playwright module and Chromium as described in
+that script; a local browser pass does not certify iOS or private Site behavior.
 
 ## Source completeness and deployment
 
