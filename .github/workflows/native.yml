@@ -121,12 +121,16 @@ jobs:
       - name: Evaluate the docling backend (full layout + OCR)
         if: ${{ !cancelled() }}
         run: uv run python native/measure_eval.py --backend docling --out eval-native/docling
-      - name: Require complete successful evaluation coverage
+      - name: Validate coverage and bounded outcomes for every backend
         if: ${{ !cancelled() }}
         run: |
+          status=0
           for b in lopdf pdfium docling-text docling; do
-            uv run python native/validate_eval.py --manifest corpus/manifest.json --split dev --backend "$b" --report "eval-native/$b/report.json"
+            if ! uv run python native/validate_eval.py --manifest corpus/manifest.json --split dev --backend "$b" --report "eval-native/$b/report.json" --provenance "eval-native/$b/provenance.json" --dumps "eval-native/$b/dumps" --reviewed-partials native/reviewed-partials.json; then
+              status=1
+            fi
           done
+          exit "$status"
       - name: Publish the reports in the job summary
         if: ${{ !cancelled() }}
         run: |

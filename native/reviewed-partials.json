@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "host": "linux aarch64",
+  "split": "dev",
+  "evidence": {
+    "head": "627325b08bfac9318cfe3fb8025ce943e7c323ed",
+    "tested_merge": "7b3f6667291d6695a3c0e590138208eb0febe960",
+    "run": 37112052229,
+    "artifact": 11270691126,
+    "artifact_sha256": "d58d49364ffa4f674092c2dccb07408a3056229adf358a27c5c7f3467a8bd533",
+    "note": "Exact bounded diagnostics; Partial remains Partial. Not full recovery or quality acceptance. Non-timing results equal the PR167 baseline."
+  },
+  "provenance_pins": {
+    "corpus_manifest_sha256": "9fe37dd0ced26b70ec94872ba7f5b296a850902874e416cd9c574fc443772d74",
+    "native_manifest_sha256": "194f06dd0a127a2faea3e2c815c9278e61d8cada1b7477f3bafddddee27fb156",
+    "cargo_lock_sha256": "ae0367f2f9391ec98fd0a125bc516e0179419b311e4f1c7693ad3052b3b7f8c0",
+    "metric_source_sha256": "4e620221af68dfa203b3d9f875ed0fdde594ef47c8125993544bc6ed1efe6cb6",
+    "truth_source_sha256": "8e968bbf3eb6b22012d45a3c92a2475400d9db463560a0ca576a367a3f3e0c5a"
+  },
+  "papers": {
+    "lopdf": {
+      "arxiv:2501.17300": {
+        "inputs": {
+          "pdf_sha256": "072315dcea8a4fa1137abb900df28b7d0c230c04e68a6fdfc0b0b276e329f89b",
+          "source_sha256": "06cf2ce056c34e5e5be0011fe152d6892b00e83923a8130e35d720b0052e795b"
+        },
+        "pages": 32,
+        "warnings": [
+          "page 15: resource_limit: vector regions coalesced (limit=2000)"
+        ],
+        "warning_count": 86,
+        "resource_page_warnings": [
+          [
+            15,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ]
+        ],
+        "page_warnings_sha256": "ce195b5e4838d8a1d97ccc338b7dce5c08843bdd6ac84554ad55c7c5153548bb",
+        "reference_baseline": {
+          "truth_refs": 54,
+          "matched_refs": 54,
+          "spurious_refs": 0
+        }
+      },
+      "arxiv:2503.04404": {
+        "inputs": {
+          "pdf_sha256": "7d2cc1894016503bf1ec14f73dceda290cfdfb7dc5ade345dcdd4a4d9b440b22",
+          "source_sha256": "9241938ce88cc5855d7f208e4b927e5f62c96582d9fcfac6827eb080dc1da55a"
+        },
+        "pages": 24,
+        "warnings": [
+          "page 11: resource_limit: vector regions coalesced (limit=2000)",
+          "page 12: resource_limit: vector regions coalesced (limit=2000)"
+        ],
+        "warning_count": 21,
+        "resource_page_warnings": [
+          [
+            11,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ],
+          [
+            12,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ]
+        ],
+        "page_warnings_sha256": "7f157657853144496ae0828a2703a82465d7547e22d577c9cb08248bba94c917",
+        "reference_baseline": {
+          "truth_refs": 56,
+          "matched_refs": 56,
+          "spurious_refs": 0
+        }
+      },
+      "arxiv:2506.23487": {
+        "inputs": {
+          "pdf_sha256": "3b82421639a46210f245e91d203e3615d38ac68da4e7856ed24c75327c8fe971",
+          "source_sha256": "e4272bfad77ffa085429a6b3580748fe44a6b686942e51550cbd75ea9aa604fd"
+        },
+        "pages": 57,
+        "warnings": [
+          "page 17: resource_limit: vector regions coalesced (limit=2000)"
+        ],
+        "warning_count": 214,
+        "resource_page_warnings": [
+          [
+            17,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ]
+        ],
+        "page_warnings_sha256": "53592ec7a3f654aa0b895fdf5ff023704fa505474c75228f9e801fcf65b489d8",
+        "reference_baseline": {
+          "truth_refs": 28,
+          "matched_refs": 28,
+          "spurious_refs": 0
+        }
+      },
+      "arxiv:2601.09974": {
+        "inputs": {
+          "pdf_sha256": "e025680ca33e5ef9f7d45c9b02ee3b781dfa84e7d5ca13b23ba2bf75836650f7",
+          "source_sha256": "6be8581a785d70c389cb42d03732716fae3bbf5118c2fc99475d2e3198c3ff74"
+        },
+        "pages": 30,
+        "warnings": [
+          "page 17: resource_limit: vector regions coalesced (limit=2000)",
+          "page 18: resource_limit: vector regions coalesced (limit=2000)"
+        ],
+        "warning_count": 108,
+        "resource_page_warnings": [
+          [
+            17,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ],
+          [
+            18,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ]
+        ],
+        "page_warnings_sha256": "e0855780ebcbe869f6a021f315a8d447d9e14d959f1e05655e3943b6deefc96e",
+        "reference_baseline": {
+          "truth_refs": 35,
+          "matched_refs": 35,
+          "spurious_refs": 0
+        }
+      },
+      "arxiv:2603.05575": {
+        "inputs": {
+          "pdf_sha256": "31b7f00ed2c8fb5962dfc99ef8937d6e5e248d19b80717b437da52f7874e62f5",
+          "source_sha256": "ebd63dedb2736f361f2c0f63e34a1eb53b6d758a104c76902c15eff5f966c3aa"
+        },
+        "pages": 123,
+        "warnings": [
+          "page 25: resource_limit: vector regions coalesced (limit=2000)"
+        ],
+        "warning_count": 291,
+        "resource_page_warnings": [
+          [
+            25,
+            "resource_limit: vector regions coalesced (limit=2000)"
+          ]
+        ],
+        "page_warnings_sha256": "0088baa2d331abd6c7a2be48f2ae7c7238f84c475fa40518d0a0dfdc521d3e66",
+        "reference_baseline": {
+          "truth_refs": 34,
+          "matched_refs": 34,
+          "spurious_refs": 0
+        }
+      }
+    },
+    "pdfium": {
+      "arxiv:2511.15503": {
+        "inputs": {
+          "pdf_sha256": "5682c7c0c805b3145b15eb5b55a1db81d491211b7fc0155cc919462c657ad349",
+          "source_sha256": "e76f7151e334a032670b47c4424d6997c5deb35e96cda9e73f709785fb2bb320"
+        },
+        "pages": 19,
+        "warnings": [
+          "page 12: resource_limit: superscript candidate window truncated (limit=256)"
+        ],
+        "warning_count": 47,
+        "resource_page_warnings": [
+          [
+            12,
+            "resource_limit: superscript candidate window truncated (limit=256)"
+          ]
+        ],
+        "page_warnings_sha256": "efe9a14113b4a489961c602ec31d2221a9621be5aa7153b6085ab0ac14e41d8b",
+        "reference_baseline": {
+          "truth_refs": 139,
+          "matched_refs": 137,
+          "spurious_refs": 2
+        }
+      }
+    },
+    "docling-text": {},
+    "docling": {}
+  }
+}
