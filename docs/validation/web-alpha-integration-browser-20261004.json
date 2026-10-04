@@ -1,0 +1,43 @@
+{
+  "checks": [
+    "empty desktop intake has no internal horizontal scrollbar at1280px or1440px",
+    "visible Upload opens a real multiple-file picker",
+    "actual upload/extraction/save stages and readable output before save finishes",
+    "Markdown clipboard/download, named reading modes, and collapsed diagnostics",
+    "background import preserves reader DOM, selection, URL, and scroll before/during/after",
+    "completed background import has an explicit Open result action and reader focus",
+    "browser back/forward restores document, reading mode, and prior reader scroll",
+    "repeated same-file picks and supported folder picker append to one queue",
+    "active cancellation, upload retry, and retained-result save retry",
+    "real Markdown headings/lists/links render safely while Plain text preserves source",
+    "mobile saved reader holds reading position as empty intake queue appears and grows",
+    "processing spinner respects reduced motion",
+    "390px and 768px layouts at 100% and 200% text have no horizontal page overflow",
+    "exact some text is readable, copyable, and downloadable before original upload completes",
+    "original upload failure preserves preview and File across actual IndexedDB reload and retry",
+    "text result-save retry reuses the confirmed original",
+    "saved-document reload keeps loading state without a false empty-reader prompt",
+    "cancelling real text preparation before upload performs no import network calls or Worker creation",
+    "local queue removal preserves saved library documents and never sends DELETE",
+    "Keep cancels local-discard, cache-clear, and document-delete dialogs without writes",
+    "cache clear failure is retryable and confirmed clear preserves unfinished files/results and saved library",
+    "503 deletion blocks stale reader/list and Back; reload preserves unrelated library and explicit cleanup retry through cache clear",
+    "no browser runtime errors"
+  ],
+  "testedSources": {
+    "web/app/workspace.tsx": "192077819d5208b68fc482b38d52b10f35dc5812097b7c0345eb3916da16999b",
+    "web/app/globals.css": "2fcfc562a5fcc5b1b1ba520f737b160aab4f85ab52bfd8e94d823751d0f6549d",
+    "web/lib/import-queue.ts": "693ec6aa2d2ff75c720b4c0fcc2962a0ba0e1a506702955df6c6757172157306",
+    "web/components/import-controls.tsx": "2a12d3a31d591385fa836b9ab6d2681e3709364978a06203a7bda1fd38848cf9",
+    "web/lib/document-client.ts": "5e8594eaa3e23a4775261bf35629323781d5a45efc1db4981b553a7f144c8fc6",
+    "web/lib/text-import.ts": "52dff7f83bc3f7f3419c0093c21caa22a5248f3674a40e82489d5c2393e38ac3",
+    "web/lib/workspace-storage.ts": "9e02544f2a4e98cd3f63bf9edb77477253422bda7fb37acd4d10dc21c567c965"
+  },
+  "browserVersion": "151.0.7922.173",
+  "liveSite": {
+    "error": "Error: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://pdftextract-alpha.junkmail-edu228.chatgpt.site/\nCall log:\n\u001b[2m  - navigating to \"https://pdftextract-alpha.junkmail-edu228.chatgpt.site/\", waiting until \"domcontentloaded\"\u001b[22m\n",
+    "scope": "Read-only unauthenticated navigation failed; no authentication bypass attempted"
+  },
+  "browserErrors": [],
+  "evidence": "Actual Chromium/React/CSS, text preparation, import lifecycle and IndexedDB; synthetic extraction and remote API services; not production Site functional validation"
+}

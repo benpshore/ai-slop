@@ -15,6 +15,13 @@
       "when": 1791073143715,
       "tag": "0001_tense_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791078022825,
+      "tag": "0002_document_deletions",
+      "breakpoints": true
     }
   ]
 }

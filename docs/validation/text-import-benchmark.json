@@ -1,0 +1,4603 @@
+{
+  "recordedAt": "2026-10-04T01:47:03.461Z",
+  "baseline": "baafb472873750e7e84d32c3c8e6fa7a680e37db",
+  "hashes": {
+    "baseline": "d9fa2a7133125191a6e605b08aad024fb40e77d2d9807048be28feeb209df044",
+    "candidate": "2443b65405c973d1f15a64e7e2c48178c373c75ec9b287826e45aa5494871699",
+    "helper": "52dff7f83bc3f7f3419c0093c21caa22a5248f3674a40e82489d5c2393e38ac3"
+  },
+  "runtime": {
+    "node": "v24.19.0",
+    "chromium": "151.0.7922.173",
+    "platform": "linux"
+  },
+  "bundles": {
+    "baseline": {
+      "entryBytes": 378737,
+      "totalBytes": 405147
+    },
+    "candidate": {
+      "entryBytes": 381850,
+      "totalBytes": 408260
+    }
+  },
+  "definitions": {
+    "cold": "New Chromium context; empty HTTP cache and IndexedDB. Timed import starts at form submit after hydration. Module download/evaluation is recorded separately.",
+    "warm": "Preloaded module in same browser context with local browser caches; timed import starts at form submit after navigation/hydration.",
+    "readableMs": "Form submit capture to MutationObserver finding exact text in actual React reader. Not a compositor paint timestamp.",
+    "renderObservationMs": "Form submit to second requestAnimationFrame after DOM text observed. Rendering opportunity, not device display/compositor proof.",
+    "network": "fetch dispatch to response headers plus Resource Timing response completion. Includes injected fixture/server work; do not sum overlapping server/client durations.",
+    "hashing": "Real SHA-256 of synthetic original bytes in local Node fixture server, inside original commit; not production Workers DigestStream cost.",
+    "persistence": "In-memory local fixture record/result update and acknowledgement. No R2/D1 or durable network storage measured.",
+    "delay": "3333 ms intentionally added to each of three original storage responses; demonstrates dependency, does not reproduce/attribute the reported hosted ten seconds.",
+    "pdfOcr": "Worker construction and WebAssembly API counters are observed, not assigned zero-duration guesses."
+  },
+  "limitations": [
+    "Private Site authentication unavailable in this task; no live Site timing or deployment.",
+    "Desktop headless Chromium only; no iPhone/iPad Safari measurements.",
+    "Baseline and candidate bundle actual workspace/upload-client code; authentication/server storage endpoints use synthetic local HTTP fixture.",
+    "Node cold means fresh module identity within one process; does not include OS process startup.",
+    "Suggested integration patch is applied only in temporary benchmark source; UX owner must integrate and revalidate."
+  ],
+  "nodeSamples": [
+    {
+      "moduleMs": 1.7868989999999485,
+      "cold": {
+        "detectMs": 0.8851650000000291,
+        "decodeMs": 3.5682789999999613,
+        "projectionMs": 0.1814399999999523,
+        "totalMs": 4.634883999999943
+      },
+      "warm": {
+        "detectMs": 0.14030400000001464,
+        "decodeMs": 0.14279499999997824,
+        "projectionMs": 0.04167600000005223,
+        "totalMs": 0.3247750000000451
+      }
+    },
+    {
+      "moduleMs": 1.1177830000000313,
+      "cold": {
+        "detectMs": 0.17261500000006436,
+        "decodeMs": 0.12346900000000005,
+        "projectionMs": 0.039435999999909654,
+        "totalMs": 0.33551999999997406
+      },
+      "warm": {
+        "detectMs": 0.08343800000000101,
+        "decodeMs": 0.12375499999996009,
+        "projectionMs": 0.023922000000084154,
+        "totalMs": 0.23111500000004526
+      }
+    },
+    {
+      "moduleMs": 0.8007969999999887,
+      "cold": {
+        "detectMs": 0.1550329999998894,
+        "decodeMs": 2.353554000000031,
+        "projectionMs": 0.08357300000000123,
+        "totalMs": 2.5921599999999216
+      },
+      "warm": {
+        "detectMs": 0.052247000000079424,
+        "decodeMs": 0.1646179999999049,
+        "projectionMs": 0.018369000000006963,
+        "totalMs": 0.23523399999999128
+      }
+    },
+    {
+      "moduleMs": 0.6483560000000352,
+      "cold": {
+        "detectMs": 0.14726199999995515,
+        "decodeMs": 0.14275099999997565,
+        "projectionMs": 0.043029000000046835,
+        "totalMs": 0.33304199999997763
+      },
+      "warm": {
+        "detectMs": 0.03523399999994581,
+        "decodeMs": 0.2053000000000793,
+        "projectionMs": 0.1108279999999695,
+        "totalMs": 0.3513619999999946
+      }
+    },
+    {
+      "moduleMs": 0.5760310000000572,
+      "cold": {
+        "detectMs": 0.22162700000001223,
+        "decodeMs": 0.18933900000001813,
+        "projectionMs": 0.07040300000005573,
+        "totalMs": 0.4813690000000861
+      },
+      "warm": {
+        "detectMs": 0.07552499999997053,
+        "decodeMs": 0.30157499999995707,
+        "projectionMs": 0.017164000000093438,
+        "totalMs": 0.39426400000002104
+      }
+    },
+    {
+      "moduleMs": 0.5543529999999919,
+      "cold": {
+        "detectMs": 0.140568999999914,
+        "decodeMs": 0.15503799999999046,
+        "projectionMs": 0.041127000000074077,
+        "totalMs": 0.33673399999997855
+      },
+      "warm": {
+        "detectMs": 0.029550999999969463,
+        "decodeMs": 0.08473300000002837,
+        "projectionMs": 0.010909999999967113,
+        "totalMs": 0.12519399999996494
+      }
+    },
+    {
+      "moduleMs": 0.9985570000000052,
+      "cold": {
+        "detectMs": 0.1732919999999467,
+        "decodeMs": 0.12910699999997632,
+        "projectionMs": 0.048814999999990505,
+        "totalMs": 0.35121399999991354
+      },
+      "warm": {
+        "detectMs": 0.0635539999999537,
+        "decodeMs": 0.08535100000005968,
+        "projectionMs": 0.01192799999989802,
+        "totalMs": 0.1608329999999114
+      }
+    },
+    {
+      "moduleMs": 0.8900170000000571,
+      "cold": {
+        "detectMs": 0.144753000000037,
+        "decodeMs": 0.0705679999999802,
+        "projectionMs": 0.03842900000006466,
+        "totalMs": 0.25375000000008185
+      },
+      "warm": {
+        "detectMs": 0.028492000000028384,
+        "decodeMs": 0.03641899999990983,
+        "projectionMs": 0.009553999999980078,
+        "totalMs": 0.07446499999991829
+      }
+    },
+    {
+      "moduleMs": 0.7757809999999381,
+      "cold": {
+        "detectMs": 0.3620339999999942,
+        "decodeMs": 0.08805999999992764,
+        "projectionMs": 0.0477050000000645,
+        "totalMs": 0.49779899999998634
+      },
+      "warm": {
+        "detectMs": 0.03100300000005518,
+        "decodeMs": 0.04300999999998112,
+        "projectionMs": 0.009937000000036278,
+        "totalMs": 0.08395000000007258
+      }
+    },
+    {
+      "moduleMs": 0.6717239999999265,
+      "cold": {
+        "detectMs": 0.1525850000000446,
+        "decodeMs": 0.0739730000000236,
+        "projectionMs": 0.038855000000012296,
+        "totalMs": 0.2654130000000805
+      },
+      "warm": {
+        "detectMs": 0.026969000000008236,
+        "decodeMs": 0.039762999999993554,
+        "projectionMs": 0.00956199999995988,
+        "totalMs": 0.07629399999996167
+      }
+    }
+  ],
+  "browserSamples": [
+    {
+      "variant": "baseline",
+      "warm": false,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 454.4000000000233,
+          "end": 464.20000000006985
+        },
+        {
+          "name": "decodeSource",
+          "start": 490.70000000006985,
+          "end": 500.70000000006985
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 464.5,
+          "end": 470.70000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 471.70000000006985,
+          "end": 480.20000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 482.30000000004657,
+          "end": 486.70000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 501.5,
+          "end": 529.0999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 531.0999999999767,
+          "end": 535.5999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 536.4000000000233,
+          "end": 541.4000000000233,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 541.7000000000698,
+          "end": 546.5999999999767,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 421.5999999999767,
+      "readableMs": 107,
+      "renderObservationMs": 135.30000000004657,
+      "moduleMs": 194,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 43.29999999993015,
+          "transferSize": 379037,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 8.199999999953434,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 464.9000000000233,
+          "duration": 5.5,
+          "requestStart": 466.9000000000233,
+          "responseStart": 469.70000000006985,
+          "responseEnd": 470.4000000000233,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 472,
+          "duration": 7.800000000046566,
+          "requestStart": 474.80000000004657,
+          "responseStart": 479.20000000006985,
+          "responseEnd": 479.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 482.5999999999767,
+          "duration": 3.900000000023283,
+          "requestStart": 483.0999999999767,
+          "responseStart": 485.20000000006985,
+          "responseEnd": 486.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.0705920000000333
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.05320399999982328
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 502.20000000006985,
+          "duration": 3.199999999953434,
+          "requestStart": 503.20000000006985,
+          "responseStart": 504.5999999999767,
+          "responseEnd": 505.4000000000233,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 531.2000000000698,
+          "duration": 4.299999999930151,
+          "requestStart": 533.5999999999767,
+          "responseStart": 534.4000000000233,
+          "responseEnd": 535.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 536.8000000000466,
+          "duration": 4.199999999953434,
+          "requestStart": 538,
+          "responseStart": 539.7000000000698,
+          "responseEnd": 541,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.04725300000018251
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 2590.145441,
+          "bodyReadMs": 1.251013999999941,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 2591.433005
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 2743.931406,
+          "bodyReadMs": 0.55289300000004,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 2744.533752
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 2753.869277,
+          "bodyReadMs": 0.1505539999998291,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 2754.225805
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 2758.802233,
+          "bodyReadMs": 0.7879830000001675,
+          "hashMs": 0.0705920000000333,
+          "fixturePersistenceMs": 0.05320399999982328,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 2759.74165
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 2778.743035,
+          "bodyReadMs": 0.32256599999982427,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 2779.162466
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 2809.173801,
+          "bodyReadMs": 0.16745700000001307,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 2809.429226
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 2813.533149,
+          "bodyReadMs": 1.019828999999845,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.04725300000018251,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 2814.624941
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 2820.68441,
+          "bodyReadMs": 0.09856700000000274,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 2820.79325
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "warm": false,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 356.5,
+          "end": 367.4000000000233
+        },
+        {
+          "name": "decodeSource",
+          "start": 395.70000000006985,
+          "end": 402
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 370.30000000004657,
+          "end": 374.5999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 379.80000000004657,
+          "end": 384.0999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 386.0999999999767,
+          "end": 392,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 402.80000000004657,
+          "end": 497.80000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 504.70000000006985,
+          "end": 513,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 515.0999999999767,
+          "end": 521,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 523.5,
+          "end": 526.5,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 335.20000000006985,
+      "readableMs": 159,
+      "renderObservationMs": 166.09999999997672,
+      "moduleMs": 130,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 28.800000000046566,
+          "transferSize": 379037,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 15.400000000023283,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 370.9000000000233,
+          "duration": 2,
+          "requestStart": 371.70000000006985,
+          "responseStart": 372.5,
+          "responseEnd": 372.9000000000233,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 380,
+          "duration": 4,
+          "requestStart": 381.5,
+          "responseStart": 382.0999999999767,
+          "responseEnd": 384,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 386.30000000004657,
+          "duration": 4.900000000023283,
+          "requestStart": 386.9000000000233,
+          "responseStart": 388.4000000000233,
+          "responseEnd": 391.20000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.03417200000012599
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.03276599999981045
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 404.30000000004657,
+          "duration": 1.599999999976717,
+          "requestStart": 404.9000000000233,
+          "responseStart": 405.4000000000233,
+          "responseEnd": 405.9000000000233,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 505,
+          "duration": 9.300000000046566,
+          "requestStart": 510.0999999999767,
+          "responseStart": 510.9000000000233,
+          "responseEnd": 514.3000000000466,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 516,
+          "duration": 2.099999999976717,
+          "requestStart": 517.0999999999767,
+          "responseStart": 517.5999999999767,
+          "responseEnd": 518.0999999999767,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.023262000000158878
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 3351.786987,
+          "bodyReadMs": 0.22629400000005262,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 3352.033318
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 3529.097986,
+          "bodyReadMs": 0.21290499999986423,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 3529.343057
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 3538.915589,
+          "bodyReadMs": 0.10440299999982017,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 3539.063842
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 3544.296513,
+          "bodyReadMs": 0.13261999999986074,
+          "hashMs": 0.03417200000012599,
+          "fixturePersistenceMs": 0.03276599999981045,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 3544.50898
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 3562.279043,
+          "bodyReadMs": 0.12162299999999959,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 3562.422331
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 3667.743853,
+          "bodyReadMs": 0.14847800000006828,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 3667.935306
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 3674.449038,
+          "bodyReadMs": 0.1358140000002095,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.023262000000158878,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 3674.618789
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 3682.063447,
+          "bodyReadMs": 0.08123500000010608,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 3682.149939
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "warm": false,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 295.5,
+          "end": 301.0999999999767
+        },
+        {
+          "name": "decodeSource",
+          "start": 317.5999999999767,
+          "end": 324.0999999999767
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 301.29999999993015,
+          "end": 304.89999999990687,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 305.89999999990687,
+          "end": 309.5,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 310.19999999995343,
+          "end": 314.39999999990687,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 324.89999999990687,
+          "end": 349.5999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 353.5,
+          "end": 357.0999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 357.89999999990687,
+          "end": 361.19999999995343,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 362.0999999999767,
+          "end": 366.69999999995343,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 283.0999999999767,
+      "readableMs": 65.5,
+      "renderObservationMs": 69.59999999997672,
+      "moduleMs": 134.80000000004657,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 18.900000000023283,
+          "transferSize": 379037,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 6.699999999953434,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 301.79999999993015,
+          "duration": 2.800000000046566,
+          "requestStart": 302.89999999990687,
+          "responseStart": 303.5999999999767,
+          "responseEnd": 304.5999999999767,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 306.19999999995343,
+          "duration": 3,
+          "requestStart": 307.89999999990687,
+          "responseStart": 308.5999999999767,
+          "responseEnd": 309.19999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 310.39999999990687,
+          "duration": 2.800000000046566,
+          "requestStart": 311.0999999999767,
+          "responseStart": 312.29999999993015,
+          "responseEnd": 313.19999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.037329000000681845
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.02554399999917223
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 325.29999999993015,
+          "duration": 3.5,
+          "requestStart": 325.89999999990687,
+          "responseStart": 328.39999999990687,
+          "responseEnd": 328.79999999993015,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 353.79999999993015,
+          "duration": 3.200000000069849,
+          "requestStart": 355,
+          "responseStart": 356.19999999995343,
+          "responseEnd": 357,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 358.0999999999767,
+          "duration": 2.599999999976717,
+          "requestStart": 358.89999999990687,
+          "responseStart": 360.0999999999767,
+          "responseEnd": 360.69999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.017195999999785272
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 4204.808829,
+          "bodyReadMs": 0.14990099999977247,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 4204.97901
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 4314.58879,
+          "bodyReadMs": 0.1672180000005028,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 4314.776155
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 4319.555199,
+          "bodyReadMs": 0.23141299999952025,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 4319.829773
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 4323.301116,
+          "bodyReadMs": 0.1333230000000185,
+          "hashMs": 0.037329000000681845,
+          "fixturePersistenceMs": 0.02554399999917223,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 4323.517686
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 4339.327216,
+          "bodyReadMs": 0.28407100000003993,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 4339.630889
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 4366.692214,
+          "bodyReadMs": 0.3785010000001421,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 4367.308239
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 4371.152542,
+          "bodyReadMs": 0.11883000000034372,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.017195999999785272,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 4371.300619
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 4375.538911,
+          "bodyReadMs": 0.06719699999939621,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 4375.610795
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "warm": true,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 130.90000000002328,
+          "end": 137
+        },
+        {
+          "name": "decodeSource",
+          "start": 152.20000000006985,
+          "end": 156.80000000004657
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 137.20000000006985,
+          "end": 140,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 140.90000000002328,
+          "end": 144.20000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 144.80000000004657,
+          "end": 148.80000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 158.90000000002328,
+          "end": 179.90000000002328,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 183.70000000006985,
+          "end": 188.5,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 189.20000000006985,
+          "end": 191.70000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 192.70000000006985,
+          "end": 196.80000000004657,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 120.80000000004657,
+      "readableMs": 58.699999999953434,
+      "renderObservationMs": 62.199999999953434,
+      "moduleMs": 10.300000000046566,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 137.90000000002328,
+          "duration": 1.900000000023283,
+          "requestStart": 138.70000000006985,
+          "responseStart": 139.20000000006985,
+          "responseEnd": 139.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 141.10000000009313,
+          "duration": 2.599999999976717,
+          "requestStart": 142.70000000006985,
+          "responseStart": 143.30000000004657,
+          "responseEnd": 143.70000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 145.10000000009313,
+          "duration": 1.2999999999301508,
+          "requestStart": 145.60000000009313,
+          "responseStart": 145.90000000002328,
+          "responseEnd": 146.40000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.03342699999939214
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.014798000000155298
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 159.60000000009313,
+          "duration": 1.8999999999068677,
+          "requestStart": 160.60000000009313,
+          "responseStart": 161,
+          "responseEnd": 161.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 184.10000000009313,
+          "duration": 3.799999999930151,
+          "requestStart": 186.5,
+          "responseStart": 187.40000000002328,
+          "responseEnd": 187.90000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 189.5,
+          "duration": 1.3000000000465661,
+          "requestStart": 190,
+          "responseStart": 190.40000000002328,
+          "responseEnd": 190.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.015235999999276828
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 4862.668158,
+          "bodyReadMs": 0.09122600000046077,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 4862.766804
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 4967.780441,
+          "bodyReadMs": 0.08341299999938201,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 4967.869421
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 5058.704571,
+          "bodyReadMs": 0.09574400000019523,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 5058.816907
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 5062.802598,
+          "bodyReadMs": 0.12888199999997596,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 5062.956317
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 5065.525012,
+          "bodyReadMs": 0.08813000000009197,
+          "hashMs": 0.03342699999939214,
+          "fixturePersistenceMs": 0.014798000000155298,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 5065.671447
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 5080.581908,
+          "bodyReadMs": 0.08635899999990215,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 5080.686632
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 5106.87543,
+          "bodyReadMs": 0.1557890000003681,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 5107.052273
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 5109.960186,
+          "bodyReadMs": 0.0841019999998025,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.015235999999276828,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 5110.069235
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 5114.488769,
+          "bodyReadMs": 0.05449200000020937,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 5114.547753
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "warm": true,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 140.40000000002328,
+          "end": 145
+        },
+        {
+          "name": "decodeSource",
+          "start": 162.29999999993015,
+          "end": 167.90000000002328
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 145.19999999995343,
+          "end": 150.40000000002328,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 151.5,
+          "end": 156.09999999997672,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 156.69999999995343,
+          "end": 160.5,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 169.09999999997672,
+          "end": 203.90000000002328,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 209.59999999997672,
+          "end": 213.59999999997672,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 214.40000000002328,
+          "end": 218.40000000002328,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 220.29999999993015,
+          "end": 224.29999999993015,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 131.79999999993015,
+      "readableMs": 71.20000000006985,
+      "renderObservationMs": 77.30000000004657,
+      "moduleMs": 10.300000000046566,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 145.59999999997672,
+          "duration": 4.400000000023283,
+          "requestStart": 147.90000000002328,
+          "responseStart": 149.59999999997672,
+          "responseEnd": 150,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 151.59999999997672,
+          "duration": 4,
+          "requestStart": 153.59999999997672,
+          "responseStart": 154.79999999993015,
+          "responseEnd": 155.59999999997672,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 156.90000000002328,
+          "duration": 2.3999999999068677,
+          "requestStart": 157.40000000002328,
+          "responseStart": 158.59999999997672,
+          "responseEnd": 159.29999999993015,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.03385499999967578
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.010818000000654138
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 169.5,
+          "duration": 1.7999999999301508,
+          "requestStart": 170,
+          "responseStart": 170.69999999995343,
+          "responseEnd": 171.29999999993015,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 209.90000000002328,
+          "duration": 2.5,
+          "requestStart": 211.19999999995343,
+          "responseStart": 211.69999999995343,
+          "responseEnd": 212.40000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 214.59999999997672,
+          "duration": 1.599999999976717,
+          "requestStart": 215.19999999995343,
+          "responseStart": 215.59999999997672,
+          "responseEnd": 216.19999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.017069000000446977
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 5514.550904,
+          "bodyReadMs": 0.1129030000001876,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 5514.672352
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 5572.317908,
+          "bodyReadMs": 0.10291099999994913,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 5572.436849
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 5675.900846,
+          "bodyReadMs": 0.11604399999941961,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 5676.042318
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 5681.170728,
+          "bodyReadMs": 0.38054299999930663,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 5681.583923
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 5685.32615,
+          "bodyReadMs": 0.07338100000015402,
+          "hashMs": 0.03385499999967578,
+          "fixturePersistenceMs": 0.010818000000654138,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 5685.452393
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 5697.153182,
+          "bodyReadMs": 0.17401500000050873,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 5697.350556
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 5738.434527,
+          "bodyReadMs": 0.13828100000046106,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 5738.597859
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 5742.352094,
+          "bodyReadMs": 0.11675299999933486,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.017069000000446977,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 5742.497232
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 5748.291186,
+          "bodyReadMs": 0.08773400000063702,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 5748.384491
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "warm": true,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 138.90000000002328,
+          "end": 146.5
+        },
+        {
+          "name": "decodeSource",
+          "start": 165.30000000004657,
+          "end": 171.10000000009313
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 146.70000000006985,
+          "end": 151,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 152.10000000009313,
+          "end": 159.30000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 160,
+          "end": 163.10000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 171.90000000002328,
+          "end": 192.10000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 197.5,
+          "end": 201.60000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 202.10000000009313,
+          "end": 205.20000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 205.90000000002328,
+          "end": 212.10000000009313,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 121.10000000009313,
+      "readableMs": 70.69999999995343,
+      "renderObservationMs": 76,
+      "moduleMs": 12.900000000023283,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 147.10000000009313,
+          "duration": 3.099999999976717,
+          "requestStart": 147.80000000004657,
+          "responseStart": 149.40000000002328,
+          "responseEnd": 150.20000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 152.30000000004657,
+          "duration": 6.5,
+          "requestStart": 157,
+          "responseStart": 157.90000000002328,
+          "responseEnd": 158.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 160.20000000006985,
+          "duration": 1.5,
+          "requestStart": 160.70000000006985,
+          "responseStart": 161.20000000006985,
+          "responseEnd": 161.70000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.21161300000039773
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.01520399999935762
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 172.5,
+          "duration": 1.400000000023283,
+          "requestStart": 173,
+          "responseStart": 173.40000000002328,
+          "responseEnd": 173.90000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 197.60000000009313,
+          "duration": 3.299999999930151,
+          "requestStart": 199.80000000004657,
+          "responseStart": 200.30000000004657,
+          "responseEnd": 200.90000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 202.5,
+          "duration": 2.300000000046566,
+          "requestStart": 202.90000000002328,
+          "responseStart": 204.20000000006985,
+          "responseEnd": 204.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.014639999999417341
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 6181.293404,
+          "bodyReadMs": 0.18556100000023434,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 6181.485952
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 6239.953211,
+          "bodyReadMs": 0.13741899999968155,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 6240.096109
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 6337.576091,
+          "bodyReadMs": 0.11057499999969878,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 6337.702968
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 6346.152194,
+          "bodyReadMs": 0.12651000000005297,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 6346.301891
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 6349.649082,
+          "bodyReadMs": 0.08396300000003976,
+          "hashMs": 0.21161300000039773,
+          "fixturePersistenceMs": 0.01520399999935762,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 6349.969073
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 6361.970486,
+          "bodyReadMs": 0.09638400000039837,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 6362.084208
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 6388.722574,
+          "bodyReadMs": 0.23535900000024412,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 6388.980035
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 6391.795327,
+          "bodyReadMs": 0.11244600000009086,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.014639999999417341,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 6391.932202
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 6395.994201,
+          "bodyReadMs": 0.06854400000065652,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 6396.067768
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "warm": false,
+      "delayPerOriginalRequestMs": 3333,
+      "parses": [
+        {
+          "name": "detectFileKind",
+          "start": 313.0999999999767,
+          "end": 317.4000000000233
+        },
+        {
+          "name": "decodeSource",
+          "start": 10336.099999999977,
+          "end": 10342.70000000007
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 317.70000000006985,
+          "end": 3655,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 3656.3000000000466,
+          "end": 6995,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 6997.5,
+          "end": 10333.800000000047,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 10344.300000000047,
+          "end": 10363.800000000047,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 10367,
+          "end": 10370.800000000047,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 10371.800000000047,
+          "end": 10375,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 10376,
+          "end": 10379.300000000047,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 302.9000000000233,
+      "readableMs": 10060.400000000023,
+      "renderObservationMs": 10070.900000000023,
+      "moduleMs": 132.09999999997672,
+      "moduleResources": [
+        {
+          "path": "/baseline/stdin.js",
+          "duration": 23,
+          "transferSize": 379037,
+          "encodedBodySize": 378737
+        },
+        {
+          "path": "/baseline/chunk-ORREMQM7.js",
+          "duration": 5.600000000093132,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 318.20000000006985,
+          "duration": 3336.29999999993,
+          "requestStart": 319.5999999999767,
+          "responseStart": 3653.70000000007,
+          "responseEnd": 3654.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 3333
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 3657,
+          "duration": 3336.5,
+          "requestStart": 3658.8000000000466,
+          "responseStart": 6992.800000000047,
+          "responseEnd": 6993.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 3333
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 6997.900000000023,
+          "duration": 3335.0999999999767,
+          "requestStart": 6998.599999999977,
+          "responseStart": 10332.300000000047,
+          "responseEnd": 10333,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.05975700000090001
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.01477100000010978
+            },
+            {
+              "name": "injected-delay",
+              "duration": 3333
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 10345,
+          "duration": 2.099999999976717,
+          "requestStart": 10345.800000000047,
+          "responseStart": 10346.300000000047,
+          "responseEnd": 10347.099999999977,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 10367.300000000047,
+          "duration": 3.900000000023283,
+          "requestStart": 10369,
+          "responseStart": 10370.099999999977,
+          "responseEnd": 10371.20000000007,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 10372,
+          "duration": 3.099999999976717,
+          "requestStart": 10372.800000000047,
+          "responseStart": 10373.70000000007,
+          "responseEnd": 10375.099999999977,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.029206999999587424
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 6926.820009,
+          "bodyReadMs": 0.08511099999941507,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 6926.912362
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 7058.518951,
+          "bodyReadMs": 0.19233299999996234,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 3333,
+          "target": "original",
+          "ended": 10391.939629
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 10397.876102,
+          "bodyReadMs": 0.124470000000656,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 3333,
+          "target": "original",
+          "ended": 13730.96331
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 13737.506254,
+          "bodyReadMs": 0.1057490000002872,
+          "hashMs": 0.05975700000090001,
+          "fixturePersistenceMs": 0.01477100000010978,
+          "injectedDelayMs": 3333,
+          "target": "original",
+          "ended": 17070.594952
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 17084.718528,
+          "bodyReadMs": 0.09887799999705749,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 17084.850376
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 17108.304594,
+          "bodyReadMs": 0.2763020000020333,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 17108.649803
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 17111.651303,
+          "bodyReadMs": 0.09414200000173878,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.029206999999587424,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 17111.783638
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 17116.076854,
+          "bodyReadMs": 0.0542490000007092,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 17116.135763
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": false,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 258.60000000009313,
+          "end": 265.70000000006985
+        },
+        {
+          "name": "detectFileKind",
+          "start": 266,
+          "end": 271.20000000006985
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 271.5,
+          "end": 275.10000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 276.9000000000233,
+          "end": 281.10000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 282,
+          "end": 288.10000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 291.80000000004657,
+          "end": 314.5,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 316.30000000004657,
+          "end": 320,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 321,
+          "end": 327.20000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 328,
+          "end": 331.30000000004657,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 245.5,
+      "readableMs": 24.600000000093132,
+      "renderObservationMs": 68.20000000006985,
+      "moduleMs": 104,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 19.899999999906868,
+          "transferSize": 382150,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 2.5,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 272.10000000009313,
+          "duration": 2.099999999976717,
+          "requestStart": 273,
+          "responseStart": 273.80000000004657,
+          "responseEnd": 274.20000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 277.10000000009313,
+          "duration": 2.599999999976717,
+          "requestStart": 278.5,
+          "responseStart": 279,
+          "responseEnd": 279.70000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 282.30000000004657,
+          "duration": 5.5,
+          "requestStart": 283.70000000006985,
+          "responseStart": 287.10000000009313,
+          "responseEnd": 287.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.029610000001412118
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.012974999997823033
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 292.20000000006985,
+          "duration": 1.599999999976717,
+          "requestStart": 292.80000000004657,
+          "responseStart": 293.30000000004657,
+          "responseEnd": 293.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 316.60000000009313,
+          "duration": 3.199999999953434,
+          "requestStart": 317.9000000000233,
+          "responseStart": 319.30000000004657,
+          "responseEnd": 319.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 321.10000000009313,
+          "duration": 5.699999999953434,
+          "requestStart": 322.30000000004657,
+          "responseStart": 326.4000000000233,
+          "responseEnd": 326.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.01968000000124448
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 17843.0323,
+          "bodyReadMs": 0.19568699999945238,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 17843.23858
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 17950.20499,
+          "bodyReadMs": 0.19507100000191713,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 17950.421321
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 17955.468652,
+          "bodyReadMs": 0.08641599999828031,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 17955.580287
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 17961.695192,
+          "bodyReadMs": 0.07661699999880511,
+          "hashMs": 0.029610000001412118,
+          "fixturePersistenceMs": 0.012974999997823033,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 17961.822968
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 17969.704861,
+          "bodyReadMs": 0.22609400000146707,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 17969.948635
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 17995.254646,
+          "bodyReadMs": 0.09110799999689334,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 17995.365803
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 18000.31675,
+          "bodyReadMs": 0.08722400000260677,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.01968000000124448,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 18000.431978
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 18006.554558,
+          "bodyReadMs": 0.07921899999928428,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 18006.63907
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": false,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 268.4000000000233,
+          "end": 276.19999999995343
+        },
+        {
+          "name": "detectFileKind",
+          "start": 276.69999999995343,
+          "end": 281.69999999995343
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 281.9000000000233,
+          "end": 285.19999999995343,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 286.80000000004657,
+          "end": 296.80000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 297.5,
+          "end": 305.30000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 308.4000000000233,
+          "end": 329.19999999995343,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 331,
+          "end": 333.0999999999767,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 333.5,
+          "end": 336.69999999995343,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 337.5,
+          "end": 343.19999999995343,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 258,
+      "readableMs": 23.099999999976717,
+      "renderObservationMs": 51.699999999953434,
+      "moduleMs": 101.59999999997672,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 7.900000000023283,
+          "transferSize": 382150,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 6.099999999976717,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 282.9000000000233,
+          "duration": 1.900000000023283,
+          "requestStart": 283.4000000000233,
+          "responseStart": 284.30000000004657,
+          "responseEnd": 284.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 287,
+          "duration": 9.300000000046566,
+          "requestStart": 287.9000000000233,
+          "responseStart": 296,
+          "responseEnd": 296.30000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 297.69999999995343,
+          "duration": 3.200000000069849,
+          "requestStart": 298.0999999999767,
+          "responseStart": 300.5,
+          "responseEnd": 300.9000000000233,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.034842000000935514
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.018135999998776242
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 308.69999999995343,
+          "duration": 3,
+          "requestStart": 309.19999999995343,
+          "responseStart": 311.19999999995343,
+          "responseEnd": 311.69999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 331.19999999995343,
+          "duration": 1.5,
+          "requestStart": 331.80000000004657,
+          "responseStart": 332.30000000004657,
+          "responseEnd": 332.69999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 333.69999999995343,
+          "duration": 1.8000000000465661,
+          "requestStart": 334.0999999999767,
+          "responseStart": 334.5999999999767,
+          "responseEnd": 335.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.019327999998495216
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 18440.7687,
+          "bodyReadMs": 0.11775499999930616,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 18440.895412
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 18571.405656,
+          "bodyReadMs": 0.26125799999863375,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 18571.691968
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 18579.605375,
+          "bodyReadMs": 0.13499400000000605,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 18579.769944
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 18587.736331,
+          "bodyReadMs": 0.1087840000000142,
+          "hashMs": 0.034842000000935514,
+          "fixturePersistenceMs": 0.018135999998776242,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 18587.910016
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 18598.295745,
+          "bodyReadMs": 0.10090700000000652,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 18598.417234
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 18619.652809,
+          "bodyReadMs": 0.10530999999900814,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 18619.781659
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 18621.958771,
+          "bodyReadMs": 0.07159599999795319,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.019327999998495216,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 18622.058567
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 18626.376756,
+          "bodyReadMs": 0.07552399999985937,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 18626.457882
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": false,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 295.4000000000233,
+          "end": 304.20000000006985
+        },
+        {
+          "name": "detectFileKind",
+          "start": 305.5,
+          "end": 309.80000000004657
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 313.30000000004657,
+          "end": 316.4000000000233,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 321.5,
+          "end": 327.9000000000233,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 329.20000000006985,
+          "end": 332.5,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 336.80000000004657,
+          "end": 360.5,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 362.20000000006985,
+          "end": 364.70000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 365.5,
+          "end": 368,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 369.30000000004657,
+          "end": 375,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 282.80000000004657,
+      "readableMs": 26.199999999953434,
+      "renderObservationMs": 55.199999999953434,
+      "moduleMs": 147.89999999990687,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 18.300000000046566,
+          "transferSize": 382150,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 6.900000000023283,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 313.9000000000233,
+          "duration": 3.300000000046566,
+          "requestStart": 314.80000000004657,
+          "responseStart": 315.5,
+          "responseEnd": 317.20000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 321.80000000004657,
+          "duration": 6,
+          "requestStart": 325,
+          "responseStart": 326.60000000009313,
+          "responseEnd": 327.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 329.5,
+          "duration": 2.800000000046566,
+          "requestStart": 330,
+          "responseStart": 330.60000000009313,
+          "responseEnd": 332.30000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.035853000001225155
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.01794999999765423
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 337.30000000004657,
+          "duration": 3,
+          "requestStart": 337.9000000000233,
+          "responseStart": 339.60000000009313,
+          "responseEnd": 340.30000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 362.30000000004657,
+          "duration": 2.300000000046566,
+          "requestStart": 363.20000000006985,
+          "responseStart": 363.80000000004657,
+          "responseEnd": 364.60000000009313,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 365.70000000006985,
+          "duration": 2.199999999953434,
+          "requestStart": 366.20000000006985,
+          "responseStart": 366.70000000006985,
+          "responseEnd": 367.9000000000233,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.017981000000872882
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 19154.094429,
+          "bodyReadMs": 0.1356630000009318,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 19154.238328
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 19254.853729,
+          "bodyReadMs": 0.15388199999870267,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 19255.028419
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 19266.090071,
+          "bodyReadMs": 0.16767600000093807,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 19266.284816
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 19269.9135,
+          "bodyReadMs": 0.12051400000200374,
+          "hashMs": 0.035853000001225155,
+          "fixturePersistenceMs": 0.01794999999765423,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 19270.105861
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 19277.799164,
+          "bodyReadMs": 0.24854300000151852,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 19278.066698
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 19303.334208,
+          "bodyReadMs": 0.07647200000064913,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 19303.431847
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 19306.162421,
+          "bodyReadMs": 0.12192799999684212,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.017981000000872882,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 19306.31096
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 19310.046667,
+          "bodyReadMs": 0.11200000000098953,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 19310.163229
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": true,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 156,
+          "end": 163
+        },
+        {
+          "name": "detectFileKind",
+          "start": 163.30000000004657,
+          "end": 167
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 167.20000000006985,
+          "end": 171.80000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 173.20000000006985,
+          "end": 177,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 180.20000000006985,
+          "end": 183.70000000006985,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 188,
+          "end": 215,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 217.10000000009313,
+          "end": 220.60000000009313,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 221.80000000004657,
+          "end": 224.30000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 225.20000000006985,
+          "end": 230.80000000004657,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 141.80000000004657,
+      "readableMs": 24.599999999976717,
+      "renderObservationMs": 72.5,
+      "moduleMs": 7.300000000046566,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 168.10000000009313,
+          "duration": 2.5,
+          "requestStart": 169,
+          "responseStart": 169.70000000006985,
+          "responseEnd": 170.60000000009313,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 173.5,
+          "duration": 3,
+          "requestStart": 174.90000000002328,
+          "responseStart": 175.80000000004657,
+          "responseEnd": 176.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 180.60000000009313,
+          "duration": 1.6999999999534339,
+          "requestStart": 181,
+          "responseStart": 181.80000000004657,
+          "responseEnd": 182.30000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.03368699999919045
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.02455299999928684
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 188.40000000002328,
+          "duration": 1.7000000000698492,
+          "requestStart": 189,
+          "responseStart": 189.70000000006985,
+          "responseEnd": 190.10000000009313,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 217.30000000004657,
+          "duration": 1.900000000023283,
+          "requestStart": 218,
+          "responseStart": 218.70000000006985,
+          "responseEnd": 219.20000000006985,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 222,
+          "duration": 1.8000000000465661,
+          "requestStart": 222.30000000004657,
+          "responseStart": 223.30000000004657,
+          "responseEnd": 223.80000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.02098399999886169
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 19805.96199,
+          "bodyReadMs": 1.056100999998307,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 19807.030007
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 19863.789104,
+          "bodyReadMs": 0.09522899999865331,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 19863.890597
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 19987.622048,
+          "bodyReadMs": 0.1421909999990021,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 19987.786646
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 19993.688743,
+          "bodyReadMs": 0.0918180000007851,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 19993.805831
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 19999.616956,
+          "bodyReadMs": 0.10900799999944866,
+          "hashMs": 0.03368699999919045,
+          "fixturePersistenceMs": 0.02455299999928684,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 19999.795652
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 20007.508493,
+          "bodyReadMs": 0.09265899999809335,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 20007.624827
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 20036.767037,
+          "bodyReadMs": 0.10528899999917485,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 20036.898355
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 20041.293734,
+          "bodyReadMs": 0.1328140000005078,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.02098399999886169,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 20041.457803
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 20045.079318,
+          "bodyReadMs": 0.07303499999761698,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 20045.157318
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": true,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 146,
+          "end": 153.40000000002328
+        },
+        {
+          "name": "detectFileKind",
+          "start": 153.5,
+          "end": 157.79999999993015
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 158,
+          "end": 161.79999999993015,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 164.79999999993015,
+          "end": 169.59999999997672,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 170.29999999993015,
+          "end": 172.59999999997672,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 180.19999999995343,
+          "end": 200.90000000002328,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 205.5,
+          "end": 210.09999999997672,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 212.69999999995343,
+          "end": 215.59999999997672,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 216.09999999997672,
+          "end": 218.5,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 132.5,
+      "readableMs": 23.400000000023283,
+      "renderObservationMs": 48.59999999997672,
+      "moduleMs": 13.199999999953434,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 158.59999999997672,
+          "duration": 2.599999999976717,
+          "requestStart": 159.90000000002328,
+          "responseStart": 160.69999999995343,
+          "responseEnd": 161.19999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 165.19999999995343,
+          "duration": 3.599999999976717,
+          "requestStart": 166.79999999993015,
+          "responseStart": 168.29999999993015,
+          "responseEnd": 168.79999999993015,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 170.40000000002328,
+          "duration": 2.799999999930151,
+          "requestStart": 170.79999999993015,
+          "responseStart": 171.59999999997672,
+          "responseEnd": 173.19999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.03192000000126427
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.02079799999773968
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 180.69999999995343,
+          "duration": 2.800000000046566,
+          "requestStart": 182.59999999997672,
+          "responseStart": 183.09999999997672,
+          "responseEnd": 183.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 205.69999999995343,
+          "duration": 4.300000000046566,
+          "requestStart": 208.59999999997672,
+          "responseStart": 209.09999999997672,
+          "responseEnd": 210,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 212.90000000002328,
+          "duration": 2,
+          "requestStart": 213.5,
+          "responseStart": 214.40000000002328,
+          "responseEnd": 214.90000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.021606999998766696
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 20444.127224,
+          "bodyReadMs": 0.1168790000010631,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 20444.251629
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 20509.843932,
+          "bodyReadMs": 1.3810229999980947,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 20511.231643
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 20615.372207,
+          "bodyReadMs": 0.1162399999993795,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 20615.5067
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 20622.292892,
+          "bodyReadMs": 0.18238800000108313,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 20622.501306
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 20625.941854,
+          "bodyReadMs": 0.08521399999881396,
+          "hashMs": 0.03192000000126427,
+          "fixturePersistenceMs": 0.02079799999773968,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 20626.088884
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 20637.873417,
+          "bodyReadMs": 0.0970839999972668,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 20637.987932
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 20663.718532,
+          "bodyReadMs": 0.1659959999997227,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 20663.905335
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 20668.804164,
+          "bodyReadMs": 0.13699500000075204,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.021606999998766696,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 20668.974056
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 20672.388545,
+          "bodyReadMs": 0.07098799999948824,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 20672.465051
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": true,
+      "delayPerOriginalRequestMs": 0,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 148.40000000002328,
+          "end": 155.69999999995343
+        },
+        {
+          "name": "detectFileKind",
+          "start": 155.80000000004657,
+          "end": 163.80000000004657
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 164.30000000004657,
+          "end": 167.19999999995343,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 168.80000000004657,
+          "end": 172.30000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 173,
+          "end": 176.80000000004657,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 181.40000000002328,
+          "end": 206.40000000002328,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 209.19999999995343,
+          "end": 211.69999999995343,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 212.40000000002328,
+          "end": 216,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 216.69999999995343,
+          "end": 219.09999999997672,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 137.69999999995343,
+      "readableMs": 21.800000000046566,
+      "renderObservationMs": 40.5,
+      "moduleMs": 11.5,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 0,
+          "transferSize": 0,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 164.80000000004657,
+          "duration": 2.3999999999068677,
+          "requestStart": 165.90000000002328,
+          "responseStart": 166.40000000002328,
+          "responseEnd": 167.19999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 169.09999999997672,
+          "duration": 2.599999999976717,
+          "requestStart": 170,
+          "responseStart": 171.30000000004657,
+          "responseEnd": 171.69999999995343,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 173.40000000002328,
+          "duration": 3.199999999953434,
+          "requestStart": 173.80000000004657,
+          "responseStart": 175.90000000002328,
+          "responseEnd": 176.59999999997672,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.02869799999825773
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.013560000003053574
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 181.90000000002328,
+          "duration": 1.6999999999534339,
+          "requestStart": 182.30000000004657,
+          "responseStart": 183.19999999995343,
+          "responseEnd": 183.59999999997672,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 209.5,
+          "duration": 1.900000000023283,
+          "requestStart": 210.40000000002328,
+          "responseStart": 211,
+          "responseEnd": 211.40000000002328,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 212.59999999997672,
+          "duration": 2.700000000069849,
+          "requestStart": 213.19999999995343,
+          "responseStart": 213.80000000004657,
+          "responseEnd": 215.30000000004657,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.023594000002049142
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 21076.459201,
+          "bodyReadMs": 0.1752599999999802,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 21076.65015
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 21153.698591,
+          "bodyReadMs": 0.11873500000001513,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 21153.823799
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 21269.235229,
+          "bodyReadMs": 0.12172800000189454,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 21269.372344
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 21274.035579,
+          "bodyReadMs": 0.19650199999887263,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 21274.256804
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 21277.321296,
+          "bodyReadMs": 0.08781499999895459,
+          "hashMs": 0.02869799999825773,
+          "fixturePersistenceMs": 0.013560000003053574,
+          "injectedDelayMs": 0,
+          "target": "original",
+          "ended": 21277.46083
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 21285.594302,
+          "bodyReadMs": 0.10982800000056159,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 21285.724998
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 21313.881813,
+          "bodyReadMs": 0.07090099999913946,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 21313.970844
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 21316.392445,
+          "bodyReadMs": 0.15249899999980698,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.023594000002049142,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 21316.58022
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 21320.612668,
+          "bodyReadMs": 0.07270900000003166,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 21320.690307
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "warm": false,
+      "delayPerOriginalRequestMs": 3333,
+      "parses": [
+        {
+          "name": "prepareTextImport",
+          "start": 218.90000000002328,
+          "end": 224.80000000004657
+        },
+        {
+          "name": "detectFileKind",
+          "start": 224.90000000002328,
+          "end": 228.30000000004657
+        }
+      ],
+      "network": [
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 229.20000000006985,
+          "end": 3566.100000000093,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1?part=1",
+          "method": "PUT",
+          "start": 3567.3000000000466,
+          "end": 6904,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/1",
+          "method": "POST",
+          "start": 6905.20000000007,
+          "end": 10242.20000000007,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads",
+          "method": "POST",
+          "start": 10246.20000000007,
+          "end": 10265.70000000007,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2?part=1",
+          "method": "PUT",
+          "start": 10268.900000000023,
+          "end": 10272.70000000007,
+          "status": 200
+        },
+        {
+          "url": "/api/uploads/2",
+          "method": "POST",
+          "start": 10273.5,
+          "end": 10276.5,
+          "status": 200
+        },
+        {
+          "url": "/api/documents?q=",
+          "method": "GET",
+          "start": 10277.20000000007,
+          "end": 10281.600000000093,
+          "status": 200
+        }
+      ],
+      "workers": [],
+      "wasm": [],
+      "started": 209.80000000004657,
+      "readableMs": 17.300000000046566,
+      "renderObservationMs": 40.5,
+      "moduleMs": 86.60000000009313,
+      "moduleResources": [
+        {
+          "path": "/candidate/stdin.js",
+          "duration": 11.5,
+          "transferSize": 382150,
+          "encodedBodySize": 381850
+        },
+        {
+          "path": "/candidate/chunk-ORREMQM7.js",
+          "duration": 3.200000000069849,
+          "transferSize": 26617,
+          "encodedBodySize": 26317
+        }
+      ],
+      "resources": [
+        {
+          "name": "/api/uploads",
+          "startTime": 230,
+          "duration": 3335.5,
+          "requestStart": 230.40000000002328,
+          "responseStart": 3564.5,
+          "responseEnd": 3565.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 3333
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 3567.70000000007,
+          "duration": 3335.5999999999767,
+          "requestStart": 3568.70000000007,
+          "responseStart": 6902.300000000047,
+          "responseEnd": 6903.300000000047,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 3333
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/1",
+          "startTime": 6905.600000000093,
+          "duration": 3336.399999999907,
+          "requestStart": 6906.300000000047,
+          "responseStart": 10240.900000000023,
+          "responseEnd": 10242,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0.5470659999991767
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.01960700000199722
+            },
+            {
+              "name": "injected-delay",
+              "duration": 3333
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads",
+          "startTime": 10246.70000000007,
+          "duration": 4.099999999976717,
+          "requestStart": 10247.400000000023,
+          "responseStart": 10250.300000000047,
+          "responseEnd": 10250.800000000047,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 10269.100000000093,
+          "duration": 3.3999999999068677,
+          "requestStart": 10270.100000000093,
+          "responseStart": 10271.900000000023,
+          "responseEnd": 10272.5,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        },
+        {
+          "name": "/api/uploads/2",
+          "startTime": 10273.600000000093,
+          "duration": 2.5,
+          "requestStart": 10274.900000000023,
+          "responseStart": 10275.5,
+          "responseEnd": 10276.100000000093,
+          "serverTiming": [
+            {
+              "name": "fixture-hash",
+              "duration": 0
+            },
+            {
+              "name": "fixture-persistence",
+              "duration": 0.05380000000150176
+            },
+            {
+              "name": "injected-delay",
+              "duration": 0
+            }
+          ]
+        }
+      ],
+      "serverRequests": [
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 21758.609469,
+          "bodyReadMs": 0.834789999997156,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 21759.474095
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 21842.447026,
+          "bodyReadMs": 0.20436100000006263,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 3333,
+          "target": "original",
+          "ended": 25175.521703
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "PUT",
+          "started": 25180.865901,
+          "bodyReadMs": 0.13593000000037136,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 3333,
+          "target": "original",
+          "ended": 28513.680734
+        },
+        {
+          "path": "/api/uploads/1",
+          "method": "POST",
+          "started": 28518.625906,
+          "bodyReadMs": 0.14012799999909475,
+          "hashMs": 0.5470659999991767,
+          "fixturePersistenceMs": 0.01960700000199722,
+          "injectedDelayMs": 3333,
+          "target": "original",
+          "ended": 31852.297527
+        },
+        {
+          "path": "/api/uploads",
+          "method": "POST",
+          "started": 31859.518816,
+          "bodyReadMs": 0.14669599999979255,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 31859.692723
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "PUT",
+          "started": 31883.383344,
+          "bodyReadMs": 0.13166199999977835,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 31883.544883
+        },
+        {
+          "path": "/api/uploads/2",
+          "method": "POST",
+          "started": 31886.981809,
+          "bodyReadMs": 0.16548099999999977,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0.05380000000150176,
+          "injectedDelayMs": 0,
+          "target": "result",
+          "ended": 31887.214013
+        },
+        {
+          "path": "/api/documents",
+          "method": "GET",
+          "started": 31891.291032,
+          "bodyReadMs": 0.08265900000333204,
+          "hashMs": 0,
+          "fixturePersistenceMs": 0,
+          "injectedDelayMs": 0,
+          "ended": 31891.379515
+        }
+      ]
+    }
+  ],
+  "checks": [
+    "Exact readable output appears while original storage is pending, with saving status and no premature retry prompt.",
+    "original save failure: exact readable/exportable result survives IndexedDB reload; retry succeeds",
+    "result save failure: exact readable/exportable result survives IndexedDB reload; retry succeeds without duplicate original",
+    "Cancel during text preparation aborts the active job before any upload.",
+    "All measured text imports create zero Workers and invoke zero WebAssembly compilation/instantiation APIs; exact Markdown downloads match input."
+  ]
+}
