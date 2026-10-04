@@ -1,0 +1,101 @@
+{
+  "source_commit": "f75d5f233432b0402b2e309e02fce7bff498b475",
+  "rust": "1.98.1",
+  "profile": "debug",
+  "platform": "x86_64-linux",
+  "trials_per_case": 3,
+  "rss": "whole-process /proc/self/status VmHWM, KiB",
+  "timing": "page_text only; fixture and loading excluded",
+  "trials": [
+    {
+      "cached_fonts": 1,
+      "cmap_bytes": 349,
+      "codes_per_font": 65536,
+      "elapsed_ms": 105.649076,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 65536,
+      "peak_rss_kib": 28072,
+      "trial": 0
+    },
+    {
+      "cached_fonts": 1,
+      "cmap_bytes": 349,
+      "codes_per_font": 65536,
+      "elapsed_ms": 111.77071500000001,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 65536,
+      "peak_rss_kib": 27968,
+      "trial": 1
+    },
+    {
+      "cached_fonts": 1,
+      "cmap_bytes": 349,
+      "codes_per_font": 65536,
+      "elapsed_ms": 111.549062,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 65536,
+      "peak_rss_kib": 27992,
+      "trial": 2
+    },
+    {
+      "cached_fonts": 1,
+      "cmap_bytes": 349,
+      "codes_per_font": 262144,
+      "elapsed_ms": 221.72924,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 262144,
+      "peak_rss_kib": 28464,
+      "trial": 0
+    },
+    {
+      "cached_fonts": 1,
+      "cmap_bytes": 349,
+      "codes_per_font": 262144,
+      "elapsed_ms": 207.81238499999998,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 262144,
+      "peak_rss_kib": 28276,
+      "trial": 1
+    },
+    {
+      "cached_fonts": 1,
+      "cmap_bytes": 349,
+      "codes_per_font": 262144,
+      "elapsed_ms": 223.63329000000002,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 262144,
+      "peak_rss_kib": 27960,
+      "trial": 2
+    },
+    {
+      "cached_fonts": 4,
+      "cmap_bytes": 349,
+      "codes_per_font": 65536,
+      "elapsed_ms": 388.437757,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 262144,
+      "peak_rss_kib": 64164,
+      "trial": 0
+    },
+    {
+      "cached_fonts": 4,
+      "cmap_bytes": 349,
+      "codes_per_font": 65536,
+      "elapsed_ms": 451.140307,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 262144,
+      "peak_rss_kib": 64056,
+      "trial": 1
+    },
+    {
+      "cached_fonts": 4,
+      "cmap_bytes": 349,
+      "codes_per_font": 65536,
+      "elapsed_ms": 456.55821299999997,
+      "emitted_spans": 0,
+      "expanded_reverse_entries": 262144,
+      "peak_rss_kib": 64048,
+      "trial": 2
+    }
+  ]
+}
