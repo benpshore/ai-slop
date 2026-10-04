@@ -33,6 +33,7 @@ def reviewed_inputs(inputs):
         ),
         "pinned",
     )
+    pins["cargo_lock_sha256"] = "a" * 64
     sources = {
         item["id"]: {key: item[key] for key in ("pdf_sha256", "source_sha256")}
         for item in manifest["items"]
@@ -462,13 +463,18 @@ def test_duplicate_source_truth_keys_preserve_match_multiplicity(inputs):
     assert MODULE.validate_dumps(report, dumps) == []
 
 
-def test_cli_uses_complete_retained_evidence_for_reviewed_partial(tmp_path, inputs, capsys):
+def test_cli_uses_complete_retained_evidence_for_reviewed_partial(
+    tmp_path, inputs, capsys, monkeypatch
+):
     manifest, report, policy, provenance = reviewed_inputs(inputs)
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     manifest_hash = MODULE.hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     policy["provenance_pins"]["corpus_manifest_sha256"] = manifest_hash
     provenance["corpus_manifest_sha256"] = manifest_hash
+    provenance["git_commit"] = "recorded-source-head"
+    expected = {**policy["provenance_pins"], "git_commit": provenance["git_commit"]}
+    monkeypatch.setattr(MODULE, "source_provenance", lambda *_: expected)
     dumps = retained_dumps(report)
     outcome = policy["papers"]["pdfium"]["a"]
     dumps["a"].update(warnings=outcome["warnings"], page_warnings=outcome["resource_page_warnings"])
@@ -496,6 +502,19 @@ def test_cli_uses_complete_retained_evidence_for_reviewed_partial(tmp_path, inpu
     ]
     assert MODULE.main(argv) == 0
     assert "1 complete, 1 reviewed partial" in capsys.readouterr().out
+    provenance["git_commit"] = "wrong-source-head"
+    (tmp_path / "provenance.json").write_text(json.dumps(provenance))
+    assert MODULE.main(argv) == 1
+    assert "current-source provenance mismatch: git_commit" in capsys.readouterr().err
+    provenance["git_commit"] = expected["git_commit"]
+    provenance["cargo_lock_sha256"] = expected["cargo_lock_sha256"] = "b" * 64
+    (tmp_path / "provenance.json").write_text(json.dumps(provenance))
+    assert MODULE.main(argv) == 1
+    errors = capsys.readouterr().err
+    assert "zero exceptions applied" in errors
+    assert "incomplete paper a: status 'partial'" in errors
+    provenance["cargo_lock_sha256"] = expected["cargo_lock_sha256"] = "a" * 64
+    (tmp_path / "provenance.json").write_text(json.dumps(provenance))
     dumps["a"]["page_warnings"][0][0] = 4
     (dump_dir / "a.json").write_text(json.dumps(dumps["a"]))
     assert MODULE.main(argv) == 1
@@ -544,3 +563,160 @@ uv() {
     )
     assert log.read_text().splitlines() == ["lopdf", "pdfium", "docling-text", "docling"]
     assert completed.returncode == (1 if failed_backend else 0)
+
+
+@pytest.mark.parametrize(
+    "field", [*MODULE.PROVENANCE_FILES, "corpus_manifest_sha256", "git_commit"]
+)
+def test_current_provenance_rejects_wrong_checkout_or_input(inputs, field):
+    _, _, policy, provenance = reviewed_inputs(inputs)
+    expected = {**policy["provenance_pins"], "git_commit": "intended-source"}
+    provenance["git_commit"] = expected["git_commit"]
+    assert MODULE.verify_current_provenance(provenance, expected) == policy["provenance_pins"]
+    provenance[field] = "wrong-artifact-input"
+    with pytest.raises(ValueError, match=f"current-source provenance mismatch: {field}"):
+        MODULE.verify_current_provenance(provenance, expected)
+
+
+def changed_dependency_outcomes(inputs):
+    manifest, report, policy, provenance = reviewed_inputs(inputs)
+    unchanged_policy = deepcopy(policy)
+    provenance["cargo_lock_sha256"] = "b" * 64
+    current_pins = {**policy["provenance_pins"], "cargo_lock_sha256": "b" * 64}
+    reviewed = MODULE.load_reviewed_partials(
+        manifest,
+        "pinned",
+        policy,
+        provenance,
+        "dev",
+        "pdfium",
+        retained_dumps(report),
+        {"a"},
+        current_pins,
+    )
+    assert policy == unchanged_policy
+    assert reviewed["a"]["partial_eligible"] is False
+    return manifest, report, reviewed
+
+
+def test_verified_dependency_change_never_grants_historical_partial_exception(inputs):
+    manifest, report, reviewed = changed_dependency_outcomes(inputs)
+    # Counts and warning totals happen to match the old policy; this must not
+    # make a Partial result eligible under a different dependency graph.
+    errors = MODULE.validate(manifest, report, "dev", "pdfium", reviewed)
+    assert errors == ["incomplete paper a: status 'partial'"]
+
+
+@pytest.mark.parametrize("status", ["partial", "complete"])
+def test_changed_dependency_keeps_same_input_page_and_reference_baselines(inputs, status):
+    manifest, report, reviewed = changed_dependency_outcomes(inputs)
+    paper = report["papers"][0]
+    paper.update(status=status, pages=19, truth_refs=1, extracted_refs=1, matched_refs=0)
+    errors = MODULE.validate(manifest, report, "dev", "pdfium", reviewed)
+    assert "reviewed input page count mismatch: a" in errors
+    assert "reviewed-partial reference regression: a" in errors
+    assert any("reference extraction failed for a" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "field", ["native_manifest_sha256", "metric_source_sha256", "truth_source_sha256"]
+)
+def test_verified_dependency_change_does_not_accept_other_historical_pin_drift(inputs, field):
+    manifest, _, policy, provenance = reviewed_inputs(inputs)
+    provenance.update(cargo_lock_sha256="b" * 64, **{field: "new-other-input"})
+    current_pins = {key: provenance[key] for key in policy["provenance_pins"]}
+    with pytest.raises(ValueError, match=f"reviewed-partial provenance mismatch: {field}"):
+        MODULE.load_reviewed_partials(
+            manifest, "pinned", policy, provenance, "dev", "pdfium", {}, {"a"}, current_pins
+        )
+
+
+def test_current_pin_assertion_cannot_hide_an_unverified_dependency_change(inputs):
+    manifest, _, policy, provenance = reviewed_inputs(inputs)
+    provenance["cargo_lock_sha256"] = "unverified-lock"
+    with pytest.raises(ValueError, match="current-source provenance pins"):
+        MODULE.load_reviewed_partials(
+            manifest,
+            "pinned",
+            policy,
+            provenance,
+            "dev",
+            "pdfium",
+            {},
+            {"a"},
+            policy["provenance_pins"],
+        )
+
+
+@pytest.mark.parametrize("status", ["partial", "deferred", "failed", "failed: parser"])
+@pytest.mark.parametrize("count", [0, -1, None, True])
+def test_noncomplete_status_never_masks_zero_or_malformed_reference_counts(inputs, status, count):
+    manifest, report = deepcopy(inputs)
+    report["papers"][0].update(status=status, matched_refs=count)
+    errors = MODULE.validate(manifest, report, "dev", "pdfium")
+    assert any("incomplete paper a" in error for error in errors)
+    expected = (
+        "reference extraction failed"
+        if type(count) is int and count == 0
+        else "invalid reference counts"
+    )
+    assert any(expected in error for error in errors)
+
+
+def test_source_checkout_provenance_reads_real_inputs_and_rejects_dirty_source(tmp_path):
+    files = [*MODULE.PROVENANCE_FILES.values(), "corpus/manifest.json", "src/reading_order.rs"]
+    for name in files:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"fixture {name}\n")
+    for args in [
+        ["init", "--quiet"],
+        ["add", "."],
+        [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    ]:
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True)  # noqa: S603,S607 -- isolated fixture, fixed argv
+    expected = MODULE.source_provenance(tmp_path, tmp_path / "corpus/manifest.json")
+    assert len(expected["git_commit"]) == 40
+    assert (
+        expected["cargo_lock_sha256"]
+        == MODULE.hashlib.sha256((tmp_path / "Cargo.lock").read_bytes()).hexdigest()
+    )
+    assert (
+        MODULE.verify_current_provenance(expected, expected)["cargo_lock_sha256"]
+        == expected["cargo_lock_sha256"]
+    )
+    (tmp_path / "src/reading_order.rs").write_text("uncommitted source drift\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        MODULE.source_provenance(tmp_path, tmp_path / "corpus/manifest.json")
+
+
+@pytest.mark.parametrize("malformed", [None, "", "different", "g" * 64, 123, []])
+def test_dependency_change_does_not_hide_malformed_historical_pin(inputs, malformed):
+    manifest, _, policy, provenance = reviewed_inputs(inputs)
+    current_pins = {**policy["provenance_pins"], "cargo_lock_sha256": "b" * 64}
+    provenance.update(current_pins)
+    policy["provenance_pins"]["cargo_lock_sha256"] = malformed
+    with pytest.raises(ValueError, match="invalid reviewed-partial dependency pin"):
+        MODULE.load_reviewed_partials(
+            manifest, "pinned", policy, provenance, "dev", "pdfium", {}, {"a"}, current_pins
+        )
+
+
+def test_dependency_change_does_not_hide_missing_historical_pin(inputs):
+    manifest, _, policy, provenance = reviewed_inputs(inputs)
+    current_pins = {**policy["provenance_pins"], "cargo_lock_sha256": "b" * 64}
+    provenance.update(current_pins)
+    del policy["provenance_pins"]["cargo_lock_sha256"]
+    with pytest.raises(ValueError, match="provenance pins are incomplete"):
+        MODULE.load_reviewed_partials(
+            manifest, "pinned", policy, provenance, "dev", "pdfium", {}, {"a"}, current_pins
+        )
