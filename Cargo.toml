@@ -35,26 +35,44 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# Optional user-built providers; no native engine is linked or distributed.
+mupdf = ["dep:libloading"]
+poppler = ["dep:libloading"]
+grobid = ["dep:roxmltree"]
 # Native PDFium backend (`--backend pdfium`); needs libpdfium at run time (docs/NATIVE.md).
 pdfium = ["dep:pdfium-render"]
+# Independent positioned-text parser; no rendering or OCR dependencies.
+pdf-oxide = ["dep:pdf_oxide", "dep:office_oxide"]
+# Pure LiteParse spatial projection over the existing PDFium extraction.
+liteparse-layout = ["pdfium", "dep:liteparse"]
 # docling.rs backends (`docling-text`, `docling`); `docling` needs PDFium and the models.
-docling = ["dep:docling-pdf", "dep:docling-core", "pdfium"]
+docling-text = ["dep:docling-pdf"]
+docling = ["docling-text", "dep:docling-core", "docling-pdf/ml", "pdfium"]
+# Recover embedded Type1C encodings in lopdf without changing page geometry.
+pdf-extract = ["dep:pdf-extract", "dep:cff-parser"]
 
 [dependencies]
 anyhow = "1"
+roxmltree = { version = "=0.20.0", optional = true }
 tpe-biblio = { path = "crates/tpe-biblio" }
 clap = { version = "4.5", features = ["derive"] }
 docling-core = { version = "=1.69.2", optional = true }
-docling-pdf = { version = "=1.69.2", optional = true }
+docling-pdf = { version = "=1.69.2", optional = true, default-features = false }
 # zlib-rs inflates faster than the default miniz_oxide. Feature unification
 # switches lopdf's inflate too: flate2 prefers zlib-rs over miniz_oxide when
 # both are enabled and no C zlib is (flate2 1.1 `src/ffi/mod.rs`).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 hex = "0.4"
 lopdf = "0.45"
+libloading = { version = "0.8.9", optional = true }
+liteparse = { version = "=2.15.1", optional = true, default-features = false }
 # Same major as docling-pdf (0.8) so one pdfium-render instance links libpdfium.
 # No `image` feature here; docling-pdf turns it on for itself under `docling`.
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
+pdf_oxide = { version = "=0.3.78", optional = true, default-features = false }
+# pdf_oxide 0.3.78 constructs DocumentIR directly; office_oxide 0.1.13
+# added a required field and breaks that upstream constructor (E0063).
+office_oxide = { version = "=0.1.9", optional = true, default-features = false }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -68,6 +86,9 @@ tempfile = "3"
 thiserror = "2"
 unicode-normalization = "0.1"
 ureq = "3"
+pdf-extract = { version = "=0.12.1", default-features = false, optional = true }
+# Same parser as pdf-extract; validate its mapping against actual glyph IDs.
+cff-parser = { version = "=0.2.0", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix = { version = "1", features = ["process", "param", "stdio"] }

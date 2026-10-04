@@ -15,7 +15,15 @@ use crate::schema::{BackendIdentity, PageText};
 
 #[cfg(feature = "docling")]
 pub mod docling_backend;
+#[cfg(feature = "docling-text")]
+pub mod docling_text_backend;
+#[cfg(feature = "liteparse-layout")]
+pub mod liteparse_layout_backend;
 pub mod lopdf_backend;
+#[cfg(any(feature = "mupdf", feature = "poppler"))]
+pub mod native_provider;
+#[cfg(feature = "pdf-oxide")]
+pub mod pdf_oxide_backend;
 #[cfg(feature = "pdfium")]
 pub mod pdfium_backend;
 
@@ -79,36 +87,71 @@ pub trait Extractor: Send + Sync {
     fn provides_reading_order(&self) -> bool {
         false
     }
+    /// `true` when `page_text` also supplies the final ordered lines and text.
+    /// Raw spans remain extraction evidence and must not replace those lines.
+    fn provides_line_layout(&self) -> bool {
+        false
+    }
 }
 
 /// Look up a compiled-in backend by CLI name.
 pub fn by_name(name: &str) -> Option<Box<dyn Extractor>> {
     match name {
         "lopdf" => Some(Box::new(lopdf_backend::LopdfBackend::default())),
+        #[cfg(feature = "mupdf")]
+        "mupdf" => Some(Box::new(native_provider::NativeProviderBackend::new(
+            native_provider::Engine::MuPdf,
+        ))),
+        #[cfg(feature = "poppler")]
+        "poppler" => Some(Box::new(native_provider::NativeProviderBackend::new(
+            native_provider::Engine::Poppler,
+        ))),
+        #[cfg(feature = "pdf-oxide")]
+        "pdf-oxide" => Some(Box::new(pdf_oxide_backend::PdfOxideBackend)),
         #[cfg(feature = "pdfium")]
         "pdfium" => Some(Box::new(pdfium_backend::PdfiumBackend::default())),
-        #[cfg(feature = "docling")]
-        "docling-text" => Some(Box::new(docling_backend::DoclingBackend::text_layer())),
+        #[cfg(feature = "liteparse-layout")]
+        "liteparse-layout" => Some(Box::new(
+            liteparse_layout_backend::LiteParseLayoutBackend::default(),
+        )),
+        #[cfg(feature = "docling-text")]
+        "docling-text" => Some(Box::new(docling_text_backend::DoclingTextBackend)),
         #[cfg(feature = "docling")]
         "docling" => Some(Box::new(docling_backend::DoclingBackend::full())),
         _ => None,
     }
 }
 
-/// Names accepted by [`by_name`] in this build (`docling` implies `pdfium`).
-#[cfg(feature = "docling")]
-pub const NAMES: &[&str] = &["lopdf", "pdfium", "docling-text", "docling"];
-
-/// Names accepted by [`by_name`] in this build (`docling` implies `pdfium`).
-#[cfg(all(feature = "pdfium", not(feature = "docling")))]
-pub const NAMES: &[&str] = &["lopdf", "pdfium"];
-
-/// Names accepted by [`by_name`] in this build (`docling` implies `pdfium`).
-#[cfg(not(feature = "pdfium"))]
-pub const NAMES: &[&str] = &["lopdf"];
+/// Names accepted by [`by_name`] in this build.
+pub const NAMES: &[&str] = &[
+    "lopdf",
+    #[cfg(feature = "mupdf")]
+    "mupdf",
+    #[cfg(feature = "poppler")]
+    "poppler",
+    #[cfg(feature = "pdfium")]
+    "pdfium",
+    #[cfg(feature = "pdf-oxide")]
+    "pdf-oxide",
+    #[cfg(feature = "docling-text")]
+    "docling-text",
+    #[cfg(feature = "docling")]
+    "docling",
+    #[cfg(feature = "liteparse-layout")]
+    "liteparse-layout",
+];
 
 /// Every backend name the engine knows, compiled in or not.
-pub const ALL_KNOWN: &[&str] = &["lopdf", "pdfium", "docling-text", "docling"];
+pub const ALL_KNOWN: &[&str] = &[
+    "lopdf",
+    "mupdf",
+    "poppler",
+    "pdfium",
+    "pdf-oxide",
+    "docling-text",
+    "docling",
+    "liteparse-layout",
+];
 
 /// Backend names compiled into this build (same as [`NAMES`]).
 pub fn available() -> Vec<&'static str> {
@@ -124,7 +167,12 @@ pub fn all_known() -> &'static [&'static str] {
 pub fn feature_for(name: &str) -> Option<&'static str> {
     match name {
         "pdfium" => Some("pdfium"),
-        "docling-text" | "docling" => Some("docling"),
+        "mupdf" => Some("mupdf"),
+        "poppler" => Some("poppler"),
+        "pdf-oxide" => Some("pdf-oxide"),
+        "docling-text" => Some("docling-text"),
+        "docling" => Some("docling"),
+        "liteparse-layout" => Some("liteparse-layout"),
         _ => None,
     }
 }
@@ -205,8 +253,9 @@ mod tests {
     fn features_are_named_for_native_backends() {
         assert_eq!(feature_for("lopdf"), None);
         assert_eq!(feature_for("pdfium"), Some("pdfium"));
-        assert_eq!(feature_for("docling-text"), Some("docling"));
+        assert_eq!(feature_for("docling-text"), Some("docling-text"));
         assert_eq!(feature_for("docling"), Some("docling"));
+        assert_eq!(feature_for("liteparse-layout"), Some("liteparse-layout"));
         assert_eq!(feature_for("nope"), None);
     }
 

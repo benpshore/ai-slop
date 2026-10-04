@@ -40,6 +40,8 @@ jobs:
       - run: uv run ruff format --check
       - run: uv run ruff check --output-format=github
       - run: uv run pytest
+      - run: uv run pytest web/tests/test_site_source.py
+      - run: uv run python scripts/site_source.py verify --source web
       - run: uv audit --locked --preview-features audit-command
       - run: uv build
 
@@ -72,6 +74,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - name: Check optional CFF, Docling text, and GROBID modules
+        run: |
+          cargo clippy --locked --all-targets --features pdf-extract,docling-text,grobid -- -D warnings
+          cargo test --locked --features pdf-extract,docling-text,grobid --lib --test pdf_extract_cff --test docling_text --test grobid_contract
 
   swift:
     runs-on: ubuntu-latest

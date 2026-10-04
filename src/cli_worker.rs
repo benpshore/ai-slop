@@ -23,8 +23,6 @@ use tpe::schema::{ExtractionResult, Job, Status};
 use super::ExtractArgs;
 use super::worker_limits::{self, LimitEvidence};
 
-const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_CAPTURE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 const REQUEST_BYTES: u64 = 64 * 1024;
 const DIAGNOSTIC_BYTES: u64 = 16 * 1024;
@@ -113,8 +111,8 @@ fn input_paths(args: &ExtractArgs) -> anyhow::Result<Vec<PathBuf>> {
         "--max-memory-growth-mib must be 32..=4096"
     );
     ensure!(
-        (1024..=MAX_CAPTURE_BYTES).contains(&args.max_output_bytes),
-        "--max-output-bytes must be 1024..=268435456"
+        args.max_output_bytes.is_none_or(|bytes| bytes >= 1024),
+        "--max-output-bytes must be at least 1024 when specified"
     );
     ensure!(
         (1..=MAX_DIRECTORY_ENTRIES).contains(&args.max_files),
@@ -177,8 +175,18 @@ fn input_paths(args: &ExtractArgs) -> anyhow::Result<Vec<PathBuf>> {
 
 fn check_supervised_backend(name: &str) -> anyhow::Result<()> {
     ensure!(
-        matches!(name, "lopdf" | "pdfium" | "auto"),
-        "supervised extraction supports native lopdf/pdfium only; OCR backends may spawn unsupervised children"
+        matches!(
+            name,
+            "lopdf"
+                | "pdfium"
+                | "pdf-oxide"
+                | "liteparse-layout"
+                | "docling-text"
+                | "mupdf"
+                | "poppler"
+                | "auto"
+        ),
+        "supervised extraction supports native lopdf/pdfium/pdf-oxide/mupdf/poppler and liteparse-layout/docling-text only; OCR backends may spawn unsupervised children"
     );
     ensure!(
         name != "auto" || !tpe::backend::available().contains(&"docling"),
@@ -428,7 +436,7 @@ fn extract(
             backend: args.backend.clone(),
             pages: args.pages,
             password: args.password.clone(),
-            max_bytes: Some(args.max_bytes.unwrap_or(MAX_INPUT_BYTES)),
+            max_bytes: args.max_bytes,
             figures_dir: None,
         },
         progress: args.progress,
@@ -445,6 +453,33 @@ fn extract(
 
 fn supervise(
     args: &ExtractArgs,
+    phase: &str,
+    request: &impl Serialize,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    sink: OutputSink,
+) -> anyhow::Result<Capture> {
+    supervise_limits(
+        WorkerBudget {
+            memory_growth_mib: args.max_memory_growth_mib,
+            output_bytes: args.max_output_bytes.unwrap_or(u64::MAX),
+        },
+        phase,
+        request,
+        deadline,
+        cancelled,
+        sink,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct WorkerBudget {
+    memory_growth_mib: u64,
+    output_bytes: u64,
+}
+
+fn supervise_limits(
+    budget: WorkerBudget,
     phase: &str,
     request: &impl Serialize,
     deadline: Instant,
@@ -479,7 +514,7 @@ fn supervise(
         .arg("--phase")
         .arg(phase)
         .arg("--growth-bytes")
-        .arg((args.max_memory_growth_mib * 1024 * 1024).to_string())
+        .arg((budget.memory_growth_mib * 1024 * 1024).to_string())
         .arg("--parent")
         .arg(std::process::id().to_string())
         .stdin(Stdio::piped())
@@ -494,13 +529,13 @@ fn supervise(
     };
     let status = loop {
         check_deadline(deadline, cancelled)?;
-        check_capture(&capture, args.max_output_bytes)?;
+        check_capture(&capture, budget.output_bytes)?;
         if let Some(status) = worker.child.try_wait()? {
             break status;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    check_capture(&capture, args.max_output_bytes)?;
+    check_capture(&capture, budget.output_bytes)?;
     if !status.success() {
         let diagnostics = read_limited(&capture.stderr, DIAGNOSTIC_BYTES, false)?;
         anyhow::bail!(
@@ -509,6 +544,40 @@ fn supervise(
         );
     }
     Ok(capture)
+}
+
+/// GROBID's server is external; local client/parsing/output use the same hard
+/// memory, cancellation, capture, deadline, and kill/reap boundary as extraction.
+#[cfg(feature = "grobid")]
+pub(super) fn run_grobid(args: &super::grobid_cli::Args) -> anyhow::Result<ExitCode> {
+    let budget = WorkerBudget {
+        memory_growth_mib: args.max_memory_growth_mib,
+        output_bytes: u64::MAX,
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _signals = CancelSignals::install(&cancelled)?;
+    let deadline = Instant::now() + Duration::from_millis(args.timeout_ms);
+    let capture = supervise_limits(
+        budget,
+        "grobid",
+        args,
+        deadline,
+        &cancelled,
+        OutputSink::Capture,
+    )?;
+    let delivery = DeliveryRequest {
+        source: capture.stdout.clone(),
+        max_bytes: budget.output_bytes,
+    };
+    supervise_limits(
+        budget,
+        "deliver",
+        &delivery,
+        deadline,
+        &cancelled,
+        OutputSink::Stdout,
+    )?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn check_deadline(deadline: Instant, cancelled: &AtomicBool) -> anyhow::Result<()> {
@@ -537,7 +606,7 @@ fn deliver(
 ) -> anyhow::Result<()> {
     let request = DeliveryRequest {
         source: source.to_path_buf(),
-        max_bytes: args.max_output_bytes,
+        max_bytes: args.max_output_bytes.unwrap_or(u64::MAX),
     };
     let sink = if stderr {
         OutputSink::Stderr
@@ -594,7 +663,7 @@ fn publish(
         path: path.to_path_buf(),
         pages: args.pages,
         json: args.json,
-        max_output_bytes: args.max_output_bytes,
+        max_output_bytes: args.max_output_bytes.unwrap_or(u64::MAX),
     };
     let capture = supervise(
         args,
@@ -659,7 +728,7 @@ fn report_failure(
 fn read_limited(path: &Path, limit: u64, reject_oversize: bool) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(limit + u64::from(reject_oversize))
+        .take(limit.saturating_add(u64::from(reject_oversize)))
         .read_to_end(&mut bytes)?;
     ensure!(
         !reject_oversize || bytes.len() as u64 <= limit,
@@ -696,6 +765,8 @@ pub(super) fn run_worker(
     super::worker_allocator::enforce();
     let encoded = read_limited(request_path, REQUEST_BYTES, true)?;
     match phase {
+        #[cfg(feature = "grobid")]
+        "grobid" => super::grobid_cli::worker(&encoded)?,
         "extract" => extract_worker(&serde_json::from_slice(&encoded)?, limits)?,
         "publish" => publish_worker(&serde_json::from_slice(&encoded)?, &limits)?,
         "deliver" => deliver_worker(&serde_json::from_slice(&encoded)?)?,

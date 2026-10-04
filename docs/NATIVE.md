@@ -7,7 +7,8 @@ artifacts which are not crates:
 | feature | backends | needs at run time |
 | --- | --- | --- |
 | `pdfium` | `pdfium` | the PDFium shared library |
-| `docling` (implies `pdfium`) | `docling-text`, `docling` | `docling-text`: nothing. `docling`: PDFium, the layout and OCR models, ONNX Runtime |
+| `docling-text` | `docling-text` | nothing; pure Rust, supervised page parser |
+| `docling` (implies `docling-text`, `pdfium`) | `docling-text`, `docling` | `docling`: PDFium, the layout and OCR models, ONNX Runtime; not enabled for supervised CLI extraction |
 
 `native/manifest.json` pins the exact set of artifacts and `native/fetch.sh`
 provisions them. The `Native` workflow (`.github/workflows/native.yml`) does the
@@ -118,7 +119,10 @@ sh native/fetch.sh                                   # about 82 MB of models plu
 export PDFIUM_DYNAMIC_LIB_PATH="$PWD/.pdfium/lib"    # required: relative library paths are rejected
 cargo build --release --features docling,pdfium      # the first build downloads ONNX Runtime
 cargo test --features docling,pdfium -- --nocapture  # native smoke tests must not print "skipped:"
-./target/release/tpe extract paper.pdf --backend docling --db local.sqlite --out out/
+# Full model-backed docling remains restricted to explicitly provisioned library/eval use.
+# For supervised text parsing without native runtimes or models:
+cargo build --release --features docling-text
+./target/release/tpe extract paper.pdf --backend docling-text --db local.sqlite --out out/
 ```
 
 The platform is detected from `uname`: `Darwin`/`arm64` maps to `mac-arm64`,
@@ -155,3 +159,6 @@ Pinning a hash changes the manifest, and with it the `.models`/`.pdfium` cache
 key, so the next run downloads fresh files and verifies them against the pins.
 Changing a URL (a new PDFium release, a new models tag) works the same way:
 edit the entry, reset its hashes to `null`, run the workflow, then pin.
+
+The bounded Docling text module and remaining layout/OCR deployment requirements
+are documented in [DOCLING.md](DOCLING.md).

@@ -1,0 +1,564 @@
+{
+  "clipSha256": "136045b0df9249b22a1f36a4425651b64568f8df96e61926c81254ed123d7c50",
+  "generatedAt": "2026-10-04T01:04:06.877Z",
+  "node": "v24.19.0",
+  "method": "One cold run and median of four subsequent runs (lower middle), includes DOM construction, excludes fetch, module load, and asset downloads. Reference paragraphs and cells are exact normalized-text matches, not a universal completeness score.",
+  "fixtures": [
+    {
+      "name": "howtogeek",
+      "url": "https://www.howtogeek.com/lenovo-yoga-mini-gen-11-review/",
+      "final_url": "https://www.howtogeek.com/lenovo-yoga-mini-gen-11-review/",
+      "file": "howtogeek.html",
+      "http_status": "200",
+      "sha256": "641925e077f0bf0f4d3d95d4931b79fe1ca39e9d4402c1e21b47c47260267eb1",
+      "bytes": 581470,
+      "reference": {
+        "selector": "#article-body",
+        "paragraphs": 24,
+        "headings": 10,
+        "tableCells": 0,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 241.51,
+          "median_ms": 187.14,
+          "textCharacters": 7725,
+          "paragraphs": 24,
+          "headings": 10,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 30,
+          "uniqueImages": 27,
+          "links": 8,
+          "tables": 0,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 383.3,
+          "median_ms": 274.16,
+          "textCharacters": 7725,
+          "paragraphs": 24,
+          "headings": 10,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 30,
+          "uniqueImages": 27,
+          "links": 8,
+          "tables": 0,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent."
+          ]
+        }
+      }
+    },
+    {
+      "name": "python",
+      "url": "https://docs.python.org/3/tutorial/datastructures.html",
+      "file": "python.html",
+      "elapsed_ms": 5350,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://docs.python.org/3/tutorial/datastructures.html",
+      "content_type": "text/html",
+      "bytes": 101544,
+      "sha256": "53d8207469b77ea4525ddbafb5ea3bf361989d3e79388fde1ce182692a1be9bc",
+      "error": "",
+      "reference": {
+        "selector": "[role=\"main\"]",
+        "paragraphs": 79,
+        "headings": 12,
+        "tableCells": 0,
+        "codeBlocks": 35
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 189.39,
+          "median_ms": 161.89,
+          "textCharacters": 22115,
+          "paragraphs": 78,
+          "headings": 12,
+          "tableCells": 0,
+          "codeBlocks": 35,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 54,
+          "tables": 0,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 649.17,
+          "median_ms": 616.88,
+          "textCharacters": 22262,
+          "paragraphs": 79,
+          "headings": 12,
+          "tableCells": 0,
+          "codeBlocks": 35,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 56,
+          "tables": 0,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent.",
+            "Article scoring omitted 1 table, code, footnote, or introductory block(s); the cleaned main boundary was retained to preserve structured content. It may include additional surrounding material."
+          ]
+        }
+      }
+    },
+    {
+      "name": "mdn",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map",
+      "file": "mdn.html",
+      "elapsed_ms": 4608,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map",
+      "content_type": "text/html",
+      "bytes": 178516,
+      "sha256": "aafcca05cbed61619b2b1242a749b13dd49a8bb8473ca96d8fa04e4b708858df",
+      "error": "",
+      "reference": {
+        "selector": "main#content",
+        "paragraphs": 34,
+        "headings": 19,
+        "tableCells": 2,
+        "codeBlocks": 18
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 127.16,
+          "median_ms": 106.06,
+          "textCharacters": 8110,
+          "paragraphs": 31,
+          "headings": 17,
+          "tableCells": 2,
+          "codeBlocks": 18,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 46,
+          "tables": 1,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 163.74,
+          "median_ms": 171.67,
+          "textCharacters": 8651,
+          "paragraphs": 34,
+          "headings": 18,
+          "tableCells": 2,
+          "codeBlocks": 18,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 53,
+          "tables": 1,
+          "noise": [
+            "Help improve MDN"
+          ],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent.",
+            "Article scoring omitted 1 table, code, footnote, or introductory block(s); the cleaned main boundary was retained to preserve structured content. It may include additional surrounding material."
+          ]
+        }
+      }
+    },
+    {
+      "name": "wikipedia",
+      "url": "https://en.wikipedia.org/wiki/Comparison_of_programming_languages",
+      "file": "wikipedia.html",
+      "elapsed_ms": 4907,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://en.wikipedia.org/wiki/Comparison_of_programming_languages",
+      "content_type": "text/html; charset=UTF-8",
+      "bytes": 624551,
+      "sha256": "7550728c7ed399696d69c4478d7a8cf628b8dbdf923f7d29c6ff6a7bba59e6a6",
+      "error": "",
+      "reference": {
+        "selector": ".mw-parser-output",
+        "paragraphs": 11,
+        "headings": 9,
+        "tableCells": 1374,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 362.6,
+          "median_ms": 334.21,
+          "textCharacters": 12077,
+          "paragraphs": 11,
+          "headings": 3,
+          "tableCells": 534,
+          "codeBlocks": 0,
+          "images": 1,
+          "uniqueImages": 1,
+          "links": 310,
+          "tables": 2,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 1706.78,
+          "median_ms": 1525.93,
+          "textCharacters": 25338,
+          "paragraphs": 11,
+          "headings": 9,
+          "tableCells": 1374,
+          "codeBlocks": 0,
+          "images": 1,
+          "uniqueImages": 1,
+          "links": 613,
+          "tables": 3,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent.",
+            "Article scoring omitted 2 table, code, footnote, or introductory block(s); the cleaned main boundary was retained to preserve structured content. It may include additional surrounding material."
+          ]
+        }
+      }
+    },
+    {
+      "name": "arxiv",
+      "url": "https://arxiv.org/html/2501.17300v2",
+      "file": "arxiv.html",
+      "elapsed_ms": 6397,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://arxiv.org/html/2501.17300v2",
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 278064,
+      "sha256": "afbef0d076d6a38ef92ec751a14e5bb0ad106386aeaddd3091325618a3215333",
+      "error": "",
+      "reference": {
+        "selector": "article.ltx_document",
+        "paragraphs": 18,
+        "headings": 8,
+        "tableCells": 41,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 138.48,
+          "median_ms": 130.65,
+          "textCharacters": 32045,
+          "paragraphs": 18,
+          "headings": 8,
+          "tableCells": 14,
+          "codeBlocks": 0,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 14,
+          "tables": 3,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 415.16,
+          "median_ms": 466.62,
+          "textCharacters": 45447,
+          "paragraphs": 18,
+          "headings": 8,
+          "tableCells": 41,
+          "codeBlocks": 0,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 14,
+          "tables": 7,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent.",
+            "Article scoring omitted 4 table, code, footnote, or introductory block(s); the cleaned main boundary was retained to preserve structured content. It may include additional surrounding material."
+          ]
+        }
+      }
+    },
+    {
+      "name": "pmc",
+      "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10947171/",
+      "file": "pmc.html",
+      "elapsed_ms": 4729,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10947171/",
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 218750,
+      "sha256": "bbe6c90187ab407d1e4038ac11b418d6979b720689b86faf6bbe0f1b11b8bab7",
+      "error": "",
+      "reference": {
+        "selector": "article",
+        "paragraphs": 57,
+        "headings": 31,
+        "tableCells": 20,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 177.7,
+          "median_ms": 159.75,
+          "textCharacters": 54455,
+          "paragraphs": 55,
+          "headings": 29,
+          "tableCells": 20,
+          "codeBlocks": 0,
+          "images": 6,
+          "uniqueImages": 6,
+          "links": 441,
+          "tables": 1,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 546.1,
+          "median_ms": 521.65,
+          "textCharacters": 54455,
+          "paragraphs": 55,
+          "headings": 29,
+          "tableCells": 20,
+          "codeBlocks": 0,
+          "images": 6,
+          "uniqueImages": 6,
+          "links": 441,
+          "tables": 1,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent."
+          ]
+        }
+      }
+    },
+    {
+      "name": "nasa",
+      "url": "https://science.nasa.gov/mission/webb/",
+      "file": "nasa.html",
+      "elapsed_ms": 4268,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://science.nasa.gov/mission/webb/",
+      "content_type": "text/html; charset=UTF-8",
+      "bytes": 440641,
+      "sha256": "d0effc7ecb79383c0d5837aa55856b22a69e0eb72b2855d6f3fb223345875d01",
+      "error": "",
+      "reference": {
+        "selector": "main",
+        "paragraphs": 55,
+        "headings": 29,
+        "tableCells": 0,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 421.2,
+          "median_ms": 248.41,
+          "textCharacters": 10205,
+          "paragraphs": 45,
+          "headings": 23,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 26,
+          "uniqueImages": 23,
+          "links": 66,
+          "tables": 0,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 340.34,
+          "median_ms": 375.2,
+          "textCharacters": 10231,
+          "paragraphs": 45,
+          "headings": 26,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 26,
+          "uniqueImages": 23,
+          "links": 66,
+          "tables": 0,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent."
+          ]
+        }
+      }
+    },
+    {
+      "name": "blog",
+      "url": "https://stephango.com/saw",
+      "file": "blog.html",
+      "elapsed_ms": 3821,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://stephango.com/saw",
+      "content_type": "text/html; charset=UTF-8",
+      "bytes": 11365,
+      "sha256": "b1137c52acf8848fdc2634cafa4759b5cf26b96fb3a5a9f883502ac784a44969",
+      "error": "",
+      "reference": {
+        "selector": "article",
+        "paragraphs": 5,
+        "headings": 0,
+        "tableCells": 0,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 20.76,
+          "median_ms": 12.96,
+          "textCharacters": 739,
+          "paragraphs": 5,
+          "headings": 0,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 0,
+          "tables": 0,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 24.13,
+          "median_ms": 25.93,
+          "textCharacters": 739,
+          "paragraphs": 5,
+          "headings": 0,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 0,
+          "uniqueImages": 0,
+          "links": 0,
+          "tables": 0,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent."
+          ]
+        }
+      }
+    },
+    {
+      "name": "rss",
+      "url": "https://www.nasa.gov/rss/dyn/breaking_news.rss",
+      "file": "rss.xml",
+      "elapsed_ms": 4539,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://www.nasa.gov/news-release/feed/",
+      "content_type": "application/rss+xml; charset=UTF-8",
+      "bytes": 245703,
+      "sha256": "13e22dc4132244e0dafaea631c67f2c0b723ba6f6a9e340dc7a8657e594d7b5d",
+      "error": "",
+      "sourceEntries": 10,
+      "entries": 10,
+      "images": 53,
+      "links": 270,
+      "cold_ms": 501.97,
+      "median_ms": 383
+    },
+    {
+      "name": "atom",
+      "url": "https://github.com/mozilla/readability/releases.atom",
+      "file": "atom.xml",
+      "elapsed_ms": 4842,
+      "curl_exit": 0,
+      "http_status": "200",
+      "final_url": "https://github.com/mozilla/readability/releases.atom",
+      "content_type": "application/atom+xml; charset=utf-8",
+      "bytes": 4600,
+      "sha256": "4d6775585e863f37f953e83ec4fcdd7bd74d7ec76a09aee8aab283f3ac5d4370",
+      "error": "",
+      "sourceEntries": 8,
+      "entries": 8,
+      "images": 0,
+      "links": 8,
+      "cold_ms": 45.22,
+      "median_ms": 43.57
+    },
+    {
+      "name": "nasa_image",
+      "url": "https://www.nasa.gov/image-article/nasas-chandra-finds-unusual-objects-in-pinwheel-galaxy/",
+      "file": "nasa_image.html",
+      "http_status": "200",
+      "final_url": "https://www.nasa.gov/image-article/nasas-chandra-finds-unusual-objects-in-pinwheel-galaxy/",
+      "content_type": "text/html; charset=UTF-8",
+      "elapsed_ms": 5942,
+      "bytes": 274073,
+      "sha256": "a63a37e46dc251df58fc9efe34f2a9f532be95853cdaf7a56e20acdaa49f9b6e",
+      "curl_exit": 0,
+      "error": "",
+      "reference": {
+        "selector": "main",
+        "paragraphs": 5,
+        "headings": 0,
+        "tableCells": 0,
+        "codeBlocks": 0
+      },
+      "scores": {
+        "readability": {
+          "cold_ms": 79.1,
+          "median_ms": 84.76,
+          "textCharacters": 618,
+          "paragraphs": 5,
+          "headings": 0,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 1,
+          "uniqueImages": 1,
+          "links": 2,
+          "tables": 0,
+          "noise": [],
+          "warnings": []
+        },
+        "fixed": {
+          "cold_ms": 89.59,
+          "median_ms": 95.92,
+          "textCharacters": 617,
+          "paragraphs": 5,
+          "headings": 0,
+          "tableCells": 0,
+          "codeBlocks": 0,
+          "images": 1,
+          "uniqueImages": 1,
+          "links": 2,
+          "tables": 0,
+          "noise": [],
+          "warnings": [
+            "Captured the available HTML without running scripts. Content requiring client-side rendering or authentication may be absent."
+          ]
+        }
+      }
+    }
+  ],
+  "versions": {
+    "readability": "0.6.0",
+    "jsdom": "30.1.1",
+    "defuddle_challenger": "0.19.4",
+    "linkedom_challenger": "0.18.12",
+    "trafilatura_challenger": "2.3.0"
+  },
+  "oldAlphaHowToGeek": {
+    "clipSha256": "725573078d1fc3419987d8a424f18684e452d34f731c63a6b25f83f6ea6a2e7b",
+    "evidenceLinks": 147,
+    "evidenceImages": 117,
+    "htmlImages": 0,
+    "imagePlaceholders": 30
+  },
+  "howToGeekChallengers": {
+    "defuddle_linkedom": {
+      "paragraphs": 24,
+      "headings": 10,
+      "images": 43,
+      "distinctImagePathnames": 12,
+      "cold_ms": 295.47
+    },
+    "trafilatura": {
+      "paragraphs": 24,
+      "headings": 10,
+      "images": 4,
+      "distinctImagePathnames": 2,
+      "cold_ms": 39.95
+    }
+  }
+}

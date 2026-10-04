@@ -39,6 +39,8 @@ pub mod bibliography;
 pub mod citations;
 pub mod corpus;
 pub mod eval;
+#[cfg(feature = "grobid")]
+pub mod grobid;
 pub mod latex_refs;
 pub mod ledger;
 pub mod metadata;

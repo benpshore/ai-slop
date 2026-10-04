@@ -1,0 +1,1 @@
+ALTER TABLE `documents` ADD `result_key` text;

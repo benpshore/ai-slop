@@ -27,6 +27,8 @@ use tpe::pipeline::{self, PipelineError, Progress};
 use tpe::schema::{ExtractionResult, Job, Metadata};
 
 mod cli_worker;
+#[cfg(feature = "grobid")]
+mod grobid_cli;
 mod worker_allocator;
 mod worker_limits;
 
@@ -46,6 +48,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Send one PDF to the explicitly configured GROBID server; return TEI evidence.
+    #[cfg(feature = "grobid")]
+    Grobid(grobid_cli::Args),
     /// Extract text, metadata and citations from PDF files into a ledger.
     Extract(ExtractArgs),
     #[command(hide = true)]
@@ -118,7 +123,7 @@ struct ExtractArgs {
     /// Path of the `SQLite` ledger; created when missing.
     #[arg(long, value_name = "FILE")]
     db: PathBuf,
-    /// Native extraction backend: lopdf, pdfium, or auto without OCR.
+    /// Extraction backend: lopdf, pdfium, pdf-oxide, liteparse-layout, mupdf, poppler, or auto without OCR.
     #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Directory that receives `<hash>.json` and `<hash>.txt` per document.
@@ -136,7 +141,7 @@ struct ExtractArgs {
     /// Number of parallel extraction processes (1..4); publication is serialized.
     #[arg(long, short, default_value_t = 1, value_name = "N")]
     jobs: usize,
-    /// Reject inputs larger than this many bytes (default 64 MiB).
+    /// Optional input size limit in bytes; omitted means no file-size cap.
     #[arg(long, value_name = "N")]
     max_bytes: Option<u64>,
     /// Total document deadline including extraction, queueing and publication.
@@ -145,9 +150,9 @@ struct ExtractArgs {
     /// Hard worker virtual-address-space growth above startup mappings, in MiB.
     #[arg(long, default_value_t = 1024)]
     max_memory_growth_mib: u64,
-    /// Maximum captured bytes per extraction/publication worker.
-    #[arg(long, default_value_t = 64 * 1024 * 1024)]
-    max_output_bytes: u64,
+    /// Optional captured-output limit in bytes; omitted means no output-size cap.
+    #[arg(long, value_name = "N")]
+    max_output_bytes: Option<u64>,
     /// Maximum selected input files.
     #[arg(long, default_value_t = 256)]
     max_files: usize,
@@ -275,6 +280,8 @@ struct EvalArgs {
 fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(feature = "grobid")]
+        Cmd::Grobid(args) => grobid_cli::run(&args),
         Cmd::Extract(args) => cli_worker::run(&args),
         Cmd::NativeWorker {
             request,
@@ -771,6 +778,19 @@ fn run_backends() -> anyhow::Result<()> {
             println!("{name}\tnot compiled\trebuild with --features {feature}");
         }
     }
+    println!(
+        "lopdf-cff-recovery\t{}\t{}",
+        if cfg!(feature = "pdf-extract") {
+            "enabled helper"
+        } else {
+            "not compiled"
+        },
+        if cfg!(feature = "pdf-extract") {
+            backend::lopdf_backend::CFF_RECOVERY
+        } else {
+            "rebuild with --features pdf-extract (lopdf font helper)"
+        }
+    );
     Ok(())
 }
 

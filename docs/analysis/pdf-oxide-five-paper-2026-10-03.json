@@ -1,0 +1,392 @@
+{
+  "schema": 1,
+  "base_commit": "88bd89e76ff9a0079be995aeeb0c48a7b8e2c6ea",
+  "adapter_source_sha256": "0db4daa414bb5636c34084e9f73fde0c3a0f0d6fbed8a60587d6fee89476db82",
+  "cargo_lock_sha256": "0244bf08409f455e16bcae0d197b7034f6c22146dfd0ab94394e4bc4d6b2442d",
+  "dependency_pins": [
+    {
+      "name": "office_oxide",
+      "version": "0.1.9",
+      "checksum": "e07e156a6bc62caaa66fc698daad7405dd62e86f5292fd22898c1a55f154748d"
+    },
+    {
+      "name": "pdf_oxide",
+      "version": "0.3.78",
+      "checksum": "95b1ecc1a60a314fbd1aea5fe8f700ec32af1efa70fef5c6879162444da3437d"
+    }
+  ],
+  "build": {
+    "profile": "dev unoptimized",
+    "debug_info": false,
+    "incremental": false,
+    "features": [
+      "pdf-oxide"
+    ],
+    "host": "linux x86_64",
+    "timing_use": "Diagnostic measurements only; no release-performance claim."
+  },
+  "inputs": [
+    {
+      "id": "arxiv:2501.17300",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2501.17300v3",
+      "source_url": "https://arxiv.org/e-print/2501.17300v3",
+      "pdf_sha256": "072315dcea8a4fa1137abb900df28b7d0c230c04e68a6fdfc0b0b276e329f89b",
+      "source_sha256": "06cf2ce056c34e5e5be0011fe152d6892b00e83923a8130e35d720b0052e795b",
+      "categories": [
+        "physics.soc-ph",
+        "cs.SI",
+        "stat.AP"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2503.04404",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2503.04404v3",
+      "source_url": "https://arxiv.org/e-print/2503.04404v3",
+      "pdf_sha256": "7d2cc1894016503bf1ec14f73dceda290cfdfb7dc5ade345dcdd4a4d9b440b22",
+      "source_sha256": "9241938ce88cc5855d7f208e4b927e5f62c96582d9fcfac6827eb080dc1da55a",
+      "categories": [
+        "cs.LG",
+        "cs.CR",
+        "cs.NI"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2506.23487",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2506.23487v2",
+      "source_url": "https://arxiv.org/e-print/2506.23487v2",
+      "pdf_sha256": "3b82421639a46210f245e91d203e3615d38ac68da4e7856ed24c75327c8fe971",
+      "source_sha256": "e4272bfad77ffa085429a6b3580748fe44a6b686942e51550cbd75ea9aa604fd",
+      "categories": [
+        "stat.ML",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2601.09974",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2601.09974v3",
+      "source_url": "https://arxiv.org/e-print/2601.09974v3",
+      "pdf_sha256": "e025680ca33e5ef9f7d45c9b02ee3b781dfa84e7d5ca13b23ba2bf75836650f7",
+      "source_sha256": "6be8581a785d70c389cb42d03732716fae3bbf5118c2fc99475d2e3198c3ff74",
+      "categories": [
+        "cs.AI",
+        "cs.CL"
+      ],
+      "split": "dev",
+      "notes": null
+    },
+    {
+      "id": "arxiv:2603.05575",
+      "kind": "arxiv",
+      "license": "http://creativecommons.org/licenses/by/4.0/",
+      "pdf_url": "https://arxiv.org/pdf/2603.05575v2",
+      "source_url": "https://arxiv.org/e-print/2603.05575v2",
+      "pdf_sha256": "31b7f00ed2c8fb5962dfc99ef8937d6e5e248d19b80717b437da52f7874e62f5",
+      "source_sha256": "ebd63dedb2736f361f2c0f63e34a1eb53b6d758a104c76902c15eff5f966c3aa",
+      "categories": [
+        "stat.ML",
+        "cs.LG"
+      ],
+      "split": "dev",
+      "notes": null
+    }
+  ],
+  "reports": {
+    "lopdf": {
+      "generated_unix": 1791073038,
+      "summary": {
+        "papers": 5,
+        "failed": 0,
+        "ref_count_exact_rate": 1.0,
+        "ref_recall": 1.0,
+        "ref_precision": 1.0,
+        "doi_accuracy": 0.4861111,
+        "doi_accuracy_printed": 1.0,
+        "year_accuracy": 1.0,
+        "title_accuracy": 0.99033815,
+        "title_not_applicable": 0,
+        "marker_resolution_rate": 1.0,
+        "marker_recall": 0.9702703,
+        "marker_precision": 1.0,
+        "marker_key_recall": 0.98550725,
+        "marker_command_ratio": 0.97923875,
+        "mean_body_alignment": 0.9519852,
+        "mean_body_alignment_raw": 0.6568879,
+        "body_word_recall": 0.96978956,
+        "body_word_precision": 0.9310594,
+        "p50_ms_per_chunk": 306.9946596666667,
+        "p95_ms_per_chunk": 732.2116035,
+        "target_ms_per_chunk": 30.0,
+        "mean_acquire_ms": 0.7065864000000001,
+        "mean_parse_ms": 673.2948512,
+        "mean_order_ms": 291.5347498,
+        "mean_metadata_ms": 1.3298234,
+        "mean_citations_ms": 138.0948292,
+        "mean_write_ms": 0.0,
+        "paper_title_accuracy": 0.8,
+        "paper_author_recall": 1.0,
+        "paper_author_precision": 1.0,
+        "paper_doi_accuracy": 0.0
+      },
+      "papers": [
+        {
+          "id": "arxiv:2501.17300",
+          "status": "partial",
+          "pages": 32,
+          "truth_refs": 54,
+          "extracted_refs": 54,
+          "matched_refs": 54,
+          "doi_truth": 36,
+          "doi_correct": 35,
+          "doi_printed": 35,
+          "title_truth": 54,
+          "title_correct": 54,
+          "year_truth": 54,
+          "year_correct": 54,
+          "body_alignment": 0.94216466,
+          "body_alignment_raw": 0.7183443,
+          "paper_title_correct": true
+        },
+        {
+          "id": "arxiv:2503.04404",
+          "status": "partial",
+          "pages": 24,
+          "truth_refs": 56,
+          "extracted_refs": 56,
+          "matched_refs": 56,
+          "doi_truth": 32,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 56,
+          "title_correct": 56,
+          "year_truth": 56,
+          "year_correct": 56,
+          "body_alignment": 0.9825337,
+          "body_alignment_raw": 0.77038467,
+          "paper_title_correct": true
+        },
+        {
+          "id": "arxiv:2506.23487",
+          "status": "partial",
+          "pages": 57,
+          "truth_refs": 28,
+          "extracted_refs": 28,
+          "matched_refs": 28,
+          "doi_truth": 4,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 28,
+          "title_correct": 28,
+          "year_truth": 28,
+          "year_correct": 28,
+          "body_alignment": 0.9345644,
+          "body_alignment_raw": 0.5546409,
+          "paper_title_correct": false
+        },
+        {
+          "id": "arxiv:2601.09974",
+          "status": "partial",
+          "pages": 30,
+          "truth_refs": 35,
+          "extracted_refs": 35,
+          "matched_refs": 35,
+          "doi_truth": 0,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 35,
+          "title_correct": 33,
+          "year_truth": 35,
+          "year_correct": 35,
+          "body_alignment": 0.9539632,
+          "body_alignment_raw": 0.6293324,
+          "paper_title_correct": true
+        },
+        {
+          "id": "arxiv:2603.05575",
+          "status": "partial",
+          "pages": 123,
+          "truth_refs": 34,
+          "extracted_refs": 34,
+          "matched_refs": 34,
+          "doi_truth": 0,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 34,
+          "title_correct": 34,
+          "year_truth": 34,
+          "year_correct": 34,
+          "body_alignment": 0.94669986,
+          "body_alignment_raw": 0.61173713,
+          "paper_title_correct": true
+        }
+      ]
+    },
+    "pdf-oxide": {
+      "generated_unix": 1791072996,
+      "summary": {
+        "papers": 5,
+        "failed": 0,
+        "ref_count_exact_rate": 1.0,
+        "ref_recall": 1.0,
+        "ref_precision": 1.0,
+        "doi_accuracy": 0.4861111,
+        "doi_accuracy_printed": 1.0,
+        "year_accuracy": 1.0,
+        "title_accuracy": 0.9951691,
+        "title_not_applicable": 0,
+        "marker_resolution_rate": 1.0,
+        "marker_recall": 0.96486485,
+        "marker_precision": 1.0,
+        "marker_key_recall": 0.98550725,
+        "marker_command_ratio": 0.97231835,
+        "mean_body_alignment": 0.8942176,
+        "mean_body_alignment_raw": 0.6421761,
+        "body_word_recall": 0.9686284,
+        "body_word_precision": 0.83069533,
+        "p50_ms_per_chunk": 457.32627549999995,
+        "p95_ms_per_chunk": 1349.2901339999999,
+        "target_ms_per_chunk": 30.0,
+        "mean_acquire_ms": 0.8127061999999998,
+        "mean_parse_ms": 1015.5328942000002,
+        "mean_order_ms": 494.98140140000004,
+        "mean_metadata_ms": 2.2695712,
+        "mean_citations_ms": 147.6385644,
+        "mean_write_ms": 0.0,
+        "paper_title_accuracy": 0.6,
+        "paper_author_recall": 0.53333336,
+        "paper_author_precision": 1.0,
+        "paper_doi_accuracy": 0.0
+      },
+      "papers": [
+        {
+          "id": "arxiv:2501.17300",
+          "status": "partial",
+          "pages": 32,
+          "truth_refs": 54,
+          "extracted_refs": 54,
+          "matched_refs": 54,
+          "doi_truth": 36,
+          "doi_correct": 35,
+          "doi_printed": 35,
+          "title_truth": 54,
+          "title_correct": 54,
+          "year_truth": 54,
+          "year_correct": 54,
+          "body_alignment": 0.8912964,
+          "body_alignment_raw": 0.70384324,
+          "paper_title_correct": true
+        },
+        {
+          "id": "arxiv:2503.04404",
+          "status": "partial",
+          "pages": 24,
+          "truth_refs": 56,
+          "extracted_refs": 56,
+          "matched_refs": 56,
+          "doi_truth": 32,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 56,
+          "title_correct": 56,
+          "year_truth": 56,
+          "year_correct": 56,
+          "body_alignment": 0.9440589,
+          "body_alignment_raw": 0.74019873,
+          "paper_title_correct": true
+        },
+        {
+          "id": "arxiv:2506.23487",
+          "status": "partial",
+          "pages": 57,
+          "truth_refs": 28,
+          "extracted_refs": 28,
+          "matched_refs": 28,
+          "doi_truth": 4,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 28,
+          "title_correct": 28,
+          "year_truth": 28,
+          "year_correct": 28,
+          "body_alignment": 0.9108233,
+          "body_alignment_raw": 0.5337165,
+          "paper_title_correct": false
+        },
+        {
+          "id": "arxiv:2601.09974",
+          "status": "partial",
+          "pages": 30,
+          "truth_refs": 35,
+          "extracted_refs": 35,
+          "matched_refs": 35,
+          "doi_truth": 0,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 35,
+          "title_correct": 34,
+          "year_truth": 35,
+          "year_correct": 35,
+          "body_alignment": 0.79508454,
+          "body_alignment_raw": 0.6355761,
+          "paper_title_correct": true
+        },
+        {
+          "id": "arxiv:2603.05575",
+          "status": "partial",
+          "pages": 123,
+          "truth_refs": 34,
+          "extracted_refs": 34,
+          "matched_refs": 34,
+          "doi_truth": 0,
+          "doi_correct": 0,
+          "doi_printed": 0,
+          "title_truth": 34,
+          "title_correct": 34,
+          "year_truth": 34,
+          "year_correct": 34,
+          "body_alignment": 0.92982507,
+          "body_alignment_raw": 0.597546,
+          "paper_title_correct": false
+        }
+      ]
+    }
+  },
+  "synthetic": {
+    "ascii_actualtext": {
+      "painted": "X",
+      "actualtext": "Recovered text",
+      "lopdf": "X",
+      "pdf-oxide": "Recovered text"
+    },
+    "unicode_actualtext": {
+      "expected": "α",
+      "actual": "Î±",
+      "status": "partial"
+    },
+    "uri_link": {
+      "displayed_text": "X",
+      "annotation_contents": "Different label, not a DOI",
+      "target": "https://doi.org/10.1234/actual-target",
+      "preserved_target": true,
+      "rectangle": [
+        72,
+        695,
+        110,
+        713
+      ]
+    }
+  }
+}

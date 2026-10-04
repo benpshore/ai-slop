@@ -6,16 +6,25 @@ on:
     paths:
       - src/backend/pdfium_backend.rs
       - src/backend/pdfium_backend/**
+      - src/backend/pdf_oxide_backend.rs
+      - src/backend/liteparse_layout_backend.rs
+      - src/backend/native_provider.rs
       - src/bibliography.rs
       - src/pipeline.rs
       - src/router.rs
       - src/schema.rs
       - tests/pdfium_unicode.rs
       - tests/resource_outcomes.rs
+      - tests/pdf_oxide_backend.rs
+      - tests/liteparse_layout.rs
+      - tests/pdf_extract_cff.rs
+      - tests/native_provider.rs
       - tests/fixtures/pdfium-unicode/**
       - Cargo.toml
       - Cargo.lock
       - native/manifest.json
+      - native/fetch-liteparse.sh
+      - .cargo/config.toml
       - .github/workflows/pdfium-probe.yml
 
 permissions:
@@ -41,13 +50,15 @@ jobs:
             platform: mac-arm64
             extension: dylib
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PDFIUM_PLATFORM: ${{ matrix.platform }}
       PDFIUM_EXTENSION: ${{ matrix.extension }}
       PDFIUM_DYNAMIC_LIB_PATH: ${{ github.workspace }}/.pdfium/lib
       TPE_PDFIUM_PROBE_EVIDENCE_DIR: ${{ github.workspace }}/out/pdfium-probe
       CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+      TPE_FEATURES: pdfium,pdf-oxide,pdf-extract,liteparse-layout,mupdf,poppler,docling-text,grobid
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,8 +80,12 @@ jobs:
           printf '%s  .pdfium/lib/libpdfium.%s\n' "$library_sha" "$PDFIUM_EXTENSION" | shasum -a 256 --check
           git rev-parse HEAD > out/pdfium-probe/code-sha.txt
           rustc --version --verbose > out/pdfium-probe/toolchain.txt
+      - name: Provision matching headers for the pure LiteParse layout dependency
+        run: sh native/fetch-liteparse.sh --archive pdfium.tgz
       - run: cargo fmt --all --check
-      - run: cargo clippy --locked --all-targets --features pdfium -- -D warnings
+      - run: cargo clippy --locked --all-targets --features "$TPE_FEATURES" -- -D warnings
+      - run: cargo test --locked --features "$TPE_FEATURES" --lib backend:: -- --nocapture
+      - run: cargo test --locked --features "$TPE_FEATURES" --test pdf_oxide_backend --test pdf_extract_cff --test liteparse_layout --test native_provider -- --nocapture
       - run: cargo test --locked --features pdfium --lib backend::pdfium_backend::unicode_mapping::tests -- --nocapture
       - run: cargo test --locked --features pdfium --lib backend::pdfium_backend::tests -- --nocapture
       - run: cargo test --locked --features pdfium --lib bibliography::tests -- --nocapture

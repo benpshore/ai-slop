@@ -1,5 +1,7 @@
 //! Backend built on `docling-pdf` / `docling-core` 1.69.2 (the `docling.rs`
-//! port of docling). Two modes share one implementation:
+//! port of docling). This is the legacy model-backed/library adapter. The CLI
+//! `docling-text` backend now uses `docling_text_backend`, a separate retained
+//! page parser without ML dependencies. Two library modes remain here:
 //!
 //! * **text layer** (`docling-text`): `docling_pdf::convert_text_layer_pages`,
 //!   a pure-Rust content-stream parser plus docling's line/paragraph
@@ -69,7 +71,7 @@ const FORMULA_PLACEHOLDER: &str = "<!-- formula-not-decoded -->";
 /// Placeholder docling writes into a table cell that holds a picture.
 const IMAGE_PLACEHOLDER: &str = "<!-- image -->";
 /// Warning for a page docling produced nothing for.
-const NO_ITEMS_WARNING: &str = "docling: no items on page";
+const NO_ITEMS_WARNING: &str = "extraction_incomplete: docling produced no items on page";
 /// Logical document name handed to docling (it only labels the output).
 const DOC_NAME: &str = "doc";
 /// Bound on the `/Parent` walk used for inherited page attributes.
@@ -164,6 +166,8 @@ impl Extractor for DoclingBackend {
         config.insert("tables".to_string(), self.tables.to_string());
         config.insert("force_ocr".to_string(), self.force_ocr.to_string());
         config.insert("provider".to_string(), "cpu".to_string());
+        config.insert("ocr_engine".to_string(), "ppocr".to_string());
+        config.insert("evidence_policy".to_string(), "2".to_string());
         if let Some((first, last)) = self.window {
             config.insert("window".to_string(), format!("{first}-{last}"));
         }
@@ -202,6 +206,14 @@ impl Extractor for DoclingBackend {
             let count = u32::try_from(doc.get_pages().len()).unwrap_or(u32::MAX);
             (count, page_geometry(&doc), info_entries(&doc))
         };
+        if page_count == 0 {
+            return Err(BackendError::Malformed(
+                "docling document has no pages".to_string(),
+            ));
+        }
+        let native_evidence = super::lopdf_backend::LopdfBackend::default()
+            .open(bytes, password)
+            .map_err(|error| error.to_string());
         Ok(Box::new(DoclingSession {
             bytes: bytes.to_vec(),
             password: password.map(String::from),
@@ -210,6 +222,7 @@ impl Extractor for DoclingBackend {
             geometry,
             info,
             converted: None,
+            native_evidence,
             figure_bytes: HashMap::new(),
         }))
     }
@@ -277,6 +290,7 @@ fn convert_full(
         index
     } else {
         let pipeline = Pipeline::new()?
+            .ocr_engine(Some(docling_pdf::OcrEngine::PpOcr))
             .no_ocr(!key.ocr)
             .no_table_former(!key.tables)
             .force_full_page_ocr(key.force_ocr);
@@ -329,6 +343,7 @@ struct PageGeometry {
     width: f32,
     height: f32,
     rotation: i32,
+    links_match_frame: bool,
 }
 
 /// One page of the cached conversion.
@@ -355,6 +370,7 @@ struct DoclingSession {
     /// `None` until the first `page_text`; then the conversion or its failure message.
     converted: Option<Result<Converted, String>>,
     figure_bytes: HashMap<(u32, u32), Vec<u8>>,
+    native_evidence: Result<Box<dyn DocumentSession>, String>,
 }
 
 impl DoclingSession {
@@ -431,9 +447,38 @@ impl DocumentSession for DoclingSession {
             text
         };
         if width <= 0.0 || height <= 0.0 {
-            text.warnings
-                .push("docling: page size unknown (no page marker, no MediaBox)".to_string());
+            text.warnings.push(
+                "extraction_incomplete: docling page size unknown (no page marker, no MediaBox)"
+                    .to_string(),
+            );
         }
+        match &mut self.native_evidence {
+            Ok(session) => match session.page_text(page) {
+                Ok(native) => {
+                    text.links = native.links;
+                    if !fallback.links_match_frame
+                        || (width - fallback.width).abs() > 0.01
+                        || (height - fallback.height).abs() > 0.01
+                    {
+                        for link in &mut text.links {
+                            link.bbox = None;
+                        }
+                        text.warnings.push("extraction_incomplete: docling annotation geometry frame is unverified; URI targets retained without rectangles".to_string());
+                    }
+                    text.warnings.extend(native.warnings);
+                }
+                Err(error) => text.warnings.push(format!(
+                    "extraction_incomplete: native annotation evidence unavailable: {error}"
+                )),
+            },
+            Err(error) => text.warnings.push(format!(
+                "extraction_incomplete: native annotation evidence unavailable: {error}"
+            )),
+        }
+        text.warnings.push(
+            "extraction_incomplete: docling reconstruction coverage is unverified".to_string(),
+        );
+        crate::router::mark_incomplete(&mut text);
         Ok(text)
     }
 
@@ -587,7 +632,7 @@ impl Walker {
         self.current = Some(1);
         let page = self.pages.entry(1).or_default();
         page.warnings
-            .push("docling: items before the first page marker attributed to page 1".to_string());
+            .push("extraction_incomplete: docling items before the first page marker attributed to page 1".to_string());
         1
     }
 
@@ -812,7 +857,7 @@ impl Walker {
             if build.formulas_undecoded > 0 {
                 let count = build.formulas_undecoded;
                 build.warnings.push(format!(
-                    "docling: {count} formula region(s) not decoded; no text emitted"
+                    "extraction_incomplete: docling {count} formula region(s) not decoded; no text emitted"
                 ));
             }
             if build.spans.is_empty() && build.figures.is_empty() {
@@ -951,6 +996,10 @@ fn page_geometry(doc: &Document) -> Vec<PageGeometry> {
             width,
             height,
             rotation: page_rotation(doc, page_dict),
+            links_match_frame: page_rotation(doc, page_dict) == 0
+                && super::docling_text_backend::page_box(doc, *page_id).is_some_and(|bounds| {
+                    bounds.x0.abs() <= f32::EPSILON && bounds.y0.abs() <= f32::EPSILON
+                }),
         });
     }
     geometry
@@ -1051,6 +1100,8 @@ mod tests {
         config.insert("full".to_string(), "false".to_string());
         config.insert("ocr".to_string(), "false".to_string());
         config.insert("provider".to_string(), "cpu".to_string());
+        config.insert("ocr_engine".to_string(), "ppocr".to_string());
+        config.insert("evidence_policy".to_string(), "2".to_string());
         config.insert("tables".to_string(), "false".to_string());
         assert_eq!(text.config_digest, config_digest(&config));
 

@@ -1,0 +1,45 @@
+name: Web alpha source
+
+on:
+  pull_request:
+    paths: [web/**, scripts/site_source.py, scripts/test-site-*.mjs, scripts/test-web-*.cjs, .github/workflows/web.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - run: npm install --global pnpm@11.25.0
+      - run: pnpm install --frozen-lockfile
+      - name: Create local-only storage binding configuration
+        run: |
+          node --input-type=module -e 'import fs from "node:fs"; fs.mkdirSync(".openai", {recursive:true}); fs.writeFileSync(".openai/hosting.json", JSON.stringify({d1:"DB",r2:"BUCKET"}));'
+      - run: node scripts/copy-pdf-wasm.mjs
+      - run: node scripts/copy-ocr-assets.mjs
+      - run: pnpm exec tsc --noEmit
+      - run: node scripts/test-clip.mjs
+      - run: node scripts/test-web-extraction-review.mjs
+      - run: node scripts/test-import-flow.mjs
+      - run: node scripts/test-office.mjs
+      - run: node scripts/test-node-imports.mjs
+      - run: node ../scripts/test-web-workspace.cjs
+      - run: node --experimental-strip-types ../scripts/test-site-mcp.mjs
+      - run: node --experimental-strip-types ../scripts/test-site-uploads-workers.mjs
+      - run: pnpm run build

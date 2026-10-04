@@ -1,0 +1,8 @@
+# LiteParse's transitive PDFium build script auto-downloads an unchecked native
+# artifact unless BOTH paths are set. Keep it offline/fail-closed: provision the
+# hash-verified library and headers first. Explicit caller paths take precedence.
+# pdfium-render/docling use PDFIUM_DYNAMIC_LIB_PATH, so these build-only defaults
+# do not change the engine's explicit runtime loader policy.
+[env]
+PDFIUM_LIB_PATH = { value = ".pdfium/lib", relative = true }
+PDFIUM_INCLUDE_PATH = { value = ".pdfium/include", relative = true }

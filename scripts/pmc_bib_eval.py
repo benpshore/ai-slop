@@ -1004,8 +1004,8 @@ def render_report(summary: dict, papers: list[dict]) -> str:
     lines.append("")
     lines.append(
         "Backward `ms` is the CLI's `elapsed_ms` (acquire, hash, backward scan, parse); forward "
-        "`ms` is `timings.parse_ms + order_ms + citations_ms`. Both ran with four parallel "
-        "workers on a shared hosted runner, so they are diagnostics, not service-time measurements."
+        "`ms` is `timings.parse_ms + order_ms + citations_ms`. Worker count and host depend "
+        "on the invoking harness; these are diagnostics, not isolated service-time measurements."
     )
     lines.append("")
     lines.append("## Entry-count difference (extracted minus truth)")

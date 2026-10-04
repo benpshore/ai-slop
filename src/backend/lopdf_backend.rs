@@ -73,6 +73,8 @@ use unicode_normalization::UnicodeNormalization;
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
 use crate::schema::{BBox, BackendIdentity, Link, PageText, Span, config_digest};
 
+#[cfg(feature = "pdf-extract")]
+mod cff_recovery;
 mod content;
 mod graphics;
 mod widths;
@@ -210,8 +212,16 @@ const MAX_FORM_FILTERS: usize = 8;
 /// 4 = prefer bounded `ToUnicode` maps over simple-font rendering encodings and
 /// preserve two-byte `Identity-H`/`Identity-V` code boundaries in sparse maps;
 /// 5 = retain usable rendering encodings when `ToUnicode` is malformed, with
-/// explicit Partial evidence instead of replacing readable text with Latin-1.
-const ENCODING_POLICY: &str = "5";
+/// explicit Partial evidence instead of replacing readable text with Latin-1;
+/// 6 = optional bounded CFF recovery; unavailable/failed recovery stays uncertain.
+const ENCODING_POLICY: &str = "6";
+
+/// Embedded CFF recovery capability, included in the backend cache identity.
+pub const CFF_RECOVERY: &str = if cfg!(feature = "pdf-extract") {
+    "pdf-extract-0.12.1/cff-parser-0.2.0/probe-1"
+} else {
+    "disabled"
+};
 
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,6 +250,7 @@ impl Extractor for LopdfBackend {
         config.insert("ligatures".to_string(), LIGATURE_POLICY.to_string());
         config.insert("content".to_string(), CONTENT_POLICY.to_string());
         config.insert("encodings".to_string(), ENCODING_POLICY.to_string());
+        config.insert("cff_recovery".to_string(), CFF_RECOVERY.to_string());
         BackendIdentity {
             name: "lopdf".to_string(),
             version: LOPDF_VERSION.to_string(),
@@ -1282,6 +1293,29 @@ fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool, bool) {
     } else {
         false
     };
+    if let Some(stream) = font_resources::embedded_cff(doc, dict) {
+        #[cfg(feature = "pdf-extract")]
+        return match stream.get_plain_content_with_limit(font_resources::MAX_CFF_STREAM) {
+            Ok(bytes) => match cff_recovery::recover(&bytes) {
+                Ok(entries) => (Decode::Table(ByteTable { entries }), true, false),
+                Err(reason) => (Decode::Latin1(reason), false, false),
+            },
+            Err(_) => (
+                Decode::Latin1("unreadable embedded CFF program"),
+                false,
+                false,
+            ),
+        };
+        #[cfg(not(feature = "pdf-extract"))]
+        {
+            let _ = stream;
+            return (
+                Decode::Latin1("embedded CFF recovery requires pdf-extract feature"),
+                false,
+                false,
+            );
+        }
+    }
     if let Some(table) = own_table(doc, dict) {
         return (Decode::Table(table), true, unverified_unicode_map);
     }
@@ -4235,8 +4269,12 @@ mod tests {
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
         config.insert("content".to_string(), "9".to_string());
-        config.insert("encodings".to_string(), "5".to_string());
+        config.insert("encodings".to_string(), "6".to_string());
+        config.insert("cff_recovery".to_string(), CFF_RECOVERY.to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
+        config.insert("cff_recovery".to_string(), "another capability".to_string());
+        assert_ne!(identity.config_digest, config_digest(&config));
+        config.insert("cff_recovery".to_string(), CFF_RECOVERY.to_string());
         // Nor the digest from before figures.
         config.insert("content".to_string(), "2".to_string());
         assert_ne!(identity.config_digest, config_digest(&config));

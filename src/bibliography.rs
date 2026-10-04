@@ -16,7 +16,7 @@ use crate::reading_order;
 use crate::regions;
 use crate::router::{self, Assessment, Route};
 use crate::schema::BackendIdentity;
-use crate::schema::{PageText, ReferenceEntry, Status};
+use crate::schema::{Link, PageText, ReferenceEntry, Status};
 use crate::text_cleanup;
 
 /// A single end-list search. `found` means the list boundary passed the
@@ -204,7 +204,9 @@ fn scan_window(
         let mut page = session.page_text(number)?;
         // Assess the backend evidence before cleanup can remove unreadable text.
         router::mark_incomplete(&mut page);
-        if extractor.provides_reading_order() {
+        if extractor.provides_line_layout() {
+            // Preserve explicitly provided layout; spans remain raw evidence.
+        } else if extractor.provides_reading_order() {
             reading_order::lines_in_backend_order(&mut page);
         } else {
             reading_order::order_page(&mut page);
@@ -240,13 +242,13 @@ fn scan_window(
                 entry.index = u32::try_from(i + 1).unwrap_or(u32::MAX);
                 citations::parse_entry(entry);
             }
-            // Link annotations come from the PDF structure, which only `lopdf`
-            // reads; a scan by another backend gets them from a `lopdf` pass over
-            // the same pages.
-            if checked.iter().any(|page| !page.links.is_empty()) {
+            // Native links can be incomplete on individual pages. Merge the
+            // selected backend's evidence with PDF annotations page by page;
+            // lopdf already supplies that exact native annotation pass.
+            if extractor.identity().name == "lopdf" {
                 crate::resolve::attach_links(&mut references, &checked);
             } else {
-                let link_pages = link_pages_via_lopdf(bytes, password, &checked);
+                let link_pages = link_pages_via_lopdf(bytes, password, &checked, &mut warnings);
                 crate::resolve::attach_links(&mut references, &link_pages);
             }
             for entry in &references {
@@ -288,23 +290,85 @@ fn scan_window(
     })
 }
 
-/// For each page of `pages`, a `PageText` holding only that page's size and
-/// link annotations as `lopdf` reads them; empty when the file does not
-/// open with `lopdf`.
-fn link_pages_via_lopdf(bytes: &[u8], password: Option<&str>, pages: &[PageText]) -> Vec<PageText> {
-    let Some(lopdf) = router::extractor_for(Route::Lopdf) else {
-        return Vec::new();
-    };
-    let Ok(mut session) = lopdf.open(bytes, password) else {
-        return Vec::new();
-    };
-    pages
+/// Preserve backend links and union native annotation evidence for each page.
+/// Every box uses the schema's unrotated PDF user-space contract. A differing
+/// page frame cannot establish correspondence and is reported, never guessed.
+fn link_pages_via_lopdf(
+    bytes: &[u8],
+    password: Option<&str>,
+    pages: &[PageText],
+    warnings: &mut Vec<String>,
+) -> Vec<PageText> {
+    let mut merged: Vec<PageText> = pages
         .iter()
-        .filter_map(|page| {
-            let read = session.page_text(page.page).ok()?;
-            let mut only_links = PageText::new(page.page, read.width, read.height, read.rotation);
-            only_links.links = read.links;
-            Some(only_links)
+        .map(|page| {
+            let mut links = PageText::new(page.page, page.width, page.height, page.rotation);
+            links.links = unique_links(page.links.iter().cloned());
+            links
+        })
+        .collect();
+    let Some(lopdf) = router::extractor_for(Route::Lopdf) else {
+        return merged;
+    };
+    let mut session = match lopdf.open(bytes, password) {
+        Ok(session) => session,
+        Err(error) => {
+            warnings.push(format!(
+                "link annotations: lopdf fallback unavailable: {error}"
+            ));
+            return merged;
+        }
+    };
+    for page in &mut merged {
+        let read = match session.page_text(page.page) {
+            Ok(read) => read,
+            Err(error) => {
+                warnings.push(format!(
+                    "link annotations: page {}: lopdf fallback failed: {error}",
+                    page.page
+                ));
+                continue;
+            }
+        };
+        if read.page != page.page
+            || !page.width.is_finite()
+            || !page.height.is_finite()
+            || page.width <= 0.0
+            || page.height <= 0.0
+            || read.width.to_bits() != page.width.to_bits()
+            || read.height.to_bits() != page.height.to_bits()
+            || read.rotation.rem_euclid(360) != page.rotation.rem_euclid(360)
+        {
+            warnings.push(format!(
+                "link annotations: page {}: lopdf fallback skipped because page geometry differs from the selected backend",
+                page.page
+            ));
+            continue;
+        }
+        // Link equality includes the complete URI and optional rectangle:
+        // identical targets at different placements remain independent evidence.
+        page.links = unique_links(
+            std::mem::take(&mut page.links)
+                .into_iter()
+                .chain(read.links),
+        );
+    }
+    merged
+}
+
+/// Stable deduplication by target and rectangle, without a quadratic scan of
+/// potentially large annotation lists. Signed zero denotes the same coordinate.
+fn unique_links(links: impl Iterator<Item = Link>) -> Vec<Link> {
+    let mut seen = std::collections::HashSet::new();
+    links
+        .filter(|link| {
+            let rectangle = link.bbox.map(|bbox| {
+                [bbox.x0, bbox.y0, bbox.x1, bbox.y1].map(|value| {
+                    let bits = value.to_bits();
+                    if bits.trailing_zeros() >= 31 { 0 } else { bits }
+                })
+            });
+            seen.insert((link.uri.clone(), rectangle))
         })
         .collect()
 }
@@ -763,6 +827,187 @@ mod tests {
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
         bytes
+    }
+
+    struct PartialLinkBackend;
+
+    struct PartialLinkSession {
+        inner: Box<dyn crate::backend::DocumentSession>,
+    }
+
+    impl crate::backend::DocumentSession for PartialLinkSession {
+        fn page_count(&self) -> u32 {
+            self.inner.page_count()
+        }
+
+        fn page_text(
+            &mut self,
+            page: u32,
+        ) -> Result<crate::schema::PageText, crate::backend::BackendError> {
+            let mut read = self.inner.page_text(page)?;
+            if page == 1 {
+                // A duplicate and a backend-only unpositioned link are real
+                // evidence, but do not establish coverage of any other page.
+                read.links.push(read.links[0].clone());
+                read.links.push(crate::schema::Link {
+                    bbox: None,
+                    uri: "https://example.test/backend-evidence".into(),
+                });
+            } else {
+                read.links.clear();
+            }
+            Ok(read)
+        }
+
+        fn info(&self) -> std::collections::BTreeMap<String, String> {
+            self.inner.info()
+        }
+    }
+
+    impl Extractor for PartialLinkBackend {
+        fn identity(&self) -> crate::schema::BackendIdentity {
+            let mut identity = LopdfBackend::default().identity();
+            identity.name = "partial-link-fixture".into();
+            identity
+        }
+
+        fn open(
+            &self,
+            bytes: &[u8],
+            password: Option<&str>,
+        ) -> Result<Box<dyn crate::backend::DocumentSession>, crate::backend::BackendError>
+        {
+            Ok(Box::new(PartialLinkSession {
+                inner: LopdfBackend::default().open(bytes, password)?,
+            }))
+        }
+    }
+
+    fn annotated_bibliography(rotated_crop: bool) -> Vec<u8> {
+        let bytes = pdf(&[
+            &["References", "[1] A. One, First cited work, 2020."],
+            &[
+                "[2] B. Two, Second cited work, 2021.",
+                "[3] C. Three, Third cited work, 2022.",
+            ],
+        ]);
+        let mut doc = Document::load_mem(&bytes).unwrap();
+        for (number, id) in doc.get_pages() {
+            let rows = if number == 1 {
+                vec![(700, "first")]
+            } else {
+                vec![(720, "shared"), (700, "shared")]
+            };
+            let mut annotations = Vec::new();
+            for (baseline, target) in rows {
+                let uri = format!("https://doi.org/10.1000/{target}");
+                let annotation = doc.add_object(dictionary! {
+                    "Type" => "Annot", "Subtype" => "Link",
+                    "Rect" => vec![92.into(), (baseline - 3).into(), 180.into(), (baseline + 3).into()],
+                    "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal(uri) },
+                });
+                annotations.push(Object::Reference(annotation));
+            }
+            let page = doc.get_object_mut(id).unwrap().as_dict_mut().unwrap();
+            page.set("Annots", annotations);
+            if rotated_crop {
+                page.set("Rotate", 90);
+                page.set(
+                    "MediaBox",
+                    vec![(-50).into(), 30.into(), 562.into(), 822.into()],
+                );
+                page.set(
+                    "CropBox",
+                    vec![(-20).into(), 60.into(), 540.into(), 800.into()],
+                );
+            }
+        }
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn annotation_fallback_merges_each_page_without_losing_distinct_placements() {
+        for rotated_crop in [false, true] {
+            let bytes = annotated_bibliography(rotated_crop);
+            let mut session = PartialLinkBackend.open(&bytes, None).unwrap();
+            let pages = vec![session.page_text(1).unwrap(), session.page_text(2).unwrap()];
+            assert!(pages[1].links.is_empty());
+            let mut warnings = Vec::new();
+            let links = super::link_pages_via_lopdf(&bytes, None, &pages, &mut warnings);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(links[0].page, 1);
+            assert_eq!(links[1].page, 2);
+            assert_eq!(links[0].links.len(), 2); // one native + backend-only, no duplicates
+            assert_eq!(links[1].links.len(), 2); // same DOI, different genuine rectangles
+            assert_eq!(links[1].links[0].uri, links[1].links[1].uri);
+            assert_ne!(links[1].links[0].bbox, links[1].links[1].bbox);
+            assert!(
+                links[0].links.iter().any(|link| link.bbox.is_none()
+                    && link.uri == "https://example.test/backend-evidence")
+            );
+
+            // A global Rotate on this horizontal-content fixture turns its
+            // lines vertical. The rotated case tests raw annotation geometry;
+            // the ordinary case below tests the complete bibliography scan.
+            if rotated_crop {
+                continue;
+            }
+            let scan = scan_backward(&PartialLinkBackend, &bytes, None).unwrap();
+            assert!(
+                scan.found,
+                "rotated_crop={rotated_crop}: {:?}",
+                scan.warnings
+            );
+            assert_eq!(scan.total_pages, 2);
+            assert_eq!(scan.pages_scanned, 2);
+            assert_eq!(
+                scan.references
+                    .iter()
+                    .map(|entry| entry.page)
+                    .collect::<Vec<_>>(),
+                [1, 2, 2]
+            );
+            assert_eq!(
+                scan.references
+                    .iter()
+                    .map(|entry| entry.doi_link.as_deref())
+                    .collect::<Vec<_>>(),
+                [
+                    Some("10.1000/first"),
+                    Some("10.1000/shared"),
+                    Some("10.1000/shared")
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn annotation_fallback_does_not_invent_a_transform_or_erase_backend_evidence() {
+        let bytes = annotated_bibliography(true);
+        let mut session = PartialLinkBackend.open(&bytes, None).unwrap();
+        let mut pages = vec![session.page_text(1).unwrap(), session.page_text(2).unwrap()];
+        pages[1].width += 1.0;
+        let mut warnings = Vec::new();
+        let links = super::link_pages_via_lopdf(&bytes, None, &pages, &mut warnings);
+        assert_eq!(links[0].links.len(), 2);
+        assert!(links[1].links.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("page 2") && warning.contains("geometry differs"))
+        );
+
+        warnings.clear();
+        let links = super::link_pages_via_lopdf(b"not a PDF", None, &pages, &mut warnings);
+        assert_eq!(links[0].links.len(), 2);
+        assert!(links[1].links.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("fallback unavailable"))
+        );
     }
 
     #[test]
