@@ -1,0 +1,121 @@
+{
+  "repository": "benpshore/pdftextract",
+  "tracking_issue": 144,
+  "workstreams": [
+    {
+      "issue": 145,
+      "key": "unsafe",
+      "title": "Maintain pinned unsafe Rust and FFI inventory for production builds",
+      "status": "In review",
+      "prs": [
+        162
+      ]
+    },
+    {
+      "issue": 146,
+      "key": "resources",
+      "title": "Complete extraction resource repairs and dense-geometry cutoffs",
+      "status": "In review",
+      "prs": [
+        119,
+        121,
+        133,
+        136,
+        138,
+        143
+      ]
+    },
+    {
+      "issue": 147,
+      "key": "accuracy",
+      "title": "Expand independent extraction validation beyond the 60-paper regression corpus",
+      "status": "In progress",
+      "prs": [
+        134,
+        135,
+        159
+      ]
+    },
+    {
+      "issue": 148,
+      "key": "resolver",
+      "title": "Revalidate Crossref and biomedical resolution with independent labeled end-to-end evidence",
+      "status": "In progress",
+      "prs": [
+        157,
+        161
+      ]
+    },
+    {
+      "issue": 149,
+      "key": "publication",
+      "title": "Preserve output umask permissions and publication rollback in headless jobs",
+      "status": "In review",
+      "prs": [
+        120
+      ]
+    },
+    {
+      "issue": 150,
+      "key": "ci",
+      "title": "Require relevant evaluator checks and retain scoped scaffold archival",
+      "status": "In review",
+      "prs": [
+        132
+      ]
+    },
+    {
+      "issue": 151,
+      "key": "gui",
+      "title": "Develop the macOS GUI separately with an honest offline engine adapter",
+      "status": "In review",
+      "prs": [
+        139
+      ]
+    },
+    {
+      "issue": 152,
+      "key": "ffi",
+      "title": "Validate supervised PDFium evidence, FFI ownership and pinned upstream source builds",
+      "status": "In review",
+      "prs": [
+        137,
+        142
+      ]
+    },
+    {
+      "issue": 153,
+      "key": "toolchain",
+      "title": "Pin Rust toolchain and locked production build/run provenance",
+      "status": "In review",
+      "prs": [
+        140
+      ]
+    },
+    {
+      "issue": 154,
+      "key": "architecture",
+      "title": "Simplify lopdf module boundaries and remove demonstrated redundant work",
+      "status": "In review",
+      "prs": [
+        141,
+        155,
+        156,
+        160
+      ]
+    },
+    {
+      "issue": 144,
+      "key": "overview",
+      "title": "Repair integration and historical reviews",
+      "status": "In progress",
+      "prs": [
+        108,
+        130,
+        131,
+        158,
+        163
+      ]
+    }
+  ]
+}
