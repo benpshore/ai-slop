@@ -32,3 +32,20 @@ export async function ownedRecord(id:string,user:string){
   const row=await storage().db.prepare('SELECT * FROM documents WHERE id = ? AND owner = ?').bind(id,user).first<Record<string,unknown>>();
   if(!row)throw new Response('Not found',{status:404});return row;
 }
+// Stream the immutable result object without materializing it in Worker memory.
+export function jsonEnvelope(record:Record<string,unknown>,body:ReadableStream<Uint8Array>|null){
+ const encoder=new TextEncoder(),reader=body?.getReader();let stage=0;
+ const stream=new ReadableStream<Uint8Array>({
+  async pull(controller){
+   if(stage===0){stage=1;controller.enqueue(encoder.encode(`{"record":${JSON.stringify(record)},"result":`));return;}
+   if(stage===1){
+    if(reader){const next=await reader.read();if(!next.done){controller.enqueue(next.value);return;}}
+    else controller.enqueue(encoder.encode('null'));
+    stage=2;
+   }
+   controller.enqueue(encoder.encode('}'));controller.close();reader?.releaseLock();
+  },
+  cancel(reason){return reader?.cancel(reason);}
+ });
+ return new Response(stream,{headers:{'Content-Type':'application/json','Cache-Control':'private, no-store'}});
+}

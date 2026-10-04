@@ -15,6 +15,8 @@ use crate::schema::{BackendIdentity, PageText};
 
 #[cfg(feature = "docling")]
 pub mod docling_backend;
+#[cfg(feature = "docling-text")]
+pub mod docling_text_backend;
 #[cfg(feature = "liteparse-layout")]
 pub mod liteparse_layout_backend;
 pub mod lopdf_backend;
@@ -112,8 +114,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Extractor>> {
         "liteparse-layout" => Some(Box::new(
             liteparse_layout_backend::LiteParseLayoutBackend::default(),
         )),
-        #[cfg(feature = "docling")]
-        "docling-text" => Some(Box::new(docling_backend::DoclingBackend::text_layer())),
+        #[cfg(feature = "docling-text")]
+        "docling-text" => Some(Box::new(docling_text_backend::DoclingTextBackend)),
         #[cfg(feature = "docling")]
         "docling" => Some(Box::new(docling_backend::DoclingBackend::full())),
         _ => None,
@@ -131,7 +133,7 @@ pub const NAMES: &[&str] = &[
     "pdfium",
     #[cfg(feature = "pdf-oxide")]
     "pdf-oxide",
-    #[cfg(feature = "docling")]
+    #[cfg(feature = "docling-text")]
     "docling-text",
     #[cfg(feature = "docling")]
     "docling",
@@ -168,7 +170,8 @@ pub fn feature_for(name: &str) -> Option<&'static str> {
         "mupdf" => Some("mupdf"),
         "poppler" => Some("poppler"),
         "pdf-oxide" => Some("pdf-oxide"),
-        "docling-text" | "docling" => Some("docling"),
+        "docling-text" => Some("docling-text"),
+        "docling" => Some("docling"),
         "liteparse-layout" => Some("liteparse-layout"),
         _ => None,
     }
@@ -250,7 +253,7 @@ mod tests {
     fn features_are_named_for_native_backends() {
         assert_eq!(feature_for("lopdf"), None);
         assert_eq!(feature_for("pdfium"), Some("pdfium"));
-        assert_eq!(feature_for("docling-text"), Some("docling"));
+        assert_eq!(feature_for("docling-text"), Some("docling-text"));
         assert_eq!(feature_for("docling"), Some("docling"));
         assert_eq!(feature_for("liteparse-layout"), Some("liteparse-layout"));
         assert_eq!(feature_for("nope"), None);

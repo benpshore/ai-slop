@@ -1,24 +1,62 @@
-# TPE private alpha
+# TPE web app
 
-Private, owner-authenticated document workspace. PDF files run through the published `pdf-oxide-wasm` 0.3.77 Rust/WASM package in a disposable browser worker. Public HTML is fetched without executing scripts, then clipped using Mozilla Readability, DOMPurify and GFM conversion. RSS/Atom entries retain identifiers, dates, article links and enclosure links.
+This directory is the complete portable application source for the private TPE ChatGPT Site. It belongs to **benpshore/pdftextract**. It is separate from the repository's native Rust engine and macOS app.
 
-Original bytes and extraction JSON are separate objects in private managed R2 storage. D1 stores owner-scoped document metadata and searchable text. Every document API authenticates the user and checks ownership; originals download as attachments. This storage is separate from ChatGPT Library.
+- Private Site: https://pdftextract-alpha.junkmail-edu228.chatgpt.site
+- Integration PR: https://github.com/benpshore/pdftextract/pull/175
+- Full handoff: [HANDOFF_TO_DOT.md](../docs/HANDOFF_TO_DOT.md)
+- User request history: [USER_REQUIREMENTS_HISTORY.md](../docs/USER_REQUIREMENTS_HISTORY.md)
+- Source exchange and deployment boundary: [WEB_ALPHA.md](../docs/WEB_ALPHA.md)
 
-## Limits and evidence
+## Application ownership
 
-- Uploads: 8 MiB; public HTML/feed capture: 4 MiB; PDF: 150 pages and a 60-second worker deadline.
-- Results are explicitly marked for review. Browser extraction does not certify Unicode completeness and does not run OCR or the native fallback engines.
-- PDF annotations retain URI targets and rectangles, independently of printed DOI candidates. DOI candidates are not registry-verified.
-- HTML preserves links, image source metadata, tables and JSON-LD. It does not retain image binaries, execute JavaScript, reproduce canvas charts, or fetch authenticated resources. Saved HTML snapshots can be imported.
-- Feed reads are manual; article pages and enclosures are not fetched automatically.
-- Native TPE JSON can be imported as unverified evidence. The native engine has not been ported wholesale to WASM.
+| Source | Web-app responsibility |
+| --- | --- |
+| `app/page.tsx`, `app/workspace.tsx`, `app/globals.css` | Authenticated mobile-first composer, per-item import queue, reader, saved records and navigation recovery |
+| `app/chatgpt-auth.ts`, `lib/server.ts` | Managed Site identity, per-owner authorization, D1/R2 access and streamed result responses |
+| `app/api/capture`, `lib/source-fetch.ts`, `lib/clip.ts` | Public source capture, HTML article/structured-page cleanup, RSS/Atom, Unicode, URLs/DOIs, tables and images |
+| `app/api/uploads`, `lib/uploads.ts`, `lib/upload-client.ts` | Chunked originals/results/assets, SHA-256, completion receipts, atomic result revision updates and content detection |
+| `app/api/documents`, `lib/article-assets.ts`, `lib/asset-storage.ts` | Private saved documents, actual retained article images, originals and ranged media playback |
+| `lib/imports.ts`, `lib/image-ocr.ts`, `lib/office.ts` | Streaming archives, local image OCR and browser Office extraction |
+| `lib/workspace-storage.ts` | Device-local draft/interrupted-queue recovery; durable originals/results remain in R2/D1 |
+| `public/pdf-worker.js` | Published upstream PDF Oxide 0.3.77 WASM in a disposable browser worker; **not** the complete native TPE engine compiled to WASM |
+| `app/mcp/route.ts`, `lib/mcp.ts` | Authenticated read-only, paginated/streamed MCP access |
+| `db/`, `drizzle/` | Authoritative document schema and immutable deployment migrations |
+| `scripts/`, `build/`, `vite.config.ts`, package/lock files | Reproducible dependency assets, tests and Workers-compatible production build |
+| `docs/OFFICE.md` | Office format evidence and explicit limitations |
 
-## Next: Ask ChatGPT
+PDF engines do not parse HTML. PHP-served HTML uses the HTML path; raw PHP source is retained as text, never executed. General binary/media originals can be stored without falsely claiming text extraction. Audio/video transcription, a native processing service, complete scanned-PDF OCR, full iWork decoding, and live JavaScript page rendering remain separate unfinished work.
 
-Add a selected-document handoff containing readable text, extracted image assets, source provenance, a manifest and a prepared prompt. A `.tar.gz` archive is a useful export format; automatic attachment to a new ChatGPT conversation is not currently implemented or assumed supported. A Site-hosted MCP capability is the preferred later path for authenticated retrieval of selected documents by ChatGPT. ChatGPT Library is not used as an arbitrary application database.
+No app-imposed source-file, PDF page-count, or archive-total-size rejection is configured. Transport part sizes are not file caps. Actual browser memory, OPFS quota, storage/hosting limits, and worker budgets still exist. A 50 GB mixed batch has **not** been validated; interrupted upload parts are not yet durably resumable across browser/device loss.
 
-## Development
+## Reproduce checks
 
-Use the committed pnpm lockfile. Run `node scripts/copy-pdf-wasm.mjs` before building to copy the pinned package assets. Type-check with `node node_modules/typescript/bin/tsc --noEmit`. D1 migrations live in `drizzle/` and are applied by Sites deployment.
+Use Node 22.13+ and the pinned pnpm release. From this directory:
 
-Design references: [Paperless-ngx](https://docs.paperless-ngx.com/), [Bear Web Clipper](https://bear.app/faq/browser-extensions/), [Mozilla Readability](https://github.com/mozilla/readability), [RSS 2.0](https://www.rssboard.org/rss-specification), [Atom](https://www.rfc-editor.org/rfc/rfc4287).
+```sh
+pnpm install --frozen-lockfile
+node scripts/copy-pdf-wasm.mjs
+node scripts/copy-ocr-assets.mjs
+pnpm exec tsc --noEmit
+node scripts/test-clip.mjs
+node scripts/test-web-extraction-review.mjs
+node scripts/test-import-flow.mjs
+node scripts/test-office.mjs
+node scripts/test-node-imports.mjs
+node ../scripts/test-web-workspace.cjs
+node --experimental-strip-types ../scripts/test-site-mcp.mjs
+node --experimental-strip-types ../scripts/test-site-uploads-workers.mjs
+pnpm run build
+```
+
+Before local type checking/building, create the local binding configuration as described in `../docs/WEB_ALPHA.md`. An external host must implement a verified identity boundary rather than trusting caller-supplied authentication headers. Do not disable authorization to make deployment work.
+
+The focused tests use JSDOM, mocks, Node/WASM and real local Workers D1/R2 bindings as identified in each script. They are **not** proof of iPhone/iPad browser behavior or 50 GB capacity. `scripts/test-browser-imports.mjs` is a separate browser harness; its execution has not been verified in this workspace.
+
+## Source completeness and deployment
+
+`SOURCE_MANIFEST.json` records the portable source's exact hashes, sizes and modes. Root `scripts/site_source.py` exports, verifies, and stages an import into a **new** directory. It does not deploy or overwrite an existing Site checkout.
+
+Managed deployment configuration, credentials, database files, uploaded user files, installed dependencies and generated WASM/OCR assets are intentionally absent from the portable manifest. Logical D1/R2 bindings and MCP capability are reconstructed by the Site owner; dependency assets are reconstructed from the pinned package lock and copy scripts. These exclusions are deployment/data boundaries, not missing application implementation.
+
+The root `.github/workflows/web.yml` owns web-app checks. Root Rust workflows validate the native engine separately. See the handoff for the exact published source revision, GitHub revision and test status rather than inferring production readiness from an open PR.

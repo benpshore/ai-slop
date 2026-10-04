@@ -15,9 +15,14 @@ in the result. Other commands and the library API are outside this worker bounda
 | `--jobs` | 1 | Concurrent extraction processes, allowed range 1–4 |
 | `--max-memory-growth-mib` | 1024 | Hard virtual-address-space allowance above initialized worker startup mappings, range 32–4096 MiB |
 | `--timeout-ms` | 60000 | Per-document deadline through extraction, publication queueing, publication and stdout delivery; range 1–300000 ms |
-| `--max-bytes` | 67108864 | Maximum source size; the descriptor read is capped too |
-| `--max-output-bytes` | 67108864 | Capture/delivery limit; range 1024–268435456 bytes |
+| `--max-bytes` | unset | Optional maximum source size; when supplied, the descriptor read is capped too |
+| `--max-output-bytes` | None | Optional capture/delivery limit; at least 1024 bytes when explicitly configured |
 | `--max-files` | 256 | Selection limit; at most 10000 entries are examined per folder |
+
+There is no default PDF file-size rejection. Input snapshots still reject files
+that change while being read; without an explicit byte cap, the read is bounded
+by the descriptor's original size plus a sentinel byte. Worker memory, deadline,
+and pathological parser protections continue to apply to large files.
 
 Linux and macOS workers install and read back soft and hard `RLIMIT_AS` before
 reading requests or PDFs. They preserve stricter inherited limits and disable

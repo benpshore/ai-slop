@@ -48,6 +48,7 @@ next-env.d.ts
 # Portable source mirror: protect local deployment state and generated assets.
 /.openai/
 /public/vendor/pdf-oxide/
+/public/ocr/
 *.tsbuildinfo
 __pycache__/
 /IMPORT_PLAN.json

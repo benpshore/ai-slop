@@ -116,6 +116,49 @@ fn native_and_existing_ocr_survive_bounded_workers_and_no_clobber_publication() 
 }
 
 #[test]
+fn large_pdf_has_no_default_input_cap_and_explicit_cap_is_honored() {
+    const PREVIOUS_DEFAULT: usize = 64 * 1024 * 1024;
+    let root = TempDir::new().unwrap();
+    let input = root.path().join("large.pdf");
+    let mut pdf = lopdf::Document::load_mem(&tpe::backend::probe_pdf().unwrap()).unwrap();
+    // A valid unused object makes the physical file large while keeping page
+    // extraction small; no huge decoded content or fabricated page is needed.
+    pdf.add_object(Stream::new(dictionary! {}, vec![b' '; PREVIOUS_DEFAULT]));
+    pdf.save(&input).unwrap();
+    drop(pdf);
+    assert!(fs::metadata(&input).unwrap().len() > PREVIOUS_DEFAULT as u64);
+
+    let accepted = root.path().join("accepted");
+    fs::create_dir(&accepted).unwrap();
+    let output = command(&accepted).arg(&input).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = record(&output);
+    assert_eq!(result["status"], "complete");
+    assert!(
+        result["pages"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("probe")
+    );
+
+    let limited = root.path().join("limited");
+    fs::create_dir(&limited).unwrap();
+    let output = command(&limited)
+        .args(["--max-bytes", &PREVIOUS_DEFAULT.to_string()])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(record(&output)["status"], "failed");
+    no_outputs(&limited);
+}
+
+#[test]
 fn limits_fail_per_document_without_publication_and_clean_captures() {
     for flags in [
         ["--max-bytes", "1"],

@@ -1,8 +1,9 @@
 # Independent extraction and routing review
 
 Reviewed 2026-10-04; initial snapshot `543fd29223bbb06f938ee24077b8b0f9d2593faa`,
-updated through root `a5fbd4d` for native providers and fallback routing, plus
-the active integration worktrees. This is a capability and policy review,
+reconciled through root `46293b0` for native providers, Docling text,
+bibliography annotation merging, and the explicit GROBID client, plus the
+reviewed uncommitted output-limit change. This is a capability and policy review,
 not an assertion that every integration has merged or met a production SLO.
 
 **Recommendation:** retain the bounded native pass as the baseline; spend extra
@@ -14,7 +15,9 @@ successful process, or a plausible rendering does not prove exact extraction.
 Evidence labels below are **M** (locally measured/reproduced), **C** (inspected
 adapter contract/code), **U** (upstream claim/API), and **P** (proposal/inference).
 An integration agent's reported runtime test is identified as such; it is not a
-new independent corpus run. No new broad benchmark was started for this review.
+new independent corpus run. No new broad native benchmark was started for this reconciliation. The separate
+[eleven-source HTML/feed review](WEB_EXTRACTION_REVIEW.md) does not establish
+native PDF quality or runtime containment.
 
 ## Capability and gap matrix
 
@@ -27,14 +30,17 @@ new independent corpus run. No new broad benchmark was started for this review.
 | LiteParse 2.15.1 projection | Spatial alignment of existing PDFium text for forms/table-like rows | **C/M:** pure `stages::project` path preserves source character multiset and original spans, boxes, fonts, links and figures; rejects unsupported rotation/geometry/limits with Partial. This is layout evidence, not semantic table correctness. | Opt-in local layout only; does not call LiteParse's second PDFium wrapper, OCR, or network APIs. Current cap: 4,096 spans and 1 MiB source text per page. |
 | MuPDF provider, exercised 1.26.11 | Independent native text/font parser, raw PDF geometry and image-region evidence | **M:** configured runtime tests confirm raw URI actions, affine geometry and output-cap recovery; reviewer reproduced malformed-content warnings. The reproduced `fz_load_links` URI rewriting/GoTo issue was repaired by reading raw PDF URI actions. No paired corpus superiority established. | Separate optional trusted provider/runtime, private session context, C exception boundary. Two-file fingerprint does not capture all system dependencies. User supplies a suitably licensed runtime. Current Rust loader is native, not a browser/WASM adapter. |
 | Poppler provider 26.09.0 | Independent word/font extraction and raw URI annotation evidence with crop/rotation transforms | **M:** exact-release native build and configured runtime tests cover passwords, malformed mappings, raw URI targets and affine geometry. **C:** shared global API calls serialized; image extraction and document metadata are not supplied by this provider. No paired corpus superiority established. | Optional C++ provider under its applicable license; no bundled engine. Font files, poppler-data and system dependencies remain outside provider/runtime fingerprints. Tested Linux x64; other targets unverified. |
-| docling.rs adapter, `docling-pdf/core` 1.69.2 | Text-layer assembly; optional learned layout/OCR and region-level structure | **C:** current adapter caches a conversion on first page access, exposes region rather than glyph boxes, and no fonts; normalizes text and may move a paragraph across a page boundary. Tables are disabled in the default full configuration. New review/repair work is active; no fresh comparative result is asserted here. | Gate model work behind scan/layout evidence and explicit configuration. Current CLI containment does not admit this OCR-capable backend. Pinned native/model policy must be checked independently of upstream HEAD. |
-| GROBID, server integration under development | Structured reference/header fields and citation relationships | **U:** API accepts isolated raw citations or PDFs and can return TEI with selected structural coordinates. This review has no measured GROBID result on the pinned corpus. TEI fields are candidates, not original glyph evidence. | Opt-in configured service. Prefer local/self-hosted operation and raw-reference requests when sufficient. Never upload a PDF or extracted text to an external service automatically. |
+| Docling text, `docling-pdf` 1.69.2, `docling-text` feature | Pure Rust per-page positioned text without models, OCR, PDFium, or child processes | **M/C:** actual parser fixtures cover crop/rotation, silent text loss, and requested-page behavior; a supervised CLI fixture ignores OCR/native-runtime environment settings. A retained parser uses immutable bytes; lopdf supplies annotations, image regions, metadata, and warning evidence. Scalar-count mismatch is Partial and a shorter candidate retains native text. Cells have no font fields. | Admitted by the supervised CLI as `docling-text`; upstream default features are disabled. No automatic model download. Encryption is unsupported by this parser. No corpus superiority or exact reading-order claim follows from matching character counts. |
+| Full Docling layout/OCR, `docling-pdf/core` 1.69.2, `docling` feature | Optional PDFium/ONNX layout and in-process PP-OCR with region-level structure | **C:** conversion caches a document; tables remain disabled in its configuration. Missing page markers, unknown geometry, undecoded formulas, and unverified reconstruction coverage now imply Partial. Raw URI targets survive; rectangles are withheld when their frame is unverified. No fresh full-model runtime/corpus result is asserted. | Still rejected by supervised `extract`; only separately provisioned library/evaluation use. Runtime/model identity, CWD-independent asset selection, inference resources, and page ownership must be established before admitting it. This restriction does not apply to `docling-text`. |
+| GROBID explicit client, upstream target 0.9.1 | Scholarly header/reference fields and citation relationships from `processFulltextDocument` TEI | **M/C:** loopback contract tests exercise the real HTTP client, version check, streamed immutable PDF, disabled consolidation, raw TEI/hash/byte ranges, coordinates/URI projection, refusal paths, supervised CLI, and former size-cap boundaries. No live GROBID server or model-quality/throughput benchmark was provisioned. TEI is explicitly a semantic projection, not original glyph evidence. | Implemented as separately selected `tpe grobid FILE`, feature `grobid`, configured endpoint required. It never runs from `extract`, `bibliography`, or automatic fallback. No redirects, retries, implicit proxy, or default PDF/TEI byte cap; local worker deadline/memory/cancellation remain. Raw-citation requests are an upstream capability/proposal, not an implemented client route. |
 
 For measurements, see [PDF Oxide evidence](PDF_OXIDE.md), its
 [paired report](analysis/pdf-oxide-five-paper-2026-10-03.json),
-[LiteParse contract](LITEPARSE_LAYOUT.md), and [native evaluation definitions](NATIVE_EVIDENCE.md).
-The CFF and provider contracts were reviewed in their integration worktrees;
-their final merge commits should be attached to any release evaluation.
+[LiteParse contract](LITEPARSE_LAYOUT.md), [Docling split](DOCLING.md),
+[GROBID client contract](GROBID.md), and [native evaluation definitions](NATIVE_EVIDENCE.md).
+The CFF and provider contracts were reviewed in their integration worktrees and
+then integrated. Attach the exact source/build/runtime identities to any release
+evaluation; a source review is not proof of a deployed backend.
 
 ## Native, browser and server are different deployment lanes
 
@@ -75,9 +81,9 @@ or policy-identity guards. Forty-eight focused tests were reported passing.
 | Unresolved glyphs, broken content, or suspicious missing text | PDFium candidate on affected selected pages | Optional MuPDF then Poppler, at most once each. Retain failed attempts and original evidence. Stop on budget/coverage regression; do not erase usable output. |
 | ActualText or reference-title disagreement | Targeted Oxide candidate | Compare the specific span/field against preserved source evidence. Its known Unicode ActualText error forbids blanket preference. |
 | Aligned form/table text needs spatial presentation | LiteParse projection of existing spans | Preserve raw spans; reject changed character coverage. Grid alignment alone does not establish cell semantics or reading order. |
-| Low text under a large raster | Preserve image region; offer configured OCR/layout pass | One bounded docling window. Keep OCR hypotheses separate from any existing text. No automatic full-document OCR retry. |
-| Citation fields incomplete but raw reference retained | Local parser, URI DOI, then printed DOI | Optional GROBID raw-citation request; preserve parsed fields as alternatives with raw-string identity. Full-document GROBID only for an explicit structural task. |
-| DOI link exists behind a non-DOI label | Keep the URI action and true annotation rectangle | Attach by page/geometry and entry evidence; never replace the target with the label. Keep raw target separately from any resolution/normalization. |
+| Low text under a large raster | Preserve image region; offer configured OCR/layout pass | Proposed future admitted model lane only; full `docling` is currently blocked in supervised extraction. Keep OCR hypotheses separate from existing text. `docling-text` supplies no OCR. |
+| Citation fields incomplete but raw reference retained | Local parser, URI DOI, then printed DOI | Raw-citation enrichment remains a proposal. The implemented GROBID command accepts an explicitly selected whole PDF for scholarly structure; its fields stay separate from native extraction. |
+| DOI link exists behind a non-DOI label | Keep the URI action and true annotation rectangle | Implemented bibliography union merges selected-backend and lopdf annotations on each scanned page. Attach only when the page frame matches; retain warnings/backend evidence on refusal. Preserve distinct placements and raw target separately from label or normalization. |
 | Figures or tables requested | Preserve native region/object evidence first | Image decoding/export and learned table recognition get distinct limits and provenance; a box is not exported pixels, and an OCR caption is not source text. |
 
 The existing hash, source-size, exact page-coverage, status-consistency and
@@ -89,33 +95,35 @@ mapping warning from the original engine remains in route history even when a
 candidate has no corresponding warning. `Complete` currently means no detected
 extraction gap, not independently adjudicated character-perfect output.
 
-## Proposed work budget
+## Runtime budgets and remaining scheduling proposals
 
-These are initial **P** admission limits to calibrate, not achieved latency or
-quality promises. Existing worker limits remain authoritative.
+Existing worker limits remain authoritative. Earlier numeric model/page and
+GROBID batch proposals are withdrawn: they are not implemented contracts and
+must not reintroduce arbitrary document-size caps. Scheduling proposals below
+are not achieved latency or quality promises.
 
 | Lane | Initial budget | On exhaustion |
 | --- | --- | --- |
 | Default local extraction | One baseline pass; selected-font helper within existing font budget | Retain Partial with explicit reason. |
 | Opt-in native recovery | At most three alternate passes; never revisit an engine; stop starting alternatives with less than 10% of document deadline left | Retain best eligible completed pass and all route reasons. |
 | Local layout | At most one projection per selected page; use current LiteParse bounds | Preserve ordinary layout and mark the refusal. |
-| Model work | Zero by default; explicit request/configuration permits one window of at most 20 pages, initially one model worker; proposed raster cap 20 million pixels/page | Return preserved native evidence with unfinished pages recorded; no silent resolution reduction or full-document retry. |
-| GROBID reference fields | Zero by default; proposed batches at most 32 references/64 KiB, response at most 2 MiB, one in-flight request and 15 s within the job deadline | Keep original parsed references; a timeout or 204 is not an empty successful bibliography. |
-| GROBID PDF structure | Explicit task only; at most one bounded upload of the immutable snapshot | No automatic retry to another host or endpoint. |
+| Model work | No automatic model work; full Docling remains outside supervised extraction. A future admitted deployment needs measured runtime/memory/cancellation and explicit model identity. | Preserve native evidence and unfinished-page diagnostics; no silent resolution reduction or unbounded retry loop. |
+| GROBID reference fields | Raw-citation client route is not implemented. | Preserve native parsed references; do not imply an external enrichment occurred. |
+| GROBID PDF structure | Implemented explicit command: one immutable streamed upload, 60 s total CLI deadline and 512 MiB address-space growth by default; no default input, response, or capture byte cap. Explicit input/response limits remain available. | No retry/redirect to another endpoint. Local cancellation does not guarantee cancellation of already accepted server work. HTTP 204 is a failure, not an empty successful bibliography. |
 
-The current CLI defaults are 60 s/document, 64 MiB source and output capture,
+The current CLI defaults are 60 s/document, no default source-file or output-capture size cap,
 one extraction worker, and 1,024 MiB address-space growth allowance above startup
 mappings. This is not a 1 GiB RSS guarantee. Multiple workers have separate
 allowances. Native provider JSON is capped at 16 MiB/page and one million
 characters. Model sessions must be accounted for separately: a warm-process
 policy must not multiply model copies implicitly. See [worker limits](CLI-WORKERS.md).
 
-For GROBID, explicitly disable header/citation/funder consolidation unless a
-separate enrichment operation is authorized. Consolidation may contact external
-bibliographic services even when the GROBID endpoint is local. Record endpoint
-identity, server version/revision and request settings; disallow redirects or
-host changes that would broaden document transfer. Fulltext TEI is not evidence
-that every page or glyph was extracted.
+The implemented GROBID client sends all three consolidation options as `0` by
+default; `--consolidation` is a separate explicit enrichment choice. Consolidation
+may contact bibliographic services even when the endpoint is local. Results
+record endpoint, reported server version/revision and settings; redirects and
+implicit proxies are disabled. Fulltext TEI is not evidence that every page or
+glyph was extracted.
 
 ## Preserve evidence before merging outputs
 
@@ -141,28 +149,32 @@ bounded `extract` CLI's supported export contract.
    unfinished. A hard native crash ends the shared worker and cannot preserve
    an in-memory baseline; recovery across crashes needs separate supervised
    passes and persisted evidence, beyond this policy.
-2. **Docling status and page ownership.** At review, missing converted pages and
-   unavailable geometry use ordinary `docling:` warnings, which do not imply
-   Partial. The adapter strips formula placeholders and copies no links into
-   PageText. Assigned reviewer is checking these paths. Target a two-page
-   paragraph, missing page marker, undecoded formula, rotated scan and hidden OCR
-   layer; verify both page accounting and retained source evidence.
-3. **Annotation coverage.** Bibliography currently uses native links if any page
-   contains one, otherwise runs a lopdf fallback. A partially populated set can
-   suppress fallback for other pages. Require page-level coverage or an immutable
-   annotation side channel; a per-page repair is assigned. Native-normalized
-   crop/rotation coordinates and lopdf source coordinates must be reconciled
-   before attaching a fallback rectangle to a reference. Keep relative URI + Base, embedded NUL, indirect
-   action/rectangle, rotated crop, and internal GoTo as targeted fixtures.
+2. **Docling full-model deployment and page ownership.** The prior status/link
+   defects are repaired: incomplete pages, geometry, formulas, and unverified
+   reconstruction emit Partial evidence, and raw annotation targets are retained.
+   `docling-text` has real per-page parser/CLI tests. Full layout/OCR still needs
+   an independently provisioned runtime/model identity and measured multicolumn,
+   cross-page, scan, and hidden-OCR cases before supervised admission; no full
+   model end-to-end result is claimed here.
+3. **Annotation coverage and geometry.** The all-or-none bibliography fallback
+   is replaced by a per-page union from the same immutable bytes. It retains
+   backend-only links, deduplicates identical URI/rectangle pairs, preserves
+   distinct placements, and refuses incompatible page geometry with a warning.
+   Regression fixtures cover a missing-link page beside a populated page,
+   crop/rotation, distinct placements, and fallback failure without erasing
+   evidence. Underlying parsers can still miss an action; the union is not proof
+   of exhaustive annotation recovery. Continue testing relative URI + Base,
+   embedded NUL, indirect actions, and internal GoTo at each native adapter.
 4. **New provider selection.** MuPDF/Poppler runtime smoke tests prove the adapters
    execute; they do not prove corpus advantage. Use the existing five-paper set
    plus one known mapping failure each, record per-field gains/losses, links,
    images, Partial reasons, cold/warm time and peak RSS on the same machine.
-5. **Reference recognition versus enrichment.** Compare exact title/author/year
-   fields and entry boundaries for native versus GROBID on existing unresolved
-   references. Record printed DOI and annotation DOI separately from source-record
-   DOI. More resolved Crossref records do not prove the printed reference was
-   extracted correctly.
+5. **Reference recognition versus enrichment.** GROBID HTTP/projection contract
+   tests now exist, but no live model benchmark does. Provision a chosen server
+   and compare exact title/author/year fields and entry boundaries on unresolved
+   references. Record printed DOI, annotation DOI, and server-enriched DOI
+   separately. More resolved Crossref records do not prove the printed reference
+   was extracted correctly.
 6. **Expensive structure.** Benchmark a small adjudicated set containing one
    merged-cell table, one multicolumn page, one mixed scan/native document and
    one figure-caption case. Score cell topology, reading order, page ownership
@@ -171,10 +183,32 @@ bounded `extract` CLI's supported export contract.
 
 Historical `analysis/routing-and-resolution-2026-09-30.md` describes an older
 automatic OCR/longer-list policy and old defaults; it is not the current routing
-contract. `NATIVE.md` has stale "not pinned" prose although the inspected manifest
-contains PDFium/model hashes. ONNX runtime identity and current feature behavior
-still need reconciliation. The 30 ms/M1 and 99% exact-chunk goals remain goals;
+contract. `NATIVE.md` records pinned PDFium/model artifacts; it explicitly leaves
+ONNX runtime version/linkage identity unverified. That full-model gap must not
+be attributed to the separate dependency-free `docling-text` feature. The 30 ms/M1 and 99% exact-chunk goals remain goals;
 development timings and five selected difficult papers cannot establish them.
+
+## Output-limit reconciliation and containment gates
+
+**C:** the current CLI diff makes `--max-output-bytes` optional, with no default
+capture-size rejection. An explicit limit must be at least 1024 bytes and has no
+policy ceiling. The omitted value becomes `u64::MAX` for comparisons;
+`read_limited` uses saturating addition for its oversize sentinel, and capture
+sizes already use saturating addition. Delivery subtracts bytes with checked
+arithmetic. Publication reads/serializes inside the memory-limited worker and
+flushes the complete response before committing the ledger.
+
+This deliberately removes a scratch-output size bound. Filesystem exhaustion
+remains a real failure; memory, deadline, cancellation, kill/reap, source
+immutability, and explicit output limits remain. It does not certify arbitrarily
+large output, bound disk usage by memory, or prove 100 GB processing. No new
+native build/test was run solely for this documentation reconciliation.
+
+The parent reports three local containment tests blocked by PID-observability
+limitations already reproduced on the baseline. That is not a passing result or
+permission to remove them: the hosted containment gate remains required and
+unchanged. Check the exact hosted run before describing containment as fully
+validated for a release.
 
 ## Primary upstream sources checked
 

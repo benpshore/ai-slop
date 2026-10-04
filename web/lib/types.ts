@@ -4,4 +4,4 @@ export type Extracted = {
   links: LinkEvidence[]; warnings: string[]; engine: string; status: 'ready'|'partial'|'failed';
   metadata?: Record<string, unknown>; pages?: unknown[]; tables?: unknown[]; entries?: unknown[];
 };
-export type DocumentRow = { id: string; title: string; kind: string; source_url: string | null; original_name: string; status: string; engine: string; created_at: string; sha256: string; bytes: number };
+export type DocumentRow = { mime?:string; id: string; title: string; kind: string; source_url: string | null; original_name: string; status: string; engine: string; created_at: string; sha256: string; bytes: number };

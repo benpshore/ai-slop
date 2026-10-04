@@ -5,11 +5,10 @@ self.onmessage=async event=>{
  try{
   await init({module_or_path:'/vendor/pdf-oxide/pdf_oxide_bg.wasm'});
   doc=new WasmPdfDocument(new Uint8Array(event.data.bytes));
-  const count=doc.pageCount();if(!count||count>150)throw new Error('This browser alpha accepts 1–150 pages. Use the native engine for larger PDFs.');
-  const pages=[],links=[],warnings=['Browser extraction uses PDF Oxide 0.3.77 (Rust/WASM). Mapping completeness is unverified; OCR and native fallback engines are not run here.'];let characters=0;
+  const count=doc.pageCount();if(!count)throw new Error('The PDF contains no readable pages.');
+  const pages=[],links=[],warnings=['Browser extraction uses PDF Oxide 0.3.77 (Rust/WASM). Mapping completeness is unverified; OCR and native fallback engines are not run here.'];
   for(let index=0;index<count;index++){
    let text='';try{text=doc.extractText(index,null);}catch(error){warnings.push(`Page ${index+1}: ${String(error)}`);}
-   characters+=text.length;if(characters>1500000)throw new Error('Extracted text exceeds the browser alpha output limit.');
    let annotations=[];try{annotations=plain(doc.getAnnotations(index));}catch(error){warnings.push(`Page ${index+1} links: ${String(error)}`);}
    for(const annotation of annotations){if(typeof annotation.action_uri==='string')links.push({url:annotation.action_uri,label:annotation.contents||'',page:index+1,rect:annotation.rect,kind:'embedded PDF link'});}
    if(!text.trim())warnings.push(`Page ${index+1}: no text extracted; this may be a blank page, an image, or a decoding failure.`);

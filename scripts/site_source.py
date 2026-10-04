@@ -15,7 +15,19 @@ from pathlib import Path, PurePosixPath
 FORMAT = "tpe-site-source-v1"
 MANIFEST = "SOURCE_MANIFEST.json"
 ROOTS = frozenset(
-    {"app", "components", "lib", "db", "drizzle", "public", "scripts", "vendor", "build", "hooks"}
+    {
+        "app",
+        "components",
+        "lib",
+        "db",
+        "drizzle",
+        "public",
+        "scripts",
+        "vendor",
+        "build",
+        "hooks",
+        "docs",
+    }
 )
 CONFIGS = frozenset(
     {
@@ -76,6 +88,7 @@ GITIGNORE_APPENDIX = b"""
 # Portable source mirror: protect local deployment state and generated assets.
 /.openai/
 /public/vendor/pdf-oxide/
+/public/ocr/
 *.tsbuildinfo
 __pycache__/
 /IMPORT_PLAN.json
@@ -98,7 +111,10 @@ def allowed_path(value: str) -> bool:
         return False
     if path.parts[0] not in ROOTS and value not in CONFIGS:
         return False
-    if path.parts[:3] == ("public", "vendor", "pdf-oxide"):
+    if path.parts[:3] == ("public", "vendor", "pdf-oxide") or path.parts[:2] == (
+        "public",
+        "ocr",
+    ):
         return False
     for part in path.parts:
         lower = part.lower()
