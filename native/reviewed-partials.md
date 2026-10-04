@@ -29,7 +29,40 @@ baseline. Do not suppress warnings or relabel the result to obtain a pass. The
 baseline pins are deliberately specific to the recorded Linux ARM64 dev run.
 
 All four backend validators run, even after an earlier failure, and the shell
-step returns failure if any validator fails. Replaying the saved artifact with
+step returns failure if any validator fails. Replaying the original saved artifact with
 this validator recognizes the six bounded outcomes but still fails PDFium,
 docling-text and docling on eight existing zero-extraction/zero-match results.
 Only lopdf passes this coverage/integrity check; this is not a quality signoff.
+
+## Current build identity and historical eligibility
+
+The CLI verifies the artifact's recorded source commit and all five input hashes
+against a clean source checkout before considering historical exceptions. The
+default is the checkout containing the validator. For archived evidence, pass
+`--source-root` pointing to the exact checkout that produced it, and use that
+checkout's corpus manifest. A wrong commit or file hash remains a hard error.
+This verifies recorded source/input provenance; it does not attest the executable
+binary or its compiled feature graph. Build logs and executable evidence remain
+separate requirements.
+
+A verified current Cargo.lock can differ from the historical policy. In that
+case **zero historical Partial exceptions apply**. The policy JSON, original
+dependency hash, diagnostics and reference baselines remain unchanged. The six
+same-input page counts and minimum reference matches/maximum spurious-reference
+counts still apply, including to genuinely Complete results. Every unreviewed
+Partial still fails, and all statuses are checked for invalid reference counts
+and zero-match outcomes. Other historical input/scorer pin changes, malformed
+policies and unverified current locks remain hard errors.
+
+This separation repairs the PR175/#174 integration mismatch without declaring
+different dependency graphs equivalent. The exact failing combined-tree runs
+were [#191 run37169841972](https://github.com/benpshore/pdftextract/actions/runs/37169841972)
+and [#194 run37170137003](https://github.com/benpshore/pdftextract/actions/runs/37170137003).
+Their artifacts correctly record intended Cargo.lock `00ff969d6bc010d669a77e8c2341a81219e7d30dadbfee892ef5825a2aadd57c`;
+the historical policy correctly records `ae0367f2f9391ec98fd0a125bc516e0179419b311e4f1c7693ad3052b3b7f8c0`.
+The corpus/native manifests and metric/truth hashes match. PR175 added 73 package
+versions; PDFium-render's active libloading edge changed from 0.8.9 to 0.9.0.
+None of the six historical diagnostic signatures matches the combined current
+run: their resource cutoffs disappeared, while Unicode/CFF limitations keep
+them Partial. Reference matching did not regress. This is not a reason to repin
+the historical outcomes or call the corpus green. Tracking: #190, #181 and #153.
