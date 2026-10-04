@@ -8,13 +8,14 @@ name: Native
 
 on:
   workflow_dispatch:
-  # On pull requests only when the native backends or their pins can change;
-  # engine-only PRs are covered by `ci`, and every merge to main still runs
-  # the full native evaluation below.
+  # Native decoding and bibliography ordering/segmentation changes run the
+  # unchanged full dev split on PRs, as well as on relevant main pushes.
   pull_request:
     paths:
       - native/**
       - src/backend/**
+      - src/reading_order.rs
+      - src/citations.rs
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml

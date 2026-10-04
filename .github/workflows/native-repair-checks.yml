@@ -7,6 +7,12 @@ on:
       - src/backend/pdfium_backend.rs
       - src/backend/pdfium_backend/**
       - src/regions.rs
+      - src/reading_order.rs
+      - src/citations.rs
+      - src/backend/docling_layout.rs
+      - tests/bibliography_column_headings.rs
+      - tests/fixtures/bibliography/**
+      - tests/fixtures/docling_bibliography/**
       - tests/pdfium_hyphens.rs
       - tests/pdfium_paragraph_regions.rs
       - tests/test_validate_eval.py
