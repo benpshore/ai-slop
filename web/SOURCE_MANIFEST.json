@@ -667,6 +667,12 @@
       "sha256": "f9819b6cdfa58267d2d8e697798f20ec71fe4271bed7d47eb3b121ec9b096bbd"
     },
     {
+      "bytes": 8268,
+      "mode": "0644",
+      "path": "lib/text-import.ts",
+      "sha256": "52dff7f83bc3f7f3419c0093c21caa22a5248f3674a40e82489d5c2393e38ac3"
+    },
+    {
       "bytes": 132,
       "mode": "0644",
       "path": "lib/turndown-plugin-gfm.d.ts",
@@ -761,6 +767,12 @@
       "mode": "0644",
       "path": "public/window.svg",
       "sha256": "decf1cf7bb22b5c99c4857cfcd5718ce5465c4454166317589c83fc73df74b66"
+    },
+    {
+      "bytes": 17436,
+      "mode": "0644",
+      "path": "scripts/benchmark-text-import.mjs",
+      "sha256": "d505829f865db0fd78a4d4b0ab9ed77dbe0f790019939743d3135eb44565a756"
     },
     {
       "bytes": 661,
@@ -887,6 +899,12 @@
       "mode": "0644",
       "path": "scripts/test-office.mjs",
       "sha256": "0c35e57e6a1c7159a57dfe7ab624c51b58c3d5b3bb3324afa5e9f43c34fb967b"
+    },
+    {
+      "bytes": 12810,
+      "mode": "0644",
+      "path": "scripts/test-text-import.mjs",
+      "sha256": "9fdbd5e59fdcfbffe48f695cc97286e36a581654c37a0da7e691ee769a9a40eb"
     },
     {
       "bytes": 11241,

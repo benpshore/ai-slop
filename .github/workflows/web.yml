@@ -37,6 +37,7 @@ jobs:
       - run: node scripts/test-clip.mjs
       - run: node scripts/test-web-extraction-review.mjs
       - run: node scripts/test-import-flow.mjs
+      - run: node scripts/test-text-import.mjs
       - run: node scripts/test-office.mjs
       - run: node scripts/test-node-imports.mjs
       - run: node ../scripts/test-web-workspace.cjs
