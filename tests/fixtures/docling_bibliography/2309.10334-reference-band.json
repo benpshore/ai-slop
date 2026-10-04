@@ -1,0 +1,1137 @@
+{
+  "provenance": {
+    "artifact_id": 11290459456,
+    "run_id": 37170137040,
+    "source_commit": "0ece133",
+    "pdf_sha256": "f5dea342cce3a0968d3c364da4dedf74c51cb3ce59c1448c2366a5a3fc7a5794",
+    "result_sha256": "2ee54e51c545f765ac0acba72c49fa01a5e0a1865c70a295a94f644bcb5c1b60",
+    "source": "https://arxiv.org/pdf/2309.10334v1",
+    "license": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "pages": [
+    {
+      "page": 10,
+      "width": 612.0,
+      "height": 792.0,
+      "rotation": 0,
+      "spans": [
+        {
+          "text": "FIG. 9. Relationship between D KL ( x t ∥ ˆ x ) and - ∆ D KL ( x t ∥ ˆ x ) for N X = 4 and N e = 1.",
+          "bbox": null,
+          "font": null,
+          "size": null,
+          "seq": 0
+        },
+        {
+          "text": "D",
+          "bbox": {
+            "x0": 173.32,
+            "y0": 611.02,
+            "x1": 178.1,
+            "y1": 620.3
+          },
+          "font": null,
+          "size": null,
+          "seq": 1
+        },
+        {
+          "text": "k ^x)",
+          "bbox": {
+            "x0": 188.86,
+            "y0": 611.02,
+            "x1": 196.03,
+            "y1": 620.3
+          },
+          "font": null,
+          "size": null,
+          "seq": 2
+        },
+        {
+          "text": "VIII. CONCLUSIONS",
+          "bbox": {
+            "x0": 120.73,
+            "y0": 546.05,
+            "x1": 233.09,
+            "y1": 553.78
+          },
+          "font": null,
+          "size": null,
+          "seq": 3
+        },
+        {
+          "text": "In this study, we developed a framework based on NG to establish an upper bound on the dynamics of a specific subset of CRNs. The physical meaning of this bound relates to the concept of entropy production, which in turn is related to the speed of convergence of the chemical reaction. The nonlinearity commonly present in CRNs presents a challenge, which is addressed here. The optimization problem in the NG derivation was found to be related to entropy production, enriching the understanding of NG within a thermodynamic context. While the primary focus has been on CRNs, the methods and discussions are applicable to a wider range of hypergraph dynamics. The study holds implications for fields beyond chemistry and physics, including information science and machine learning.",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 358.88,
+            "x1": 298.83,
+            "y1": 530.58
+          },
+          "font": null,
+          "size": null,
+          "seq": 4
+        },
+        {
+          "text": "ACKNOWLEDGMENTS",
+          "bbox": {
+            "x0": 117.14,
+            "y0": 327.94,
+            "x1": 235.48,
+            "y1": 335.67
+          },
+          "font": null,
+          "size": null,
+          "seq": 5
+        },
+        {
+          "text": "H.M. was supported by JSPS KAKENHI Grant Number 23H04489. T. J. K was supported by JST (Grants No. JPMJCR2011 and No. JPMJCR1927) and JSPS (Grant No. 19H05799). L.-S.B. was partially funded by NSF award CHE-2002313.",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 255.23,
+            "x1": 298.83,
+            "y1": 310.92
+          },
+          "font": null,
+          "size": null,
+          "seq": 6
+        },
+        {
+          "text": "Appendix A: Derivation of the KL divergence from the Bregman divergence",
+          "bbox": {
+            "x0": 57.38,
+            "y0": 211.92,
+            "x1": 296.44,
+            "y1": 230.48
+          },
+          "font": null,
+          "size": null,
+          "seq": 7
+        },
+        {
+          "text": "In this section, we show that the Bregman divergence, Eq. (2.34), with Eq. (2.36) is equivalent to the KL divergence, Eq. (2.37). Let us define the following potential for α ∈ R :",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 143.86,
+            "x1": 298.83,
+            "y1": 196.45
+          },
+          "font": null,
+          "size": null,
+          "seq": 8
+        },
+        {
+          "text": "[1] U. Seifert, Stochastic thermodynamics, fluctuation theorems and molecular machines, Reports on progress in",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 60.33,
+            "x1": 298.83,
+            "y1": 78.89
+          },
+          "font": null,
+          "size": null,
+          "seq": 9
+        },
+        {
+          "text": "The Bregman divergence, Eq. (2.34), with Eq. (A.1) is computed as follows:",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 716.2,
+            "x1": 561.8,
+            "y1": 737.86
+          },
+          "font": null,
+          "size": null,
+          "seq": 10
+        },
+        {
+          "text": "Thus, the Bregman divergence, Eq. (2.34), with Eq. (A.1) is equivalent to the KL divergence, Eq. (2.37), independently from α . Furthermore, Eq. (2.36) is the special case of Eq. (A.1) with α = 0.",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 405.28,
+            "x1": 561.8,
+            "y1": 450.14
+          },
+          "font": null,
+          "size": null,
+          "seq": 11
+        },
+        {
+          "text": "Appendix B: Upper bound system with the L 2 constraint",
+          "bbox": {
+            "x0": 331.1,
+            "y0": 337.22,
+            "x1": 547.45,
+            "y1": 357.33
+          },
+          "font": null,
+          "size": null,
+          "seq": 12
+        },
+        {
+          "text": "In Sec. V, we have considered ϕ KL ( · ), Eq. (2.36), as the potential of the Bregman divergence in the constraint term since the KL divergence is minimized in CRNs. However, we are not limited to this choice, and it is expected that a different potential in the constraint may give us a different bound. Another simple candidate for the potential of the Bregman divergence in the constraint is the L 2 norm given by",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 225.84,
+            "x1": 561.8,
+            "y1": 317.11
+          },
+          "font": null,
+          "size": null,
+          "seq": 13
+        },
+        {
+          "text": "In this case, D KL ( x t + ∥ ˙ x t ∥ F e t ∆ t ∥ x t ) does not depend on e t and the Hessian G ϕ L 2 ( x t ) becomes the identity matrix: G ϕ L 2 ( x t ) = 1 .",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 119.11,
+            "x1": 561.8,
+            "y1": 154.69
+          },
+          "font": null,
+          "size": null,
+          "seq": 14
+        },
+        {
+          "text": "physics 75 , 126001 (2012).",
+          "bbox": {
+            "x0": 335.88,
+            "y0": 69.61,
+            "x1": 442.27,
+            "y1": 78.89
+          },
+          "font": null,
+          "size": null,
+          "seq": 15
+        },
+        {
+          "text": "10",
+          "bbox": {
+            "x0": 552.23,
+            "y0": 753.33,
+            "x1": 561.8,
+            "y1": 762.61
+          },
+          "font": null,
+          "size": null,
+          "seq": 16
+        }
+      ],
+      "figures": [],
+      "links": [],
+      "lines": [],
+      "text": "",
+      "warnings": [
+        "extraction_incomplete: docling 7 formula region(s) not decoded; no text emitted",
+        "unicode_mapping: font F17: unmapped code(s); U+FFFD substituted",
+        "extraction_incomplete: docling reconstruction coverage is unverified",
+        "furniture removed: 1"
+      ]
+    },
+    {
+      "page": 11,
+      "width": 612.0,
+      "height": 792.0,
+      "rotation": 0,
+      "spans": [
+        {
+          "text": "[2] N. Shiraishi, An Introduction to Stochastic Thermodynamics: From Basic to Advanced , Vol. 212 (Springer Nature, 2023).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 706.92,
+            "x1": 298.83,
+            "y1": 736.31
+          },
+          "font": null,
+          "size": null,
+          "seq": 0
+        },
+        {
+          "text": "[3] R. Kawai, J. M. R. Parrondo, and C. V. den Broeck, Dissipation: The phase-space perspective, Phys. Rev. Lett. 98 , 080602 (2007).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 675.98,
+            "x1": 298.83,
+            "y1": 705.38
+          },
+          "font": null,
+          "size": null,
+          "seq": 1
+        },
+        {
+          "text": "[4] H. Miyahara and K. Aihara, Work relations with measurement and feedback control on nonuniform temperature systems, Phys. Rev. E 98 , 042138 (2018).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 645.05,
+            "x1": 298.83,
+            "y1": 672.89
+          },
+          "font": null,
+          "size": null,
+          "seq": 2
+        },
+        {
+          "text": "[5] A. C. Barato and U. Seifert, Thermodynamic uncertainty relation for biomolecular processes, Phys. Rev. Lett. 114 , 158101 (2015).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 612.56,
+            "x1": 298.83,
+            "y1": 641.95
+          },
+          "font": null,
+          "size": null,
+          "seq": 3
+        },
+        {
+          "text": "[6] T. R. Gingrich, J. M. Horowitz, N. Perunov, and J. L. England, Dissipation bounds all steady-state current fluctuations, Phys. Rev. Lett. 116 , 120601 (2016).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 581.63,
+            "x1": 298.83,
+            "y1": 611.02
+          },
+          "font": null,
+          "size": null,
+          "seq": 4
+        },
+        {
+          "text": "[7] Y. Hasegawa and T. Van Vu, Uncertainty relations in stochastic processes: An information inequality approach, Phys. Rev. E 99 , 062126 (2019).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 550.69,
+            "x1": 298.83,
+            "y1": 578.53
+          },
+          "font": null,
+          "size": null,
+          "seq": 5
+        },
+        {
+          "text": "[8] T. Van Vu and Y. Hasegawa, Uncertainty relations for underdamped langevin dynamics, Phys. Rev. E 100 , 032130 (2019).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 519.75,
+            "x1": 298.83,
+            "y1": 547.59
+          },
+          "font": null,
+          "size": null,
+          "seq": 6
+        },
+        {
+          "text": "[9] T. Van Vu and K. Saito, Thermodynamic unification of optimal transport: Thermodynamic uncertainty relation, minimum dissipation, and thermodynamic speed limits, Phys. Rev. X 13 , 011013 (2023).",
+          "bbox": {
+            "x0": 58.57,
+            "y0": 476.44,
+            "x1": 298.83,
+            "y1": 516.66
+          },
+          "font": null,
+          "size": null,
+          "seq": 7
+        },
+        {
+          "text": "[10] N. Ohga, S. Ito, and A. Kolchinsky, Thermodynamic bound on the asymmetry of cross-correlations, arXiv preprint arXiv:2303.13116 (2023).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 445.5,
+            "x1": 298.83,
+            "y1": 474.89
+          },
+          "font": null,
+          "size": null,
+          "seq": 8
+        },
+        {
+          "text": "[11] T. Van Vu, V. T. Vo, and K. Saito, Dissipation bounds asymmetry of finite-time cross-correlations, arXiv preprint arXiv:2305.18000 (2023).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 414.56,
+            "x1": 298.83,
+            "y1": 443.95
+          },
+          "font": null,
+          "size": null,
+          "seq": 9
+        },
+        {
+          "text": "[12] A. Dechant, J. Garnier-Brun, and S.-i. Sasa, Thermodynamic bounds on correlation times, arXiv preprint arXiv:2303.13038 (2023).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 383.63,
+            "x1": 298.83,
+            "y1": 411.47
+          },
+          "font": null,
+          "size": null,
+          "seq": 10
+        },
+        {
+          "text": "[13] T. J. Kobayashi and Y. Sughiyama, Fluctuation relations of fitness and information in population dynamics, Phys. Rev. Lett. 115 , 238102 (2015).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 351.14,
+            "x1": 298.83,
+            "y1": 380.53
+          },
+          "font": null,
+          "size": null,
+          "seq": 11
+        },
+        {
+          "text": "[14] H. Miyahara, Many-body perturbation theory and fluctuation relations for interacting population dynamics, Phys. Rev. E 99 , 042415 (2019).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 320.2,
+            "x1": 298.83,
+            "y1": 349.59
+          },
+          "font": null,
+          "size": null,
+          "seq": 12
+        },
+        {
+          "text": "[15] Y. Sughiyama and T. J. Kobayashi, Steady-state thermodynamics for population growth in fluctuating environments, Phys. Rev. E 95 , 012131 (2017).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 289.27,
+            "x1": 298.83,
+            "y1": 317.11
+          },
+          "font": null,
+          "size": null,
+          "seq": 13
+        },
+        {
+          "text": "[16] H. Miyahara, Steady-state thermodynamics for population dynamics in fluctuating environments with side information, Journal of Statistical Mechanics: Theory and Experiment 2022 , 013501 (2022).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 247.5,
+            "x1": 298.83,
+            "y1": 286.17
+          },
+          "font": null,
+          "size": null,
+          "seq": 14
+        },
+        {
+          "text": "[17] K. Adachi, R. Iritani, and R. Hamazaki, Universal constraint on nonlinear population dynamics, Communications Physics 5 , 129 (2022).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 215.02,
+            "x1": 298.83,
+            "y1": 244.41
+          },
+          "font": null,
+          "size": null,
+          "seq": 15
+        },
+        {
+          "text": "[18] M. Hoshino, R. Nagayama, K. Yoshimura, J. F. Yamagishi, and S. Ito, Geometric speed limit for acceleration by natural selection in evolutionary processes, Phys. Rev. Res. 5 , 023127 (2023).",
+          "bbox": {
+            "x0": 53.79,
+            "y0": 173.25,
+            "x1": 298.83,
+            "y1": 213.47
+          },
+          "font": null,
+          "size": null,
+          "seq": 16
+        },
+        {
+          "text": "[19] T. J. Kobayashi, D. Loutchko, A. Kamimura, S. Horiguchi, and Y. Sughiyama, Information geometry of dynamics on graphs and hypergraphs, arXiv preprint arXiv:2211.14455 (2022).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 696.09,
+            "x1": 561.8,
+            "y1": 736.31
+          },
+          "font": null,
+          "size": null,
+          "seq": 17
+        },
+        {
+          "text": "[20] T. J. Kobayashi, D. Loutchko, A. Kamimura, and Y. Sughiyama, Kinetic derivation of the hessian geometric structure in chemical reaction networks, Phys. Rev. Res. 4 , 033066 (2022).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 654.33,
+            "x1": 561.8,
+            "y1": 694.55
+          },
+          "font": null,
+          "size": null,
+          "seq": 18
+        },
+        {
+          "text": "[21] T. J. Kobayashi, D. Loutchko, A. Kamimura, and Y. Sughiyama, Hessian geometry of nonequilibrium chemical reaction networks and entropy production decompositions, Phys. Rev. Res. 4 , 033208 (2022).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 612.56,
+            "x1": 561.8,
+            "y1": 652.78
+          },
+          "font": null,
+          "size": null,
+          "seq": 19
+        },
+        {
+          "text": "[22] T. Okada and A. Mochizuki, Law of localization in chemical reaction networks, Phys. Rev. Lett. 117 , 048101 (2016).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 581.63,
+            "x1": 561.8,
+            "y1": 611.02
+          },
+          "font": null,
+          "size": null,
+          "seq": 20
+        },
+        {
+          "text": "[23] Y. Hirono, T. Okada, H. Miyazaki, and Y. Hidaka, Structural reduction of chemical reaction networks based on topology, Phys. Rev. Res. 3 , 043123 (2021).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 550.69,
+            "x1": 561.8,
+            "y1": 578.53
+          },
+          "font": null,
+          "size": null,
+          "seq": 21
+        },
+        {
+          "text": "[24] Y. Hirono, T. Okada, H. Miyazaki, and Y. Hidaka, Structural reduction of hypergraphs based on topology, in Proceedings of Blockchain in Kyoto 2021 (BCK21) , https://journals.jps.jp/doi/pdf/10.7566/JPSCP.36.011008.",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 508.92,
+            "x1": 571.36,
+            "y1": 547.59
+          },
+          "font": null,
+          "size": null,
+          "seq": 22
+        },
+        {
+          "text": "[25] Y. Hirono, H. Hong, and J. K. Kim, Robust perfect adaptation of reaction fluxes ensured by network topology, arXiv preprint arXiv:2302.01270 (2023).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 476.44,
+            "x1": 561.8,
+            "y1": 505.83
+          },
+          "font": null,
+          "size": null,
+          "seq": 23
+        },
+        {
+          "text": "[26] S.-i. Amari and H. Nagaoka, Methods of information geometry , Vol. 191 (American Mathematical Soc., 2000).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 456.33,
+            "x1": 561.8,
+            "y1": 474.89
+          },
+          "font": null,
+          "size": null,
+          "seq": 24
+        },
+        {
+          "text": "[27] S.-i. Amari, Information Geometry and Its Applications , Applied Mathematical Sciences (Springer Japan, 2016).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 434.67,
+            "x1": 561.8,
+            "y1": 453.23
+          },
+          "font": null,
+          "size": null,
+          "seq": 25
+        },
+        {
+          "text": "[28] S.-I. Amari, Natural gradient works efficiently in learning, Neural computation 10 , 251 (1998).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 414.56,
+            "x1": 561.8,
+            "y1": 433.13
+          },
+          "font": null,
+          "size": null,
+          "seq": 26
+        },
+        {
+          "text": "[29] Y. Wang and W. Li, Accelerated information gradient flow, Journal of Scientific Computing 90 , 1 (2022).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 392.91,
+            "x1": 561.8,
+            "y1": 411.47
+          },
+          "font": null,
+          "size": null,
+          "seq": 27
+        },
+        {
+          "text": "[30] S. A. Horiguchi and T. J. Kobayashi, Cellular gradient flow structure linking single-cell-level rules and population-level dynamics, Phys. Rev. Res. 5 , L022052 (2023).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 351.14,
+            "x1": 561.8,
+            "y1": 391.36
+          },
+          "font": null,
+          "size": null,
+          "seq": 28
+        },
+        {
+          "text": "[31] J. Karbowski, Bounds on the rates of statistical divergences and mutual information, arXiv preprint arXiv:2308.05597 (2023).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 320.2,
+            "x1": 561.8,
+            "y1": 349.59
+          },
+          "font": null,
+          "size": null,
+          "seq": 29
+        },
+        {
+          "text": "[32] D. A. Beard and H. Qian, Chemical biophysics: quantitative analysis of cellular systems , Vol. 126 (Cambridge University Press Cambridge, 2008).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 289.27,
+            "x1": 561.8,
+            "y1": 317.11
+          },
+          "font": null,
+          "size": null,
+          "seq": 30
+        },
+        {
+          "text": "[33] M. Feinberg, Foundations of chemical reaction network theory (Springer, 2019).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 267.61,
+            "x1": 561.8,
+            "y1": 286.17
+          },
+          "font": null,
+          "size": null,
+          "seq": 31
+        },
+        {
+          "text": "[34] R. Rao and M. Esposito, Nonequilibrium thermodynamics of chemical reaction networks: Wisdom from stochastic thermodynamics, Phys. Rev. X 6 , 041064 (2016).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 236.67,
+            "x1": 561.8,
+            "y1": 266.06
+          },
+          "font": null,
+          "size": null,
+          "seq": 32
+        },
+        {
+          "text": "[35] R. Hamming, Numerical methods for scientists and engineers (Courier Corporation, 2012).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 215.02,
+            "x1": 561.8,
+            "y1": 233.58
+          },
+          "font": null,
+          "size": null,
+          "seq": 33
+        },
+        {
+          "text": "[36] Y. Sughiyama, D. Loutchko, A. Kamimura, and T. J. Kobayashi, Hessian geometric structure of chemical thermodynamic systems with stoichiometric constraints, Phys. Rev. Res. 4 , 033065 (2022).",
+          "bbox": {
+            "x0": 316.76,
+            "y0": 173.25,
+            "x1": 561.8,
+            "y1": 213.47
+          },
+          "font": null,
+          "size": null,
+          "seq": 34
+        },
+        {
+          "text": "11",
+          "bbox": {
+            "x0": 552.23,
+            "y0": 753.33,
+            "x1": 561.8,
+            "y1": 762.61
+          },
+          "font": null,
+          "size": null,
+          "seq": 35
+        }
+      ],
+      "figures": [],
+      "links": [],
+      "lines": [],
+      "text": "",
+      "warnings": [
+        "extraction_incomplete: docling reconstruction coverage is unverified",
+        "furniture removed: 1"
+      ]
+    }
+  ],
+  "truth": [
+    {
+      "key": "Seifert_001",
+      "label": "Seifert(2012)",
+      "text": "U. Seifert, Stochastic thermodynamics, fluctuation theorems and molecular machines, @noop Reports on progress in physics 75, 126001 ( 2012)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2012,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Shiraishi_001",
+      "label": "Shiraishi(2023)",
+      "text": "N. Shiraishi, @noop An Introduction to Stochastic Thermodynamics: From Basic to Advanced, Vol. 212 ( Springer Nature, 2023)NoStop",
+      "authors": [
+        "N. Shiraishi",
+        "@noop"
+      ],
+      "title": "An Introduction to Stochastic Thermodynamics: From Basic to Advanced",
+      "year": 2023,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Kawai_001",
+      "label": "Kawai et al.(2007)Kawai, Parrondo, and den Broeck",
+      "text": "R. Kawai, J. M. R. Parrondo, and C. V. den Broeck, Dissipation: The phase-space perspective, Phys. Rev. Lett. 98, 080602 ( 2007)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2007,
+      "doi": "10.1103/PhysRevLett.98.080602",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Miyahara_001",
+      "label": "Miyahara and Aihara(2018)",
+      "text": "H. Miyahara and K. Aihara, Work relations with measurement and feedback control on nonuniform temperature systems, Phys. Rev. E 98, 042138 ( 2018)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2018,
+      "doi": "10.1103/PhysRevE.98.042138",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Barato_001",
+      "label": "Barato and Seifert(2015)",
+      "text": "A. C. Barato and U. Seifert, Thermodynamic uncertainty relation for biomolecular processes, Phys. Rev. Lett. 114, 158101 ( 2015)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2015,
+      "doi": "10.1103/PhysRevLett.114.158101",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Gingrich_001",
+      "label": "Gingrich et al.(2016)Gingrich, Horowitz, Perunov, and England",
+      "text": "T. R. Gingrich, J. M. Horowitz, N. Perunov, and J. L. England, Dissipation bounds all steady-state current fluctuations, Phys. Rev. Lett. 116, 120601 ( 2016)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2016,
+      "doi": "10.1103/PhysRevLett.116.120601",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Hasegawa_001",
+      "label": "Hasegawa and Van Vu(2019)",
+      "text": "Y. Hasegawa and T. Van Vu, Uncertainty relations in stochastic processes: An information inequality approach, Phys. Rev. E 99, 062126 ( 2019)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2019,
+      "doi": "10.1103/PhysRevE.99.062126",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Vu_001",
+      "label": "Van Vu and Hasegawa(2019)",
+      "text": "T. Van Vu and Y. Hasegawa, Uncertainty relations for underdamped langevin dynamics, Phys. Rev. E 100, 032130 ( 2019)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2019,
+      "doi": "10.1103/PhysRevE.100.032130",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Vu_002",
+      "label": "Van Vu and Saito(2023)",
+      "text": "T. Van Vu and K. Saito, Thermodynamic unification of optimal transport: Thermodynamic uncertainty relation, minimum dissipation, and thermodynamic speed limits, Phys. Rev. X 13, 011013 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": "10.1103/PhysRevX.13.011013",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Ohga_001",
+      "label": "Ohga et al.(2023)Ohga, Ito, and Kolchinsky",
+      "text": "N. Ohga, S. Ito, and A. Kolchinsky, Thermodynamic bound on the asymmetry of cross-correlations, @noop arXiv preprint arXiv:2303.13116 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": null,
+      "arxiv_id": "2303.13116",
+      "source": "Bbl"
+    },
+    {
+      "key": "Vu_003",
+      "label": "Van Vu et al.(2023)Van Vu, Vo, and Saito",
+      "text": "T. Van Vu, V. T. Vo, and K. Saito, Dissipation bounds asymmetry of finite-time cross-correlations, @noop arXiv preprint arXiv:2305.18000 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": null,
+      "arxiv_id": "2305.18000",
+      "source": "Bbl"
+    },
+    {
+      "key": "Dechant_001",
+      "label": "Dechant et al.(2023)Dechant, Garnier-Brun, and Sasa",
+      "text": "A. Dechant, J. Garnier-Brun, and S.-i. Sasa, Thermodynamic bounds on correlation times, @noop arXiv preprint arXiv:2303.13038 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": null,
+      "arxiv_id": "2303.13038",
+      "source": "Bbl"
+    },
+    {
+      "key": "Kobayashi_001",
+      "label": "Kobayashi and Sughiyama(2015)",
+      "text": "T. J. Kobayashi and Y. Sughiyama, Fluctuation relations of fitness and information in population dynamics, Phys. Rev. Lett. 115, 238102 ( 2015)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2015,
+      "doi": "10.1103/PhysRevLett.115.238102",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Miyahara_002",
+      "label": "Miyahara(2019)",
+      "text": "H. Miyahara, Many-body perturbation theory and fluctuation relations for interacting population dynamics, Phys. Rev. E 99, 042415 ( 2019)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2019,
+      "doi": "10.1103/PhysRevE.99.042415",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Sughiyama_001",
+      "label": "Sughiyama and Kobayashi(2017)",
+      "text": "Y. Sughiyama and T. J. Kobayashi, Steady-state thermodynamics for population growth in fluctuating environments, Phys. Rev. E 95, 012131 ( 2017)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2017,
+      "doi": "10.1103/PhysRevE.95.012131",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Miyahara_003",
+      "label": "Miyahara(2022)",
+      "text": "H. Miyahara, Steady-state thermodynamics for population dynamics in fluctuating environments with side information, Journal of Statistical Mechanics: Theory and Experiment 2022, 013501 ( 2022)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": "10.1088/1742-5468/ac42cc",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Adachi_001",
+      "label": "Adachi et al.(2022)Adachi, Iritani, and Hamazaki",
+      "text": "K. Adachi, R. Iritani, and R. Hamazaki, Universal constraint on nonlinear population dynamics, @noop Communications Physics 5, 129 ( 2022)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Hoshino_001",
+      "label": "Hoshino et al.(2023)Hoshino, Nagayama, Yoshimura, Yamagishi, and Ito",
+      "text": "M. Hoshino, R. Nagayama, K. Yoshimura, J. F. Yamagishi, and S. Ito, Geometric speed limit for acceleration by natural selection in evolutionary processes, Phys. Rev. Res. 5, 023127 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": "10.1103/PhysRevResearch.5.023127",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Kobayashi_003",
+      "label": "Kobayashi et al.(2022a)Kobayashi, Loutchko, Kamimura, Horiguchi, and Sughiyama",
+      "text": "T. J. Kobayashi, D. Loutchko, A. Kamimura, S. Horiguchi, and Y. Sughiyama, Information geometry of dynamics on graphs and hypergraphs, @noop arXiv preprint arXiv:2211.14455 ( 2022a)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": null,
+      "arxiv_id": "2211.14455",
+      "source": "Bbl"
+    },
+    {
+      "key": "Kobayashi_004",
+      "label": "Kobayashi et al.(2022b)Kobayashi, Loutchko, Kamimura, and Sughiyama",
+      "text": "T. J. Kobayashi, D. Loutchko, A. Kamimura, and Y. Sughiyama, Kinetic derivation of the hessian geometric structure in chemical reaction networks, Phys. Rev. Res. 4, 033066 ( 2022b)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": "10.1103/PhysRevResearch.4.033066",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Kobayashi_005",
+      "label": "Kobayashi et al.(2022c)Kobayashi, Loutchko, Kamimura, and Sughiyama",
+      "text": "T. J. Kobayashi, D. Loutchko, A. Kamimura, and Y. Sughiyama, Hessian geometry of nonequilibrium chemical reaction networks and entropy production decompositions, Phys. Rev. Res. 4, 033208 ( 2022c)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": "10.1103/PhysRevResearch.4.033208",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Okada_001",
+      "label": "Okada and Mochizuki(2016)",
+      "text": "T. Okada and A. Mochizuki, Law of localization in chemical reaction networks, Phys. Rev. Lett. 117, 048101 ( 2016)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2016,
+      "doi": "10.1103/PhysRevLett.117.048101",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Hirono_001",
+      "label": "Hirono et al.(2021)Hirono, Okada, Miyazaki, and Hidaka",
+      "text": "Y. Hirono, T. Okada, H. Miyazaki, and Y. Hidaka, Structural reduction of chemical reaction networks based on topology, Phys. Rev. Res. 3, 043123 ( 2021)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2021,
+      "doi": "10.1103/PhysRevResearch.3.043123",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Hirono_002",
+      "label": "Hirono et al.()Hirono, Okada, Miyazaki, and Hidaka",
+      "text": "Y. Hirono, T. Okada, H. Miyazaki, and Y. Hidaka, Structural reduction of hypergraphs based on topology, in Proceedings of Blockchain in Kyoto 2021 (BCK21), https://arxiv.org/abs/https://journals.jps.jp/doi/pdf/10.7566/JPSCP.36.011008 https://journals.jps.jp/doi/pdf/10.7566/JPSCP.36.011008 NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2021,
+      "doi": "10.7566/JPSCP.36.011008",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Hirono_003",
+      "label": "Hirono et al.(2023)Hirono, Hong, and Kim",
+      "text": "Y. Hirono, H. Hong, and J. K. Kim, Robust perfect adaptation of reaction fluxes ensured by network topology, @noop arXiv preprint arXiv:2302.01270 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": null,
+      "arxiv_id": "2302.01270",
+      "source": "Bbl"
+    },
+    {
+      "key": "Amari_002",
+      "label": "Amari and Nagaoka(2000)",
+      "text": "S.-i. Amari and H. Nagaoka, @noop Methods of information geometry, Vol. 191 ( American Mathematical Soc., 2000)NoStop",
+      "authors": [
+        "S.-i. Amari",
+        "H. Nagaoka",
+        "@noop"
+      ],
+      "title": "Methods of information geometry",
+      "year": 2000,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Amari_004",
+      "label": "Amari(2016)",
+      "text": "S.-i. Amari, Information Geometry and Its Applications, Applied Mathematical Sciences ( Springer Japan, 2016)NoStop",
+      "authors": [
+        "S.-i. Amari"
+      ],
+      "title": "Information Geometry and Its Applications",
+      "year": 2016,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Amari_005",
+      "label": "Amari(1998)",
+      "text": "S.-I. Amari, Natural gradient works efficiently in learning, @noop Neural computation 10, 251 ( 1998)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 1998,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Wang_001",
+      "label": "Wang and Li(2022)",
+      "text": "Y. Wang and W. Li, Accelerated information gradient flow, @noop Journal of Scientific Computing 90, 1 ( 2022)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Horiguchi_001",
+      "label": "Horiguchi and Kobayashi(2023)",
+      "text": "S. A. Horiguchi and T. J. Kobayashi, Cellular gradient flow structure linking single-cell-level rules and population-level dynamics, Phys. Rev. Res. 5, L022052 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": "10.1103/PhysRevResearch.5.L022052",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Karbowski_001",
+      "label": "Karbowski(2023)",
+      "text": "J. Karbowski, Bounds on the rates of statistical divergences and mutual information, @noop arXiv preprint arXiv:2308.05597 ( 2023)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2023,
+      "doi": null,
+      "arxiv_id": "2308.05597",
+      "source": "Bbl"
+    },
+    {
+      "key": "Beard_001",
+      "label": "Beard and Qian(2008)",
+      "text": "D. A. Beard and H. Qian, @noop Chemical biophysics: quantitative analysis of cellular systems, Vol. 126 ( Cambridge University Press Cambridge, 2008)NoStop",
+      "authors": [
+        "D. A. Beard",
+        "H. Qian",
+        "@noop"
+      ],
+      "title": "Chemical biophysics: quantitative analysis of cellular systems",
+      "year": 2008,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Feinberg_001",
+      "label": "Feinberg(2019)",
+      "text": "M. Feinberg, @noop Foundations of chemical reaction network theory ( Springer, 2019)NoStop",
+      "authors": [
+        "M. Feinberg",
+        "@noop"
+      ],
+      "title": "Foundations of chemical reaction network theory",
+      "year": 2019,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Rao_001",
+      "label": "Rao and Esposito(2016)",
+      "text": "R. Rao and M. Esposito, Nonequilibrium thermodynamics of chemical reaction networks: Wisdom from stochastic thermodynamics, Phys. Rev. X 6, 041064 ( 2016)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2016,
+      "doi": "10.1103/PhysRevX.6.041064",
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Hamming_001",
+      "label": "Hamming(2012)",
+      "text": "R. Hamming, @noop Numerical methods for scientists and engineers ( Courier Corporation, 2012)NoStop",
+      "authors": [
+        "R. Hamming",
+        "@noop"
+      ],
+      "title": "Numerical methods for scientists and engineers",
+      "year": 2012,
+      "doi": null,
+      "arxiv_id": null,
+      "source": "Bbl"
+    },
+    {
+      "key": "Sughiyama_002",
+      "label": "Sughiyama et al.(2022)Sughiyama, Loutchko, Kamimura, and Kobayashi",
+      "text": "Y. Sughiyama, D. Loutchko, A. Kamimura, and T. J. Kobayashi, Hessian geometric structure of chemical thermodynamic systems with stoichiometric constraints, Phys. Rev. Res. 4, 033065 ( 2022)NoStop",
+      "authors": [],
+      "title": null,
+      "year": 2022,
+      "doi": "10.1103/PhysRevResearch.4.033065",
+      "arxiv_id": null,
+      "source": "Bbl"
+    }
+  ],
+  "list_items": [
+    [
+      9
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34
+    ]
+  ]
+}
