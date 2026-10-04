@@ -63,7 +63,10 @@
 //! text layer (`FPDFTextObj_GetText`), which may carry the `\r`/`\n`
 //! separators that layer inserts between runs; they are not glyphs and are
 //! replaced by a space (see `clean_object_text`). Spaces are kept exactly
-//! as reported.
+//! as reported. U+0002 is restored to a hyphen only when the object's
+//! corresponding characters are confirmed by `FPDFText_IsHyphen`. This keeps
+//! visible hyphens in spans; the existing cleanup decides whether to join a
+//! word across a line break.
 //!
 //! # Library compatibility
 //!
@@ -103,6 +106,12 @@ const PDFIUM_RENDER_VERSION: &str = "0.8.37";
 const ENV_LIBRARY_PATH: &str = "PDFIUM_DYNAMIC_LIB_PATH";
 /// Bound on nested Form `XObject` traversal.
 const MAX_FORM_DEPTH: u32 = 8;
+/// Text interpretation is part of the result identity, independently of the
+/// dynamically loaded library version.
+const TEXT_POLICY: &str = "confirmed-hyphen-markers-v1";
+/// `chars_for_object` scans the whole text page. Bound the additional work
+/// across marked objects without discarding any text when the budget runs out.
+const HYPHEN_SCAN_WORK_LIMIT: usize = 1_000_000;
 /// Bound native-library fingerprint work independently of document size.
 const MAX_LIBRARY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -170,6 +179,7 @@ fn library_identity(configured: Option<&str>, environment: Option<&str>) -> Back
             .unwrap_or_else(|| "unavailable".to_string()),
     );
     config.insert("unicode_mapping_policy".to_string(), "1".to_string());
+    config.insert("text_policy".to_string(), TEXT_POLICY.to_string());
     BackendIdentity {
         name: "pdfium".to_string(),
         version: version_string(),
@@ -501,6 +511,7 @@ fn extract_page(
         paths: 0,
         shadings: 0,
         unsupported: 0,
+        hyphen_work_left: HYPHEN_SCAN_WORK_LIMIT,
     };
     collector.visit(pdf_page.objects().iter(), &text_page, None, 0);
     Ok(collector.finish())
@@ -538,6 +549,7 @@ struct Collector<'a> {
     paths: u32,
     shadings: u32,
     unsupported: u32,
+    hyphen_work_left: usize,
 }
 
 impl Collector<'_> {
@@ -599,7 +611,36 @@ impl Collector<'_> {
         text_page: &PdfPageText<'_>,
         placement: Option<PdfMatrix>,
     ) {
-        let raw = text_page.for_object(text);
+        let mut raw = text_page.for_object(text);
+        if raw.contains('\u{0002}') {
+            // Only objects containing the native marker need character-level
+            // inspection. A control character alone is not recovery evidence.
+            let cost = usize::try_from(text_page.len()).unwrap_or(usize::MAX);
+            let can_inspect = cost <= self.hyphen_work_left;
+            self.hyphen_work_left = self.hyphen_work_left.saturating_sub(cost);
+            let confirmed = can_inspect
+                .then(|| text_page.chars_for_object(text).ok())
+                .flatten()
+                .map(|chars| {
+                    chars
+                        .iter()
+                        .filter(|ch| ch.unicode_value() == 2)
+                        .map(|ch| ch.is_hyphen().unwrap_or(false))
+                        .collect::<Vec<_>>()
+                });
+            if let Some(restored) = confirmed
+                .as_deref()
+                .and_then(|confirmed| restore_hyphen_markers(&raw, confirmed))
+            {
+                raw = restored;
+            } else {
+                self.warn(if can_inspect {
+                    "unverified PDFium hyphen marker; original text retained".to_string()
+                } else {
+                    "resource_limit: PDFium hyphen inspection budget exhausted; original text retained".to_string()
+                });
+            }
+        }
         let content: String = if raw.is_empty() {
             let glyphs = text_page
                 .chars_for_object(text)
@@ -738,6 +779,14 @@ fn clean_object_text(raw: &str) -> String {
         }
     }
     out
+}
+
+/// Object text and its character evidence must agree before interpreting a
+/// `PDFium` marker. Never delete a marker or an ordinary/soft hyphen here.
+fn restore_hyphen_markers(raw: &str, confirmed: &[bool]) -> Option<String> {
+    (raw.chars().filter(|&ch| ch == '\u{0002}').count() == confirmed.len()
+        && confirmed.iter().all(|&hyphen| hyphen))
+    .then(|| raw.replace('\u{0002}', "-"))
 }
 
 /// `/BaseFont` when `pdfium` knows it, else the substituted family name.
@@ -952,6 +1001,7 @@ mod tests {
         config.insert("library_path".to_string(), String::new());
         config.insert("library_sha256".to_string(), "unavailable".to_string());
         config.insert("unicode_mapping_policy".to_string(), "1".to_string());
+        config.insert("text_policy".to_string(), TEXT_POLICY.to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
 
         let configured = PdfiumBackend {
@@ -1525,6 +1575,153 @@ mod tests {
         assert_eq!(clean_object_text("keep  spaces "), "keep  spaces ");
         // NFC composes a combining acute onto its base.
         assert_eq!(clean_object_text("e\u{0301}\r\nx"), "\u{00E9} x");
+    }
+
+    #[test]
+    fn hyphen_markers_require_native_evidence_and_preserve_other_hyphens() {
+        let raw = "Krishna\u{0002}\r\nmurthy and Processing-in-Memory soft\u{00ad}hyphen";
+        assert_eq!(
+            restore_hyphen_markers(raw, &[true]).as_deref(),
+            Some("Krishna-\r\nmurthy and Processing-in-Memory soft\u{00ad}hyphen")
+        );
+        assert!(restore_hyphen_markers(raw, &[false]).is_none());
+        assert!(restore_hyphen_markers(raw, &[]).is_none());
+        assert!(restore_hyphen_markers(raw, &[true, true]).is_none());
+        assert!(restore_hyphen_markers("a\u{0002}b\u{0002}c", &[true, false]).is_none());
+    }
+
+    #[test]
+    fn native_line_end_hyphens_survive_as_spans_and_reference_fields() {
+        if !pdfium_available() {
+            return;
+        }
+        let mut ops = text_ops(12, 45, 740, "References");
+        for (y, line) in [
+            (
+                700,
+                "[1] T. Chen, L. Zheng, E. Yan, Z. Jiang, T. Moreau, L. Ceze, C. Guestrin, and A. Krishna-",
+            ),
+            (
+                690,
+                "murthy, \"Learning to Optimize Tensor Programs,\" NeurIPS, 2018.",
+            ),
+            (
+                660,
+                "[2] S. Nakandala, K. Saur, G.-I. Yu, K. Karanasos, C. Curino, M. Weimer, and M. Inter-",
+            ),
+            (
+                650,
+                "landi, \"A Tensor Compiler for Unified Machine Learning Prediction Serving,\" in OSDI, 2020.",
+            ),
+            (620, "[3] A. Smith, \"Processing-in-Memory and self-"),
+            (610, "attention for task-mapping,\" NeurIPS, 2020."),
+        ] {
+            ops.extend(text_ops(8, 45, y, line));
+        }
+        let bytes = build_pdf(vec![ops], None, false);
+        // Assert that this fixture actually exercises PDFium's special marker.
+        let native_markers = {
+            let pdfium = bind(None).unwrap();
+            let doc = load(&pdfium, &bytes, None).unwrap();
+            let page = doc.pages().get(0).unwrap();
+            let text = page.text().unwrap();
+            text.chars()
+                .iter()
+                .filter(|ch| ch.unicode_value() == 2 && ch.is_hyphen().unwrap_or(false))
+                .count()
+        };
+        assert_eq!(
+            native_markers, 3,
+            "all three line-end hyphens exercise the marker"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("references.pdf");
+        std::fs::write(&path, bytes).unwrap();
+        let job = crate::schema::Job {
+            path: path.to_string_lossy().into_owned(),
+            backend: "pdfium".into(),
+            pages: None,
+            password: None,
+            max_bytes: None,
+            figures_dir: None,
+        };
+        let result = crate::pipeline::run_job_with(&PdfiumBackend::default(), &job).unwrap();
+        assert!(
+            result.pages[0]
+                .spans
+                .iter()
+                .any(|span| span.text.ends_with("Krishna-"))
+        );
+        assert!(!result.pages[0].text.contains('\u{0002}'));
+        for (index, name, title) in [
+            (
+                1,
+                "A. Krishnamurthy",
+                "Learning to Optimize Tensor Programs",
+            ),
+            (
+                2,
+                "M. Interlandi",
+                "A Tensor Compiler for Unified Machine Learning Prediction Serving",
+            ),
+            (
+                3,
+                "A. Smith",
+                "Processing-in-Memory and self-attention for task-mapping",
+            ),
+        ] {
+            let entry = result
+                .references
+                .iter()
+                .find(|entry| entry.label.as_deref() == Some(format!("[{index}]").as_str()))
+                .unwrap_or_else(|| panic!("missing [{index}]: {:?}", result.references));
+            assert!(entry.raw.contains(name), "{}", entry.raw);
+            assert_eq!(entry.title.as_deref(), Some(title));
+            assert!(
+                entry.authors.iter().any(|author| author == name),
+                "{:?}",
+                entry.authors
+            );
+        }
+    }
+
+    #[test]
+    fn hyphen_inspection_exhaustion_keeps_text_and_marks_partial() {
+        if !pdfium_available() {
+            return;
+        }
+        let mut ops = text_ops(12, 45, 700, "Krishna-");
+        ops.extend(text_ops(12, 45, 685, "murthy"));
+        ops.extend(text_ops(12, 45, 650, "self-"));
+        ops.extend(text_ops(12, 45, 635, "attention"));
+        let bytes = build_pdf(vec![ops], None, false);
+        let page = {
+            let pdfium = bind(None).unwrap();
+            let doc = load(&pdfium, &bytes, None).unwrap();
+            let pdf_page = doc.pages().get(0).unwrap();
+            let text_page = pdf_page.text().unwrap();
+            let mut figures = FigureStore::new(0);
+            let mut collector = Collector {
+                page: PageText::new(1, 612.0, 792.0, 0),
+                figures: &mut figures,
+                seq: 0,
+                paths: 0,
+                shadings: 0,
+                unsupported: 0,
+                // Allow exactly one marked object; the second must retain its
+                // original text instead of adding an unbounded page scan.
+                hyphen_work_left: usize::try_from(text_page.len()).unwrap(),
+            };
+            collector.visit(pdf_page.objects().iter(), &text_page, None, 0);
+            collector.finish()
+        };
+        let texts: Vec<_> = page.spans.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(texts, ["Krishna-", "murthy", "self\u{0002}", "attention"]);
+        assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+        assert_eq!(
+            page.warnings,
+            ["resource_limit: PDFium hyphen inspection budget exhausted; original text retained"]
+        );
     }
 
     #[test]
