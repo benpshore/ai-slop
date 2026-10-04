@@ -40,6 +40,7 @@ jobs:
       - run: node scripts/test-office.mjs
       - run: node scripts/test-node-imports.mjs
       - run: node ../scripts/test-web-workspace.cjs
+      - run: node ../scripts/test-web-reader.cjs
       - run: node --experimental-strip-types ../scripts/test-site-mcp.mjs
       - run: node --experimental-strip-types ../scripts/test-site-uploads-workers.mjs
       - run: pnpm run build

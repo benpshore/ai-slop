@@ -1,0 +1,28 @@
+{
+  "checks": [
+    "visible Upload opens a real multiple-file picker",
+    "actual upload/extraction/save stages and readable output before save finishes",
+    "Markdown clipboard/download, named reading modes, and collapsed diagnostics",
+    "background import preserves reader DOM, selection, URL, and scroll before/during/after",
+    "completed background import has an explicit Open result action and reader focus",
+    "browser back/forward restores document, reading mode, and prior reader scroll",
+    "repeated same-file picks and supported folder picker append to one queue",
+    "active cancellation, upload retry, and retained-result save retry",
+    "real Markdown headings/lists/links render safely while Plain text preserves source",
+    "mobile saved reader holds reading position as empty intake queue appears and grows",
+    "processing spinner respects reduced motion",
+    "390px and 768px layouts at 100% and 200% text have no horizontal page overflow",
+    "no browser runtime errors"
+  ],
+  "testedSources": {
+    "web/app/workspace.tsx": "67c79991fcf01056af722cbeb5d4a88739410075e96c264bf34fc3035546c96b",
+    "web/app/globals.css": "3daef371af6f9b9c9b103e3d9953b51e1a059004679f1f261463ee8a302c2f9b"
+  },
+  "browserVersion": "151.0.7922.173",
+  "liveSite": {
+    "error": "Error: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://pdftextract-alpha.junkmail-edu228.chatgpt.site/\nCall log:\n\u001b[2m  - navigating to \"https://pdftextract-alpha.junkmail-edu228.chatgpt.site/\", waiting until \"domcontentloaded\"\u001b[22m\n",
+    "scope": "Read-only unauthenticated navigation failed; no authentication bypass attempted"
+  },
+  "browserErrors": [],
+  "evidence": "Actual Chromium/React/CSS; synthetic extraction, network and persistence; not production Site functional validation"
+}
