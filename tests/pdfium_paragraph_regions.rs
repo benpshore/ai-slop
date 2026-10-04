@@ -50,7 +50,20 @@ fn dehyphenated_paragraph_tail_is_body_and_diagram_labels_remain_figure() {
     );
     assert_eq!(result.pages.len(), 19);
     assert_eq!(result.references.len(), 139);
-    assert!(result.warnings.iter().any(|warning| {
-        warning == "page 12: resource_limit: superscript candidate window truncated (limit=256)"
-    }));
+    // The merged complete-window search removes the old candidate cutoff.
+    // Unicode mapping diagnostics still prevent a Complete claim.
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("superscript candidate window truncated") })
+    );
+    assert_eq!(result.status, tpe::schema::Status::Partial);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unicode_mapping:"))
+    );
+    eprintln!("retained public diagnostics: {:?}", result.warnings);
 }
