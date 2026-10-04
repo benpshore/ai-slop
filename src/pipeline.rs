@@ -356,7 +356,37 @@ pub fn run_job_observed(
 /// fonts had no Unicode mapping, then docling (layout and OCR) for scans
 /// or other poor text (`crate::router`). Unresolved `PDFium` mapping evidence
 /// retains native Partial output: automatic OCR recovery is not verified.
+/// `TPE_AUTO_NATIVE_FALLBACK=1` additionally permits the bounded MuPDF/Poppler
+/// native cascade described in `docs/NATIVE_FALLBACK.md`.
 pub const AUTO_BACKEND: &str = "auto";
+
+const NATIVE_FALLBACK_ENV: &str = "TPE_AUTO_NATIVE_FALLBACK";
+const NATIVE_FALLBACK_POLICY: &str = "mupdf-poppler-v1-max4";
+
+fn native_fallback_enabled(value: Option<&std::ffi::OsStr>) -> Result<bool, PipelineError> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None if value.is_none() => Ok(false),
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(BackendError::Unsupported(format!("{NATIVE_FALLBACK_ENV} must be 0 or 1")).into()),
+    }
+}
+
+fn record_native_fallback_policy(result: &mut ExtractionResult) {
+    result.backend.config_digest = config_digest(&BTreeMap::from([
+        (
+            "backend_config".to_string(),
+            result.backend.config_digest.clone(),
+        ),
+        (
+            "auto_native_fallback".to_string(),
+            NATIVE_FALLBACK_POLICY.to_string(),
+        ),
+    ]));
+    result.warnings.push(format!(
+        "routing policy: {NATIVE_FALLBACK_POLICY}; native fallback is opt-in; text-count guards do not verify semantic correctness"
+    ));
+}
 
 /// Run `job` with a route chosen from what `lopdf` reports. Every page is
 /// read by `lopdf`; when the assessment asks for `pdfium` or docling and that
@@ -371,18 +401,33 @@ pub fn run_job_auto_observed(
     job: &Job,
     observe: &mut dyn FnMut(Progress),
 ) -> Result<ExtractionResult, PipelineError> {
+    let native_fallback =
+        native_fallback_enabled(std::env::var_os(NATIVE_FALLBACK_ENV).as_deref())?;
     let lopdf = backend::by_name("lopdf")
         .ok_or_else(|| PipelineError::UnknownBackend("lopdf".to_string()))?;
     let result = run_job_with_observed(lopdf.as_ref(), job, observe)?;
-    Ok(route_result(result, &mut |route| {
+    let mut result = route_result_with_policy(result, native_fallback, &mut |route| {
         rerun(job, route, observe)
-    }))
+    });
+    if native_fallback {
+        record_native_fallback_policy(&mut result);
+    }
+    Ok(result)
 }
 
 /// Route a completed native pass without giving an unsuccessful fallback
 /// permission to erase its usable text or completeness evidence.
+#[cfg(test)]
 fn route_result(
+    result: ExtractionResult,
+    rerun: &mut dyn FnMut(Route) -> Result<Option<ExtractionResult>, PipelineError>,
+) -> ExtractionResult {
+    route_result_with_policy(result, false, rerun)
+}
+
+fn route_result_with_policy(
     mut result: ExtractionResult,
+    native_fallback: bool,
     rerun: &mut dyn FnMut(Route) -> Result<Option<ExtractionResult>, PipelineError>,
 ) -> ExtractionResult {
     let first = router::assess(&result.pages);
@@ -390,14 +435,23 @@ fn route_result(
     if route == Route::Pdfium {
         match rerun(route) {
             Ok(Some(second)) => {
-                if let Some(reason) = fallback_regression(&result, &second) {
+                let regression = fallback_regression(&result, &second).or_else(|| {
+                    native_fallback
+                        .then(|| native_evidence_regression(&result, &second))
+                        .flatten()
+                });
+                if let Some(reason) = regression {
                     result.warnings.push(format!(
                         "route not taken: pdfium {reason}; native text retained"
                     ));
-                    return result;
+                    return native_fallback_result(result, native_fallback, rerun);
                 }
                 let again = router::assess(&second.pages);
+                let history = native_fallback.then(|| native_route_history(&result));
                 result = second;
+                if let Some(history) = history {
+                    result.warnings.extend(history);
+                }
                 result.warnings.push(format!(
                     "routed: pdfium ({} of {} pages had fonts lopdf could not map)",
                     first.unmapped, first.pages
@@ -410,6 +464,9 @@ fn route_result(
                         .iter()
                         .any(|w| w.starts_with("unicode_mapping:"))
                 }) {
+                    if native_fallback {
+                        return native_fallback_result(result, true, rerun);
+                    }
                     result.warnings.push(
                         "unresolved: pdfium Unicode mapping; native text retained because automatic OCR recovery is unverified"
                             .to_string(),
@@ -418,6 +475,13 @@ fn route_result(
                 }
                 route = again.route_after_pdfium();
                 if route != Route::Docling {
+                    if result.pages.iter().any(|page| {
+                        page.warnings
+                            .iter()
+                            .any(|warning| warning.starts_with("failed:"))
+                    }) {
+                        return native_fallback_result(result, native_fallback, rerun);
+                    }
                     return result;
                 }
             }
@@ -425,13 +489,13 @@ fn route_result(
                 result
                     .warnings
                     .push("route not taken: pdfium is not compiled into this build".to_string());
-                return result;
+                return native_fallback_result(result, native_fallback, rerun);
             }
             Err(err) => {
                 result
                     .warnings
                     .push(format!("route not taken: pdfium failed: {err}"));
-                return result;
+                return native_fallback_result(result, native_fallback, rerun);
             }
         }
     }
@@ -459,6 +523,183 @@ fn route_result(
         }
     }
     result
+}
+
+/// A fixed native-only cascade: at most one `MuPDF` and one Poppler attempt.
+/// Each accepted result stays whole, with its own backend/derived data. Nothing
+/// here enters OCR, retries a backend, or changes the enclosing worker limits.
+fn native_fallback_result(
+    mut best: ExtractionResult,
+    enabled: bool,
+    rerun: &mut dyn FnMut(Route) -> Result<Option<ExtractionResult>, PipelineError>,
+) -> ExtractionResult {
+    if !enabled {
+        return best;
+    }
+    for route in [Route::MuPdf, Route::Poppler] {
+        let name = route.backend_name();
+        match rerun(route) {
+            Ok(Some(mut candidate)) => {
+                let regression = fallback_regression(&best, &candidate)
+                    .or_else(|| native_evidence_regression(&best, &candidate));
+                if let Some(reason) = regression {
+                    best.warnings.push(format!(
+                        "route not taken: {name} {reason}; best native text retained"
+                    ));
+                    continue;
+                }
+                if native_result_quality(&candidate) <= native_result_quality(&best) {
+                    best.warnings.push(format!(
+                        "route not taken: {name} did not improve native extraction evidence; best native text retained"
+                    ));
+                    continue;
+                }
+                candidate.warnings.extend(native_route_history(&best));
+                candidate.warnings.push(format!(
+                    "routed: {name} (bounded native fallback after unresolved or failed PDFium; whole requested page range)"
+                ));
+                best = candidate;
+                if best.status == Status::Complete
+                    && !best.pages.iter().any(router::has_unmapped_text)
+                {
+                    break;
+                }
+            }
+            Ok(None) => best.warnings.push(format!(
+                "route not taken: {name} is not compiled in or both explicit native library files are not configured"
+            )),
+            Err(error) => best
+                .warnings
+                .push(format!("route not taken: {name} failed: {error}")),
+        }
+    }
+    best
+}
+
+/// Retain prior route decisions and source-specific mapping uncertainty as
+/// history. These are not warnings about the newly selected backend's text.
+fn native_route_history(result: &ExtractionResult) -> Vec<String> {
+    let mut history: Vec<String> = result
+        .warnings
+        .iter()
+        .filter(|warning| {
+            warning.starts_with("routed:")
+                || warning.starts_with("route not taken:")
+                || warning.starts_with("routing evidence:")
+        })
+        .cloned()
+        .collect();
+    for page in &result.pages {
+        if router::has_unmapped_text(page) {
+            let warnings: Vec<&str> = page
+                .warnings
+                .iter()
+                .map(String::as_str)
+                .filter(|warning| {
+                    warning.starts_with("unicode_mapping:")
+                        || warning.contains("undecodable")
+                        || warning.contains("decoded as Latin-1")
+                })
+                .collect();
+            for warning in if warnings.is_empty() {
+                vec!["unresolved source-character mappings detected in text"]
+            } else {
+                warnings
+            } {
+                history.push(format!(
+                    "routing evidence: {} page {}: {warning}",
+                    result.backend.name, page.page
+                ));
+            }
+        }
+    }
+    history
+}
+
+fn native_result_quality(result: &ExtractionResult) -> (usize, std::cmp::Reverse<usize>, usize) {
+    (
+        result
+            .pages
+            .iter()
+            .filter(|page| page.extraction_status() == Status::Complete)
+            .count(),
+        std::cmp::Reverse(
+            result
+                .pages
+                .iter()
+                .filter(|page| router::has_unmapped_text(page))
+                .count(),
+        ),
+        result
+            .pages
+            .iter()
+            .map(|page| {
+                page.text
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace() && *ch != '\u{fffd}')
+                    .count()
+            })
+            .sum(),
+    )
+}
+
+fn evidence_counts<T: serde::Serialize>(
+    values: impl Iterator<Item = T>,
+) -> Result<BTreeMap<Vec<u8>, usize>, serde_json::Error> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(serde_json::to_vec(&value)?).or_default() += 1;
+    }
+    Ok(counts)
+}
+
+fn evidence_retained<T: serde::Serialize>(
+    before: impl Iterator<Item = T>,
+    after: impl Iterator<Item = T>,
+) -> bool {
+    let (Ok(before), Ok(after)) = (evidence_counts(before), evidence_counts(after)) else {
+        return false;
+    };
+    before
+        .into_iter()
+        .all(|(key, count)| after.get(&key).copied().unwrap_or(0) >= count)
+}
+
+/// A whole-pass native fallback must not discard already observed annotations
+/// or images. Index/file/caption are derived for each backend; source geometry,
+/// image dimensions, format and captured pixel hashes must remain represented.
+fn native_evidence_regression(
+    native: &ExtractionResult,
+    candidate: &ExtractionResult,
+) -> Option<String> {
+    for (before, after) in native.pages.iter().zip(&candidate.pages) {
+        if !evidence_retained(before.links.iter(), after.links.iter()) {
+            return Some(format!(
+                "dropped native link targets or rectangles on page {}",
+                before.page
+            ));
+        }
+        let figure_key = |figure: &crate::schema::Figure| {
+            (
+                figure.bbox,
+                figure.kind.clone(),
+                figure.mime.clone(),
+                figure.width_px,
+                figure.height_px,
+                figure.sha256.clone(),
+            )
+        };
+        if !evidence_retained(
+            before.figures.iter().map(figure_key),
+            after.figures.iter().map(figure_key),
+        ) {
+            return Some(format!(
+                "dropped native figure evidence on page {}",
+                before.page
+            ));
+        }
+    }
+    None
 }
 
 /// Reject observable regressions before replacing a whole result. Keeping a
@@ -579,7 +820,9 @@ pub fn run_job_with_observed(
     let order_start = Instant::now();
     let backend_order = extractor.provides_reading_order();
     for page in &mut pages {
-        if backend_order {
+        if extractor.provides_line_layout() {
+            // The backend has projected lines while retaining its raw spans.
+        } else if backend_order {
             reading_order::lines_in_backend_order(page);
         } else {
             reading_order::order_page(page);
@@ -1246,6 +1489,258 @@ mod tests {
                     .any(|w| w.starts_with("route not taken:"))
             );
         }
+    }
+
+    #[test]
+    fn native_cascade_policy_is_explicit_and_has_a_distinct_ledger_identity() {
+        use std::ffi::OsStr;
+        assert!(!super::native_fallback_enabled(None).unwrap());
+        assert!(!super::native_fallback_enabled(Some(OsStr::new("0"))).unwrap());
+        assert!(super::native_fallback_enabled(Some(OsStr::new("1"))).unwrap());
+        for value in ["", "true", "2", " 1"] {
+            assert!(super::native_fallback_enabled(Some(OsStr::new(value))).is_err());
+        }
+        let original = run_pages(vec![native_page("Mapped source text")]);
+        let mut enabled = original.clone();
+        super::record_native_fallback_policy(&mut enabled);
+        assert_ne!(
+            enabled.backend.config_digest,
+            original.backend.config_digest
+        );
+        assert_eq!(enabled.backend.name, original.backend.name);
+        assert_eq!(enabled.backend.version, original.backend.version);
+        assert_eq!(enabled.pages, original.pages);
+        let mut repeated = original;
+        super::record_native_fallback_policy(&mut repeated);
+        assert_eq!(enabled.backend, repeated.backend);
+    }
+
+    #[test]
+    fn native_cascade_recovers_after_missing_failed_or_regressing_pdfium() {
+        use crate::router::Route;
+        for failure in ["missing", "failed", "regressing"] {
+            let original = run_pages(vec![native_page("Readable source text \u{fffd}")]);
+            let mut repaired = run_pages(vec![native_page("Readable source text repaired")]);
+            repaired.backend.name = "mupdf".into();
+            let mut calls = Vec::new();
+            let result = super::route_result_with_policy(original.clone(), true, &mut |route| {
+                calls.push(route);
+                match route {
+                    Route::Pdfium if failure == "missing" => Ok(None),
+                    Route::Pdfium if failure == "failed" => {
+                        Err(BackendError::Unsupported("native open failed".into()).into())
+                    }
+                    Route::Pdfium => Ok(Some(run_pages(vec![native_page("")]))),
+                    Route::MuPdf => Ok(Some(repaired.clone())),
+                    _ => panic!("successful native recovery must stop the cascade"),
+                }
+            });
+            assert_eq!(calls, [Route::Pdfium, Route::MuPdf]);
+            assert_eq!(result.pages, repaired.pages);
+            assert_eq!(result.status, Status::Complete);
+            assert_eq!(result.backend.name, "mupdf");
+            assert!(
+                result
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("route not taken: pdfium"))
+            );
+            assert!(
+                result
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("routing evidence:"))
+            );
+        }
+    }
+
+    #[test]
+    fn native_cascade_preserves_best_partial_result_and_never_enters_ocr() {
+        use crate::router::Route;
+        let original = run_pages(vec![native_page("Source \u{fffd}")]);
+        let mut pdfium = run_pages(vec![native_page("Longer PDFium source \u{fffd}")]);
+        pdfium.backend.name = "pdfium".into();
+        let mut mupdf = run_pages(vec![native_page("Even longer MuPDF source text \u{fffd}")]);
+        mupdf.backend.name = "mupdf".into();
+        let mut calls = Vec::new();
+        let result = super::route_result_with_policy(original, true, &mut |route| {
+            calls.push(route);
+            match route {
+                Route::Pdfium => Ok(Some(pdfium.clone())),
+                Route::MuPdf => Ok(Some(mupdf.clone())),
+                Route::Poppler => Err(BackendError::Unsupported("runtime failure".into()).into()),
+                _ => panic!("unresolved native mapping cannot enter OCR"),
+            }
+        });
+        assert_eq!(calls, [Route::Pdfium, Route::MuPdf, Route::Poppler]);
+        assert_eq!(result.backend.name, "mupdf");
+        assert_eq!(result.pages, mupdf.pages);
+        assert_eq!(result.chunks, mupdf.chunks);
+        assert_eq!(result.status, Status::Partial);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("route not taken: poppler failed:"))
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("routing evidence: pdfium"))
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("routed: pdfium"))
+        );
+    }
+
+    #[test]
+    fn native_cascade_tries_poppler_once_after_mupdf_cannot_improve() {
+        use crate::router::Route;
+        let original = run_pages(vec![native_page("Readable \u{fffd}")]);
+        let mut candidate = run_pages(vec![native_page("Readable recovered source characters")]);
+        candidate.backend.name = "poppler".into();
+        let mut calls = Vec::new();
+        let result = super::route_result_with_policy(original.clone(), true, &mut |route| {
+            calls.push(route);
+            match route {
+                Route::Pdfium => Ok(None),
+                Route::MuPdf => Ok(Some(original.clone())),
+                Route::Poppler => Ok(Some(candidate.clone())),
+                _ => panic!("native route budget exceeded"),
+            }
+        });
+        assert_eq!(calls, [Route::Pdfium, Route::MuPdf, Route::Poppler]);
+        assert_eq!(result.backend.name, "poppler");
+        assert_eq!(result.status, Status::Complete);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("mupdf did not improve"))
+        );
+    }
+
+    #[test]
+    fn native_cascade_cannot_change_source_coverage_status_or_known_evidence() {
+        use crate::router::Route;
+        let mut page = native_page("Readable native source \u{fffd}");
+        page.links.push(crate::schema::Link {
+            uri: "https://doi.org/10.1000/reference".into(),
+            bbox: page.spans[0].bbox,
+        });
+        page.figures.push(Figure {
+            index: 0,
+            bbox: page.spans[0].bbox,
+            kind: "raster".into(),
+            mime: Some("image/png".into()),
+            width_px: Some(20),
+            height_px: Some(30),
+            sha256: Some(sha256_hex(b"native image")),
+            file: None,
+            caption: None,
+        });
+        let original = run_pages(vec![page]);
+        for damage in [
+            "hash",
+            "size",
+            "total_pages",
+            "selected_page",
+            "failed",
+            "status",
+            "text",
+            "link",
+            "rectangle",
+            "image",
+            "image_hash",
+        ] {
+            let mut candidate = original.clone();
+            candidate.backend.name = "mupdf".into();
+            match damage {
+                "hash" => candidate.document.hash = ContentHash(sha256_hex(b"different input")),
+                "size" => candidate.document.size += 1,
+                "total_pages" => candidate.document.pages += 1,
+                "selected_page" => candidate.pages[0].page += 1,
+                "failed" => candidate.status = Status::Failed,
+                "status" => candidate.status = Status::Complete,
+                "text" => candidate.pages[0].text = "short".into(),
+                "link" => candidate.pages[0].links.clear(),
+                "rectangle" => candidate.pages[0].links[0].bbox = None,
+                "image" => candidate.pages[0].figures.clear(),
+                "image_hash" => candidate.pages[0].figures[0].sha256 = None,
+                _ => unreachable!(),
+            }
+            let mut calls = Vec::new();
+            let result = super::route_result_with_policy(original.clone(), true, &mut |route| {
+                calls.push(route);
+                match route {
+                    Route::Pdfium | Route::Poppler => Ok(None),
+                    Route::MuPdf => Ok(Some(candidate.clone())),
+                    _ => panic!("native route budget exceeded"),
+                }
+            });
+            assert_eq!(calls, [Route::Pdfium, Route::MuPdf, Route::Poppler]);
+            assert_eq!(result.backend, original.backend, "{damage}");
+            assert_eq!(result.pages, original.pages, "{damage}");
+            assert_eq!(result.chunks, original.chunks, "{damage}");
+            assert!(
+                result
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("route not taken: mupdf")),
+                "{damage}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_cascade_does_not_drop_link_evidence_during_pdfium_replacement() {
+        use crate::router::Route;
+        let mut page = native_page("Readable native source \u{fffd}");
+        page.links.push(crate::schema::Link {
+            uri: "https://doi.org/10.1000/reference".into(),
+            bbox: page.spans[0].bbox,
+        });
+        let original = run_pages(vec![page]);
+        let candidate = run_pages(vec![native_page(
+            "Readable native source repaired by PDFium",
+        )]);
+        let result =
+            super::route_result_with_policy(original.clone(), true, &mut |route| match route {
+                Route::Pdfium => Ok(Some(candidate.clone())),
+                Route::MuPdf | Route::Poppler => Ok(None),
+                _ => panic!("unexpected route"),
+            });
+        assert_eq!(result.pages, original.pages);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("pdfium dropped native link"))
+        );
+    }
+
+    #[test]
+    fn native_cascade_keeps_mapped_lopdf_and_successfully_repaired_pdfium() {
+        use crate::router::Route;
+        let mapped = run_pages(vec![native_page("Known mapped native source")]);
+        let result = super::route_result_with_policy(mapped.clone(), true, &mut |_| {
+            panic!("mapped lopdf should not run another backend")
+        });
+        assert_eq!(result, mapped);
+        let original = run_pages(vec![native_page("Source \u{fffd}")]);
+        let mut calls = Vec::new();
+        let result = super::route_result_with_policy(original, true, &mut |route| {
+            calls.push(route);
+            assert_eq!(route, Route::Pdfium);
+            Ok(Some(mapped.clone()))
+        });
+        assert_eq!(calls, [Route::Pdfium]);
+        assert_eq!(result.pages, mapped.pages);
+        assert_eq!(result.status, Status::Complete);
     }
 
     #[test]

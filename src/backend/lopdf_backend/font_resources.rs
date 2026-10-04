@@ -8,6 +8,8 @@ pub(super) const MAX_FONT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_FONT_CACHE_ENTRIES: usize = 512;
 pub(super) const MIN_FONT_CHARGE: usize = 16 * 1024;
 pub(super) const MAX_FONT_STREAM: usize = 8 * 1024 * 1024;
+#[cfg(feature = "pdf-extract")]
+pub(super) const MAX_CFF_STREAM: usize = 256 * 1024;
 const MAX_FONT_ITEMS: usize = 65_536;
 // Cover width/encoding construction, including CID interval sweep scratch:
 // two endpoints, one heap entry, and up to two output runs per source run can
@@ -167,7 +169,60 @@ pub(super) fn preflight(
             .unwrap_or(bytes.len());
         work.reserve(clear_end.saturating_mul(32))?;
     }
+    #[cfg(feature = "pdf-extract")]
+    if let Some(stream) = embedded_cff(doc, dict) {
+        let policy = form_decode_policy(stream).ok_or("CFF filter limit exceeded")?;
+        // CFF is a byte program, not image pixels; predictor scratch is not
+        // needed and could exceed the decoded program cap.
+        if policy.uses_predictor || stream.content.len() > MAX_CFF_STREAM {
+            return Err("CFF encoded stream/predictor limit exceeded");
+        }
+        work.reserve(MAX_CFF_STREAM * policy.layers * 2)?;
+        match stream.get_plain_content_with_limit(MAX_CFF_STREAM) {
+            Ok(bytes) => {
+                // Two controlled probes, input copies, maps and up to 256
+                // lookups through the font's source tables. Charged before
+                // constructing the foreign parser or any probe document.
+                work.reserve(bytes.len().saturating_mul(128) + 1024 * 1024)?;
+            }
+            Err(LopdfError::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. })) => {
+                return Err("CFF decoded stream byte limit exceeded");
+            }
+            Err(_) => {}
+        }
+    }
     Ok(before - work.bytes)
+}
+
+/// Only an actually selected simple Type1 font without an authoritative
+/// PDF-level mapping can use its embedded CFF encoding. No source resources,
+/// page content or recursive font dictionaries enter the recovery probe.
+pub(super) fn embedded_cff<'a>(doc: &'a Document, dict: &'a Dictionary) -> Option<&'a Stream> {
+    if dict.get(b"ToUnicode").is_ok()
+        || dict.get(b"Encoding").is_ok()
+        || !dict
+            .get(b"Subtype")
+            .and_then(Object::as_name)
+            .is_ok_and(|s| s == b"Type1")
+    {
+        return None;
+    }
+    let descriptor = dict
+        .get_deref(b"FontDescriptor", doc)
+        .ok()?
+        .as_dict()
+        .ok()?;
+    let stream = descriptor
+        .get_deref(b"FontFile3", doc)
+        .ok()?
+        .as_stream()
+        .ok()?;
+    stream
+        .dict
+        .get(b"Subtype")
+        .and_then(Object::as_name)
+        .is_ok_and(|s| s == b"Type1C")
+        .then_some(stream)
 }
 
 /// Follow the same fallback routes as `own_table` and `builtin_entries`.
@@ -176,7 +231,7 @@ pub(super) fn preflight(
 /// would make an irrelevant resource prevent otherwise valid extraction.
 fn uses_embedded_program(doc: &Document, dict: &Dictionary) -> bool {
     use super::{BASE_ENCODINGS, TexEncoding, tex_encoding};
-    if dict.get(b"ToUnicode").is_ok() {
+    if dict.get(b"ToUnicode").is_ok() || embedded_cff(doc, dict).is_some() {
         return false;
     }
     if matches!(

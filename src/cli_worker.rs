@@ -177,8 +177,11 @@ fn input_paths(args: &ExtractArgs) -> anyhow::Result<Vec<PathBuf>> {
 
 fn check_supervised_backend(name: &str) -> anyhow::Result<()> {
     ensure!(
-        matches!(name, "lopdf" | "pdfium" | "auto"),
-        "supervised extraction supports native lopdf/pdfium only; OCR backends may spawn unsupervised children"
+        matches!(
+            name,
+            "lopdf" | "pdfium" | "pdf-oxide" | "liteparse-layout" | "mupdf" | "poppler" | "auto"
+        ),
+        "supervised extraction supports native lopdf/pdfium/pdf-oxide/mupdf/poppler and liteparse-layout only; OCR backends may spawn unsupervised children"
     );
     ensure!(
         name != "auto" || !tpe::backend::available().contains(&"docling"),

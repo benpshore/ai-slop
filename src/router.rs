@@ -15,6 +15,10 @@
 //!   without unresolved native mapping evidence. Unverified Unicode mappings
 //!   remain Partial; OCR has not proved recovery of those source characters.
 //!
+//! The optional full-extraction native cascade also uses [`Route::MuPdf`] and
+//! [`Route::Poppler`]. The assessment itself never selects them; the pipeline
+//! permits each once after the `PDFium` route needs additional help.
+//!
 //! Nothing here touches geometry or reading order.
 
 use serde::Serialize;
@@ -40,6 +44,10 @@ pub enum Route {
     Pdfium,
     /// Re-read with docling (layout + OCR): scanned pages.
     Docling,
+    /// Optional native fallback after `PDFium` cannot resolve the text.
+    MuPdf,
+    /// Last optional native fallback after `MuPDF` cannot resolve the text.
+    Poppler,
 }
 
 impl Route {
@@ -50,6 +58,8 @@ impl Route {
             Self::Lopdf => "lopdf",
             Self::Pdfium => "pdfium",
             Self::Docling => "docling",
+            Self::MuPdf => "mupdf",
+            Self::Poppler => "poppler",
         }
     }
 }
@@ -91,10 +101,34 @@ impl Assessment {
     }
 }
 
-/// The compiled-in extractor for `route`, if this build has it.
+/// The compiled-in extractor for `route`, if this build has it. Optional native
+/// cascade routes also require both explicit runtime library files.
 #[must_use]
 pub fn extractor_for(route: Route) -> Option<Box<dyn Extractor>> {
+    if !native_runtime_configured(route, |name| std::env::var_os(name)) {
+        return None;
+    }
     backend::by_name(route.backend_name())
+}
+
+/// Optional native fallbacks never discover a library through PATH or the
+/// platform loader. Both exact library files must be explicitly configured;
+/// the provider then verifies their fingerprints and ABI when opening them.
+fn native_runtime_configured(
+    route: Route,
+    mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    let variables = match route {
+        Route::MuPdf => ["TPE_MUPDF_PROVIDER_PATH", "MUPDF_DYNAMIC_LIB_PATH"],
+        Route::Poppler => ["TPE_POPPLER_PROVIDER_PATH", "POPPLER_DYNAMIC_LIB_PATH"],
+        _ => return true,
+    };
+    variables.into_iter().all(|name| {
+        lookup(name).is_some_and(|value| {
+            let path = std::path::Path::new(&value);
+            path.is_absolute() && path.is_file()
+        })
+    })
 }
 
 /// Non-whitespace characters and U+FFFD characters of `text`.
@@ -317,5 +351,29 @@ mod tests {
         assert_eq!(Route::Lopdf.backend_name(), "lopdf");
         assert_eq!(Route::Pdfium.backend_name(), "pdfium");
         assert_eq!(Route::Docling.backend_name(), "docling");
+        assert_eq!(Route::MuPdf.backend_name(), "mupdf");
+        assert_eq!(Route::Poppler.backend_name(), "poppler");
+    }
+
+    #[test]
+    fn optional_native_routes_require_both_explicit_library_files() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for route in [Route::MuPdf, Route::Poppler] {
+            assert!(!native_runtime_configured(route, |_| None));
+            assert!(!native_runtime_configured(route, |_| Some(
+                "libnative.so".into()
+            )));
+            assert!(!native_runtime_configured(route, |name| {
+                name.starts_with("TPE_")
+                    .then(|| file.path().as_os_str().to_owned())
+            }));
+            assert!(native_runtime_configured(route, |_| {
+                Some(file.path().as_os_str().to_owned())
+            }));
+            assert!(!native_runtime_configured(route, |_| {
+                Some(file.path().parent().unwrap().as_os_str().to_owned())
+            }));
+        }
+        assert!(native_runtime_configured(Route::Pdfium, |_| None));
     }
 }

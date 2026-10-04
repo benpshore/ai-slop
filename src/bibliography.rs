@@ -204,7 +204,9 @@ fn scan_window(
         let mut page = session.page_text(number)?;
         // Assess the backend evidence before cleanup can remove unreadable text.
         router::mark_incomplete(&mut page);
-        if extractor.provides_reading_order() {
+        if extractor.provides_line_layout() {
+            // Preserve explicitly provided layout; spans remain raw evidence.
+        } else if extractor.provides_reading_order() {
             reading_order::lines_in_backend_order(&mut page);
         } else {
             reading_order::order_page(&mut page);

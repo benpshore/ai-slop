@@ -118,7 +118,7 @@ struct ExtractArgs {
     /// Path of the `SQLite` ledger; created when missing.
     #[arg(long, value_name = "FILE")]
     db: PathBuf,
-    /// Native extraction backend: lopdf, pdfium, or auto without OCR.
+    /// Extraction backend: lopdf, pdfium, pdf-oxide, liteparse-layout, mupdf, poppler, or auto without OCR.
     #[arg(long, default_value = "lopdf")]
     backend: String,
     /// Directory that receives `<hash>.json` and `<hash>.txt` per document.
@@ -771,6 +771,19 @@ fn run_backends() -> anyhow::Result<()> {
             println!("{name}\tnot compiled\trebuild with --features {feature}");
         }
     }
+    println!(
+        "lopdf-cff-recovery\t{}\t{}",
+        if cfg!(feature = "pdf-extract") {
+            "enabled helper"
+        } else {
+            "not compiled"
+        },
+        if cfg!(feature = "pdf-extract") {
+            backend::lopdf_backend::CFF_RECOVERY
+        } else {
+            "rebuild with --features pdf-extract (lopdf font helper)"
+        }
+    );
     Ok(())
 }
 
