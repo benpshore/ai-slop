@@ -47,6 +47,8 @@
 //!   fragment-like lies above, the lines below the caption are tried the
 //!   same way (caption above the figure), cut at the first numbered
 //!   section heading (`3 Method`, `3.1 Setup`).
+//!   A short sentence ending aligned with the preceding unfinished prose
+//!   line, at the same height and ordinary leading, stays with its paragraph.
 //! - table: the lines below a table caption (caption above, ACM/IEEE) up
 //!   to the next prose paragraph, else the lines above it (Elsevier),
 //!   tagged `table` when at least 50 % of the lines have at most 5 words or
@@ -206,6 +208,9 @@ const BLANK_GAP: f32 = 0.6;
 const FALLBACK_HEIGHT: f32 = 10.0;
 /// Fewest words in a prose line.
 const PROSE_WORDS: usize = 6;
+/// Alignment and line-height slack for a short paragraph-ending line.
+const PARAGRAPH_EDGE_SLACK: f32 = 2.0;
+const PARAGRAPH_HEIGHT_SLACK: f32 = 1.0;
 /// Fewest words in a prose-like line (the hard guard).
 const PROSE_LIKE_WORDS: usize = 7;
 /// Most all-caps or abbreviation tokens in a prose-like line.
@@ -1027,11 +1032,11 @@ fn walk_up(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> Vec<us
         if ends_sentence(text) && gap(page, i, below) > blank {
             break;
         }
-        let upper_prose = k
-            .checked_sub(1)
-            .and_then(|u| entries.get(u))
-            .is_some_and(|&u| is_prose(&page.lines[u].text));
-        if is_prose(text) && upper_prose {
+        let upper = k.checked_sub(1).and_then(|u| entries.get(u));
+        if upper.is_some_and(|&u| {
+            (is_prose(text) && is_prose(&page.lines[u].text))
+                || finishes_paragraph(page, u, i, blank)
+        }) {
             break;
         }
         region.push(i);
@@ -1041,6 +1046,30 @@ fn walk_up(page: &PageText, entries: &[usize], pos: usize, blank: f32) -> Vec<us
         below = i;
     }
     region
+}
+
+/// A short final sentence line belongs to the preceding prose paragraph
+/// when its geometry still follows that paragraph. Dehyphenation can move
+/// a word fragment out of this line, so its word count is not a boundary.
+fn finishes_paragraph(page: &PageText, upper: usize, lower: usize, blank: f32) -> bool {
+    let before = &page.lines[upper];
+    let after = &page.lines[lower];
+    if before.role != ROLE_BODY
+        || !is_prose(&before.text)
+        || ends_sentence(&before.text)
+        || before.text.trim_end().ends_with([':', ';'])
+        || !ends_sentence(&after.text)
+        || !after.text.trim_start().starts_with(char::is_lowercase)
+    {
+        return false;
+    }
+    let (Some(a), Some(b)) = (finite_box(before), finite_box(after)) else {
+        return false;
+    };
+    let leading = a.y0 - b.y1;
+    (a.x0 - b.x0).abs() <= PARAGRAPH_EDGE_SLACK
+        && ((a.y1 - a.y0) - (b.y1 - b.y0)).abs() <= PARAGRAPH_HEIGHT_SLACK
+        && (0.0..=blank).contains(&leading)
 }
 
 /// Body lines below the caption at `entries[pos]` (after its continuation
@@ -3189,6 +3218,66 @@ mod tests {
             page.warnings
                 .contains(&"regions: caption text 1 lines".to_string())
         );
+    }
+
+    #[test]
+    fn a_short_paragraph_tail_above_diagram_labels_stays_body() {
+        let mut page = figure_page();
+        page.lines[5].text = "and communication between the devices typically happens".to_string();
+        // Normal paragraph leading above the tail, followed closely by a
+        // smaller diagram gap: the tail must not join the figure's labels.
+        let first_label = page.lines[6].bbox.as_mut().unwrap();
+        first_label.y0 += 4.0;
+        first_label.y1 += 4.0;
+        page.lines
+            .insert(6, line("via the Host memory bus.", 54.0, 628.0, 0));
+        let mut pages = vec![page_of(page.lines)];
+        let original_text = pages[0].text.clone();
+
+        let report = tag_regions(&mut pages);
+
+        assert_eq!(role_of(&pages[0], "via the Host memory bus."), ROLE_BODY);
+        for text in [
+            "Observation sequence",
+            "Robot State",
+            "Noise Prediction",
+            "auxiliary patches",
+            "Epoch 50",
+        ] {
+            assert_eq!(role_of(&pages[0], text), "figure", "{text}");
+        }
+        assert_eq!(report.figure, 5);
+        assert_eq!(pages[0].text, original_text);
+    }
+
+    #[test]
+    fn short_diagram_labels_near_prose_still_belong_to_the_figure() {
+        for variant in 0..3 {
+            let mut page = figure_page();
+            page.lines[5].text = if variant == 0 {
+                "and communication between the devices proceeds as follows:".to_string()
+            } else {
+                "and communication between the devices typically happens".to_string()
+            };
+            let first_label = page.lines[6].bbox.as_mut().unwrap();
+            first_label.y0 += 4.0;
+            first_label.y1 += 4.0;
+            let mut label = line("data output.", 54.0, 628.0, 0);
+            let bounds = label.bbox.as_mut().unwrap();
+            if variant == 1 {
+                bounds.x0 += 16.0;
+                bounds.x1 += 16.0;
+            } else if variant == 2 {
+                bounds.y1 = bounds.y0 + 6.0;
+            }
+            page.lines.insert(6, label);
+            let mut pages = vec![page_of(page.lines)];
+
+            let report = tag_regions(&mut pages);
+
+            assert_eq!(role_of(&pages[0], "data output."), "figure", "{variant}");
+            assert_eq!(report.figure, 6, "{variant}");
+        }
     }
 
     #[test]

@@ -1,0 +1,141 @@
+name: Native repair checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - src/backend/pdfium_backend.rs
+      - src/backend/pdfium_backend/**
+      - src/regions.rs
+      - tests/pdfium_hyphens.rs
+      - tests/pdfium_paragraph_regions.rs
+      - tests/test_validate_eval.py
+      - native/validate_eval.py
+      - native/reviewed-partials.*
+      - native/manifest.json
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/native-repair-checks.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x64
+            extension: so
+            architecture: x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            extension: so
+            architecture: aarch64
+          - os: macos-15
+            platform: mac-arm64
+            extension: dylib
+            architecture: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PDFIUM_PLATFORM: ${{ matrix.platform }}
+      PDFIUM_EXTENSION: ${{ matrix.extension }}
+      PDFIUM_DYNAMIC_LIB_PATH: ${{ github.workspace }}/.pdfium/lib
+      TPE_HYPHEN_FIXTURE: ${{ github.workspace }}/.public-fixtures/2511.15503v5.pdf
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_BUILD_JOBS: 2
+      RAYON_NUM_THREADS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: native-repairs-${{ matrix.platform }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Record exact source and runner
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/native-repairs
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+          git rev-parse HEAD HEAD^{tree} > out/native-repairs/source.txt
+          rustc --version --verbose > out/native-repairs/toolchain.txt
+          uname -a > out/native-repairs/runner.txt
+      - name: Fetch pinned PDFium and public regression PDF
+        shell: bash
+        run: |
+          set -euo pipefail
+          entry=$(jq -ce '[.entries[] | select(.kind == "pdfium" and .platform == env.PDFIUM_PLATFORM)] | if length == 1 then .[0] else error("expected one PDFium pin") end' native/manifest.json)
+          pdfium_url=$(jq -er '.url' <<< "$entry")
+          archive_sha=$(jq -er '.archive_sha256 | select(test("^[a-f0-9]{64}$"))' <<< "$entry")
+          library_sha=$(jq -er '.sha256 | select(test("^[a-f0-9]{64}$"))' <<< "$entry")
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 "$pdfium_url" -o pdfium.tgz
+          printf '%s  pdfium.tgz\n' "$archive_sha" | shasum -a 256 --check
+          mkdir -p .pdfium .public-fixtures
+          tar -xzf pdfium.tgz -C .pdfium "lib/libpdfium.$PDFIUM_EXTENSION"
+          printf '%s  .pdfium/lib/libpdfium.%s\n' "$library_sha" "$PDFIUM_EXTENSION" | shasum -a 256 --check
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 https://arxiv.org/pdf/2511.15503v5 -o "$TPE_HYPHEN_FIXTURE"
+          printf '%s  %s\n' 5682c7c0c805b3145b15eb5b55a1db81d491211b7fc0155cc919462c657ad349 "$TPE_HYPHEN_FIXTURE" | shasum -a 256 --check | tee out/native-repairs/input-check.txt
+      - name: Rust formatting and strict lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets --features pdfium -- -D warnings
+      - name: Rust workspace with PDFium
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace --features pdfium -- --nocapture 2>&1 | tee out/native-repairs/rust.log
+      - name: Explicit public hyphen and paragraph regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=(--test pdfium_hyphens)
+          if [ -f tests/pdfium_paragraph_regions.rs ]; then
+            tests+=(--test pdfium_paragraph_regions)
+          fi
+          cargo test --locked --features pdfium "${tests[@]}" -- --ignored --nocapture 2>&1 | tee out/native-repairs/public.log
+      - name: Python validation tests and lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked
+          uv run ruff format --check
+          uv run ruff check
+          uv run pytest 2>&1 | tee out/native-repairs/python.log
+          uv audit --locked --preview-features audit-command
+      - name: macOS Swift and CMake checks
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift build
+          swift test
+          cmake -S . -B build
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-repairs-${{ matrix.platform }}
+          path: out/native-repairs
+          if-no-files-found: error
