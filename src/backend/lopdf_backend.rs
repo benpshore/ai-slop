@@ -208,8 +208,10 @@ const MAX_FORM_FILTERS: usize = 8;
 /// 2 = lazy, bounded font loading and preflight before `CMap` reverse expansion;
 /// 3 = preserve the position of unmapped bytes and report lossy mapping evidence;
 /// 4 = prefer bounded `ToUnicode` maps over simple-font rendering encodings and
-/// preserve two-byte `Identity-H`/`Identity-V` code boundaries in sparse maps.
-const ENCODING_POLICY: &str = "4";
+/// preserve two-byte `Identity-H`/`Identity-V` code boundaries in sparse maps;
+/// 5 = retain usable rendering encodings when `ToUnicode` is malformed, with
+/// explicit Partial evidence instead of replacing readable text with Latin-1.
+const ENCODING_POLICY: &str = "5";
 
 /// The `lopdf` extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1216,6 +1218,8 @@ struct LoadedFont {
     composite: bool,
     /// Decoding yields exactly one char per byte, so dropped bytes are detectable.
     one_to_one: bool,
+    /// A present but unusable `ToUnicode` map must not certify fallback text.
+    unverified_unicode_map: bool,
     widths: Widths,
 }
 
@@ -1227,6 +1231,7 @@ impl LoadedFont {
             decode: Decode::Latin1("not in resources"),
             composite: false,
             one_to_one: false,
+            unverified_unicode_map: false,
             widths: Widths::Simple(SimpleWidths::unknown()),
         }
     }
@@ -1236,8 +1241,8 @@ fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
     let subtype = dict.get(b"Subtype").and_then(Object::as_name);
     let composite = subtype.is_ok_and(|name| name == b"Type0");
     let base_font = dict.get(b"BaseFont").and_then(Object::as_name).ok();
-    let (decode, one_to_one) = if composite {
-        (composite_decode(doc, dict), false)
+    let (decode, one_to_one, unverified_unicode_map) = if composite {
+        (composite_decode(doc, dict), false, false)
     } else {
         simple_decode(doc, dict)
     };
@@ -1252,12 +1257,13 @@ fn load_font(doc: &Document, dict: &Dictionary) -> LoadedFont {
         decode,
         composite,
         one_to_one,
+        unverified_unicode_map,
         widths,
     }
 }
 
-fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool) {
-    if let Ok(to_unicode) = dict.get(b"ToUnicode") {
+fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool, bool) {
+    let unverified_unicode_map = if let Ok(to_unicode) = dict.get(b"ToUnicode") {
         // ToUnicode specifies extraction text and takes priority over Encoding,
         // which selects rendered glyphs (PDF 1.7 section 5.9.1). lopdf checks
         // Encoding first, so give its bounded parser only the Unicode map.
@@ -1265,31 +1271,38 @@ fn simple_decode(doc: &Document, dict: &Dictionary) -> (Decode, bool) {
         let mut unicode_font = Dictionary::new();
         unicode_font.set("Type", "Font");
         unicode_font.set("ToUnicode", to_unicode.clone());
-        return match unicode_font.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM)
+        if let Ok(encoding @ Encoding::UnicodeMapEncoding(_)) =
+            unicode_font.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM)
         {
-            Ok(encoding @ Encoding::UnicodeMapEncoding(_)) => {
-                (Decode::Table(ByteTable::build(&encoding)), false)
-            }
-            // lopdf silently falls back to StandardEncoding when a CMap is
-            // malformed. Keep that uncertainty visible rather than Complete.
-            _ => (Decode::Latin1("no usable ToUnicode map"), false),
-        };
-    }
+            return (Decode::Table(ByteTable::build(&encoding)), false, false);
+        }
+        // A malformed map does not invalidate a usable /Encoding or Differences
+        // table. Retain that text and carry the mapping uncertainty separately.
+        true
+    } else {
+        false
+    };
     if let Some(table) = own_table(doc, dict) {
-        return (Decode::Table(table), true);
+        return (Decode::Table(table), true, unverified_unicode_map);
     }
     match dict.get_font_encoding_with_limit(doc, font_resources::MAX_FONT_STREAM) {
         // A simple font always consumes one source byte per glyph. The generic
         // CMap decoder probes up to four bytes after an absent mapping, which
         // can swallow later, correctly mapped characters in a sparse map.
-        Ok(encoding @ Encoding::UnicodeMapEncoding(_)) => {
-            (Decode::Table(ByteTable::build(&encoding)), false)
-        }
+        Ok(encoding @ Encoding::UnicodeMapEncoding(_)) => (
+            Decode::Table(ByteTable::build(&encoding)),
+            false,
+            unverified_unicode_map,
+        ),
         Ok(encoding) => {
             let one_to_one = !matches!(encoding, Encoding::UnicodeMapEncoding(_));
-            (own_encoding(encoding), one_to_one)
+            (own_encoding(encoding), one_to_one, unverified_unicode_map)
         }
-        Err(_) => (Decode::Latin1("no usable encoding"), false),
+        Err(_) => (
+            Decode::Latin1("no usable encoding"),
+            false,
+            unverified_unicode_map,
+        ),
     }
 }
 
@@ -1868,6 +1881,12 @@ impl<'a> Interpreter<'a> {
 
     /// Decode `bytes` shown with the font resource `name`.
     fn decode(&mut self, name: &[u8], font: &LoadedFont, bytes: &[u8]) -> String {
+        if font.unverified_unicode_map {
+            self.warn(format!(
+                "unicode_mapping: font {}: no usable ToUnicode map; usable fallback encoding retained",
+                lossy(name)
+            ));
+        }
         match &font.decode {
             Decode::Table(table) | Decode::UnverifiedTable(table) => {
                 if matches!(font.decode, Decode::UnverifiedTable(_)) {
@@ -4216,7 +4235,7 @@ mod tests {
         config.insert("max_xobject_depth".to_string(), "8".to_string());
         config.insert("ligatures".to_string(), "expand".to_string());
         config.insert("content".to_string(), "9".to_string());
-        config.insert("encodings".to_string(), "4".to_string());
+        config.insert("encodings".to_string(), "5".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
         // Nor the digest from before figures.
         config.insert("content".to_string(), "2".to_string());
@@ -4748,6 +4767,39 @@ end
                 .iter()
                 .any(|warning| warning.contains("no usable ToUnicode map"))
         );
+    }
+
+    #[test]
+    fn malformed_to_unicode_preserves_named_and_differences_text_as_partial() {
+        for (encoding, shown, expected) in [
+            (
+                Object::Name(b"WinAnsiEncoding".to_vec()),
+                b"\x80".as_slice(),
+                "€",
+            ),
+            (
+                Object::Dictionary(dictionary! {
+                    "BaseEncoding" => "WinAnsiEncoding",
+                    "Differences" => vec![65.into(), "eacute".into(), "germandbls".into()],
+                }),
+                b"AB".as_slice(),
+                "éß",
+            ),
+        ] {
+            let page = show_with_font(shown, |doc| {
+                let cmap = doc.add_object(Stream::new(dictionary! {}, b"not a CMap".to_vec()));
+                dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Custom",
+                    "Encoding" => encoding, "ToUnicode" => cmap,
+                }
+            });
+            assert_eq!(page.spans[0].text, expected);
+            assert_eq!(page.extraction_status(), crate::schema::Status::Partial);
+            assert!(page.warnings.iter().any(|warning| {
+                warning.starts_with("unicode_mapping:")
+                    && warning.contains("usable fallback encoding retained")
+            }));
+        }
     }
 
     #[test]

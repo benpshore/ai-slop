@@ -294,7 +294,7 @@ fn heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"^\s*(?:(?:\d+|[IVX]+)\.?\s*|[A-Z]\.?\s+)?(?:(?:Supplementary|Supplemental|Additional|Appendix|Further|Extended|Online|SUPPLEMENTARY|SUPPLEMENTAL|ADDITIONAL|APPENDIX)\s+)?(?:(?i:notes\s+and\s+references|references\s+and\s+notes)|References|REFERENCES|Reference List|Bibliography|BIBLIOGRAPHY|Works Cited|WORKS CITED|Literature Cited|LITERATURE CITED)(?:\s+(?:for|of|to|and|in|FOR|OF|TO|AND|IN)\s+[\p{L}\s’'\-]{1,40})?\s*:?\s*$",
+            r"^\s*(?:(?:\d+|[IVX]+)\.?\s*|[A-Z]\.?\s+)?(?:(?:Supplementary|Supplemental|Additional|Appendix|Further|Extended|Online|SUPPLEMENTARY|SUPPLEMENTAL|ADDITIONAL|APPENDIX)\s+)?(?i:notes\s+and\s+references|references\s+and\s+notes|references|reference list|bibliography|works cited|literature cited)(?:\s+(?:for|of|to|and|in|FOR|OF|TO|AND|IN)\s+[\p{L}\s’'\-]{1,40})?\s*:?\s*$",
         )
         .expect("valid regex")
     })
@@ -9608,6 +9608,11 @@ mod tests {
             "7. References",
             "A Bibliography",
             "REFERENCES",
+            "references",
+            "reFerences",
+            "rEfErEnCEs",
+            "bibliography",
+            "works cited",
             "Supplementary References",
             "References for the Appendices",
             "References and Notes",

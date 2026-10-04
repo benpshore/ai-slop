@@ -203,3 +203,70 @@ fn bibliography_cli_reports_zero_page_pdf_as_failed() {
     assert!(record["error"].as_str().unwrap().contains("out of range"));
     assert!(record["references"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn mixed_case_reference_headings_preserve_lists_and_reference_text() {
+    let original = common::synthetic_paper();
+    let backend = LopdfBackend::default();
+    let baseline = scan_backward(&backend, &original, None).unwrap();
+    let expected: Vec<_> = baseline.references.iter().map(|entry| &entry.raw).collect();
+    assert_eq!(expected.len(), 3);
+    for heading in ["references", "reFerences", "rEfErEnCEs", "bibliography"] {
+        let mut document = Document::load_mem(&original).unwrap();
+        let mut changed = 0;
+        for object in document.objects.values_mut() {
+            if let Ok(stream) = object.as_stream_mut() {
+                let mut content = Content::decode(&stream.content).unwrap();
+                for operation in &mut content.operations {
+                    if operation.operator == "Tj"
+                        && operation.operands[0]
+                            .as_str()
+                            .is_ok_and(|text| text == b"References")
+                    {
+                        operation.operands[0] = Object::string_literal(heading);
+                        changed += 1;
+                    }
+                }
+                stream.set_content(content.encode().unwrap());
+            }
+        }
+        assert_eq!(changed, 1);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        let scan = scan_backward(&backend, &bytes, None).unwrap();
+        assert!(scan.found, "{heading}");
+        assert_eq!(
+            scan.references
+                .iter()
+                .map(|entry| &entry.raw)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let (_directory, path) = common::write_temp_pdf(&bytes);
+        let result = run_job(&Job {
+            path: path.to_string_lossy().into_owned(),
+            backend: "lopdf".into(),
+            pages: None,
+            password: None,
+            max_bytes: None,
+            figures_dir: None,
+        })
+        .unwrap();
+        assert_eq!(result.status, Status::Complete);
+        assert_eq!(
+            scan.heading.as_deref(),
+            Some(heading),
+            "{:?}",
+            result.pages[1].text
+        );
+        assert_eq!(
+            result
+                .references
+                .iter()
+                .map(|entry| &entry.raw)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(result.pages.iter().any(|page| page.text.contains(heading)));
+    }
+}
