@@ -57,6 +57,16 @@ the right digest. `--list` prints the cache paths of the PDFs. Requests go to
 S3 with four workers and exponential back-off; nothing is fetched from any
 other host. PDFs are never committed or uploaded as artifacts.
 
+Article-version URLs can change upstream without changing the version in
+their path. For the reviewed `PMC9866638.1.xml` URL/MD5 pair, the fetcher uses
+the exact source recovered from the successful 200-paper run, committed in
+`corpus/verified/` with provenance and CC BY attribution. It verifies size,
+MD5 and SHA-256 before copying or reusing that source; a missing or corrupt
+snapshot fails closed. Other URLs or pins still require the normal checksum
+verification and never inherit this exception. See
+[source verification](analysis/pmc9866638-pin-2026-10-01.md) and
+[recovery provenance](../corpus/verified/README.md).
+
 ## Running it
 
 The `PMC bibliography` workflow (`.github/workflows/pmc-bibliography.yml`)
@@ -73,8 +83,20 @@ not part of the required `ci` check. It:
 5. scores both with `scripts/pmc_bib_eval.py`, appends `report.md` to the job
    summary and uploads `out/report` (report, JSON, failures) as an artifact.
 
-Both `tpe` commands exit non-zero when any file is `not_found` or failed; the
-workflow keeps going and scores the JSON records.
+Both `tpe` commands can exit nonzero for individual extraction outcomes; the
+workflow retains those JSON records for scoring. The scorer requires exactly
+one version-matching record per manifest paper in each requested extraction
+stream, and rejects duplicate, missing, unexpected or malformed records.
+It rechecks JATS checksums and reference counts, retains every manifest paper
+in the cohort denominator, and reports unavailable truth explicitly. Reports
+are written before the scorer exits nonzero for coverage or integrity errors.
+Low accuracy, `not_found`, `failed` and `partial` records remain diagnostic;
+none of these statuses is relabeled or excluded to pass the coverage gate.
+
+The scorer requires `--code-sha` identifying the extraction binary's source
+checkout. Its report preserves the exact manifest, source/scorer/manifest
+fingerprints, backend identities and every matched or unmatched reference.
+The full forward JSONL is retained in a separate workflow artifact.
 
 ## Metrics (`scripts/pmc_bib_eval.py`)
 

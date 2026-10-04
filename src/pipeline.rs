@@ -65,6 +65,9 @@ fn resolve_page_range(
     requested: Option<(u32, u32)>,
     count: u32,
 ) -> Result<(u32, u32), BackendError> {
+    if count == 0 {
+        return Err(BackendError::PageRange { page: 1, count: 0 });
+    }
     match requested {
         None => Ok((1, count)),
         Some((start, end)) => {
@@ -72,7 +75,13 @@ fn resolve_page_range(
             if first > count {
                 return Err(BackendError::PageRange { page: first, count });
             }
-            Ok((first, end.min(count)))
+            let last = end.min(count);
+            if last < first {
+                return Err(BackendError::Unsupported(format!(
+                    "page range ends at {last} before it starts at {first}"
+                )));
+            }
+            Ok((first, last))
         }
     }
 }
@@ -265,6 +274,7 @@ fn parse_while_hashing(
                 Ok(mut text) => {
                     let figure_warnings = collect_figures(session.as_mut(), &mut text, export);
                     warnings.extend(figure_warnings);
+                    router::mark_incomplete(&mut text);
                     pages.push(text);
                 }
                 Err(BackendError::Page { message, .. }) => {
@@ -350,8 +360,9 @@ pub const AUTO_BACKEND: &str = "auto";
 
 /// Run `job` with a route chosen from what `lopdf` reports. Every page is
 /// read by `lopdf`; when the assessment asks for `pdfium` or docling and that
-/// backend is compiled in and works, its result replaces the `lopdf` one
-/// and a `routed: …` warning records why. A missing or failing backend
+/// backend is compiled in and works without observable regression, its result
+/// replaces the `lopdf` one and a `routed: …` warning records why.
+/// A missing, failing, or regressing backend
 /// keeps the `lopdf` result with a warning naming the route that was not
 /// taken. `PDFium` mapping diagnostics instead retain the native Partial result;
 /// those flags mark unverified mappings, not necessarily lost characters.
@@ -362,12 +373,29 @@ pub fn run_job_auto_observed(
 ) -> Result<ExtractionResult, PipelineError> {
     let lopdf = backend::by_name("lopdf")
         .ok_or_else(|| PipelineError::UnknownBackend("lopdf".to_string()))?;
-    let mut result = run_job_with_observed(lopdf.as_ref(), job, observe)?;
+    let result = run_job_with_observed(lopdf.as_ref(), job, observe)?;
+    Ok(route_result(result, &mut |route| {
+        rerun(job, route, observe)
+    }))
+}
+
+/// Route a completed native pass without giving an unsuccessful fallback
+/// permission to erase its usable text or completeness evidence.
+fn route_result(
+    mut result: ExtractionResult,
+    rerun: &mut dyn FnMut(Route) -> Result<Option<ExtractionResult>, PipelineError>,
+) -> ExtractionResult {
     let first = router::assess(&result.pages);
     let mut route = first.route();
     if route == Route::Pdfium {
-        match rerun(job, route, observe) {
+        match rerun(route) {
             Ok(Some(second)) => {
+                if let Some(reason) = fallback_regression(&result, &second) {
+                    result.warnings.push(format!(
+                        "route not taken: pdfium {reason}; native text retained"
+                    ));
+                    return result;
+                }
                 let again = router::assess(&second.pages);
                 result = second;
                 result.warnings.push(format!(
@@ -386,30 +414,36 @@ pub fn run_job_auto_observed(
                         "unresolved: pdfium Unicode mapping; native text retained because automatic OCR recovery is unverified"
                             .to_string(),
                     );
-                    return Ok(result);
+                    return result;
                 }
                 route = again.route_after_pdfium();
                 if route != Route::Docling {
-                    return Ok(result);
+                    return result;
                 }
             }
             Ok(None) => {
                 result
                     .warnings
                     .push("route not taken: pdfium is not compiled into this build".to_string());
-                return Ok(result);
+                return result;
             }
             Err(err) => {
                 result
                     .warnings
                     .push(format!("route not taken: pdfium failed: {err}"));
-                return Ok(result);
+                return result;
             }
         }
     }
     if route == Route::Docling {
-        match rerun(job, route, observe) {
+        match rerun(route) {
             Ok(Some(third)) => {
+                if let Some(reason) = fallback_regression(&result, &third) {
+                    result.warnings.push(format!(
+                        "route not taken: docling {reason}; native text retained"
+                    ));
+                    return result;
+                }
                 result = third;
                 result.warnings.push(format!(
                     "routed: docling ({} scanned and {} unmapped of {} pages)",
@@ -424,7 +458,65 @@ pub fn run_job_auto_observed(
                 .push(format!("route not taken: docling failed: {err}")),
         }
     }
-    Ok(result)
+    result
+}
+
+/// Reject observable regressions before replacing a whole result. Keeping a
+/// whole pass preserves its backend identity, figure paths, and derived data.
+/// A partial fallback may improve an already partial page, but must not erase
+/// decoded characters or make a previously complete page partial.
+fn fallback_regression(native: &ExtractionResult, candidate: &ExtractionResult) -> Option<String> {
+    if !matches!(candidate.status, Status::Complete | Status::Partial)
+        || (candidate.status == Status::Complete
+            && (candidate
+                .pages
+                .iter()
+                .any(|page| page.extraction_status() != Status::Complete)
+                || candidate
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.status != Status::Complete)))
+    {
+        return Some("returned an unsuccessful or inconsistent extraction status".to_string());
+    }
+    if native.document.hash != candidate.document.hash
+        || native.document.size != candidate.document.size
+    {
+        return Some("read different source bytes".to_string());
+    }
+    if native.document.pages != candidate.document.pages
+        || native.pages.len() != candidate.pages.len()
+        || native
+            .pages
+            .iter()
+            .zip(&candidate.pages)
+            .any(|(before, after)| before.page != after.page)
+    {
+        return Some("changed the requested page coverage".to_string());
+    }
+    for (before, after) in native.pages.iter().zip(&candidate.pages) {
+        let decoded_chars = |text: &str| {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace() && *ch != '\u{fffd}')
+                .count()
+        };
+        let before_chars = decoded_chars(&before.text);
+        let after_chars = decoded_chars(&after.text);
+        if (before.extraction_status() == Status::Complete
+            && after.extraction_status() == Status::Partial)
+            || (after_chars > 0 && after_chars < before_chars)
+        {
+            return Some(format!("regressed native text on page {}", before.page));
+        }
+        if after_chars == 0
+            && (before_chars > 0
+                || router::has_unmapped_text(before)
+                || router::looks_scanned(before))
+        {
+            return Some(format!("did not recover text on page {}", before.page));
+        }
+    }
+    None
 }
 
 /// Run `job` again with the backend for `route`; `None` when that backend
@@ -506,7 +598,10 @@ pub fn run_job_with_observed(
             status = Status::Partial;
         }
         for warning in &page.warnings {
-            if warning.starts_with("resource_limit:") || warning.starts_with("unicode_mapping:") {
+            if warning.starts_with("resource_limit:")
+                || warning.starts_with("unicode_mapping:")
+                || warning.starts_with("extraction_incomplete:")
+            {
                 warnings.push(format!("page {}: {warning}", page.page));
             }
         }
@@ -551,7 +646,8 @@ pub fn run_job_with_observed(
 /// when only a sub-range was extracted. `parse_plus_order_ms` is apportioned
 /// to chunks by page count. The chunk text hash covers the page texts joined
 /// by `"\n\x0C\n"`. A chunk is `Partial` when any of its pages carries a
-/// warning starting with `failed:`, `resource_limit:`, or `unicode_mapping:`.
+/// warning starting with `failed:`, `resource_limit:`, `unicode_mapping:`,
+/// or `extraction_incomplete:`.
 pub fn chunk_results(pages: &[PageText], parse_plus_order_ms: f64) -> Vec<ChunkResult> {
     if pages.is_empty() {
         return Vec::new();
@@ -795,6 +891,363 @@ mod tests {
             .collect()
     }
 
+    #[derive(Clone)]
+    struct PageExtractor(Vec<PageText>);
+
+    impl DocumentSession for PageExtractor {
+        fn page_count(&self) -> u32 {
+            u32::try_from(self.0.len()).unwrap()
+        }
+
+        fn page_text(&mut self, page: u32) -> Result<PageText, BackendError> {
+            Ok(self.0[page as usize - 1].clone())
+        }
+
+        fn info(&self) -> BTreeMap<String, String> {
+            BTreeMap::new()
+        }
+    }
+
+    impl Extractor for PageExtractor {
+        fn identity(&self) -> BackendIdentity {
+            FakeExtractor {
+                reading_order: false,
+            }
+            .identity()
+        }
+
+        fn open(
+            &self,
+            _bytes: &[u8],
+            _password: Option<&str>,
+        ) -> Result<Box<dyn DocumentSession>, BackendError> {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    fn run_pages(pages: Vec<PageText>) -> crate::schema::ExtractionResult {
+        let dir = tempfile::tempdir().unwrap();
+        run_job_with(
+            &PageExtractor(pages),
+            &fake_job(&fake_input(dir.path()), None),
+        )
+        .unwrap()
+    }
+
+    fn native_page(text: &str) -> PageText {
+        let mut page = PageText::new(1, 612.0, 792.0, 0);
+        if !text.is_empty() {
+            page.spans.push(fake_span(text, 500.0, 0));
+        }
+        page
+    }
+
+    fn scanned_page() -> PageText {
+        let mut page = native_page("");
+        page.figures.push(Figure {
+            index: 0,
+            bbox: Some(BBox {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 612.0,
+                y1: 792.0,
+            }),
+            kind: "raster".into(),
+            mime: None,
+            width_px: None,
+            height_px: None,
+            sha256: None,
+            file: None,
+            caption: None,
+        });
+        page
+    }
+
+    #[test]
+    fn real_lopdf_scan_is_partial_but_a_blank_page_is_complete() {
+        for scanned in [false, true] {
+            let mut doc = Document::with_version("1.5");
+            let tree_id = doc.new_object_id();
+            let image_id = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Image", "Width" => 1,
+                    "Height" => 1, "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+                },
+                vec![255],
+            ));
+            let content = if scanned {
+                b"q 612 0 0 792 0 0 cm /Scan Do Q".to_vec()
+            } else {
+                Vec::new()
+            };
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => tree_id, "Contents" => content_id,
+                "Resources" => dictionary! { "XObject" => dictionary! { "Scan" => image_id } },
+            });
+            doc.objects.insert(
+                tree_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Pages", "Count" => 1, "Kids" => vec![Object::Reference(page_id)],
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                }),
+            );
+            let catalog_id =
+                doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => tree_id });
+            doc.trailer.set("Root", catalog_id);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("raster.pdf");
+            doc.save(&path).unwrap();
+            let mut job = lopdf_job(&path, None);
+            for backend in ["lopdf", "auto"] {
+                // Full OCR backends require their external models. The injected
+                // route tests cover that transition without a model download.
+                if backend == "auto" && cfg!(feature = "docling") {
+                    continue;
+                }
+                job.backend = backend.into();
+                let result = run_job(&job).unwrap();
+                let expected = if scanned {
+                    Status::Partial
+                } else {
+                    Status::Complete
+                };
+                assert_eq!(result.status, expected, "{backend}: {:?}", result.warnings);
+                assert_eq!(result.pages[0].extraction_status(), expected);
+                assert_eq!(result.chunks[0].status, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn scan_evidence_survives_pipeline_chunks_json_and_ledger() {
+        let result = run_pages(vec![scanned_page()]);
+        assert_eq!(result.status, Status::Partial);
+        assert_eq!(result.pages[0].extraction_status(), Status::Partial);
+        assert_eq!(result.chunks[0].status, Status::Partial);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("page 1: extraction_incomplete:"))
+        );
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: crate::schema::ExtractionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, result);
+        let mut ledger = crate::ledger::Ledger::open_in_memory().unwrap();
+        let run = ledger.write_result(&result).unwrap();
+        let stored = ledger.load_result(run).unwrap();
+        assert_eq!(stored.status, Status::Partial);
+        assert_eq!(stored.chunks[0].status, Status::Partial);
+        assert_eq!(stored.pages[0].warnings, result.pages[0].warnings);
+    }
+
+    #[test]
+    fn actual_blank_stays_complete() {
+        let result = run_pages(vec![native_page("")]);
+        assert_eq!(result.status, Status::Complete);
+        assert_eq!(result.chunks[0].status, Status::Complete);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn replacement_text_is_partial_even_without_backend_warning() {
+        let result = run_pages(vec![native_page("Readable words with \u{fffd} glyphs")]);
+        assert_eq!(result.status, Status::Partial);
+        assert_eq!(result.chunks[0].status, Status::Partial);
+        assert!(
+            result.pages[0]
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("unicode_mapping:"))
+        );
+    }
+
+    #[test]
+    fn absent_or_failed_fallback_retains_partial_native_text() {
+        for scan in [false, true] {
+            let original = run_pages(vec![if scan {
+                scanned_page()
+            } else {
+                native_page("Text \u{fffd}")
+            }]);
+            for failed in [false, true] {
+                let mut calls = 0;
+                let routed = super::route_result(original.clone(), &mut |route| {
+                    calls += 1;
+                    assert_eq!(
+                        route,
+                        if scan {
+                            crate::router::Route::Docling
+                        } else {
+                            crate::router::Route::Pdfium
+                        }
+                    );
+                    if failed {
+                        Err(BackendError::Unsupported("unavailable runtime".into()).into())
+                    } else {
+                        Ok(None)
+                    }
+                });
+                assert_eq!(calls, 1);
+                assert_eq!(routed.status, Status::Partial);
+                assert_eq!(routed.backend, original.backend);
+                assert_eq!(routed.pages, original.pages);
+                assert_eq!(routed.chunks, original.chunks);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_fallback_cannot_clear_scan_or_unicode_evidence() {
+        for page in [scanned_page(), native_page("Readable text \u{fffd}")] {
+            let original = run_pages(vec![page]);
+            let candidate = run_pages(vec![native_page("")]);
+            let routed =
+                super::route_result(original.clone(), &mut |_| Ok(Some(candidate.clone())));
+            assert_eq!(routed.status, Status::Partial);
+            assert_eq!(routed.pages, original.pages);
+            assert_eq!(routed.backend, original.backend);
+            assert!(
+                routed
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("did not recover text"))
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_cannot_drop_decoded_native_text_regardless_of_status() {
+        let original = run_pages(vec![native_page(
+            "Substantial native text with \u{fffd} glyphs",
+        )]);
+        for text in ["Short \u{fffd}", "Short"] {
+            let candidate = run_pages(vec![native_page(text)]);
+            let routed =
+                super::route_result(original.clone(), &mut |_| Ok(Some(candidate.clone())));
+            assert_eq!(routed.pages, original.pages);
+            assert_eq!(routed.chunks, original.chunks);
+            assert!(
+                routed
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("regressed native text"))
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_cannot_launder_failed_or_inconsistent_status() {
+        let original = run_pages(vec![native_page("Readable \u{fffd}")]);
+        for status in [Status::Failed, Status::Deferred, Status::Complete] {
+            let mut candidate = original.clone();
+            candidate.status = status;
+            let routed =
+                super::route_result(original.clone(), &mut |_| Ok(Some(candidate.clone())));
+            assert_eq!(routed.pages, original.pages);
+            assert_eq!(routed.status, Status::Partial);
+            assert!(
+                routed
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("inconsistent extraction status"))
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_cannot_make_a_good_native_page_partial() {
+        let mut second = native_page("Stable known readable native page");
+        second.page = 2;
+        let original = run_pages(vec![native_page("Unreadable \u{fffd}"), second.clone()]);
+        second.warnings.push("resource_limit: truncated".into());
+        let candidate = run_pages(vec![native_page("Recovered native text"), second]);
+        let routed = super::route_result(original.clone(), &mut |_| Ok(Some(candidate.clone())));
+        assert_eq!(routed.pages, original.pages);
+        assert!(routed.warnings.iter().any(|w| w.contains("page 2")));
+    }
+
+    #[test]
+    fn complete_fallback_cannot_drop_good_native_page_text() {
+        let mut second = native_page("Stable known readable native page");
+        second.page = 2;
+        let original = run_pages(vec![native_page("Unreadable \u{fffd}"), second]);
+        let mut shorter = native_page("Lost");
+        shorter.page = 2;
+        let candidate = run_pages(vec![native_page("Recovered native text"), shorter]);
+        assert_eq!(candidate.status, Status::Complete);
+        let routed = super::route_result(original.clone(), &mut |_| Ok(Some(candidate.clone())));
+        assert_eq!(routed.pages, original.pages);
+        assert_eq!(routed.status, Status::Partial);
+        assert!(
+            routed
+                .warnings
+                .iter()
+                .any(|w| w.contains("regressed native text on page 2"))
+        );
+    }
+
+    #[test]
+    fn mixed_scan_and_unicode_evidence_cannot_jump_to_ocr() {
+        let mut second = scanned_page();
+        second.page = 2;
+        let original = run_pages(vec![native_page("Readable \u{fffd}"), second]);
+        let mut recovered = native_page("Scanned page text has now been recovered");
+        recovered.page = 2;
+        let mut candidate = run_pages(vec![native_page("Readable \u{fffd}"), recovered]);
+        candidate.backend.name = "pdfium".into();
+        let mut calls = 0;
+        let routed = super::route_result(original, &mut |route| {
+            calls += 1;
+            assert_eq!(route, crate::router::Route::Pdfium);
+            Ok(Some(candidate.clone()))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(routed.backend.name, "pdfium");
+        assert_eq!(routed.status, Status::Partial);
+        assert!(
+            routed
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("unresolved: pdfium Unicode mapping"))
+        );
+    }
+
+    #[test]
+    fn mapped_native_fallback_can_complete_a_partial_page() {
+        let original = run_pages(vec![native_page("Readable \u{fffd}")]);
+        let mut candidate = run_pages(vec![native_page("Readable repaired text")]);
+        candidate.backend.name = "pdfium".into();
+        let routed = super::route_result(original, &mut |_| Ok(Some(candidate.clone())));
+        assert_eq!(routed.backend.name, "pdfium");
+        assert_eq!(routed.status, Status::Complete);
+        assert_eq!(routed.pages, candidate.pages);
+    }
+
+    #[test]
+    fn fallback_must_read_the_same_source_and_page_range() {
+        let original = run_pages(vec![native_page("Text \u{fffd}")]);
+        for different_source in [false, true] {
+            let mut candidate = original.clone();
+            if different_source {
+                candidate.document.hash = ContentHash(sha256_hex(b"changed"));
+            } else {
+                candidate.pages[0].page = 2;
+            }
+            let routed =
+                super::route_result(original.clone(), &mut |_| Ok(Some(candidate.clone())));
+            assert_eq!(routed.pages, original.pages);
+            assert_eq!(routed.document, original.document);
+            assert!(
+                routed
+                    .warnings
+                    .iter()
+                    .any(|w| w.starts_with("route not taken:"))
+            );
+        }
+    }
+
     #[test]
     fn forty_five_pages_make_three_chunks() {
         let pages = synthetic_pages(45);
@@ -848,6 +1301,30 @@ mod tests {
         assert_eq!(resolve_page_range(Some((2, 2)), 7).unwrap(), (2, 2));
         let err = resolve_page_range(Some((8, 9)), 7).unwrap_err();
         assert!(matches!(err, BackendError::PageRange { page: 8, count: 7 }));
+    }
+
+    #[test]
+    fn zero_page_document_returns_an_error_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = run_job_with(
+            &PageExtractor(Vec::new()),
+            &fake_job(&fake_input(dir.path()), None),
+        );
+        assert!(matches!(
+            result,
+            Err(PipelineError::Backend(BackendError::PageRange {
+                page: 1,
+                count: 0
+            }))
+        ));
+    }
+
+    #[test]
+    fn reversed_page_range_returns_an_error_without_panicking() {
+        let (_dir, path) = three_page_fixture();
+        for pages in [(3, 1), (1, 0)] {
+            assert!(run_job(&lopdf_job(&path, Some(pages))).is_err());
+        }
     }
 
     #[test]

@@ -1,7 +1,8 @@
 """Score `tpe bibliography` and `tpe extract` reference lists against PMC JATS truth.
 
     python3 scripts/pmc_bib_eval.py --manifest corpus/pmc-manifest.json --cache DIR \\
-        --bibliography out/bibliography.jsonl --extract out/extract.jsonl --out out/report
+        --bibliography out/bibliography.jsonl --extract out/extract.jsonl --out out/report \\
+        --code-sha SHA_OF_EXTRACTION_BINARY_SOURCE
 
 Writes `report.md`, `report.json` and `failures.md` into `--out`. The truth is
 the publisher's own reference list from the JATS XML pinned by the manifest;
@@ -9,6 +10,7 @@ what each metric means, and does not mean, is in docs/PMC_EVAL.md. Stdlib only.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -20,6 +22,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+
+SCORER_VERSION = "3"  # Complete-cohort coverage and verified truth; accuracy stays diagnostic.
 
 TITLE_ALIGN_MIN = 0.85
 TITLE_LOOSE_MIN = 0.9
@@ -327,47 +331,129 @@ def pmcid_of_path(path: str) -> str:
     return Path(path).name.split(".")[0]
 
 
-def read_jsonl(path: Path | None) -> list[dict]:
-    if path is None or not path.exists():
-        return []
+def read_jsonl(path: Path | None, errors: list[str]) -> list[dict]:
     records = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
+    if path is None:
+        return records
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        raise ValueError("record is not an object")
+                    records.append(record)
+                except ValueError as error:
+                    errors.append(f"{path}:{number}: invalid record: {error}")
+    except (OSError, UnicodeError) as error:
+        errors.append(f"{path}: {error}")
     return records
 
 
-def backward_records(path: Path | None) -> dict[str, dict]:
-    return {pmcid_of_path(rec["path"]): rec for rec in read_jsonl(path)}
+def record_identity(record: dict) -> tuple[str, str]:
+    document = record.get("document")
+    path = document["sources"][0]["path"] if document is not None else record["path"]
+    if not isinstance(path, str) or not re.fullmatch(r"PMC\d+\.\d+\.pdf", Path(path).name):
+        raise ValueError("record has no versioned PMC PDF source path")
+    status = record.get("status")
+    if not isinstance(status, str) or not status:
+        raise ValueError("record has no status")
+    entries = record.get("references", [])
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise ValueError("references must be a list of objects")
+    for entry in entries:
+        extracted = extracted_ref(entry)
+        # Reject corrupt field types before they can break scoring/reporting.
+        if not isinstance(extracted.raw, str):
+            raise ValueError("reference raw must be text")
+        for key in ("raw", "title", "label", "doi"):
+            if entry.get(key) is not None and not isinstance(entry[key], str):
+                raise ValueError(f"reference {key} must be text")
+    for key in ("elapsed_ms", "ms", "pages_scanned", "total_pages"):
+        if record.get(key) is not None and (
+            type(record[key]) not in (int, float) or not math.isfinite(record[key])
+        ):
+            raise ValueError(f"record {key} must be finite numeric data")
+    return pmcid_of_path(path), path
 
 
-def forward_records(path: Path | None) -> dict[str, dict]:
-    """`tpe extract --json` lines keyed by PMCID, in a shape close to the backward one."""
+def load_records(path: Path | None, errors: list[str], *, forward: bool) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for rec in read_jsonl(path):
-        if "document" in rec:
-            sources = rec["document"].get("sources") or [{}]
-            timings = rec.get("timings") or {}
-            ms = sum(timings.get(key, 0.0) for key in ("parse_ms", "order_ms", "citations_ms"))
-            out[pmcid_of_path(sources[0].get("path", ""))] = {
-                "status": rec.get("status"),
-                "total_pages": rec["document"].get("pages"),
-                "references": rec.get("references") or [],
-                "elapsed_ms": ms,
-                "error": None,
-                "pages_text": [page.get("text") or "" for page in rec.get("pages") or []],
-            }
-        else:
-            out[pmcid_of_path(rec.get("path", ""))] = {
-                "status": "failed",
-                "total_pages": None,
-                "references": [],
-                "elapsed_ms": rec.get("ms"),
-                "error": rec.get("error"),
-            }
+    for number, record in enumerate(read_jsonl(path, errors), 1):
+        try:
+            pmcid, source = record_identity(record)
+            allowed = (
+                {"complete", "partial", "failed", "deferred"}
+                if forward
+                else {"found", "not_found", "failed"}
+            )
+            if record["status"] not in allowed:
+                raise ValueError(f"unknown record status: {record['status']!r}")
+            if pmcid in out:
+                errors.append(f"{path}: duplicate record for {pmcid}")
+                continue
+            if not forward:
+                result = record.copy()
+            elif "document" in record:
+                timings = record.get("timings") or {}
+                ms = sum(timings.get(key, 0.0) for key in ("parse_ms", "order_ms", "citations_ms"))
+                if not math.isfinite(ms):
+                    raise ValueError("nonfinite extraction timing")
+                result = {
+                    "status": record["status"],
+                    "total_pages": record["document"].get("pages"),
+                    "references": record.get("references") or [],
+                    "elapsed_ms": ms,
+                    "error": None,
+                    "backend": record.get("backend"),
+                    "warnings": record.get("warnings") or [],
+                    "pages_text": [page.get("text") or "" for page in record.get("pages") or []],
+                }
+            else:
+                result = {
+                    "status": record["status"],
+                    "total_pages": None,
+                    "references": [],
+                    "elapsed_ms": record.get("ms"),
+                    "error": record.get("error"),
+                    "backend": record.get("backend"),
+                    "warnings": record.get("warnings") or [],
+                }
+            result["source_path"] = source
+            out[pmcid] = result
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as error:
+            errors.append(f"{path}: record {number}: invalid record: {error}")
     return out
+
+
+def backward_records(path: Path | None, errors: list[str]) -> dict[str, dict]:
+    return load_records(path, errors, forward=False)
+
+
+def forward_records(path: Path | None, errors: list[str]) -> dict[str, dict]:
+    return load_records(path, errors, forward=True)
+
+
+def coverage_errors(manifest: dict, records: dict[str, dict], name: str) -> list[str]:
+    expected = {
+        item["pmcid"]: f"{item['pmcid']}.{item['version']}.pdf" for item in manifest["items"]
+    }
+    errors = []
+    if not expected:
+        errors.append("manifest contains no papers")
+    if len(expected) != len(manifest["items"]):
+        errors.append("manifest contains duplicate PMCIDs")
+    for pmcid in sorted(expected.keys() - records.keys()):
+        errors.append(f"{name}: missing record for {pmcid}")
+    for pmcid in sorted(records.keys() - expected.keys()):
+        errors.append(f"{name}: unexpected record for {pmcid}")
+    for pmcid in sorted(expected.keys() & records.keys()):
+        actual = Path(records[pmcid]["source_path"]).name
+        if actual != expected[pmcid]:
+            errors.append(f"{name}: {pmcid} source version mismatch: {actual} != {expected[pmcid]}")
+    return errors
 
 
 # ---------------------------------------------------------------- alignment
@@ -545,7 +631,34 @@ def score_list(
         "fffd_entries": sum(1 for ext in extracted if "\ufffd" in ext.raw),
         "leak_entries": sum(1 for ext in extracted if leaks(ext.raw, facts)),
         "numbered": numbered_labels([ext.label for ext in extracted]),
+        "entry_results": entry_results(pmcid, truth, extracted, pairs),
     }
+
+
+def entry_results(
+    pmcid: str, truth: list[TruthRef], extracted: list[ExtractedRef], pairs: Pairs
+) -> list[dict]:
+    """Keep every truth and extracted entry, including absent/unmatched ones."""
+    matched = dict(pairs)
+    used = {j for _, j in pairs}
+    results = []
+    for i, ref in enumerate(truth):
+        j = matched.get(i)
+        results.append(
+            {
+                "truth": asdict(ref),
+                "extracted": asdict(extracted[j]) if j is not None else None,
+                "fields": asdict(score_fields(pmcid, truth, extracted, [(i, j)], []))
+                if j is not None
+                else None,
+            }
+        )
+    results.extend(
+        {"truth": None, "extracted": asdict(ext), "fields": None}
+        for j, ext in enumerate(extracted)
+        if j not in used
+    )
+    return results
 
 
 def empty_list_score() -> dict:
@@ -590,11 +703,22 @@ def evaluate_paper(
     truth: list[TruthRef] = []
     facts: dict = {}
     try:
-        truth, facts = parse_truth(xml_path.read_bytes())
-    except OSError as err:
+        data = xml_path.read_bytes()
+        expected_md5 = item.get("xml_md5")
+        if expected_md5 and hashlib.md5(data, usedforsecurity=False).hexdigest() != expected_md5:
+            raise ValueError("JATS checksum differs from the manifest pin")
+        truth, facts = parse_truth(data)
+        if not truth:
+            raise ValueError("JATS contains no reference truth")
+        if item.get("ref_count") is not None and len(truth) != item["ref_count"]:
+            raise ValueError("JATS reference count differs from the manifest")
+    except (OSError, ValueError) as err:
         paper["truth_error"] = str(err)
     except ET.ParseError as err:
         paper["truth_error"] = str(err)
+    if paper["truth_error"]:
+        truth = []
+        facts = {}
     paper["truth_count"] = len(truth)
     paper["truth_kinds"] = dict(Counter(ref.kind for ref in truth))
     paper["truth"] = [asdict(ref) for ref in truth]
@@ -605,12 +729,16 @@ def evaluate_paper(
             result = {"status": "missing", "elapsed_ms": None, "error": "no record", "found": False}
             result.update(empty_list_score())
             result["entries"] = []
+            result["entry_results"] = entry_results(pmcid, truth, [], [])
         else:
             entries = record.get("references") or []
             result = {
                 "status": record.get("status"),
                 "elapsed_ms": record.get("elapsed_ms"),
                 "error": record.get("error"),
+                "backend": record.get("backend"),
+                "warnings": record.get("warnings") or [],
+                "extraction_status": record.get("extraction_status", record.get("status")),
             }
             if name == "backward":
                 result["pages_scanned"] = record.get("pages_scanned")
@@ -626,10 +754,12 @@ def evaluate_paper(
             else:
                 result.update(empty_list_score())
                 result["extracted_count"] = len(entries)
-            result["entries"] = [
-                {"label": e.get("label"), "raw": e.get("raw"), "page": e.get("page")}
-                for e in entries
-            ]
+                result["entry_results"] = entry_results(
+                    pmcid, truth, [extracted_ref(e) for e in entries], []
+                )
+            result["entries"] = entries
+        if result["unmatched_truth"] is None:
+            result["unmatched_truth"] = len(truth)
         paper[name] = result
     paper["forward_context"] = heading_context((forward or {}).get("pages_text") or [])
     numbered = truth_numbered or paper["backward"].get("numbered", False)
@@ -670,7 +800,7 @@ def diff_bucket(diff: int | None) -> str:
 
 
 def summarize_path(papers: list[dict], name: str, wall_s: float | None) -> dict:
-    results = [(paper, paper[name]) for paper in papers if paper["truth_count"]]
+    results = [(paper, paper[name]) for paper in papers]
     statuses = Counter(result["status"] for _, result in results)
     found = [result for _, result in results if result["found"]]
     fields: dict = {}
@@ -686,7 +816,7 @@ def summarize_path(papers: list[dict], name: str, wall_s: float | None) -> dict:
         "count_exact": sum(1 for result in found if result["count_exact"]),
         "count_diff_histogram": dict(histogram),
         "matched_entries": sum(result["matched"] for result in found),
-        "unmatched_truth": sum(result["unmatched_truth"] or 0 for result in found),
+        "unmatched_truth": sum(result["unmatched_truth"] or 0 for _, result in results),
         "unmatched_extracted": sum(result["unmatched_extracted"] for result in found),
         "truth_entries": sum(paper["truth_count"] for paper, _ in results),
         "extracted_entries": entries,
@@ -712,8 +842,7 @@ def summarize_path(papers: list[dict], name: str, wall_s: float | None) -> dict:
 def breakdown(papers: list[dict], key: str) -> list[dict]:
     groups: dict[str, list[dict]] = {}
     for paper in papers:
-        if paper["truth_count"]:
-            groups.setdefault(str(paper[key]), []).append(paper)
+        groups.setdefault(str(paper[key]), []).append(paper)
     rows = []
     for value, members in groups.items():
         rows.append(
@@ -789,7 +918,7 @@ def render_report(summary: dict, papers: list[dict]) -> str:
     back, fwd = summary["backward"], summary["forward"]
     lines = ["# PMC bibliography measurement", ""]
     lines.append(
-        f"{corpus['papers']} articles with a parsed JATS reference list "
+        f"{corpus['scored_papers']} articles with a parsed JATS reference list "
         f"({corpus['manifest_items']} in the manifest, {corpus['truth_errors']} truth failures), "
         f"{corpus['journals']} journals, {corpus['publishers']} publishers, "
         f"{corpus['manuscripts']} author manuscripts, "
@@ -810,7 +939,7 @@ def render_report(summary: dict, papers: list[dict]) -> str:
             pct(fwd["count_exact"], fwd["found"]),
         ],
         [
-            "truth entries unmatched (found papers)",
+            "truth entries unmatched (all papers with verified truth)",
             str(back["unmatched_truth"]),
             str(fwd["unmatched_truth"]),
         ],
@@ -1076,7 +1205,8 @@ def evaluate(
         "manifest_seed": manifest.get("seed"),
         "corpus": {
             "manifest_items": len(papers),
-            "papers": len(scored),
+            "papers": len(papers),
+            "scored_papers": len(scored),
             "truth_errors": sum(1 for paper in papers if paper["truth_error"]),
             "journals": len({paper["journal"] for paper in scored}),
             "publishers": len({paper["publisher"] for paper in scored}),
@@ -1100,21 +1230,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bibliography-wall-s", type=float)
     parser.add_argument("--extract-wall-s", type=float)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--code-sha", required=True, help="SHA of the extraction binary's source checkout"
+    )
     args = parser.parse_args(argv)
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    errors: list[str] = []
+    backward = backward_records(args.bibliography, errors)
+    forward = forward_records(args.extract, errors)
+    errors.extend(coverage_errors(manifest, backward, "backward"))
+    if args.extract is not None:
+        errors.extend(coverage_errors(manifest, forward, "forward"))
     summary, papers, mismatches = evaluate(
         manifest,
         args.cache,
-        backward_records(args.bibliography),
-        forward_records(args.extract),
+        backward,
+        forward,
         args.bibliography_wall_s,
         args.extract_wall_s,
     )
+    errors.extend(
+        f"{paper['pmcid']}: truth unavailable: {paper['truth_error']}"
+        for paper in papers
+        if paper["truth_error"]
+    )
+    summary["coverage"] = {"valid": not errors, "errors": errors}
     args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "manifest.json").write_bytes(args.manifest.read_bytes())
     report = render_report(summary, papers)
+    if errors:
+        report += (
+            "\n## Invalid evaluation coverage\n\n"
+            + "\n".join(f"- {error}" for error in errors)
+            + "\n"
+        )
     (args.out / "report.md").write_text(report, encoding="utf-8")
     (args.out / "failures.md").write_text(render_failures(papers, mismatches), encoding="utf-8")
     payload = {
+        "provenance": provenance(args.manifest, args.code_sha, backward, forward),
         "summary": summary,
         "papers": papers,
         "mismatches": {k: [asdict(m) for m in v] for k, v in mismatches.items()},
@@ -1122,7 +1275,27 @@ def main(argv: list[str] | None = None) -> int:
     encoded = json.dumps(payload, indent=1, ensure_ascii=False) + "\n"
     (args.out / "report.json").write_text(encoded, encoding="utf-8")
     sys.stdout.write(report.split("## Entry-count difference")[0])
-    return 0
+    for error in errors:
+        print(f"PMC evaluation invalid: {error}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+def provenance(manifest: Path, code_sha: str, backward: dict, forward: dict) -> dict:
+    """Fingerprint the actual manifest/scorer, preserving per-record backend identity."""
+    identities = {}
+    for name, records in (("backward", backward), ("forward", forward)):
+        unique = {
+            json.dumps(r["backend"], sort_keys=True) for r in records.values() if r.get("backend")
+        }
+        identities[name] = [json.loads(value) for value in sorted(unique)]
+    return {
+        "code_sha": code_sha,
+        "corpus_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "scorer_version": SCORER_VERSION,
+        "scorer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "backend_identities": identities,
+        "resolution": "not_measured",
+    }
 
 
 if __name__ == "__main__":

@@ -1,8 +1,11 @@
 """Tests for scripts/pmc_bib_eval.py with inline JATS fragments and JSONL records."""
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+
+import pytest
 
 DOI_2 = "10.1000/def.2"
 WHO = "World Health Organization"
@@ -178,6 +181,9 @@ def test_report_numbers_end_to_end(tmp_path):
             "pages_scanned": 2,
             "section_page": 9,
             "heading": "References",
+            "backend": {"name": "lopdf", "version": "test", "config_digest": "bounded"},
+            "warnings": ["resource_limit: retained diagnostic"],
+            "extraction_status": "partial",
             "references": good_entries(),
             "elapsed_ms": 20.0,
             "error": None,
@@ -220,6 +226,8 @@ def test_report_numbers_end_to_end(tmp_path):
 
     rc = pmc.main(
         [
+            "--code-sha",
+            "a" * 40,
             "--manifest",
             str(tmp_path / "manifest.json"),
             "--cache",
@@ -234,8 +242,36 @@ def test_report_numbers_end_to_end(tmp_path):
             str(out),
         ]
     )
-    assert rc == 0
-    summary = json.loads((out / "report.json").read_text(encoding="utf-8"))["summary"]
+    assert rc == 1
+    payload = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["coverage"] == {
+        "valid": False,
+        "errors": ["forward: missing record for PMC3"],
+    }
+    provenance = payload["provenance"]
+    assert provenance["code_sha"] == "a" * 40
+    assert (
+        provenance["corpus_sha256"]
+        == hashlib.sha256((tmp_path / "manifest.json").read_bytes()).hexdigest()
+    )
+    assert provenance["scorer_sha256"] == hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    assert provenance["scorer_version"] == pmc.SCORER_VERSION
+    assert provenance["resolution"] == "not_measured"
+    assert provenance["backend_identities"]["backward"] == [
+        {"name": "lopdf", "version": "test", "config_digest": "bounded"}
+    ]
+    assert payload["papers"][0]["backward"]["extraction_status"] == "partial"
+    assert payload["papers"][0]["backward"]["warnings"] == ["resource_limit: retained diagnostic"]
+    assert (out / "manifest.json").read_bytes() == (tmp_path / "manifest.json").read_bytes()
+    # A failed/missing record still accounts for every truth entry.
+    missing = payload["papers"][2]["forward"]["entry_results"]
+    assert len(missing) == 3
+    assert all(entry["truth"] is not None and entry["extracted"] is None for entry in missing)
+    aligned = payload["papers"][0]["backward"]["entry_results"]
+    assert len(aligned) == 3
+    assert aligned[0]["fields"]["title_strict"] == {"correct": 1, "total": 1}
+    assert payload["papers"][0]["backward"]["entries"][0]["doi"] == "10.1000/abc.1"
+    summary = payload["summary"]
     back = summary["backward"]
     assert back["papers"] == 3
     assert back["status_counts"] == {"found": 2, "not_found": 1}
@@ -262,7 +298,7 @@ def test_report_numbers_end_to_end(tmp_path):
     assert fwd["elapsed_ms_p50"] == 3.0
     assert fwd["elapsed_ms_p95"] == 8.0
     assert fwd["matched_entries"] == 2
-    assert fwd["unmatched_truth"] == 1
+    assert fwd["unmatched_truth"] == 7
     manuscripts = {row["is_manuscript"]: row for row in summary["breakdowns"]["is_manuscript"]}
     assert manuscripts["True"]["backward_found"] == 0
     assert manuscripts["False"]["backward_count_exact"] == 2
@@ -274,3 +310,150 @@ def test_report_numbers_end_to_end(tmp_path):
     assert "## PMC3" in failures
     assert "## PMC1" not in failures
     assert "Obtu\u0142owicz" in failures
+
+
+def coverage_fixture(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    manifest = {"items": []}
+    records = []
+    for index in (1, 2):
+        pmcid = f"PMC{index}"
+        (cache / f"{pmcid}.1.xml").write_text(JATS, encoding="utf-8")
+        manifest["items"].append(
+            {
+                "pmcid": pmcid,
+                "version": 1,
+                "ref_count": 3,
+                "xml_md5": hashlib.md5(JATS.encode(), usedforsecurity=False).hexdigest(),
+            }
+        )
+        records.append(
+            {
+                "path": str(cache / f"{pmcid}.1.pdf"),
+                "status": "not_found",
+                "references": [],
+                "extraction_status": "partial",
+            }
+        )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    bib_path = tmp_path / "bib.jsonl"
+    bib_path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    out = tmp_path / "report"
+    args = [
+        "--code-sha",
+        "a" * 40,
+        "--manifest",
+        str(manifest_path),
+        "--cache",
+        str(cache),
+        "--bibliography",
+        str(bib_path),
+        "--out",
+        str(out),
+    ]
+    return args, cache, bib_path, out, records
+
+
+def test_coverage_does_not_require_accuracy_or_complete_status(tmp_path):
+    args, _, _, out, _ = coverage_fixture(tmp_path)
+    assert pmc.main(args) == 0
+    payload = json.loads((out / "report.json").read_text())
+    assert payload["summary"]["coverage"] == {"valid": True, "errors": []}
+    assert payload["summary"]["backward"]["found"] == 0
+    assert payload["summary"]["backward"]["unmatched_truth"] == 6
+    assert payload["papers"][0]["backward"]["extraction_status"] == "partial"
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing",
+        "duplicate",
+        "malformed",
+        "nonobject",
+        "badfield",
+        "wrongversion",
+        "unexpected",
+        "badidentity",
+        "absentfile",
+    ],
+)
+def test_invalid_record_coverage_fails_after_preserving_report(tmp_path, defect):
+    args, _, bib_path, out, records = coverage_fixture(tmp_path)
+    if defect == "missing":
+        records.pop()
+    elif defect == "duplicate":
+        records.append(records[0])
+    elif defect == "wrongversion":
+        records[0]["path"] = records[0]["path"].replace("PMC1.1.pdf", "PMC1.2.pdf")
+    elif defect == "unexpected":
+        records.append({**records[0], "path": "/cache/PMC99.1.pdf"})
+    elif defect == "badidentity":
+        records[0]["path"] = "/cache/unrelated.pdf"
+    elif defect == "badfield":
+        records[0]["references"] = "broken"
+    bib_path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    if defect in {"malformed", "nonobject"}:
+        with bib_path.open("a") as handle:
+            handle.write('{"path":' if defect == "malformed" else "[]\n")
+    if defect == "absentfile":
+        bib_path.unlink()
+    assert pmc.main(args) == 1
+    payload = json.loads((out / "report.json").read_text())
+    assert not payload["summary"]["coverage"]["valid"]
+    assert payload["summary"]["coverage"]["errors"]
+    assert len(payload["papers"]) == payload["summary"]["backward"]["papers"] == 2
+    assert (out / "failures.md").is_file()
+    assert "Invalid evaluation coverage" in (out / "report.md").read_text()
+
+
+@pytest.mark.parametrize("defect", ["missing", "duplicate", "malformed"])
+def test_forward_coverage_is_independently_validated(tmp_path, defect):
+    args, _, _, out, records = coverage_fixture(tmp_path)
+    forward = tmp_path / "extract.jsonl"
+    rows = [
+        {"path": record["path"], "status": "failed", "error": "diagnostic failure"}
+        for record in records
+    ]
+    if defect == "missing":
+        rows.pop()
+    elif defect == "duplicate":
+        rows.append(rows[0])
+    forward.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    if defect == "malformed":
+        with forward.open("a") as handle:
+            handle.write('{"broken":')
+    assert pmc.main([*args, "--extract", str(forward)]) == 1
+    summary = json.loads((out / "report.json").read_text())["summary"]
+    assert summary["forward"]["papers"] == 2
+    assert any(
+        "forward" in error or "extract.jsonl" in error for error in summary["coverage"]["errors"]
+    )
+
+
+@pytest.mark.parametrize("defect", ["missing", "corrupt", "wrongpin", "wrongcount"])
+def test_unavailable_truth_stays_in_cohort_and_invalidates_evaluation(tmp_path, defect):
+    args, cache, _, out, _ = coverage_fixture(tmp_path)
+    xml = cache / "PMC2.1.xml"
+    if defect == "missing":
+        xml.unlink()
+    elif defect == "corrupt":
+        xml.write_text("<broken")
+    elif defect == "wrongpin":
+        xml.write_text(JATS.replace("Alpha", "Changed"))
+    else:
+        manifest_path = Path(args[args.index("--manifest") + 1])
+        manifest = json.loads(manifest_path.read_text())
+        manifest["items"][1]["ref_count"] = 4
+        manifest_path.write_text(json.dumps(manifest))
+    assert pmc.main(args) == 1
+    payload = json.loads((out / "report.json").read_text())
+    summary = payload["summary"]
+    assert summary["corpus"]["papers"] == summary["corpus"]["manifest_items"] == 2
+    assert summary["corpus"]["scored_papers"] == summary["corpus"]["truth_errors"] == 1
+    assert summary["backward"]["papers"] == 2
+    assert len(payload["papers"]) == 2
+    assert payload["papers"][1]["truth_error"]
+    assert payload["papers"][1]["truth_count"] == 0

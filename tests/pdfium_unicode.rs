@@ -62,7 +62,7 @@ fn pdfium_mapping_failures_survive_adapter_result_and_json() {
     );
     assert_eq!(
         router::assess(&result.pages).route_after_pdfium(),
-        router::Route::Docling
+        router::Route::Pdfium
     );
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["status"], "partial");
@@ -150,13 +150,18 @@ fn bibliography_preserves_mapping_evidence_without_attempting_ocr() {
     .unwrap();
     assert_eq!(passes, 2, "only lopdf and PDFium may run");
     assert_eq!(routed.backend.name, "pdfium");
-    assert!(
-        routed
-            .scan
-            .warnings
+    // The canonical mapping evidence is the completeness contract. Route
+    // explanations can describe either the PDFium candidate or a better
+    // retained native list, so their prose is not an extraction invariant.
+    let mapping_warnings = |scan: &tpe::bibliography::BibliographyScan| {
+        scan.warnings
             .iter()
-            .any(|w| w.starts_with("unresolved: pdfium Unicode mapping; native text retained"))
-    );
+            .filter(|w| w.starts_with("unicode_mapping:"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(!mapping_warnings(&direct).is_empty());
+    assert_eq!(mapping_warnings(&routed.scan), mapping_warnings(&direct));
     assert!(!routed.scan.warnings.iter().any(|w| {
         w.starts_with("routed: docling") || w.starts_with("route not taken: docling")
     }));

@@ -286,6 +286,15 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
         .arg(fixture("existing-ocr.pdf"))
         .output()
         .unwrap();
+    eprintln!(
+        "pressure-evidence exit={} expected_decoded_bytes={} input_bytes={} input_sha256={} stdout={} stderr={}",
+        output.status,
+        2 * 1024 * 1024 * 1024_u64,
+        bytes.len(),
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     assert!(!output.status.success());
     let rows: Vec<Value> = String::from_utf8(output.stdout)
         .unwrap()
@@ -299,7 +308,7 @@ fn allocation_pressure_is_contained_and_the_next_document_succeeds() {
         rows[1]["error"]
             .as_str()
             .unwrap()
-            .contains("memory allocation"),
+            .contains("memory allocation failed in native worker"),
         "{}",
         rows[1]
     );
@@ -681,4 +690,48 @@ fn canonical_ledger_sidecars_cannot_delete_an_input_behind_a_symlink() {
         assert_eq!(fs::read(input).unwrap(), original);
         assert!(fs::read(real_db).unwrap().is_empty());
     }
+}
+
+#[test]
+fn missing_ledger_or_sidecars_cannot_be_created_as_selected_sources() {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let root = TempDir::new().unwrap();
+        let first = root.path().join("paper.pdf");
+        fs::copy(fixture("native.pdf"), &first).unwrap();
+        let original = fs::read(&first).unwrap();
+        let input = root.path().join(format!("ledger.sqlite{suffix}"));
+        let output = command(root.path())
+            .arg(&first)
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "batch must fail before any workers run"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("aliases input"));
+        assert!(!input.exists());
+        assert!(!root.path().join("ledger.sqlite").exists());
+        assert!(!root.path().join("out").exists());
+        assert_eq!(fs::read(&first).unwrap(), original);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn missing_ledger_sources_behind_dangling_symlinks_are_preserved() {
+    let root = TempDir::new().unwrap();
+    let alias = root.path().join("input.pdf");
+    std::os::unix::fs::symlink("./ledger.sqlite", &alias).unwrap();
+    let output = command(root.path())
+        .arg(fixture("native.pdf"))
+        .arg(&alias)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("aliases input"));
+    assert!(!root.path().join("ledger.sqlite").exists());
+    assert_eq!(fs::read_link(&alias).unwrap(), Path::new("./ledger.sqlite"));
 }
