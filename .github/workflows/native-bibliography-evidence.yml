@@ -1,0 +1,73 @@
+name: Native bibliography evidence
+
+# Focused derived evidence only. Native still evaluates all 60 dev papers.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - examples/bibliography_evidence.rs
+      - native/bibliography_evidence.py
+      - src/backend/**
+      - src/citations.rs
+      - src/reading_order.rs
+      - .github/workflows/native-bibliography-evidence.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-bibliography-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      PDFIUM_DYNAMIC_LIB_PATH: ${{ github.workspace }}/.pdfium/lib
+      DOCLING_RS_MODELS_DIR: ${{ github.workspace }}/.models
+      CARGO_BUILD_JOBS: 2
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify exact requested head and toolchain
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          rustc --version --verbose
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/ort.pyke.io
+            target
+          key: cargo-bibliography-evidence-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-native-ubuntu-24.04-arm-
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            .models
+            .pdfium
+          key: native-assets-ubuntu-24.04-arm-${{ hashFiles('native/manifest.json') }}
+      - run: sh native/fetch.sh
+      - run: cargo build --locked --release --features docling,pdfium --bin tpe --example bibliography_evidence
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .corpus-cache
+          key: corpus-${{ hashFiles('corpus/manifest.json') }}
+          restore-keys: corpus-
+      - name: Capture nine scored cases, raw spans, ordered lines and Docling nodes
+        run: uv run --no-project python native/bibliography_evidence.py --out bibliography-evidence
+      - name: Upload derived diagnostics, including failed cases
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-bibliography-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: bibliography-evidence
+          if-no-files-found: error
+          retention-days: 14

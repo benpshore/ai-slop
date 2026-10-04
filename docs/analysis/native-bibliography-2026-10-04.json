@@ -1,0 +1,317 @@
+{
+  "scope": {
+    "historical_backend_paper_rows": 8,
+    "historical_unique_pdfs": 7,
+    "additional_current_failures": [
+      {
+        "backend": "docling-text",
+        "id": "arxiv:2502.00857"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "id": "11290813136",
+      "run_id": "37168134953",
+      "git_commit": "c484b73a6882431a12d8a061a307491fbc5e02cc",
+      "archive_sha256": "83509461a8376801f444dd0a8a5fff76dec39c76d2ba90b4a02938f35a1f7084",
+      "full_corpus": {
+        "lopdf": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "partial": 47,
+            "complete": 13
+          },
+          "report_sha256": "9366ef83751fb9b7c013030ac5535fb23d8fcc8b48114d39c8f34570edda2df2",
+          "provenance_sha256": "127fbb7d4611d8f48548109abe83031c70cbd07c182f2b89d5090d57677dbd51"
+        },
+        "pdfium": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "partial": 50,
+            "complete": 10
+          },
+          "report_sha256": "63c06009d0bcbd52f44232904081784af97fbc54897d5ed59cf8bac2fe9f9e15",
+          "provenance_sha256": "a2a71448fc8becbccc5858b164ad74f33b84d82e7019b4187e83d560c3266a16"
+        },
+        "docling-text": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "complete": 59,
+            "partial": 1
+          },
+          "report_sha256": "56d8623e44c42d20f4d5eee1a453889c98960a8f53fa6bf99d88ddb5423ab41b",
+          "provenance_sha256": "aa899973125c6bfa21dc28c8c1ad9821d21151e2fd82cd143677e4cedebbc354"
+        },
+        "docling": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "complete": 60
+          },
+          "report_sha256": "f42c132104e6d7e61374db9cbc3097c818afc7b01eced1f38c76f7acac958175",
+          "provenance_sha256": "763848ed2df90f79d4dccae6ca847c1c4aa5d1e868787caf7e69cf7f47a1b9f8"
+        }
+      },
+      "scoped_cases": [
+        {
+          "id": "arxiv:2502.00857",
+          "status": "partial",
+          "pages": 11,
+          "truth_refs": 29,
+          "extracted_refs": 4,
+          "matched_refs": 0,
+          "backend": "pdfium",
+          "original_eight": true,
+          "pdf_sha256": "e50212a32e349f5528780dbb39d023acc9daecdd281f88db79abc1d2517d33b5"
+        },
+        {
+          "id": "arxiv:2503.15734",
+          "status": "complete",
+          "pages": 10,
+          "truth_refs": 33,
+          "extracted_refs": 0,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "ab112424bcbcf25f0c3989c98ae87e993b7134daae20f4b53f334cf29834261e"
+        },
+        {
+          "id": "arxiv:2309.10334",
+          "status": "complete",
+          "pages": 11,
+          "truth_refs": 36,
+          "extracted_refs": 0,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "f5dea342cce3a0968d3c364da4dedf74c51cb3ce59c1448c2366a5a3fc7a5794"
+        },
+        {
+          "id": "arxiv:2503.13415",
+          "status": "complete",
+          "pages": 76,
+          "truth_refs": 341,
+          "extracted_refs": 0,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "c32123a52893d3f1d35416daebb8ea94f26f4cf7bcd1f27fa22323fdfb1f71e6"
+        },
+        {
+          "id": "arxiv:2506.23487",
+          "status": "complete",
+          "pages": 57,
+          "truth_refs": 28,
+          "extracted_refs": 0,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "3b82421639a46210f245e91d203e3615d38ac68da4e7856ed24c75327c8fe971"
+        },
+        {
+          "id": "arxiv:2507.14211",
+          "status": "complete",
+          "pages": 13,
+          "truth_refs": 54,
+          "extracted_refs": 0,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "187cb024beb09eb9dbc2d469cd63ad287782be386b2ca68a25e8d4f4e446b171"
+        },
+        {
+          "id": "arxiv:2602.16061",
+          "status": "complete",
+          "pages": 50,
+          "truth_refs": 54,
+          "extracted_refs": 0,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "b887868d3d59429b86adbd762050eb19d13161ffc76199f4a9c7278e5a9fd985"
+        },
+        {
+          "id": "arxiv:2502.00857",
+          "status": "complete",
+          "pages": 11,
+          "truth_refs": 29,
+          "extracted_refs": 30,
+          "matched_refs": 29,
+          "backend": "docling-text",
+          "original_eight": false,
+          "pdf_sha256": "e50212a32e349f5528780dbb39d023acc9daecdd281f88db79abc1d2517d33b5"
+        },
+        {
+          "id": "arxiv:2309.10334",
+          "status": "complete",
+          "pages": 11,
+          "truth_refs": 36,
+          "extracted_refs": 1,
+          "matched_refs": 0,
+          "backend": "docling",
+          "original_eight": true,
+          "pdf_sha256": "f5dea342cce3a0968d3c364da4dedf74c51cb3ce59c1448c2366a5a3fc7a5794"
+        }
+      ]
+    },
+    {
+      "id": "11290528450",
+      "run_id": "37167782132",
+      "git_commit": "35f96747b68afe3401a84ca27ea91f72797e68d9",
+      "archive_sha256": "b4025bce44993f4368f0f65e00c484568560ea66746f5cf5e5106729675c6b75",
+      "full_corpus": {
+        "lopdf": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "partial": 47,
+            "complete": 13
+          },
+          "report_sha256": "a407696824c72f930bfe629b56b54b7ce1d639f2b735a05a5ee3198bc4e67efb",
+          "provenance_sha256": "40d058016fe6cb1a2c71c878be3b0438d1a0268d54200e69760579696ffb9bc4"
+        },
+        "pdfium": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "partial": 50,
+            "complete": 10
+          },
+          "report_sha256": "517c1bb8a1ab0311474bd293573e46d421ad8bb9435675c305af1b01667a067b",
+          "provenance_sha256": "195b66e44ebadfb348a889eec9500cb44b7061244ed69cf1e9b9c1710c5bc459"
+        },
+        "docling-text": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "partial": 52,
+            "complete": 8
+          },
+          "report_sha256": "5949ffccfe9fc028609b5426e9a95db33f7f3465893f6b221fac8febd230d592",
+          "provenance_sha256": "a00625e136c6126dff52ffacdbfb3dad983f440d6b5566d3f2f715038be6eb3d"
+        },
+        "docling": {
+          "papers": 60,
+          "pages": 1747,
+          "statuses": {
+            "partial": 60
+          },
+          "report_sha256": "5493dedeeb30e7114396c26c67872d7c5c5bddb5384c05e7786126c76a86d548",
+          "provenance_sha256": "d64b5ce8f541516900e1faf0f99fbd3908c74f29a5bacc1fecf1c5d6193c7132"
+        }
+      },
+      "scoped_cases": [
+        {
+          "id": "arxiv:2502.00857",
+          "status": "partial",
+          "pages": 11,
+          "truth_refs": 29,
+          "extracted_refs": 4,
+          "matched_refs": 0,
+          "backend": "pdfium",
+          "original_eight": true,
+          "pdf_sha256": "e50212a32e349f5528780dbb39d023acc9daecdd281f88db79abc1d2517d33b5"
+        },
+        {
+          "id": "arxiv:2503.15734",
+          "status": "partial",
+          "pages": 10,
+          "truth_refs": 33,
+          "extracted_refs": 33,
+          "matched_refs": 33,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "ab112424bcbcf25f0c3989c98ae87e993b7134daae20f4b53f334cf29834261e"
+        },
+        {
+          "id": "arxiv:2309.10334",
+          "status": "partial",
+          "pages": 11,
+          "truth_refs": 36,
+          "extracted_refs": 36,
+          "matched_refs": 36,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "f5dea342cce3a0968d3c364da4dedf74c51cb3ce59c1448c2366a5a3fc7a5794"
+        },
+        {
+          "id": "arxiv:2503.13415",
+          "status": "partial",
+          "pages": 76,
+          "truth_refs": 341,
+          "extracted_refs": 341,
+          "matched_refs": 341,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "c32123a52893d3f1d35416daebb8ea94f26f4cf7bcd1f27fa22323fdfb1f71e6"
+        },
+        {
+          "id": "arxiv:2506.23487",
+          "status": "partial",
+          "pages": 57,
+          "truth_refs": 28,
+          "extracted_refs": 28,
+          "matched_refs": 28,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "3b82421639a46210f245e91d203e3615d38ac68da4e7856ed24c75327c8fe971"
+        },
+        {
+          "id": "arxiv:2507.14211",
+          "status": "partial",
+          "pages": 13,
+          "truth_refs": 54,
+          "extracted_refs": 54,
+          "matched_refs": 54,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "187cb024beb09eb9dbc2d469cd63ad287782be386b2ca68a25e8d4f4e446b171"
+        },
+        {
+          "id": "arxiv:2602.16061",
+          "status": "partial",
+          "pages": 50,
+          "truth_refs": 54,
+          "extracted_refs": 54,
+          "matched_refs": 54,
+          "backend": "docling-text",
+          "original_eight": true,
+          "pdf_sha256": "b887868d3d59429b86adbd762050eb19d13161ffc76199f4a9c7278e5a9fd985"
+        },
+        {
+          "id": "arxiv:2502.00857",
+          "status": "complete",
+          "pages": 11,
+          "truth_refs": 29,
+          "extracted_refs": 4,
+          "matched_refs": 0,
+          "backend": "docling-text",
+          "original_eight": false,
+          "pdf_sha256": "e50212a32e349f5528780dbb39d023acc9daecdd281f88db79abc1d2517d33b5"
+        },
+        {
+          "id": "arxiv:2309.10334",
+          "status": "partial",
+          "pages": 11,
+          "truth_refs": 36,
+          "extracted_refs": 1,
+          "matched_refs": 0,
+          "backend": "docling",
+          "original_eight": true,
+          "pdf_sha256": "f5dea342cce3a0968d3c364da4dedf74c51cb3ce59c1448c2366a5a3fc7a5794"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Matched-reference coverage is not field accuracy.",
+    "Original Partial statuses retained.",
+    "Archived eval dumps lack original spans/geometry.",
+    "Current PR175 merge35f96747 and headbaafb47 have identical tree19a0ed2921f74455def912be3e426aff8fe4f372.",
+    "Combined PR175+PR174 native tree needs its own fresh verification."
+  ]
+}
