@@ -1,0 +1,310 @@
+{
+  "recorded_at_utc": "2026-10-04T01:19:02.579842+00:00",
+  "reviewer": "/root/regression_reviewer",
+  "repository": "/workspace/scratch/b337de76c73c/pdftextract",
+  "git_head": "f22b49c0497ed22d37d8661cb6595860693a58bd",
+  "revision_scope": "Final application and test source bytes checked during integration; parent verified those recorded hashes against implementation f22b49c0497ed22d37d8661cb6595860693a58bd after publication. Documentation hashes describe the reviewer snapshot and may precede final publication annotations.",
+  "scope": "Final bounded integration checks and read-only source audit. No source changes were made during this review.",
+  "fresh_checks": [
+    {
+      "command": "node scripts/test-import-flow.mjs",
+      "cwd": "web",
+      "exit_code": 0,
+      "result": "Import routing, >8 MiB multipart transfer, cancellation, and lost-save-response recovery passed.",
+      "provenance": [
+        {
+          "path": "web/scripts/test-import-flow.mjs",
+          "sha256": "c22f7ec322106d635798332e083b617c94185707373e790db1396b3b71d25b85",
+          "bytes": 3497
+        },
+        {
+          "path": "web/lib/upload-client.ts",
+          "sha256": "3a772b085d586480c7f4fe175c87a2638f7a1ad14d0d60395a8708cd77030af4",
+          "bytes": 7062
+        }
+      ],
+      "limits": "Network transport is mocked. Six routing fixtures cover HTML disguised as PDF, PDF disguised as HTML, raw PHP, PHP-served HTML, CSS, and Atom XML. The new detectOffice import is bundled, but this suite does not directly exercise extensionless/renamed Office ZIP routing."
+    },
+    {
+      "command": "node scripts/test-web-workspace.cjs",
+      "cwd": ".",
+      "exit_code": 0,
+      "assertion_outcomes": {
+        "multi_file_independent_failure": true,
+        "content_dispatch_over_extension": true,
+        "stable_selection": true,
+        "retry_owner_preserved": true,
+        "back_reader_and_scroll": true,
+        "indexeddb_snapshot_drops_saved_files": true,
+        "remount_reader_restored": true,
+        "private_asset_only_rendering": true,
+        "queued_cancel_skips_upload": true,
+        "interrupted_retry_reuses_owned_original": true,
+        "reader_css_and_active_inputs_removed": true,
+        "reread_reuses_owned_original": true,
+        "saved_html_charset_recovered": true,
+        "failed_reread_keeps_valid_result": true,
+        "failed_status_reread_keeps_valid_result": true,
+        "cancelled_reread_keeps_valid_result": true
+      },
+      "provenance": [
+        {
+          "path": "scripts/test-web-workspace.cjs",
+          "sha256": "1085233923ae00062c627436666b7d747455025a2a4d8ac328f612bbf541de3a",
+          "bytes": 14778
+        },
+        {
+          "path": "web/app/workspace.tsx",
+          "sha256": "d9fa2a7133125191a6e605b08aad024fb40e77d2d9807048be28feeb209df044",
+          "bytes": 42834
+        }
+      ],
+      "limits": "Actual React component in jsdom with mocked network, extraction, and storage helpers; legacy charset case runs real decodeSource. Not real browser layout, IndexedDB durability, device navigation, background, or deployed-site QA."
+    },
+    {
+      "command": "node node_modules/typescript/bin/tsc --noEmit --incremental false",
+      "cwd": "web",
+      "exit_code": 0,
+      "stdout": "",
+      "provenance": [
+        {
+          "path": "web/tsconfig.json",
+          "sha256": "7199c6e4e400921e8049729840165a39f1476fa97901bed00239e7697bfe8da4",
+          "bytes": 800
+        },
+        {
+          "path": "web/package.json",
+          "sha256": "eb7f1a36fd700b7bd94ed5f8af2f337f79be7a33c5f6af18b71a5678bbc53279",
+          "bytes": 2467
+        },
+        {
+          "path": "web/pnpm-lock.yaml",
+          "sha256": "ad9d6261cb3434a3b6d6adc9e3e04c98326ff9086483c9007489a98b551c02cd",
+          "bytes": 361452
+        }
+      ],
+      "limits": "Static type check, not runtime or deployment validation."
+    },
+    {
+      "command": "uv run python scripts/site_source.py verify --source web",
+      "cwd": ".",
+      "exit_code": 0,
+      "files": 153,
+      "verified": true,
+      "provenance": [
+        {
+          "path": "scripts/site_source.py",
+          "sha256": "7691d5533a2fe836adb9ec62242fa0ec2af0bd1c117d88b90d35948f2f0cd373",
+          "bytes": 11681
+        },
+        {
+          "path": "web/SOURCE_MANIFEST.json",
+          "sha256": "62de7b649c8674f00c218587355a36990341bc2a483068875c5101a2ac251b5e",
+          "bytes": 27731
+        }
+      ]
+    }
+  ],
+  "source_audit": {
+    "web_manifest_files": 153,
+    "site_allowlisted_files": 153,
+    "site_readonly_comparison": "Every allowlisted portable file matches bytes and mode after the documented export normalization; no missing, extra, or changed portable files.",
+    "all_listed_custom_runtime_paths_present": [
+      "app/workspace.tsx",
+      "app/globals.css",
+      "app/chatgpt-auth.ts",
+      "lib/server.ts",
+      "lib/upload-client.ts",
+      "lib/uploads.ts",
+      "lib/workspace-storage.ts",
+      "lib/clip.ts",
+      "lib/source-fetch.ts",
+      "lib/article-assets.ts",
+      "lib/asset-storage.ts",
+      "lib/imports.ts",
+      "lib/image-ocr.ts",
+      "lib/office.ts",
+      "lib/mcp.ts",
+      "app/mcp/route.ts",
+      "public/pdf-worker.js",
+      "scripts/copy-pdf-wasm.mjs",
+      "scripts/copy-ocr-assets.mjs",
+      "package.json",
+      "pnpm-lock.yaml",
+      "vite.config.ts"
+    ],
+    "clear_web_label": {
+      "path": "web/README.md",
+      "line": 1,
+      "description": "TPE web app is explicitly separate from the native Rust/macOS engine; public/pdf-worker.js uses upstream PDF Oxide 0.3.77 WASM rather than the complete native TPE engine."
+    },
+    "identity_boundary": "Managed Sites edge identity is host-specific; another host must replace the verified identity adapter and must not trust arbitrary public headers.",
+    "intentional_exclusions": [
+      "credentials and deployment-local configuration",
+      "installed dependencies and caches",
+      "generated pinned WASM/OCR assets rebuilt by copy scripts",
+      "database contents and user-uploaded files"
+    ],
+    "provenance": [
+      {
+        "path": "web/README.md",
+        "sha256": "536dc01742985dd2c8195fe3e293a67d884d7ad52945addb06791eee6f0beb1c",
+        "bytes": 5199
+      },
+      {
+        "path": "docs/WEB_ALPHA.md",
+        "sha256": "aa1c0b03ca630bfc71c792f68744a9e3fba56277419eb3e7e0bbfe77fbcda84a",
+        "bytes": 5873
+      },
+      {
+        "path": "web/SOURCE_MANIFEST.json",
+        "sha256": "62de7b649c8674f00c218587355a36990341bc2a483068875c5101a2ac251b5e",
+        "bytes": 27731
+      }
+    ]
+  },
+  "previous_evidence_not_rerun_in_this_final_check": [
+    {
+      "name": "Archive and actual OCR WASM contracts",
+      "status": "previous passing result reported in handoff and module epic",
+      "result": "21 assertions in five fresh processes, including 9 MiB ZIP/251 members, integrity/path/link/cancellation/quota cleanup, nested archive member error with sibling continuation, and repeated compressed-stream teardown. Actual Tesseract 7 CPU/WASM reproduced the three fixture lines and DOI at confidence 94.",
+      "provenance": [
+        {
+          "path": "web/scripts/test-node-imports.mjs",
+          "sha256": "64f4aa61faabe1634db9540a9d12180cc5253224a324e22142a276b22314919e",
+          "bytes": 10873
+        },
+        {
+          "path": "docs/epics/180-formats.md",
+          "sha256": "955dcdbf007a95e54bb32386cecdfc0a4ccf41aa3771547eb7c82465812bf61a",
+          "bytes": 3106
+        },
+        {
+          "path": "docs/HANDOFF_TO_DOT.md",
+          "sha256": "d769348d6022bd8befb0785d7ea21c3420e33f7cd6c77b57211f4025d0f154da",
+          "bytes": 39908
+        }
+      ],
+      "limits": "Disk storage, image decoding and worker construction are shims. Chromium installation was unavailable; this is not real browser or device evidence."
+    },
+    {
+      "name": "Office packages",
+      "status": "previous passing module-owner result documented in handoff",
+      "result": "Generated DOCX/PPTX/XLSX ZIP fixtures validate text and order, tables, hyperlinks, exact embedded PNG bytes, UTF-16/spacing, selective streaming, async asset backpressure, failed storage, unsafe SVG/links, DTD and cancellation.",
+      "provenance": [
+        {
+          "path": "web/scripts/test-office.mjs",
+          "sha256": "0c35e57e6a1c7159a57dfe7ab624c51b58c3d5b3bb3324afa5e9f43c34fb967b",
+          "bytes": 14578
+        },
+        {
+          "path": "web/docs/OFFICE.md",
+          "sha256": "469039938a39d116c56face60bdba8adbb5b494ac9466277d78f61fc6d75e7f7",
+          "bytes": 5163
+        },
+        {
+          "path": "docs/HANDOFF_TO_DOT.md",
+          "sha256": "d769348d6022bd8befb0785d7ea21c3420e33f7cd6c77b57211f4025d0f154da",
+          "bytes": 39908
+        }
+      ],
+      "limits": "Synthetic package contracts, not real Office corpus, page/slide layout comparison or live asset storage. The Office fflate path does not verify ZIP CRC."
+    },
+    {
+      "name": "HTML and feed focused extraction",
+      "status": "previous passing focused and independent review results documented in handoff",
+      "result": "Focused clip suite covers Unicode, hidden/script/style noise, actual DOI targets, lazy images/captions, structured tables, leading definitions, semantic footnotes, >4 MiB HTML, >1000 DOI candidates, >500 feed entries and CSS/plain sources. Five independent feed/article cases cover namespace collisions, inherited base URLs, external Atom fallback and static script shells.",
+      "provenance": [
+        {
+          "path": "web/scripts/test-clip.mjs",
+          "sha256": "13cf1ecc970e2e0cec7489c6a8a1fa3e928f9fcdf7fb4fb9fbe9bf04453c912c",
+          "bytes": 8235
+        },
+        {
+          "path": "web/scripts/test-web-extraction-review.mjs",
+          "sha256": "c8c4b7dbe1875795bd3f789baebce5c031c82488994f000a09dc842a1c895817",
+          "bytes": 11241
+        },
+        {
+          "path": "docs/WEB_EXTRACTION_REVIEW.md",
+          "sha256": "5c1ad7cf00accbfbd5943b89fa27f8ffd4102c1b86eae3608faa3801402e2e87",
+          "bytes": 13166
+        }
+      ],
+      "limits": "Synthetic Node/jsdom checks; no web scripts execute and no real browser visibility/layout is measured."
+    },
+    {
+      "name": "Eleven-source retained web corpus",
+      "status": "previous measured corpus evidence, checked-in benchmark and review",
+      "benchmark_generated_at": "2026-10-04T01:04:06.877Z",
+      "benchmark_clip_sha256": "136045b0df9249b22a1f36a4425651b64568f8df96e61926c81254ed123d7c50",
+      "current_clip_sha256": "136045b0df9249b22a1f36a4425651b64568f8df96e61926c81254ed123d7c50",
+      "result": "Exact How-To Geek capture HTTP 200, 581470 bytes, SHA256 641925e077f0bf0f4d3d95d4931b79fe1ca39e9d4402c1e21b47c47260267eb1; 24/24 authored paragraphs, 10/10 headings, 30 image elements, eight article links. Broader retention: Python 79/79 paragraphs, MDN 34/34, Wikipedia 1374/1374 cells and 9/9 headings, arXiv 41/41 cells, RSS 10/10 and Atom 8/8 entries.",
+      "provenance": [
+        {
+          "path": "docs/WEB_EXTRACTION_BENCHMARK.json",
+          "sha256": "7f53031019bbf3f5a11789b22931bf6fc255583817d4d0a532bfd0320724cf42",
+          "bytes": 17235
+        },
+        {
+          "path": "docs/WEB_EXTRACTION_REVIEW.md",
+          "sha256": "5c1ad7cf00accbfbd5943b89fa27f8ffd4102c1b86eae3608faa3801402e2e87",
+          "bytes": 13166
+        }
+      ],
+      "limits": "Normalized-text retention in recorded HTTP snapshots, not semantic completeness, rendered browser capture or downloaded image-byte persistence. NASA landing page retains 45/55 reference paragraphs; PMC 55/57 omits correspondence/date metadata. Timings are machine-specific Node/jsdom parses, not browser latency."
+    },
+    {
+      "name": "Real local Workers R2/D1 transaction evidence",
+      "status": "previous passing parent-owned storage suite documented in integration audit",
+      "result": "Disposable Miniflare R2/D1/DigestStream verifies real multipart transfer, SHA256, owner 404, D1 compare-and-swap, stale result 409, failed-receipt recovery and preservation of newer committed result data.",
+      "provenance": [
+        {
+          "path": "scripts/test-site-uploads-workers.mjs",
+          "sha256": "fd6332804e462e522e360dfc7a5cd3e0f7c1d9df1667d80e217917cc95a1c7d4",
+          "bytes": 7742
+        },
+        {
+          "path": "docs/WEB_APP_INTEGRATION_AUDIT.md",
+          "sha256": "5c0e76560846675e129273056a9b6a48fa638932b22c8da9571f2e5b2ec4599a",
+          "bytes": 6775
+        }
+      ],
+      "limits": "Actual local Workers bindings, not production data, deployed R2 quota/throughput, large-scale stress or browser transfer proof."
+    },
+    {
+      "name": "MCP contracts",
+      "status": "previous passing parent-owned contract suite documented in handoff",
+      "result": "Discovery/auth/owner checks, bound SQL, pagination/revisions, Unicode, >9 MiB saved JSON streaming, extraction evidence, images and protocol errors.",
+      "provenance": [
+        {
+          "path": "scripts/test-site-mcp.mjs",
+          "sha256": "381d59ad54c0c9232483a994b94b6b5ac322d6b0f756778cb1e2ee0352bd6485",
+          "bytes": 10552
+        },
+        {
+          "path": "docs/WEB_APP_INTEGRATION_AUDIT.md",
+          "sha256": "5c0e76560846675e129273056a9b6a48fa638932b22c8da9571f2e5b2ec4599a",
+          "bytes": 6775
+        }
+      ],
+      "limits": "Mocked application contracts, not successful installation or invocation through a live ChatGPT connector."
+    }
+  ],
+  "remaining_unproven": [
+    "Final Site build and deployment are not certified by this report.",
+    "No real iPhone/iPad or browser run; no 50 GB mixed batch or 100 GB account/storage capacity test.",
+    "Active workers do not survive destroyed browser processes; multipart transfer resumes are not durable byte-level recovery across browser/device loss.",
+    "Several parsers and result serializers require whole buffers; no arbitrary app file cap does not imply unbounded browser memory.",
+    "No live MCP connector installation, production multi-account browser authorization test, penetration test, or production quota/throughput certification."
+  ],
+  "verdict": "All requested bounded checks passed and the portable source mirror is complete relative to the current Site allowlist. Prior feature evidence remains explicitly qualified; deployment, device QA and extreme-capacity tests remain separate gates.",
+  "parent_publication_verification": {
+    "recorded_at_utc": "2026-10-04 01:20 UTC",
+    "implementation_revision": "f22b49c0497ed22d37d8661cb6595860693a58bd",
+    "checked_application_and_test_files": 17,
+    "site_source": "9f7bc798ca5b3002f77e52e9bb2c7bd2774c5f0b",
+    "site_version": 2,
+    "portable_source_files": 153
+  }
+}

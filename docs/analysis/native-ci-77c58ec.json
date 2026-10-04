@@ -1,0 +1,198 @@
+{
+  "revision": "77c58ec89a1c9c07425b77dec90ab00316aa07be",
+  "run_url": "https://github.com/benpshore/pdftextract/actions/runs/37165453019",
+  "artifact_url": "https://github.com/benpshore/pdftextract/actions/runs/37165453019/artifacts/11289029814",
+  "gate": "Require complete successful evaluation coverage",
+  "first_backend_validated": "lopdf",
+  "incomplete": 47,
+  "cases": [
+    {
+      "paper": "arxiv:2108.04588",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2412.06210",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2505.16990",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2603.21379",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2603.04447",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2306.11313",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2503.15734",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2505.01811",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2604.03540",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2305.13843",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2507.08599",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2504.09409",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2608.28714",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2608.03351",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2509.08395",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2601.13206",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2501.17300",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2309.10334",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2401.15719",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2410.17124",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2410.19245",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2412.11061",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2503.00030",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2503.04404",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2503.13415",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2504.10389",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2505.22973",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2506.03828",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2506.23487",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2507.14211",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2507.14212",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2508.02208",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2508.19485",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2509.04183",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2509.24852",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2510.07065",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2510.26824",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2511.22707",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2512.10223",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2601.09974",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2602.00685",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2602.16061",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2602.17690",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2603.03010",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2603.05575",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2603.12824",
+      "status": "partial"
+    },
+    {
+      "paper": "arxiv:2603.19305",
+      "status": "partial"
+    }
+  ]
+}

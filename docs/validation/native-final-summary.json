@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-10-04T01:17:10.113417+00:00",
+  "source": {
+    "repository": "/workspace/scratch/b337de76c73c/pdftextract",
+    "head": "46293b0e5128d125c4f842ae13604095e6e78a7b",
+    "reviewed_native_files": {
+      "Cargo.toml": "663052305600c1f02faf1394fa7be32dd15da047e966e9128d5f14d4b9607e24",
+      "Cargo.lock": "00ff969d6bc010d669a77e8c2341a81219e7d30dadbfee892ef5825a2aadd57c",
+      "src/main.rs": "a66269183a1cfee52d5fc3569e039991cccc115def7b90273edaac59220a9043",
+      "src/cli_worker.rs": "b685d3640dc51f3a61ac78d3a420dbebc472a691754c2a70b9a9ea31c5b092b7"
+    },
+    "working_tree_note": "Includes uncommitted native output-limit changes; only approved rustfmt whitespace was changed by this final validator."
+  },
+  "environment": {
+    "toolchain": "1.98.1",
+    "cargo_home": "/workspace/scratch/3f55418e2879/toolchain/cargo",
+    "rustup_home": "/workspace/scratch/3f55418e2879/toolchain/rustup",
+    "cargo_build_jobs": 2,
+    "cargo_incremental": 0,
+    "dev_debug": 0,
+    "test_debug": 0,
+    "features": [
+      "pdf-oxide",
+      "pdf-extract",
+      "liteparse-layout",
+      "mupdf",
+      "poppler",
+      "docling-text",
+      "grobid"
+    ]
+  },
+  "gates_run_now": {
+    "format": {
+      "status": "passed",
+      "exit_code": 0,
+      "command": "cargo +1.98.1 fmt --all --check",
+      "initial_failure": "Backend whitelist in src/cli_worker.rs needed line wrapping; parent authorized cargo fmt --all, then check passed.",
+      "log": {
+        "path": "/workspace/scratch/b337de76c73c/validation/native-final-fmt.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    "clippy": {
+      "status": "passed",
+      "exit_code": 0,
+      "command": "cargo +1.98.1 clippy --locked --offline --workspace --all-targets --features pdf-oxide,pdf-extract,liteparse-layout,mupdf,poppler,docling-text,grobid -- -D warnings",
+      "log": {
+        "path": "/workspace/scratch/b337de76c73c/validation/native-final-clippy.log",
+        "sha256": "d4fb495475e7fc1a8b774a14ee1586a12201523852f5a2fa5476f13e47da12d4",
+        "bytes": 2103
+      }
+    }
+  },
+  "existing_available_test_run": {
+    "status": "passed_with_declared_exclusions",
+    "rerun_in_this_task": false,
+    "command": "cargo test --locked --offline --workspace --features pdf-oxide,pdf-extract,liteparse-layout,mupdf,poppler,docling-text,grobid -- --skip deadline_and_cancellation_kill_and_reap_a_stopped_worker --skip cancellation_does_not_launch_relays_for_the_whole_pending_batch --skip kernel_parent_death_signal_terminates_even_a_stopped_parser",
+    "log": {
+      "path": "/workspace/scratch/b337de76c73c/validation/combined-native-final-available-tests.log",
+      "sha256": "5a016dfe8d6d54838f72aef6ce427445ee90db27d6b028c010152dd26e9040d2",
+      "bytes": 96217
+    },
+    "totals": {
+      "passed": 1173,
+      "failed": 0,
+      "ignored": 13,
+      "filtered": 3
+    },
+    "counting": "Top-level suite summaries only; nested worker-probe subprocess summaries are not double-counted.",
+    "selected_suites": {
+      "Running unittests src/lib.rs": {
+        "status": "ok",
+        "passed": 782,
+        "failed": 0,
+        "ignored": 8,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running unittests src/main.rs": {
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 2,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running tests/cli_containment.rs": {
+        "status": "ok",
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 3
+      },
+      "Running tests/docling_text.rs": {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running tests/grobid_contract.rs": {
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running tests/lopdf_unicode_status.rs": {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running tests/native_provider.rs": {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 3,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running tests/pdf_extract_cff.rs": {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      "Running tests/pdfium_unicode.rs": {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      }
+    },
+    "ignored_notes": "13 statically ignored tests include 3 native-provider tests requiring configured separately licensed runtimes. Some other tests may conditionally return when external runtime/model configuration is absent; a passing count alone does not establish those deployments."
+  },
+  "local_containment_limit": {
+    "status": "executor_observability_blocked",
+    "excluded_tests": [
+      "deadline_and_cancellation_kill_and_reap_a_stopped_worker",
+      "cancellation_does_not_launch_relays_for_the_whole_pending_batch",
+      "kernel_parent_death_signal_terminates_even_a_stopped_parser"
+    ],
+    "observed_failure": "worker did not become observable",
+    "unfiltered_log": {
+      "path": "/workspace/scratch/b337de76c73c/validation/combined-native-final-fixed-tests.log",
+      "sha256": "b29d81bd94ed43347f29a386e23e933764e9f3727065f5664656993906967cd0",
+      "bytes": 70270
+    },
+    "unfiltered_cli_containment": {
+      "passed": 15,
+      "failed": 3
+    },
+    "baseline_reproduction": "Reported by parent as reproduced on baseline in this executor; not rerun here.",
+    "hosted_gate": "Still required and unchanged; no hosted run was invoked or verified in this task."
+  },
+  "existing_actual_provider_evidence": {
+    "status": "passed",
+    "rerun_in_this_task": false,
+    "log": {
+      "path": "/workspace/scratch/b337de76c73c/validation/native-provider-real.log",
+      "sha256": "e507b7cec0c7a99fe06282219ef97cc18098d6731b36b6548f35cf33986f12b9",
+      "bytes": 1092
+    },
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0,
+    "tests": [
+      "native_text_geometry_and_uri_annotations_round_trip",
+      "independent_native_sessions_and_malformed_input",
+      "poppler_uses_the_same_validated_rust_provider_boundary"
+    ],
+    "scope": "Configured real MuPDF and Poppler providers: positioned text/fonts, raw URI actions including relative/NUL handling and GoTo exclusion, crop/rotation affine geometry, independent sessions and malformed-input failure.",
+    "limits": "The log does not embed runtime/library fingerprints. This is adapter fixture evidence, not paired corpus superiority, production deployment, browser support, or the hosted containment gate."
+  },
+  "live_service_gaps": [
+    "GROBID tests use a loopback contract server; no live model-quality/throughput result.",
+    "Full Docling model/OCR feature is outside this combined feature gate and remains rejected by supervised extract.",
+    "No 100 GB extraction or live Sites native-backend end-to-end test is established."
+  ]
+}

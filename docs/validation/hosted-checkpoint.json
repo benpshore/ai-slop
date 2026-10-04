@@ -1,0 +1,37 @@
+{
+  "recorded_at_utc": "2026-10-04T01:21:36.296474+00:00",
+  "revision": "f22b49c0497ed22d37d8661cb6595860693a58bd",
+  "note": "Snapshot only; subsequent docs-only commits may start replacement runs. Web success applies to the exact implementation tree, not future source changes.",
+  "runs": [
+    {
+      "name": "Native",
+      "status": "in_progress",
+      "conclusion": null,
+      "url": "https://github.com/benpshore/pdftextract/actions/runs/37167621890"
+    },
+    {
+      "name": "PMC bibliography",
+      "status": "in_progress",
+      "conclusion": null,
+      "url": "https://github.com/benpshore/pdftextract/actions/runs/37167621888"
+    },
+    {
+      "name": "Build binaries",
+      "status": "in_progress",
+      "conclusion": null,
+      "url": "https://github.com/benpshore/pdftextract/actions/runs/37167621869"
+    },
+    {
+      "name": "Web alpha source",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/benpshore/pdftextract/actions/runs/37167621935"
+    },
+    {
+      "name": "CI",
+      "status": "in_progress",
+      "conclusion": null,
+      "url": "https://github.com/benpshore/pdftextract/actions/runs/37167621884"
+    }
+  ]
+}
