@@ -15,6 +15,8 @@ use crate::schema::{BackendIdentity, PageText};
 
 #[cfg(feature = "docling")]
 pub mod docling_backend;
+#[cfg(any(feature = "docling", test))]
+mod docling_layout;
 #[cfg(feature = "docling-text")]
 pub mod docling_text_backend;
 #[cfg(feature = "liteparse-layout")]

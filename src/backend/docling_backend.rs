@@ -15,7 +15,9 @@
 //!
 //! docling already decides the reading order, so [`Extractor::provides_reading_order`]
 //! is `true` and spans are emitted in docling's node order with a running
-//! `seq` per page.
+//! `seq` per page. The adapter also supplies final lines: a narrowly qualified
+//! split reference opening at the bottom of two columns is moved beside its
+//! continuation, while the upstream spans and sequence remain unchanged.
 //!
 //! # Limitations (all by construction of the docling API)
 //!
@@ -168,6 +170,12 @@ impl Extractor for DoclingBackend {
         config.insert("provider".to_string(), "cpu".to_string());
         config.insert("ocr_engine".to_string(), "ppocr".to_string());
         config.insert("evidence_policy".to_string(), "2".to_string());
+        if self.full {
+            config.insert(
+                "line_layout".to_string(),
+                "split-reference-start-v1".to_string(),
+            );
+        }
         if let Some((first, last)) = self.window {
             config.insert("window".to_string(), format!("{first}-{last}"));
         }
@@ -227,9 +235,14 @@ impl Extractor for DoclingBackend {
         }))
     }
 
-    /// docling orders items itself.
+    /// Raw spans preserve upstream node order; the line projection can repair
+    /// a geometrically and semantically qualified split reference opening.
     fn provides_reading_order(&self) -> bool {
         true
+    }
+
+    fn provides_line_layout(&self) -> bool {
+        self.full
     }
 }
 
@@ -354,6 +367,7 @@ struct ConvertedPage {
     spans: Vec<Span>,
     figures: Vec<Figure>,
     warnings: Vec<String>,
+    list_items: Vec<usize>,
 }
 
 /// Pages 1..=count of the conversion; `None` where docling emitted nothing.
@@ -479,6 +493,19 @@ impl DocumentSession for DoclingSession {
             "extraction_incomplete: docling reconstruction coverage is unverified".to_string(),
         );
         crate::router::mark_incomplete(&mut text);
+        if self.config.full {
+            crate::reading_order::lines_in_backend_order(&mut text);
+            if let Some(current) = pages.get(index).and_then(Option::as_ref)
+                && let Some(next) = pages.get(index + 1).and_then(Option::as_ref)
+            {
+                super::docling_layout::repair_split_reference_start(
+                    &mut text,
+                    &current.list_items,
+                    &next.spans,
+                    &next.list_items,
+                );
+            }
+        }
         Ok(text)
     }
 
@@ -599,6 +626,7 @@ struct PageBuild {
     figures: Vec<Figure>,
     warnings: Vec<String>,
     formulas_undecoded: u32,
+    list_items: Vec<usize>,
 }
 
 /// Walks a [`DoclingDocument`]'s nodes in order, tracking the current page
@@ -718,7 +746,11 @@ impl Walker {
             | Node::TextDump(text) => self.push_text(text, bbox),
             Node::ListItem { text, location, .. } => {
                 let own = self.own_location(*location);
+                let before = self.page().spans.len();
                 self.push_text(text, bbox.or(own));
+                if self.page().spans.len() > before {
+                    self.page().list_items.push(before);
+                }
             }
             Node::Formula {
                 latex,
@@ -869,6 +901,7 @@ impl Walker {
                 spans: build.spans,
                 figures: build.figures,
                 warnings: build.warnings,
+                list_items: build.list_items,
             }));
         }
         (pages, self.figure_bytes)
@@ -1114,6 +1147,8 @@ mod tests {
         assert_eq!(DoclingBackend::default(), DoclingBackend::text_layer());
         assert!(DoclingBackend::text_layer().provides_reading_order());
         assert!(DoclingBackend::full().provides_reading_order());
+        assert!(DoclingBackend::full().provides_line_layout());
+        assert!(!DoclingBackend::text_layer().provides_line_layout());
     }
 
     #[test]
