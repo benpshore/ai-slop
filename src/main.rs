@@ -27,6 +27,7 @@ use tpe::pipeline::{self, PipelineError, Progress};
 use tpe::schema::{ExtractionResult, Job, Metadata};
 
 mod cli_worker;
+mod worker_allocator;
 mod worker_limits;
 
 /// Service-time target per 20-page chunk, in milliseconds.
@@ -426,6 +427,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// hash and page range so it can be imported into a separate store later.
 fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
     check_backend(&args.backend)?;
+    if let Some(csv) = &args.csv {
+        reject_csv_input_aliases(csv, &args.paths)?;
+    }
     pipeline::warm_up();
     // `auto` picks the backend per document (`bibliography::scan_backward_auto_observed`).
     let extractor: Option<Box<dyn backend::Extractor>> = if args.backend == pipeline::AUTO_BACKEND {
@@ -496,6 +500,7 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
                     routed.scan,
                     0.0,
                 );
+                any_failed |= record.extraction_status != tpe::schema::Status::Complete;
                 if let Some(resolver) = &resolver {
                     record.resolution = Some(resolver.resolve_entries(&mut record.references));
                     record.paper = paper_metadata(&bytes, args.password.as_deref())
@@ -516,10 +521,95 @@ fn run_bibliography(args: &BibliographyArgs) -> anyhow::Result<ExitCode> {
         };
         println!("{}", serde_json::to_string(&record)?);
         if let Some(csv) = &args.csv {
+            // Recheck the whole batch before each append, including inputs
+            // that have not been read yet. An empty input is still immutable.
+            reject_csv_input_aliases(csv, &args.paths)?;
             append_csv(csv, &record).with_context(|| format!("writing {}", csv.display()))?;
         }
     }
     Ok(exit_code(any_failed))
+}
+
+/// Check file identities before CSV creation or append can change a source.
+fn reject_csv_input_aliases(csv: &Path, inputs: &[PathBuf]) -> anyhow::Result<()> {
+    let destination_path = prospective_path_identity(csv).context("resolving CSV destination")?;
+    let destination = match fs::metadata(csv) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("checking CSV destination"),
+    };
+    for input in inputs {
+        let mut same = input == csv;
+        if let Some(destination_path) = &destination_path {
+            same |= prospective_path_identity(input)
+                .context("resolving CSV input")?
+                .as_ref()
+                == Some(destination_path);
+        }
+        if let Some(destination) = &destination {
+            match fs::metadata(input) {
+                Ok(source) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        same |=
+                            source.dev() == destination.dev() && source.ino() == destination.ino();
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = (source, destination);
+                        same |= input.canonicalize()? == csv.canonicalize()?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("checking CSV input identity"),
+            }
+        }
+        anyhow::ensure!(
+            !same,
+            "CSV output aliases input {}; choose a different --csv",
+            input.display()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve existing files and prospective filenames in existing directories.
+/// A dangling final symlink can still be created through `OpenOptions`, so
+/// resolve its target too. Missing parent directories cannot be created by
+/// these publishers and therefore have no writable file identity here.
+fn prospective_path_identity(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    use std::io::{Error, ErrorKind};
+    let mut path = std::path::absolute(path)?;
+    for _ in 0..40 {
+        match path.canonicalize() {
+            Ok(path) => return Ok(Some(path)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&path)?;
+                path = path.parent().unwrap_or_else(|| Path::new(".")).join(target);
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Ok(None);
+        };
+        return match parent.canonicalize() {
+            Ok(parent) => Ok(Some(parent.join(name))),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
+    Err(Error::new(
+        ErrorKind::InvalidInput,
+        "too many path symlinks",
+    ))
 }
 
 /// A CSV field: quoted when it holds a comma, quote or line break.

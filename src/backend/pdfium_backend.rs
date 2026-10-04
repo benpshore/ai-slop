@@ -70,8 +70,17 @@
 //! Dynamic binding resolves every `FPDF_*` symbol of the compiled-in API
 //! version (`pdfium_latest`) at bind time, so the `libpdfium` found must be at
 //! least that recent. The pinned `chromium/8066` build is.
+//!
+//! The backend identity records the binding version, not an assumed native
+//! release: `PDFium` exposes no runtime version query. Its configuration digest
+//! includes the effective absolute library path and a streaming SHA-256 of
+//! its configured bytes (at most 64 MiB). Keep that trusted deployment file
+//! unchanged during a job. This fingerprint is not an immutable snapshot and
+//! does not cover concurrent replacement or the library's own dependencies.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use pdfium_render::prelude::{
@@ -87,10 +96,6 @@ use unicode_mapping::MappingDocument;
 use crate::backend::{BackendError, DocumentSession, EncryptionProblem, Extractor};
 use crate::schema::{BBox, BackendIdentity, Figure, PageText, Span, config_digest, sha256_hex};
 
-/// The `pdfium` binary release the native CI leg pins. `pdfium` has no
-/// runtime version call (`pdfium-render`'s `version()` only echoes the
-/// compile-time API selection), so this is a constant.
-const PDFIUM_BINARY_VERSION: &str = "chromium/8066";
 /// The `pdfium-render` release this backend is written against; a unit test
 /// ties it to `Cargo.lock`.
 const PDFIUM_RENDER_VERSION: &str = "0.8.37";
@@ -98,11 +103,12 @@ const PDFIUM_RENDER_VERSION: &str = "0.8.37";
 const ENV_LIBRARY_PATH: &str = "PDFIUM_DYNAMIC_LIB_PATH";
 /// Bound on nested Form `XObject` traversal.
 const MAX_FORM_DEPTH: u32 = 8;
+/// Bound native-library fingerprint work independently of document size.
+const MAX_LIBRARY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Version recorded in the [`BackendIdentity`]:
-/// `<binary release>-binding-<pdfium-render release>`.
+/// Binding identity; it does not claim a runtime `PDFium` release.
 fn version_string() -> String {
-    format!("{PDFIUM_BINARY_VERSION}-binding-{PDFIUM_RENDER_VERSION}")
+    format!("dynamic-binding-{PDFIUM_RENDER_VERSION}")
 }
 
 /// Upper bound on distinct image bytes retained by one session (256 MiB).
@@ -119,19 +125,10 @@ pub struct PdfiumBackend {
 }
 
 impl Extractor for PdfiumBackend {
-    /// Name `pdfium`, version from [`version_string`], digest over `library_dir`.
+    /// Fingerprint the effective configured library without loading native code.
     fn identity(&self) -> BackendIdentity {
-        let mut config = BTreeMap::new();
-        config.insert(
-            "library_dir".to_string(),
-            self.library_dir.clone().unwrap_or_default(),
-        );
-        config.insert("unicode_mapping_policy".to_string(), "1".to_string());
-        BackendIdentity {
-            name: "pdfium".to_string(),
-            version: version_string(),
-            config_digest: config_digest(&config),
-        }
+        let environment = std::env::var(ENV_LIBRARY_PATH).ok();
+        library_identity(self.library_dir.as_deref(), environment.as_deref())
     }
 
     /// Geometry only; the engine's XY-cut orders the spans.
@@ -155,6 +152,65 @@ impl Extractor for PdfiumBackend {
     }
 }
 
+fn library_identity(configured: Option<&str>, environment: Option<&str>) -> BackendIdentity {
+    let location = configured.or(environment.filter(|value| !value.is_empty()));
+    let file = location.and_then(|path| configured_library_file(path).ok());
+    let mut config = BTreeMap::new();
+    config.insert(
+        "library_path".to_string(),
+        file.as_ref().map_or_else(
+            || location.unwrap_or_default().to_string(),
+            |path| path.to_string_lossy().into_owned(),
+        ),
+    );
+    config.insert(
+        "library_sha256".to_string(),
+        file.as_deref()
+            .and_then(|path| fingerprint_library(path).ok())
+            .unwrap_or_else(|| "unavailable".to_string()),
+    );
+    config.insert("unicode_mapping_policy".to_string(), "1".to_string());
+    BackendIdentity {
+        name: "pdfium".to_string(),
+        version: version_string(),
+        config_digest: config_digest(&config),
+    }
+}
+
+fn checked_library_file(path: &Path) -> io::Result<File> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > MAX_LIBRARY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PDFium library must be a regular file no larger than 64 MiB",
+        ));
+    }
+    File::open(path)
+}
+
+fn fingerprint_library(path: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut source = checked_library_file(path)?.take(MAX_LIBRARY_BYTES + 1);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > MAX_LIBRARY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PDFium library exceeds 64 MiB",
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 impl PdfiumBackend {
     /// The cap is private and injectable so boundary tests need only tiny images.
     fn open_session(
@@ -166,9 +222,11 @@ impl PdfiumBackend {
         let pdfium = bind(self.library_dir.as_deref())?;
         // `doc` borrows `pdfium` and `bytes`; locals drop in reverse order.
         let doc = load(&pdfium, bytes, password)?;
-        let page_count = u32::from(doc.pages().len());
-        let info = read_info(&doc);
         let mapping = MappingDocument::new(pdfium.bindings(), bytes, password);
+        // The wrapper truncates native page counts to u16. Check the raw
+        // count through our existing native document before trusting it.
+        let page_count = mapping.page_count()?;
+        let info = read_info(&doc);
         let mut pages = Vec::new();
         let mut figures = FigureStore::new(figure_cap);
         for page in 1..=page_count {
@@ -281,6 +339,12 @@ fn bind(library_dir: Option<&str>) -> Result<Pdfium, BackendError> {
     }
     let mut failures: Vec<String> = Vec::new();
     for candidate in &candidates {
+        // Keep successful loads within the same regular-file/size contract as
+        // identity fingerprinting. No implicit loader fallback is permitted.
+        if let Err(err) = checked_library_file(candidate) {
+            failures.push(format!("{}: {err}", candidate.display()));
+            continue;
+        }
         match Pdfium::bind_to_library(candidate) {
             Ok(bindings) => return Ok(Pdfium::new(bindings)),
             Err(err) => failures.push(format!("{}: {err:?}", candidate.display())),
@@ -881,11 +945,12 @@ mod tests {
         let backend = PdfiumBackend::default();
         assert_eq!(backend.library_dir, None);
         assert!(!backend.provides_reading_order());
-        let identity = backend.identity();
+        let identity = library_identity(None, None);
         assert_eq!(identity.name, "pdfium");
-        assert_eq!(identity.version, "chromium/8066-binding-0.8.37");
+        assert_eq!(identity.version, "dynamic-binding-0.8.37");
         let mut config = BTreeMap::new();
-        config.insert("library_dir".to_string(), String::new());
+        config.insert("library_path".to_string(), String::new());
+        config.insert("library_sha256".to_string(), "unavailable".to_string());
         config.insert("unicode_mapping_policy".to_string(), "1".to_string());
         assert_eq!(identity.config_digest, config_digest(&config));
 
@@ -893,6 +958,48 @@ mod tests {
             library_dir: Some("/opt/pdfium".to_string()),
         };
         assert_ne!(configured.identity().config_digest, identity.config_digest);
+    }
+
+    #[test]
+    fn effective_library_path_and_bytes_distinguish_run_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.so");
+        let second = directory.path().join("second.so");
+        std::fs::write(&first, b"first library").unwrap();
+        std::fs::write(&second, b"second library").unwrap();
+        let first_path = first.to_str().unwrap();
+        let second_path = second.to_str().unwrap();
+        let first_identity = library_identity(None, Some(first_path));
+        let second_identity = library_identity(None, Some(second_path));
+        assert_ne!(first_identity.config_digest, second_identity.config_digest);
+        // Explicit configuration wins over the environment, without mutating
+        // process-global variables in concurrently executing tests.
+        assert_eq!(
+            first_identity.config_digest,
+            library_identity(Some(first_path), Some(second_path)).config_digest
+        );
+        assert_eq!(
+            fingerprint_library(&first).unwrap(),
+            sha256_hex(b"first library")
+        );
+        std::fs::write(&first, b"changed bytes at the same path").unwrap();
+        assert_ne!(
+            first_identity.config_digest,
+            library_identity(None, Some(first_path)).config_digest
+        );
+    }
+
+    #[test]
+    fn oversized_library_is_rejected_before_fingerprinting_or_loading() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("oversized.so");
+        File::create(&file)
+            .unwrap()
+            .set_len(MAX_LIBRARY_BYTES + 1)
+            .unwrap();
+        assert!(fingerprint_library(&file).is_err());
+        let error = bind(file.to_str()).err().unwrap();
+        assert!(error.to_string().contains("no larger than 64 MiB"));
     }
 
     #[test]
@@ -1038,6 +1145,30 @@ mod tests {
         assert!(
             matches!(zero, Some(BackendError::PageRange { page: 0, count: 1 })),
             "{zero:?}"
+        );
+    }
+
+    #[test]
+    fn native_page_count_beyond_binding_range_is_rejected() {
+        if !pdfium_available() {
+            return;
+        }
+        // pdfium-render 0.8.37 truncates FPDF_GetPageCount to u16. A real
+        // 65537-page document must never become a successful one-page session.
+        let bytes = build_pdf(vec![Vec::new(); usize::from(u16::MAX) + 2], None, false);
+        let result = PdfiumBackend::default().open(&bytes, None).map(|_| ());
+        assert!(
+            matches!(&result, Err(BackendError::Limit(message)) if message.contains("65537")),
+            "{result:?}"
+        );
+        // The rejected document closes before another library instance opens.
+        let bytes = build_pdf(vec![text_ops(12, 10, 10, "next document")], None, false);
+        assert_eq!(
+            PdfiumBackend::default()
+                .open(&bytes, None)
+                .unwrap()
+                .page_count(),
+            1
         );
     }
 

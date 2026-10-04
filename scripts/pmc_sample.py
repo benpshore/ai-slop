@@ -33,6 +33,16 @@ BUCKET = "https://pmc-oa-opendata.s3.amazonaws.com/"
 S3_PREFIX = "s3://pmc-oa-opendata/"
 USER_AGENT = "pdftextract-pmc-eval/1 (GitHub Actions; bibliography measurement)"
 MANIFEST_VERSION = 1
+SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "corpus" / "verified"
+# Only explicitly reviewed URL/digest pairs may use a recovered source. The
+# version in an article's S3 key is not an immutable S3 object version ID.
+VERIFIED_XML_SNAPSHOTS = {
+    (BUCKET + "PMC9866638.1/PMC9866638.1.xml", "707148ab259c325c84acd030be5a5c8b"): (
+        "PMC9866638.1.xml",
+        110342,
+        "4bc081237097ef294c09e1f50b5f0a6d383f270ded3fcedbe8eb811661e6630b",
+    ),
+}
 
 # PMCIDs roughly span 2012 (PMC3.2M) to 2026 (PMC12.8M). Starts are drawn
 # uniformly over that numeric span; because S3 lists keys as strings, a
@@ -323,6 +333,26 @@ def cache_paths(item: dict, cache: Path) -> tuple[Path, Path]:
 
 def fetch_one(url: str, md5: str | None, target: Path) -> str:
     """Download `url` to `target` unless it is already there with the right MD5."""
+    snapshot = VERIFIED_XML_SNAPSHOTS.get((url, md5))
+    if snapshot is not None:
+        filename, size, sha256 = snapshot
+        try:
+            data = (SNAPSHOT_DIR / filename).read_bytes()
+        except OSError as err:
+            raise FetchError(f"verified {filename} snapshot unavailable: {err}") from err
+        if (
+            len(data) != size
+            or hashlib.md5(data, usedforsecurity=False).hexdigest() != md5
+            or hashlib.sha256(data).hexdigest() != sha256
+        ):
+            raise FetchError(f"verified {filename} snapshot failed checksum verification")
+        # Equality to the verified bytes also validates cached snapshots with
+        # SHA-256, rather than accepting a cache entry on MD5 alone.
+        if target.is_file() and target.read_bytes() == data:
+            return "cached"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return "verified snapshot"
     if target.exists() and (md5 is None or md5_of(target) == md5):
         return "cached"
     data = fetch_bytes(url)
