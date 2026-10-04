@@ -1,5 +1,10 @@
 # TPE web app
 
+Batch/storage follow-up: [reusable control wiring](docs/BATCH_CONTROLS.md),
+[storage lifecycle contract](docs/STORAGE_LIFECYCLE.md), and
+[validation/remaining integration work](../docs/BATCH_STORAGE_VALIDATION_2026-10-04.md).
+These repo changes are not a new Site deployment; workspace wiring is separately owned.
+
 This directory is the complete portable application source for the private TPE ChatGPT Site. It belongs to **benpshore/pdftextract**. It is separate from the repository's native Rust engine and macOS app.
 
 - Private Site: https://pdftextract-alpha.junkmail-edu228.chatgpt.site

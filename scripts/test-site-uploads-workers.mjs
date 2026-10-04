@@ -8,9 +8,9 @@ import { createDocumentStore } from '../web/lib/mcp.ts';
 const requireWeb = createRequire(new URL('../web/package.json', import.meta.url));
 const requireWrangler = createRequire(requireWeb.resolve('wrangler/package.json'));
 const { Miniflare, Log, LogLevel } = requireWrangler('miniflare');
+const lifecycle = await readFile(new URL('../web/lib/document-lifecycle.ts', import.meta.url), 'utf8');
 let source = await readFile(new URL('../web/lib/uploads.ts', import.meta.url), 'utf8');
-source = source.replace(/^import[^\n]*from ['"]\.\/server['"];?\n/m, '').replace(/^import type[^\n]*\n/m, '');
-source = stripTypeScriptTypes(source);
+source = stripTypeScriptTypes(`${lifecycle}\n${source}`.replace(/^import[^\n]*\n/gm, ''));
 const fixture = `
 import {env} from 'cloudflare:workers';
 let failReceipt=false,pauseHead=false,headReady=null,releaseHead=null;
@@ -37,6 +37,7 @@ const mf = new Miniflare({ modules: true, script: fixture, compatibilityDate: '2
 try {
   const db = await mf.getD1Database('DB'), bucket = await mf.getR2Bucket('BUCKET');
   await db.exec('CREATE TABLE documents (id TEXT PRIMARY KEY,owner TEXT NOT NULL,title TEXT NOT NULL,kind TEXT NOT NULL,source_url TEXT,original_name TEXT NOT NULL,mime TEXT NOT NULL,status TEXT NOT NULL,engine TEXT NOT NULL,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL,created_at TEXT NOT NULL,search_text TEXT NOT NULL,result_key TEXT)');
+  await db.exec('CREATE TABLE document_deletions (id TEXT PRIMARY KEY, owner TEXT NOT NULL)');
   const post = message => mf.dispatchFetch('https://upload-fixture.test/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(message) });
   const documentId = randomUUID(), owner = 'fixture-owner';
   async function upload(target, bytes, baseResultKey = null) {

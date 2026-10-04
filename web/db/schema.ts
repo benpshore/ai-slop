@@ -5,3 +5,6 @@ export const documents=sqliteTable('documents',{
  status:text('status').notNull(),engine:text('engine').notNull().default(''),sha256:text('sha256').notNull(),
  bytes:integer('bytes').notNull(),createdAt:text('created_at').notNull(),searchText:text('search_text').notNull().default(''),resultKey:text('result_key'),
 },t=>[index('documents_owner_created').on(t.owner,t.createdAt)]);
+export const documentDeletions=sqliteTable('document_deletions',{
+ id:text('id').primaryKey(),owner:text('owner').notNull(),
+});

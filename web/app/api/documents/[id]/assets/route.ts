@@ -1,4 +1,4 @@
-import {owner,ownedRecord,boundedBody,failure} from '@/lib/server';
+import {owner,ownedRecord,boundedBody,failure,storage} from '@/lib/server';
 import {fetchPublicSource} from '@/lib/source-fetch';
 import {storeAssetStream} from '@/lib/asset-storage';
 export async function POST(request:Request,context:{params:Promise<{id:string}>}){try{
@@ -9,5 +9,6 @@ export async function POST(request:Request,context:{params:Promise<{id:string}>}
  const mime=(response.headers.get('content-type')||'').split(';')[0].trim().toLowerCase();
  if(!['image/png','image/jpeg','image/webp','image/avif','image/gif','image/bmp','image/tiff'].includes(mime)||!response.body){await response.body?.cancel();throw new Error('This image format cannot be displayed safely.');}
  const asset=crypto.randomUUID(),bytes=await storeAssetStream(`${id}/assets/${asset}`,response.body,mime);
+ try{await ownedRecord(id,user);}catch(error){await storage().bucket.delete(`${id}/assets/${asset}`);throw error;}
  return Response.json({url:`/api/documents/${id}/assets/${asset}`,sourceUrl:url,mime,bytes},{status:201});
 }catch(error){return failure(error);}}
